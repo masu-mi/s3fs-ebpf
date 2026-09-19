@@ -54,11 +54,11 @@ help:
 	@echo "  make bench          Run fio + BCC jobs (requires mounted target)"
 	@echo "  make bench-dry      Verify job files without running (dry-run)"
 	@echo ""
-	@echo "Week 1 verification (requires 6.9+ kernel):"
+	@echo "Week 1 verification (requires 6.12+ kernel):"
 	@echo "  make test-arena     insmod + run bpf_arena/KFunc round-trip probe + rmmod"
 	@echo ""
 	@echo "Environment bootstrap (run once on a fresh host):"
-	@echo "  make setup-kernel     Install mainline Linux 6.9 kernel (reboot after)"
+	@echo "  make setup-kernel     Install mainline Linux 6.12 LTS kernel (reboot after)"
 	@echo "  make setup-toolchain  Install clang, bpftool, go, docker, fio, bcc"
 	@echo ""
 	@echo "Documentation:"
@@ -140,7 +140,7 @@ bench-dry:
 # Host bootstrap
 # -----------------------------------------------------------------------------
 setup-kernel:
-	$(SCRIPTS_DIR)/setup-kernel-6.9.sh
+	$(SCRIPTS_DIR)/setup-kernel-6.12.sh
 
 setup-toolchain:
 	$(SCRIPTS_DIR)/setup-toolchain.sh
@@ -166,7 +166,7 @@ $(README): $(README_TMPL) $(DAEMON_BIN) Makefile
 # Week 1: arena / KFunc round-trip probe
 # -----------------------------------------------------------------------------
 # Loads the kmod, runs the daemon's `test-arena` subcommand, then unloads.
-# Requires a 6.9+ kernel; on older kernels arena.New() will fail with
+# Requires a 6.12+ kernel; on older kernels arena.New() will fail with
 # a clear message and the target exits non-zero.
 test-arena: kmod daemon
 	@echo "==> insmod kmod/s3fs_kfunc.ko"
