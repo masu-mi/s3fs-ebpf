@@ -23,6 +23,30 @@ typedef uint32_t __u32;
 
 #define S3FS_ARENA_ABI_VERSION 1
 
+/*
+ * Address-space tag for arena pointers. Mirrors the pattern used in
+ * tools/testing/selftests/bpf/bpf_arena_common.h. Compilers that support
+ * __BPF_FEATURE_ADDR_SPACE_CAST emit `bpf_addr_space_cast` transparently
+ * on dereference and pointer assignment; older toolchains fall back to
+ * plain pointers (which the JIT still validates via the verifier).
+ */
+#if defined(__BPF__) && defined(__BPF_FEATURE_ADDR_SPACE_CAST)
+# define __arena          __attribute__((address_space(1)))
+# define __arena_global   __attribute__((address_space(1)))
+# define cast_kern(ptr)  /* LLVM nop */
+# define cast_user(ptr)  /* LLVM nop */
+#elif defined(__BPF__)
+# define __arena
+# define __arena_global   SEC(".addr_space.1")
+# define cast_kern(ptr) ((void)(ptr = bpf_addr_space_cast(ptr, 0, 1)))
+# define cast_user(ptr) ((void)(ptr = bpf_addr_space_cast(ptr, 1, 0)))
+#else
+# define __arena
+# define __arena_global
+# define cast_kern(ptr) ((void)(ptr))
+# define cast_user(ptr) ((void)(ptr))
+#endif
+
 /* Placeholder inode entry stored in the arena. */
 struct s3fs_inode_stub {
 	__u64 ino;

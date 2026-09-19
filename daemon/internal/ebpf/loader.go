@@ -1,28 +1,66 @@
-// Package ebpf wraps the bpf2go-generated objects and exposes a
-// Load/Attach lifecycle to the CLI. Week 0: no-op stub that panics if
-// invoked, so callers can wire the plumbing without pulling cilium/ebpf
-// into the skeleton build.
+// Package ebpf wraps the bpf2go-generated objects (s3fsfp_*) with a
+// small Load/Run/Close lifecycle for the daemon.
 package ebpf
 
-import "errors"
+import (
+	"fmt"
 
-// Programs is the handle the daemon holds while eBPF is attached.
-type Programs struct{}
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/rlimit"
+)
 
-// ErrNotImplemented is returned until Week 2 wires the real loader.
-var ErrNotImplemented = errors.New("ebpf loader not implemented in Week 0 skeleton")
+// TestArgs mirrors `struct s3fs_test_args` in include/s3fs_shared_types.h.
+// Layout must stay in sync (`_pad` present to match the C struct).
+type TestArgs struct {
+	Idx      uint32
+	KfuncArg uint32
+	OutIno   uint64
+	OutKfunc uint32
+	Pad      uint32
+}
 
-// Load pins the eBPF objects. Skeleton returns ErrNotImplemented.
+// Programs holds loaded bpf2go objects.
+type Programs struct {
+	Objs s3fsfpObjects
+}
+
+// Load pulls the bpf2go collection into the kernel and returns a handle.
+// Removes the memlock rlimit before load (required on older kernels).
 func Load() (*Programs, error) {
-	return nil, ErrNotImplemented
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return nil, fmt.Errorf("remove memlock: %w", err)
+	}
+
+	p := &Programs{}
+	if err := loadS3fsfpObjects(&p.Objs, nil); err != nil {
+		return nil, fmt.Errorf("load bpf objects: %w", err)
+	}
+	return p, nil
 }
 
-// Attach hooks the programs into their targets (fentry/vfs_getattr, ...).
-func (p *Programs) Attach() error {
-	return ErrNotImplemented
+// SharedMap returns the mmap-able array shared with the daemon.
+func (p *Programs) SharedMap() *ebpf.Map {
+	return p.Objs.S3fsShared
 }
 
-// Close detaches programs and closes maps.
+// RunTestShared invokes the SEC("syscall") test harness with the given
+// ctx and returns the populated result.
+func (p *Programs) RunTestShared(in TestArgs) (TestArgs, uint32, error) {
+	out := TestArgs{}
+	ret, err := p.Objs.S3fsTestShared.Run(&ebpf.RunOptions{
+		Context:    in,
+		ContextOut: &out,
+	})
+	if err != nil {
+		return TestArgs{}, 0, fmt.Errorf("BPF_PROG_TEST_RUN: %w", err)
+	}
+	return out, ret, nil
+}
+
+// Close releases all loaded programs and maps.
 func (p *Programs) Close() error {
-	return nil
+	if p == nil {
+		return nil
+	}
+	return p.Objs.Close()
 }
