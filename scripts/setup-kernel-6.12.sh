@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# setup-kernel-6.9.sh — install a mainline Linux 6.9+ kernel on Ubuntu 24.04.
-# bpf_arena is required by the daemon; it landed in Linux 6.9.
+# setup-kernel-6.12.sh — install a mainline Linux 6.12 LTS kernel on Ubuntu 24.04.
+# bpf_arena is required by the daemon (landed in Linux 6.9); we pin to 6.12
+# because it is the current LTS branch that still ships the arena support.
 #
 # This script uses the mainline-ppa .deb builds. Review before running.
 set -euo pipefail
 
 MAINLINE=https://kernel.ubuntu.com/mainline
-VERSION="${VERSION:-v6.9}"
+VERSION="${VERSION:-v6.12}"
 ARCH=$(dpkg --print-architecture)
 
 TMP=$(mktemp -d)
