@@ -14,11 +14,12 @@ bin/
 # eBPF generated
 bpf/vmlinux.h
 
-# bpf2go generated stubs (regenerated from bpf/*.bpf.c)
-daemon/internal/ebpf/*_bpfel.go
-daemon/internal/ebpf/*_bpfeb.go
-daemon/internal/ebpf/*_bpfel.o
-daemon/internal/ebpf/*_bpfeb.o
+# bpf2go generated stubs are committed to the repo (see daemon/generate.go)
+# so `go build ./...` works without clang / bpf2go. Regenerate with
+# `make daemon-gen`. The .o embed files are also tracked because
+# //go:embed refers to them (explicitly un-ignore since **/*.o above).
+!daemon/internal/ebpf/*_bpfel.o
+!daemon/internal/ebpf/*_bpfeb.o
 
 # Bench results
 bench/results/

@@ -11,6 +11,8 @@ SCRIPTS_DIR := $(TOPDIR)/scripts
 
 COMPOSE_FILE := $(DEPLOY_DIR)/docker-compose.yml
 
+CLANG ?= clang
+
 .DEFAULT_GOAL := help
 
 README_TMPL := $(TOPDIR)/README.md.tmpl
@@ -19,7 +21,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
 .PHONY: help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs bench bench-dry \
-        setup-kernel setup-toolchain readme clean
+        setup-kernel setup-toolchain readme test-arena clean
 
 ## help: Show this help (default target)
 help:
@@ -51,6 +53,9 @@ help:
 	@echo "Benchmarks:"
 	@echo "  make bench          Run fio + BCC jobs (requires mounted target)"
 	@echo "  make bench-dry      Verify job files without running (dry-run)"
+	@echo ""
+	@echo "Week 1 verification (requires 6.9+ kernel):"
+	@echo "  make test-arena     insmod + run bpf_arena/KFunc round-trip probe + rmmod"
 	@echo ""
 	@echo "Environment bootstrap (run once on a fresh host):"
 	@echo "  make setup-kernel     Install mainline Linux 6.9 kernel (reboot after)"
@@ -98,11 +103,13 @@ daemon: | $(BIN_DIR)
 	cd $(DAEMON_DIR) && go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
 daemon-gen: | $(BIN_DIR)
-	cd $(DAEMON_DIR) && go generate ./... && \
+	cd $(DAEMON_DIR) && BPF_CLANG=$(CLANG) go generate ./... && \
 		go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
 daemon-clean:
-	-cd $(DAEMON_DIR) && go clean ./...
+	# Note: intentionally NOT running `go clean ./...` — it removes *.o
+	# including bpf2go's embedded s3fsfp_bpf{el,eb}.o (checked in). Use
+	# `make daemon-gen` to regenerate those from bpf/**.
 	rm -f $(BIN_DIR)/s3fs-ebpf
 
 $(BIN_DIR):
@@ -154,6 +161,21 @@ $(README): $(README_TMPL) $(DAEMON_BIN) Makefile
 	 MAKE_HELP="$$($(MAKE) --no-print-directory help)" \
 	 envsubst '$$CLI_HELP $$CLI_MOUNT_HELP $$MAKE_HELP' \
 	   < $(README_TMPL) > $(README)
+
+# -----------------------------------------------------------------------------
+# Week 1: arena / KFunc round-trip probe
+# -----------------------------------------------------------------------------
+# Loads the kmod, runs the daemon's `test-arena` subcommand, then unloads.
+# Requires a 6.9+ kernel; on older kernels arena.New() will fail with
+# a clear message and the target exits non-zero.
+test-arena: kmod daemon
+	@echo "==> insmod kmod/s3fs_kfunc.ko"
+	@if ! lsmod | grep -q '^s3fs_kfunc'; then sudo insmod $(KMOD_DIR)/s3fs_kfunc.ko; fi
+	@echo "==> running $(DAEMON_BIN) test-arena"
+	@sudo $(DAEMON_BIN) test-arena; rc=$$?; \
+	 echo "==> rmmod s3fs_kfunc"; \
+	 sudo rmmod s3fs_kfunc || true; \
+	 exit $$rc
 
 # -----------------------------------------------------------------------------
 # Cleanup

@@ -15,8 +15,10 @@
 #define S3FS_MAX_PATH 4096
 #define S3FS_MAX_NAME 255
 
-#ifdef __KERNEL__
+#if defined(__KERNEL__)
 #include <linux/types.h>
+#elif defined(__bpf__) || defined(__BPF__)
+/* Types come from vmlinux.h in the BPF translation unit. */
 #else
 #include <stdint.h>
 typedef uint64_t __u64;
@@ -45,6 +47,19 @@ struct s3fs_miss_event {
 	__u32 length;
 	__u32 op;               /* 0=stat 1=read 2=lookup */
 	char  path[S3FS_MAX_PATH];
+};
+
+/*
+ * Context passed via BPF_PROG_TEST_RUN to the SEC("syscall") test harness
+ * added in Week 1. The daemon fills `idx` and `kfunc_arg`; the BPF program
+ * writes `out_ino` (arena[idx].ino) and `out_kfunc` (s3fs_kfunc_echo result).
+ */
+struct s3fs_test_args {
+	__u32 idx;
+	__u32 kfunc_arg;
+	__u64 out_ino;
+	__u32 out_kfunc;
+	__u32 _pad;
 };
 
 #endif /* _S3FS_EBPF_SHARED_TYPES_H */
