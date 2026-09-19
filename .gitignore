@@ -1,0 +1,31 @@
+# Build outputs
+bin/
+**/*.o
+**/*.ko
+**/*.mod
+**/*.mod.c
+**/*.mod.o
+**/*.cmd
+**/.tmp_versions/
+**/Module.symvers
+**/modules.order
+**/.modules.order
+
+# eBPF generated
+bpf/vmlinux.h
+
+# bpf2go generated stubs (regenerated from bpf/*.bpf.c)
+daemon/internal/ebpf/*_bpfel.go
+daemon/internal/ebpf/*_bpfeb.go
+daemon/internal/ebpf/*_bpfel.o
+daemon/internal/ebpf/*_bpfeb.o
+
+# Bench results
+bench/results/
+
+# Editors / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
