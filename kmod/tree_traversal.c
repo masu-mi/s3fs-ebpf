@@ -45,20 +45,24 @@ __bpf_kfunc u32 s3fs_kfunc_echo(u32 v)
 __bpf_kfunc_end_defs();
 
 /*
- * BTF_SET8_START / BTF_SET8_END are the pre-6.11 spelling; kernels 6.11+
- * added BTF_KFUNCS_START / BTF_KFUNCS_END as aliases. Use SET8 so we
- * compile against the entire 6.8 → mainline range.
+ * 6.11+ requires BTF_KFUNCS_START (sets BTF_SET8_KFUNCS in .flags) —
+ * register_btf_kfunc_id_set rejects sets without it. Fall back to
+ * BTF_SET8_START on older kernels that predate BTF_KFUNCS_START.
  */
+#ifndef BTF_KFUNCS_START
+#define BTF_KFUNCS_START(name) BTF_SET8_START(name)
+#define BTF_KFUNCS_END(name)   BTF_SET8_END(name)
+#endif
 
 /* KFuncs callable from BPF_PROG_TYPE_TRACING (fentry / kprobe programs). */
-BTF_SET8_START(s3fs_kfunc_ids_tracing)
+BTF_KFUNCS_START(s3fs_kfunc_ids_tracing)
 BTF_ID_FLAGS(func, s3fs_kfunc_traverse_stub, KF_TRUSTED_ARGS)
-BTF_SET8_END(s3fs_kfunc_ids_tracing)
+BTF_KFUNCS_END(s3fs_kfunc_ids_tracing)
 
 /* KFuncs callable from BPF_PROG_TYPE_SYSCALL (BPF_PROG_TEST_RUN harness). */
-BTF_SET8_START(s3fs_kfunc_ids_syscall)
+BTF_KFUNCS_START(s3fs_kfunc_ids_syscall)
 BTF_ID_FLAGS(func, s3fs_kfunc_echo)
-BTF_SET8_END(s3fs_kfunc_ids_syscall)
+BTF_KFUNCS_END(s3fs_kfunc_ids_syscall)
 
 static const struct btf_kfunc_id_set s3fs_kfunc_set_tracing = {
 	.owner = THIS_MODULE,
