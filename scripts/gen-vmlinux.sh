@@ -10,9 +10,33 @@ if [[ ! -r "$BTF_PATH" ]]; then
     exit 1
 fi
 
-if ! command -v bpftool >/dev/null 2>&1; then
-    echo "ERROR: bpftool not found. Install linux-tools-$(uname -r) or build from source." >&2
-    exit 1
-fi
+# Ubuntu's /usr/sbin/bpftool is a shim that dispatches to
+# /usr/lib/linux-tools/<uname -r>/bpftool. On mainline kernels (e.g. 6.12
+# from the Ubuntu mainline PPA) there is no matching linux-tools package
+# so the shim exits 2 with a "please install" warning. Fall back to the
+# newest concrete bpftool in /usr/lib/linux-tools/*/ — bpftool's BTF
+# dump is kernel-agnostic and cross-version-compatible.
+find_bpftool() {
+    if [[ -n "${BPFTOOL:-}" ]] && command -v "$BPFTOOL" >/dev/null 2>&1; then
+        echo "$BPFTOOL"
+        return 0
+    fi
+    if bpftool version >/dev/null 2>&1; then
+        command -v bpftool
+        return 0
+    fi
+    local candidate
+    candidate=$(ls -dv /usr/lib/linux-tools/*/bpftool 2>/dev/null | tail -1)
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        echo "$candidate"
+        return 0
+    fi
+    return 1
+}
 
-exec bpftool btf dump file "$BTF_PATH" format c
+BPFTOOL_BIN=$(find_bpftool) || {
+    echo "ERROR: no working bpftool found. Install linux-tools-generic or set BPFTOOL=/path/to/bpftool." >&2
+    exit 1
+}
+
+exec "$BPFTOOL_BIN" btf dump file "$BTF_PATH" format c

@@ -207,6 +207,50 @@ stat /mnt/s3demo      # 以降: fast_hits がインクリメントされ ringbuf
 
 **設計上の注意** — fentry フックは kstat を「返さない」（fentry は observe 専用）。実際の getattr レスポンスは kernel module の `inode_operations.getattr` から arena を読んで埋める設計で、その配線は Week 3 (kmod 側の inode 生成) 以降。今の fastpath は Hit/Miss メトリクスと Slow Path キック (ringbuf → daemon → S3 fetch) の 2 役に絞っている。
 
+### 統合デモ: miss → S3 fetch → arena populate → 次回 hit
+
+`--s3` を付けると fastpath は miss ringbuf event を消費して S3 metadata を取得し、arena + `s3fs_inode_index` を warmup します。次の `stat` は Fast Path Hit として counter が動きます。
+
+```bash
+# 1. MinIO を立てて bucket にオブジェクトを入れる (前節参照)
+make compose-up
+docker run --rm --network=deploy_default --entrypoint /bin/sh quay.io/minio/mc:latest -c '
+  mc alias set local http://minio:9000 minioadmin minioadmin
+  echo hello | mc pipe local/s3fs-test/hello.txt
+  echo world | mc pipe local/s3fs-test/world.txt'
+
+# 2. kmod と mount
+sudo insmod kmod/s3fs_kfunc.ko
+sudo mkdir -p /mnt/s3demo && sudo mount -t s3fs_ebpf none /mnt/s3demo
+
+# 3. S3 統合版 fastpath (別 shell)
+sudo ./bin/s3fs-ebpf fastpath --s3 --sample-every=1s
+
+# 4. さらに別 shell で連続 stat
+for i in 1 2 3 4 5; do stat /mnt/s3demo > /dev/null; done
+```
+
+期待出力 (`fastpath` 側):
+
+```text
+[fastpath] attached fentry/vfs_getattr_nosec; arena base=0x7a...000 size=4096
+[fastpath] s3 backend: bucket=s3fs-test (will warm arena on miss)
+[fastpath] stat any path to trigger events. Ctrl+C to stop.
+[counters/sample] fast_hits=0 slow_misses=0 unknown_fs=2005
+[miss] ino=1 op=getattr
+[warm] ino=1 ← s3://s3fs-test (3 objects) → arena offset=0
+[miss] ino=1 op=getattr        ← ringbuf にキューされた重複 miss、IsWarmed() で S3 は再叩きしない
+[miss] ino=1 op=getattr
+[counters/sample] fast_hits=4 slow_misses=4 unknown_fs=8236  ← ここで cache warm 完了
+[counters/sample] fast_hits=8 slow_misses=4 unknown_fs=14051 ← 以降は全て hit
+```
+
+**制限事項**:
+
+- 現状 `ino=1` (マウントポイントの root inode) だけを S3 の bucket listing に紐付けている。他 ino が来ると `[warm] ino=N skipped (no S3 key mapping yet — Week 3)` を出す。理由は kmod がまだ per-object inode を作らないため。Week 3 で kmod の `inode_operations` を拡張したら任意 ino → S3 key の解決を daemon 側で書く
+- arena は 1 ページ (128 slot) しか確保していない。溢れると `WarmCache` が `ErrCacheFull` を返す。デモ規模では問題にならない
+- ringbuf は BPF 側で 256KB。ドレインが遅れて溢れるとイベントロスするが、`slow_misses` counter は fentry 側で直接インクリメントするので数値は正しい
+
 ---
 
 ## Verifier 拒否デモ (`verifier-demo`)

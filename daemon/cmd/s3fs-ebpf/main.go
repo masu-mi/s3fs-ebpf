@@ -253,13 +253,18 @@ func subtestSharedAndKfunc(idx, kfuncArg uint32) int {
 
 // -- Week 2: fastpath ---------------------------------------------------------
 
-// runFastpath loads the BPF collection, attaches fentry/vfs_getattr, and
-// streams miss events + counter samples until SIGINT/SIGTERM. Intended for
-// PoC demos: run in one shell, `stat` s3fs_ebpf-mounted paths in another.
+// runFastpath loads the BPF collection, attaches fentry/vfs_getattr_nosec,
+// and streams miss events + counter samples until SIGINT/SIGTERM. If
+// --s3 is passed, each miss event triggers an S3 metadata fetch and
+// arena/inode_index population, so subsequent stats on the same ino
+// register as fast_hits.
 func runFastpath(args []string) int {
 	fs := flag.NewFlagSet("fastpath", flag.ExitOnError)
 	sampleEvery := fs.Duration("sample-every", 2*time.Second,
 		"how often to print aggregated counters")
+	enableS3 := fs.Bool("s3", false,
+		"consume miss events and warm the arena from an S3-compatible backend")
+	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
 	fs.Parse(args)
 
 	progs, err := fpebpf.Load()
@@ -283,24 +288,34 @@ func runFastpath(args []string) int {
 	}
 	defer reader.Close()
 
+	var s3c *s3.Client
+	if *enableS3 {
+		s3c, err = newClient()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "fastpath: s3: %v\n", err)
+			return 1
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("[fastpath] attached fentry/vfs_getattr; arena base=0x%x size=%d\n",
+	fmt.Printf("[fastpath] attached fentry/vfs_getattr_nosec; arena base=0x%x size=%d\n",
 		progs.Arena().BaseAddr(), progs.Arena().Size())
+	if s3c != nil {
+		fmt.Printf("[fastpath] s3 backend: bucket=%s (will warm arena on miss)\n", s3c.Bucket())
+	} else {
+		fmt.Printf("[fastpath] s3 backend disabled — misses are reported but not cached\n")
+	}
 	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
 
-	// Wake the ringbuf reader on cancel so it doesn't block forever.
 	go func() {
 		<-ctx.Done()
 		reader.Close()
 	}()
-
-	// Counter sampler.
 	go sampleCounters(ctx, progs, *sampleEvery)
 
-	// Ringbuf consumer (main goroutine).
 	for {
 		rec, err := reader.Read()
 		if err != nil {
@@ -320,11 +335,58 @@ func runFastpath(args []string) int {
 			Pad: binary.LittleEndian.Uint32(rec.RawSample[12:16]),
 		}
 		fmt.Printf("[miss] ino=%d op=%s\n", ev.Ino, opName(ev.Op))
+		if s3c != nil {
+			warmFromS3(ctx, progs, s3c, ev)
+		}
 	}
 
-	// Final counter snapshot.
 	printCounters(progs, "final")
 	return 0
+}
+
+// warmFromS3 resolves a miss event through the S3 client and populates
+// the arena + inode index so the next matching stat hits Fast Path.
+//
+// Ino → S3 key mapping (Week 2 scope): only ino=1 (the s3fs_ebpf mount
+// root) is known — its "content" is the bucket-wide listing. Per-object
+// inos will land once kmod's inode_operations grows to materialise
+// bucket objects as VFS entries (Week 3).
+func warmFromS3(ctx context.Context, progs *fpebpf.Programs, c *s3.Client, ev fpebpf.MissEvent) {
+	if ev.Ino != 1 {
+		fmt.Printf("[warm] ino=%d skipped (no S3 key mapping yet — Week 3)\n", ev.Ino)
+		return
+	}
+	// Drain-race: BPF can fire many misses before we admit the first;
+	// they all queue on the ringbuf. Skip the S3 round-trip when the
+	// ino is already cached — the fentry hook will start hitting
+	// fast_hits as soon as its dentry-cache-warm getattrs finish.
+	if progs.IsWarmed(ev.Ino) {
+		return
+	}
+	timedCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	objs, err := c.List(timedCtx, "")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warm] ino=1 list bucket: %v\n", err)
+		return
+	}
+	// The root dir stub summarises "how many objects live under this
+	// mount point" and when the listing was last refreshed. It's a
+	// pragmatic placeholder for Week 3 when per-object inodes exist.
+	stub := fpebpf.InodeStub{
+		Ino:     ev.Ino,
+		Size:    uint64(len(objs)),
+		MtimeNs: uint64(time.Now().UnixNano()),
+		Mode:    0o40755, // S_IFDIR | 0755
+	}
+	off, err := progs.WarmCache(stub)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[warm] ino=%d populate: %v\n", ev.Ino, err)
+		return
+	}
+	fmt.Printf("[warm] ino=%d ← s3://%s (%d objects) → arena offset=%d\n",
+		ev.Ino, c.Bucket(), len(objs), off)
 }
 
 func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Duration) {

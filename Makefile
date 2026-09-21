@@ -16,6 +16,19 @@ COMPOSE_FILE := $(DEPLOY_DIR)/docker-compose.yml
 # clang-20 which we prefer when available. Override with `make CLANG=...`.
 CLANG ?= $(shell command -v clang-20 2>/dev/null || command -v clang-19 2>/dev/null || echo clang)
 
+# Ubuntu mainline 6.12 kernel headers hard-code CC=gcc-15 but noble only
+# ships up to gcc-14. Detect the highest available and pass it through
+# to the kmod sub-make. See docs/week1-build-runtime-notes.md #2.
+KMOD_CC ?= $(shell command -v gcc-15 2>/dev/null || command -v gcc-14 2>/dev/null || command -v gcc 2>/dev/null || echo gcc)
+
+# Distro pahole 1.25 silently emits empty BTF against kernels built with
+# pahole 1.30+; a user-local rebuild lives at $HOME/.local. See Week 1
+# notes #3. Fall back to system pahole if the local build isn't there.
+KMOD_PAHOLE ?= $(shell test -x $(HOME)/.local/bin/pahole && echo $(HOME)/.local/bin/pahole || command -v pahole 2>/dev/null || echo pahole)
+
+# Locally-built pahole needs its libdwarves; prepend if present.
+KMOD_LDLIB := $(HOME)/.local/lib
+
 .DEFAULT_GOAL := help
 
 README_TMPL := $(TOPDIR)/README.md.tmpl
@@ -76,11 +89,16 @@ build: all
 # -----------------------------------------------------------------------------
 # Kernel module
 # -----------------------------------------------------------------------------
+# LD_LIBRARY_PATH lets a $HOME/.local pahole find its libdwarves.so;
+# CC / HOSTCC / PAHOLE override the kernel Kbuild defaults that assume
+# gcc-15 / distro pahole. All three are computed at the top of this
+# Makefile and can be overridden per-invocation.
 kmod:
-	$(MAKE) -C $(KMOD_DIR)
+	LD_LIBRARY_PATH=$(KMOD_LDLIB):$$LD_LIBRARY_PATH \
+	$(MAKE) -C $(KMOD_DIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) PAHOLE=$(KMOD_PAHOLE)
 
 kmod-clean:
-	$(MAKE) -C $(KMOD_DIR) clean
+	$(MAKE) -C $(KMOD_DIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) clean
 
 # -----------------------------------------------------------------------------
 # eBPF
@@ -93,8 +111,14 @@ bpf-clean:
 
 vmlinux: $(BPF_DIR)/vmlinux.h
 
+# Generate to a tmp file and only rename on success. Without the
+# intermediate, a partial gen-vmlinux.sh run (missing bpftool, no BTF,
+# etc.) leaves an empty $@ that make happily accepts on the next build,
+# and the bpf sub-make then fails with "unknown type name '__u32'".
 $(BPF_DIR)/vmlinux.h:
-	$(SCRIPTS_DIR)/gen-vmlinux.sh > $@
+	@tmp=$$(mktemp $@.tmp.XXXXXX) && \
+	  ( $(SCRIPTS_DIR)/gen-vmlinux.sh > $$tmp && mv $$tmp $@ ) || \
+	  { rm -f $$tmp; exit 1; }
 
 vmlinux-clean:
 	rm -f $(BPF_DIR)/vmlinux.h
