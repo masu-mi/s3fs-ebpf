@@ -30,3 +30,4 @@ bench/results/
 *.swo
 .idea/
 .vscode/
+.claude
