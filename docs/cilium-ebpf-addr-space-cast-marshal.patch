@@ -1,0 +1,75 @@
+From: s3fs-ebpf maintainers
+Subject: [PATCH] asm: preserve caller-set Offset when Marshal has no extended-ALU marker
+
+Upstream `Instruction.Marshal` unconditionally overwrites `ins.Offset`
+with `newOffset` at the end of the ALU-op fixup block. `newOffset` is
+only non-zero for `SDiv` / `SMod` / `MovSX{8,16,32}`, so every plain
+`Mov` written back to the wire ends up with `Offset=0`.
+
+This silently corrupts `bpf_addr_space_cast`. LLVM (with
+`-mcpu=v3 -mattr=+addr_space_cast` on clang 19+) encodes it as
+
+    opcode = BPF_MOV | BPF_ALU64 | BPF_X   (0xbf)
+    off    = BPF_ADDR_SPACE_CAST = 1
+    imm    = (from_as << 16) | to_as
+
+which surfaces at cilium/ebpf's asm layer as a plain `Mov` instruction
+carrying `Offset=1, Constant=1`. Marshal turns that into
+`Mov r_dst = r_src, off=0, imm=1`, and the kernel verifier rejects it
+with `BPF_MOV uses reserved fields` (kernel/bpf/verifier.c:14620 in
+v6.12, inside the else-branch of the addr_space_cast dispatch).
+
+Verified against Linux 6.12 with clang 20.1.2 and a bpf_arena-based
+`__arena` pointer dereference. See s3fs-ebpf
+docs/week2-implementation-notes.md §1 for the full write-up.
+
+Repro (relative to cilium/ebpf's tree, once addr_space_cast tests exist
+upstream — until then, cross-check against the s3fs-ebpf harness at
+`make test-arena`):
+
+  llvm-objdump-20 -d ... | grep addr_space_cast   # before load: OK
+  # after Marshal:
+  bpftool prog load ...                            # verifier: "BPF_MOV uses reserved fields"
+
+Fix: only overwrite `ins.Offset` when the Marshaller itself has
+computed a non-zero `newOffset` (i.e. one of the extended-ALU forms).
+For every other ALU op the caller-set Offset must survive to the wire.
+
+Signed-off-by: s3fs-ebpf maintainers
+
+---
+
+To apply against a cilium/ebpf checkout at v0.22.0 (or main, as of
+2026-09-11 the same code exists), from the repo root:
+
+    patch -p1 < cilium-ebpf-addr-space-cast-marshal.patch
+
+Or, if you want a real commit for a fork/PR:
+
+    git am cilium-ebpf-addr-space-cast-marshal.patch
+
+---
+ asm/instruction.go | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/asm/instruction.go b/asm/instruction.go
+--- a/asm/instruction.go
++++ b/asm/instruction.go
+@@ -192,7 +192,16 @@ func (ins Instruction) Marshal(w io.Writer, bo binary.ByteOrder) (uint64, error)
+ 		if newOffset != 0 && ins.Offset != 0 {
+ 			return 0, fmt.Errorf("extended ALU opcodes should have an .Offset of 0: %s", ins)
+ 		}
+-		ins.Offset = newOffset
++		// s3fs-ebpf patch: only overwrite ins.Offset when Marshal actually
++		// needs to encode an extended-ALU marker. Upstream unconditionally
++		// wipes Offset to 0 for plain Mov, which silently corrupts BPF's
++		// `bpf_addr_space_cast` (opcode 0xbf|ALU64|X + Offset=1 + imm=1)
++		// into an invalid `MOV r_dst = r_src, off=0, imm=1` that the
++		// verifier rejects with "BPF_MOV uses reserved fields". Preserve
++		// caller-set Offset when we have no marker of our own to emit.
++		if newOffset != 0 {
++			ins.Offset = newOffset
++		}
+ 	} else if atomic := ins.OpCode.AtomicOp(); atomic != InvalidAtomic {
+ 		ins.OpCode = ins.OpCode &^ atomicMask
+ 		ins.Constant = int64(atomic >> 8)
