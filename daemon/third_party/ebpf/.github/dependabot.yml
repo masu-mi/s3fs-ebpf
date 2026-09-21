@@ -1,0 +1,20 @@
+---
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/docs"
+    schedule:
+      interval: "monthly"
+    allow:
+      # Only manage direct dependencies in Pipfile, ignore transient
+      # dependencies only appearing in Pipfile.lock.
+      - dependency-name: "*"
+        dependency-type: "direct"
+    groups:
+      docs:
+        dependency-type: production
+        applies-to: version-updates
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

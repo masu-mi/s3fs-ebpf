@@ -4,7 +4,7 @@
 FUSE を経由せずに Linux VFS へ直接ぶら下がる、次世代 S3 ファイルシステムの PoC。
 Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メモリ、6.9 導入・6.12 で安定）、カーネルモジュール上の **KFunc**（Verifier 制限突破）、**eBPF**（VFS フック）、**Go 製コントロールプレーン** の 4 段構成でメタデータ操作を IPC 0 回で完結させます。
 
-> **Status: Week 1 in progress.** ビルド系・観測基盤に加えて、`bpf_arena` 作成 + mmap 共有 + カスタム KFunc 呼び出しの疎通確認 (`make test-arena`) が動きます。VFS 実装本体は Week 2 以降。
+> **Status: Week 2 complete.** Week 1 の `bpf_arena` 疎通に加え、(a) `bpf_addr_space_cast` 経由で BPF から arena を dereference (`make test-arena`)、(b) `fentry/vfs_getattr_nosec` Fast Path で Hit/Miss を per-CPU カウンタ + ringbuf に分別 (`s3fs-ebpf fastpath`)、(c) 純 eBPF での深層 arena 走査が verifier に拒否される様子のライブデモ (`s3fs-ebpf verifier-demo`)、(d) minio-go 経由で MinIO/S3 と会話できる daemon スケルトン (`s3fs-ebpf s3-list` / `s3-stat`) まで揃っています。VFS 実装本体 (kmod の inode 生成 → BPF Fast Path が返す実データ) は Week 3 以降。
 
 ---
 
@@ -36,7 +36,7 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 |---|---|
 | OS | Ubuntu 24.04 LTS |
 | Kernel | **Linux 6.12 LTS**（`bpf_arena` 必須。6.9 で導入、6.12 で LTS 化） |
-| Compiler | clang 17+ / LLVM 17+ |
+| Compiler | **clang 19+ (推奨 20)** — `__BPF_FEATURE_ADDR_SPACE_CAST` (`-mcpu=v3`) が必要。Ubuntu 24.04 標準の clang-18 では arena deref パスがビルドできません |
 | Go | 1.22+ |
 | Tools | `bpftool`, `fio`, `bcc`, `docker compose` v2, `gettext-base` (envsubst) |
 
@@ -134,7 +134,7 @@ ${MAKE_HELP}
 
 ---
 
-## Week 1 動作確認 (`test-arena`)
+## 動作確認 (`test-arena`)
 
 Linux 6.12+ ホスト上で以下を叩くと 3 つのサブテストが順に走ります:
 
@@ -146,8 +146,8 @@ make test-arena     # sudo insmod → daemon test-arena → sudo rmmod
 
 | ID | 内容 | 検証する仮説 |
 |---|---|---|
-| A | `BPF_MAP_TYPE_ARENA` を 1 ページで作成、mmap して往復 read/write | bpf_arena (6.9 導入 / 6.12 LTS) が daemon から利用可能 |
-| B | `BPF_MAP_TYPE_ARRAY \| BPF_F_MMAPABLE` を daemon が populate → SEC(`"syscall"`) の BPF プログラムが読み出す | daemon ↔ eBPF ゼロコピー shared memory |
+| A | `BPF_MAP_TYPE_ARENA` を daemon 側で作成、mmap して往復 read/write | bpf_arena (6.9 導入 / 6.12 LTS) の standalone create/mmap が動く |
+| B | BPF プログラムが宣言した `BPF_MAP_TYPE_ARENA` を daemon が mmap で populate → SEC(`"syscall"`) の BPF プログラムが `__arena` deref 経由で読み出す | daemon ↔ BPF が同一 arena 上でゼロコピー共有できる |
 | C | 上記 BPF プログラムが kmod 内の `s3fs_kfunc_echo(u32) → 2v+1` を呼ぶ | KFunc の登録・ロード・呼び出しパスが Verifier を通過 |
 
 期待出力 (抜粋):
@@ -156,13 +156,162 @@ make test-arena     # sudo insmod → daemon test-arena → sudo rmmod
 == subtest A: bpf_arena create + mmap ==
 [A] arena map id=42 size=4096 bytes
 [A] roundtrip OK: wrote/read "hello arena"
-== subtest B+C: mmap shared array + KFunc call ==
-[B] wrote 32 dummy inodes to shared map
+== subtest B+C: bpf_arena populate + KFunc call ==
+[B] arena mmap base=0x7ab...000 size=4096 bytes
+[B] wrote 32 dummy inodes into arena
 [B/C] prog ret=0 out_ino=0x1003 out_kfunc=43
 PASS
 ```
 
-> **注**: Week 1 の BPF プログラムは cilium/ebpf v0.22 が `.addr_space.1` グローバルを未サポートのため、shared memory 側を `BPF_MAP_TYPE_ARRAY|MMAPABLE` に降格しています。arena 本体は daemon 側でのみ触ります。Week 2 で arena グローバル直参照へ引き上げます。
+---
+
+## Fast Path 動作確認 (`fastpath`)
+
+`fentry/vfs_getattr_nosec` をアタッチし、`stat` 系システムコールごとに Hit/Miss を分別してリングバッファ+per-CPU カウンタに落とします。
+
+```bash
+# 1. kmod をロード (未ロードなら)
+sudo insmod kmod/s3fs_kfunc.ko
+
+# 2. s3fs_ebpf をマウント (getattr が s_magic フィルタを通るのに必要)
+sudo mkdir -p /mnt/s3demo
+sudo mount -t s3fs_ebpf none /mnt/s3demo
+
+# 3. 別 shell で fastpath を起動 (Ctrl+C で終了)
+sudo ./bin/s3fs-ebpf fastpath --sample-every=1s
+
+# 4. さらに別 shell で stat を叩く
+stat /mnt/s3demo      # 初回: [miss] ino=1 op=getattr が飛ぶ
+stat /tmp             # 非 s3fs → unknown_fs カウンタが伸びる
+
+# 5. Fast Path Hit を模倣: ino=1 → arena offset=0 を index に注入
+BPFTOOL=/usr/lib/linux-tools/$(uname -r | awk -F- '{print $1"-"$2}')/bpftool
+INDEX_ID=$(sudo $BPFTOOL map list | awk '/s3fs_inode_index/{print $1}' | tr -d ':')
+sudo $BPFTOOL map update id "$INDEX_ID" \
+    key 0x01 0 0 0 0 0 0 0 \
+    value 0 0 0 0
+stat /mnt/s3demo      # 以降: fast_hits がインクリメントされ ringbuf は静か
+```
+
+期待出力例 (`fastpath` 側):
+
+```text
+[fastpath] attached fentry/vfs_getattr_nosec; arena base=0x7ab...000 size=4096
+[fastpath] stat any path to trigger events. Ctrl+C to stop.
+[counters/sample] fast_hits=0 slow_misses=0 unknown_fs=25788
+[miss] ino=1 op=getattr
+[miss] ino=1 op=getattr
+[counters/sample] fast_hits=0 slow_misses=2 unknown_fs=56068
+[counters/sample] fast_hits=3 slow_misses=11 unknown_fs=130815   ← ino=1 を index に注入後
+```
+
+**設計上の注意** — fentry フックは kstat を「返さない」（fentry は observe 専用）。実際の getattr レスポンスは kernel module の `inode_operations.getattr` から arena を読んで埋める設計で、その配線は Week 3 (kmod 側の inode 生成) 以降。今の fastpath は Hit/Miss メトリクスと Slow Path キック (ringbuf → daemon → S3 fetch) の 2 役に絞っている。
+
+---
+
+## Verifier 拒否デモ (`verifier-demo`)
+
+「なぜ KFunc が必要か」を verifier のログで示すためのデモ。純 eBPF で arena 上の linked-list を `while (n) { n = n->next; }` で辿ろうとして、verifier の 1M 命令上限 (`BPF_COMPLEXITY_LIMIT_INSNS`) に落ちる様子を見せます。
+
+```bash
+sudo ./bin/s3fs-ebpf verifier-demo
+```
+
+期待出力 (末尾抜粋):
+
+```text
+== verifier-demo ==============================================
+Attempting to load s3fs_deep_walk_reject (pure eBPF arena walk
+with an unbounded pointer chase). ...
+=== verifier log ===
+...
+	7: (bf) r2 = addr_space_cast(r2, 0, 1)   ; R2_w=arena
+	8: (79) r4 = *(u64 *)(r2 +8)             ; R2_w=arena R4_w=scalar()
+	...
+	12: (55) if r2 != 0x0 goto pc-6          ; back-edge
+	...
+	BPF program is too large. Processed 1000001 insn
+	processed 1000001 insns (limit 1000000) max_states_per_insn 4 total_states 9664 peak_states 9664 mark_read 1
+
+== outcome ====================================================
+The verifier refused this program. In s3fs-ebpf the same walk
+is expressed as a KFunc call (see kmod/tree_traversal.c and
+the `make test-arena` subtest C), which runs unbounded C and
+bypasses the eBPF verifier entirely.
+```
+
+対比:
+
+| 実装 | Verifier | 効果 |
+|---|---|---|
+| pure eBPF `while (n) { n = n->next; }` | ❌ `BPF program is too large. Processed 1000001 insn` | 深さ不定のツリー走査は静的解析で 1M 命令の状態爆発を起こす |
+| KFunc (`s3fs_kfunc_traverse_stub` / kmod C コード) | ✅ 通過 (`make test-arena` subtest C) | KFunc の境界で verifier が「信頼」する → 中身は普通の C なのでループ制限なし |
+
+デモは exit 0 で「rejected as expected」を返します。将来のカーネル改良で万一ロードが通ってしまった場合は exit 2 (「デモは obsolete」) を返します。
+
+---
+
+## MinIO Slow Path 疎通 (`s3-list` / `s3-stat`)
+
+daemon が本物の S3-compatible endpoint と会話できることを確認するスケルトンです。`fentry` から見た miss → S3 fetch → arena populate → hit の完全ループは kmod の inode ops (Week 3) を待つため今週はまだ組みませんが、S3 API 側の骨格はここまで動きます。
+
+```bash
+# 1. 観測スタック (MinIO 含む) を起動
+make compose-up
+#   MinIO:  http://localhost:9000  (minioadmin / minioadmin)
+#   Console: http://localhost:9001
+#   compose 内で bucket "s3fs-test" が自動作成される
+
+# 2. 何かオブジェクトを put (mc / aws / SDK いずれでも可)
+docker run --rm --network=deploy_default --entrypoint /bin/sh quay.io/minio/mc:latest -c '
+  mc alias set local http://minio:9000 minioadmin minioadmin
+  echo "hello, s3fs-ebpf" | mc pipe local/s3fs-test/hello.txt
+  echo "AI weights"       | mc pipe local/s3fs-test/models/weights.bin'
+
+# 3. daemon から list / stat
+./bin/s3fs-ebpf s3-list
+./bin/s3fs-ebpf s3-list --prefix=models/
+./bin/s3fs-ebpf s3-stat hello.txt
+```
+
+期待出力:
+
+```text
+$ ./bin/s3fs-ebpf s3-list
+bucket=s3fs-test prefix="" count=3
+  hello.txt            17  787e25ff430270dcf04ba82bba3032c1-1  2026-09-21T01:00:05Z
+  hostname             13  68d9ef9c4bdd75fab935fc116df6111b     2026-09-21T01:00:05Z
+  models/weights.bin   23  139f878b2b374df6ca2a2cc2199056a1-1  2026-09-21T01:00:05Z
+
+$ ./bin/s3fs-ebpf s3-stat hello.txt
+bucket=s3fs-test key=hello.txt
+  size          17
+  etag          787e25ff430270dcf04ba82bba3032c1-1
+  content-type  text/plain
+  last-modified 2026-09-21T01:00:05Z
+```
+
+共通フラグ:
+
+| フラグ | デフォルト | 説明 |
+|---|---|---|
+| `--endpoint` | `localhost:9000` | S3-compatible endpoint (`host:port`, scheme なし) |
+| `--bucket` | `s3fs-test` | Bucket 名 |
+| `--access-key` | `minioadmin` (`$S3FS_ACCESS_KEY`) | アクセスキー |
+| `--secret-key` | `minioadmin` (`$S3FS_SECRET_KEY`) | シークレットキー |
+| `--ssl` | `false` | HTTPS を使う |
+
+AWS 本番 endpoint (`s3.us-west-2.amazonaws.com` 等) と IAM キーを指定すれば MinIO を経由せずに直接叩けます。
+
+---
+
+> **Week 2 の学習事項** — subtest B/C を「本物の arena deref」に上げるために踏んだ地雷:
+>
+> - `bpf_addr_space_cast` は `-mcpu=v3` を要求 (`__BPF_FEATURE_ADDR_SPACE_CAST`)。Ubuntu 24.04 標準の clang-18 では未サポート。Makefile が `clang-20` を優先検出します
+> - verifier は arena map が `prog->aux->arena` に関連付いていないと `addr_space_cast` を拒否。単に `.maps` セクションに置くだけでは足りず、プログラム側で `LD_MAP_FD` を発行させる必要がある (`asm volatile("" :: "r"(&s3fs_arena));` で強制)
+> - verifier は arena の `user_vm_start` が未設定だとロードを拒む。daemon が `Map.Memory()` で mmap してから BPF プログラムをロードする 2 段順序が必要 (`daemon/internal/ebpf/loader.go`)
+> - cilium/ebpf v0.22.0 (main HEAD 含む) の `asm/instruction.go` `Marshal` が `bpf_addr_space_cast` のエンコーディングを壊すバグを踏んだ。`Instruction.Offset=1` (BPF_ADDR_SPACE_CAST マーカー) が plain Mov に対して常に 0 で上書きされてしまう。`daemon/third_party/ebpf/` にパッチ済みのソースを vendor して `go.mod` の `replace` で差し込んでいる。詳細は `daemon/third_party/ebpf/README-s3fs-patch.md`
+> - `SEC("fentry/vfs_getattr")` は fires しない — 現行 kernel の `newfstatat` は `vfs_statx_path` → `vfs_getattr_nosec` を直接呼ぶため。ftrace で `set_ftrace_filter=vfs_getattr*` して確認したのち `SEC("fentry/vfs_getattr_nosec")` へ変更
 
 ---
 
@@ -240,8 +389,11 @@ make readme        # daemon をビルドしてから README.md を再生成
 | Week | ゴール | ステータス |
 |---|---|---|
 | **0** | ビルドテンプレート（本リポジトリ） | ✅ done |
-| **1** | `bpf_arena` 疎通、daemon↔BPF 共有メモリ、KFunc 呼び出し (`make test-arena`) | ✅ done (arena globals は Week 2 で本実装) |
-| **2** | eBPF Fast Path、Verifier 拒否デモ、MinIO Slow Path 骨、arena `.addr_space.1` 対応 | pending |
+| **1** | `bpf_arena` 疎通、daemon↔BPF 共有メモリ、KFunc 呼び出し (`make test-arena`) | ✅ done |
+| **2 (a)** | arena `__arena` deref パス (`bpf_addr_space_cast`) の疎通 | ✅ done (cilium/ebpf の Marshal バグを vendor patch で回避) |
+| **2 (b)** | eBPF Fast Path (`fentry/vfs_getattr_nosec` → hit/miss counter + ringbuf) | ✅ done (`s3fs-ebpf fastpath`) |
+| **2 (c)** | Verifier 拒否デモ | ✅ done (`s3fs-ebpf verifier-demo`) |
+| **2 (d)** | MinIO Slow Path 骨 (minio-go / bucket list & stat) | ✅ done (`s3fs-ebpf s3-list` / `s3-stat`) |
 | **3** | Lua/WASM ポリシー、CLI `stats` / `policy reload` | pending |
 | **4** | s3fs-fuse / Mountpoint との `stat` レイテンシ比較、Meetup 準備 | pending |
 

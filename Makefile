@@ -11,7 +11,10 @@ SCRIPTS_DIR := $(TOPDIR)/scripts
 
 COMPOSE_FILE := $(DEPLOY_DIR)/docker-compose.yml
 
-CLANG ?= clang
+# Week 2 requires __BPF_FEATURE_ADDR_SPACE_CAST (clang 19+ with -mcpu=v3).
+# Ubuntu 24.04 ships clang-18.1 as /usr/bin/clang; noble-updates carries
+# clang-20 which we prefer when available. Override with `make CLANG=...`.
+CLANG ?= $(shell command -v clang-20 2>/dev/null || command -v clang-19 2>/dev/null || echo clang)
 
 .DEFAULT_GOAL := help
 
