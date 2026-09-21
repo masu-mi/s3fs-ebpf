@@ -12,13 +12,20 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
+	"github.com/cilium/ebpf/ringbuf"
 )
 
 const usage = `Usage: s3fs-ebpf <command> [options]
@@ -30,6 +37,12 @@ Commands:
   policy       Hot-reload the cache policy blob
   test-arena   Week 1 probe: bpf_arena + KFunc round-trip (requires 6.9+ kernel
                and the s3fs_kfunc module loaded)
+  fastpath     Week 2 probe: attach fentry/vfs_getattr, stream ringbuf miss
+               events and hit/miss counters until interrupted
+  verifier-demo Week 2 probe: try to load an intentionally-rejected pure eBPF
+               arena walker and print the verifier's rejection log
+  s3-list      Connect to an S3-compatible endpoint and list a bucket
+  s3-stat      Connect to an S3-compatible endpoint and stat a single object
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
 `
@@ -53,6 +66,14 @@ func main() {
 		os.Exit(runPolicy(args))
 	case "test-arena":
 		os.Exit(runTestArena(args))
+	case "fastpath":
+		os.Exit(runFastpath(args))
+	case "verifier-demo":
+		os.Exit(runVerifierDemo(args))
+	case "s3-list":
+		os.Exit(runS3List(args))
+	case "s3-stat":
+		os.Exit(runS3Stat(args))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -176,31 +197,39 @@ func subtestArena() int {
 }
 
 func subtestSharedAndKfunc(idx, kfuncArg uint32) int {
-	fmt.Println("== subtest B+C: mmap shared array + KFunc call ================")
-	progs, err := ebpf.Load()
+	fmt.Println("== subtest B+C: bpf_arena populate + KFunc call ===============")
+	progs, err := fpebpf.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL B] ebpf.Load: %v\n", err)
 		return 1
 	}
 	defer progs.Close()
 
-	// Populate the shared array with dummy inodes: ino = base + i.
-	shared := progs.SharedMap()
+	// The BPF-owned arena was mmap'd inside ebpf.Load() (that ordering is
+	// required so the verifier sees a valid user_vm_start when the program
+	// loads). First write to each page demand-allocates it.
+	a := progs.Arena()
+	fmt.Printf("[B] arena mmap base=0x%x size=%d bytes\n", a.BaseAddr(), a.Size())
+
+	// Layout: stub[i] at offset i * inodeStubSize.
+	buf := make([]byte, inodeStubSize)
 	for i := uint32(0); i < testInodes; i++ {
-		key := i
-		val := make([]byte, inodeStubSize)
-		binary.LittleEndian.PutUint64(val[0:8], testInoBase+uint64(i))
-		binary.LittleEndian.PutUint64(val[8:16], 4096)               // size
-		binary.LittleEndian.PutUint64(val[16:24], 0)                 // mtime_ns
-		binary.LittleEndian.PutUint32(val[24:28], 0o100644)          // mode
-		if err := shared.Update(&key, val, 0); err != nil {
-			fmt.Fprintf(os.Stderr, "[FAIL B] populate shared[%d]: %v\n", i, err)
+		binary.LittleEndian.PutUint64(buf[0:8], testInoBase+uint64(i))
+		binary.LittleEndian.PutUint64(buf[8:16], 4096)      // size
+		binary.LittleEndian.PutUint64(buf[16:24], 0)        // mtime_ns
+		binary.LittleEndian.PutUint32(buf[24:28], 0o100644) // mode
+		if _, err := a.WriteAt(buf, int64(i)*int64(inodeStubSize)); err != nil {
+			fmt.Fprintf(os.Stderr, "[FAIL B] arena WriteAt[%d]: %v\n", i, err)
 			return 1
 		}
 	}
-	fmt.Printf("[B] wrote %d dummy inodes to shared map\n", testInodes)
+	fmt.Printf("[B] wrote %d dummy inodes into arena\n", testInodes)
 
-	in := ebpf.TestArgs{Idx: idx, KfuncArg: kfuncArg}
+	in := fpebpf.TestArgs{
+		ArenaBaseUaddr: a.BaseAddr(),
+		Idx:            idx,
+		KfuncArg:       kfuncArg,
+	}
 	out, ret, err := progs.RunTestShared(in)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL B/C] RunTestShared: %v\n", err)
@@ -220,4 +249,245 @@ func subtestSharedAndKfunc(idx, kfuncArg uint32) int {
 		failed++
 	}
 	return failed
+}
+
+// -- Week 2: fastpath ---------------------------------------------------------
+
+// runFastpath loads the BPF collection, attaches fentry/vfs_getattr, and
+// streams miss events + counter samples until SIGINT/SIGTERM. Intended for
+// PoC demos: run in one shell, `stat` s3fs_ebpf-mounted paths in another.
+func runFastpath(args []string) int {
+	fs := flag.NewFlagSet("fastpath", flag.ExitOnError)
+	sampleEvery := fs.Duration("sample-every", 2*time.Second,
+		"how often to print aggregated counters")
+	fs.Parse(args)
+
+	progs, err := fpebpf.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load: %v\n", err)
+		return 1
+	}
+	defer progs.Close()
+
+	fentry, err := progs.AttachFentry()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "attach: %v\n", err)
+		return 1
+	}
+	defer fentry.Close()
+
+	reader, err := ringbuf.NewReader(progs.EventsMap())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ringbuf reader: %v\n", err)
+		return 1
+	}
+	defer reader.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Printf("[fastpath] attached fentry/vfs_getattr; arena base=0x%x size=%d\n",
+		progs.Arena().BaseAddr(), progs.Arena().Size())
+	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
+
+	// Wake the ringbuf reader on cancel so it doesn't block forever.
+	go func() {
+		<-ctx.Done()
+		reader.Close()
+	}()
+
+	// Counter sampler.
+	go sampleCounters(ctx, progs, *sampleEvery)
+
+	// Ringbuf consumer (main goroutine).
+	for {
+		rec, err := reader.Read()
+		if err != nil {
+			if errors.Is(err, ringbuf.ErrClosed) {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "ringbuf read: %v\n", err)
+			continue
+		}
+		if len(rec.RawSample) < 16 {
+			fmt.Fprintf(os.Stderr, "short miss event: %d bytes\n", len(rec.RawSample))
+			continue
+		}
+		ev := fpebpf.MissEvent{
+			Ino: binary.LittleEndian.Uint64(rec.RawSample[0:8]),
+			Op:  binary.LittleEndian.Uint32(rec.RawSample[8:12]),
+			Pad: binary.LittleEndian.Uint32(rec.RawSample[12:16]),
+		}
+		fmt.Printf("[miss] ino=%d op=%s\n", ev.Ino, opName(ev.Op))
+	}
+
+	// Final counter snapshot.
+	printCounters(progs, "final")
+	return 0
+}
+
+func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			printCounters(progs, "sample")
+		}
+	}
+}
+
+func printCounters(progs *fpebpf.Programs, label string) {
+	c, err := progs.ReadCounters()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "read counters: %v\n", err)
+		return
+	}
+	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d\n",
+		label, c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS])
+}
+
+func opName(op uint32) string {
+	switch op {
+	case fpebpf.OpGetattr:
+		return "getattr"
+	case fpebpf.OpLookup:
+		return "lookup"
+	case fpebpf.OpRead:
+		return "read"
+	default:
+		return fmt.Sprintf("op#%d", op)
+	}
+}
+
+// -- Week 2: verifier-demo ----------------------------------------------------
+
+// runVerifierDemo tries to load the intentionally-rejected pure-eBPF
+// arena walker and prints the verifier's rejection log. Exit codes:
+//
+//	0 — program was rejected (the expected demo outcome, log printed)
+//	1 — I/O or setup failure (message on stderr)
+//	2 — program unexpectedly loaded (a future kernel accepted it —
+//	    the demo is obsolete and someone should update the pitch)
+func runVerifierDemo(args []string) int {
+	fs := flag.NewFlagSet("verifier-demo", flag.ExitOnError)
+	fs.Parse(args)
+
+	fmt.Println("== verifier-demo ==============================================")
+	fmt.Println("Attempting to load s3fs_deep_walk_reject (pure eBPF arena walk")
+	fmt.Println("with an unbounded pointer chase). The kernel's verifier should")
+	fmt.Println("reject it with a complexity-limit or unbounded-loop diagnostic.")
+	fmt.Println()
+
+	ve, err := fpebpf.LoadRejectDemo()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "verifier-demo: %v\n", err)
+		return 1
+	}
+	if ve == nil {
+		fmt.Fprintln(os.Stderr, "verifier-demo: program loaded unexpectedly — the demo is obsolete")
+		return 2
+	}
+	fmt.Printf("=== verifier log ===\n%+v\n", ve)
+	fmt.Println()
+	fmt.Println("== outcome ====================================================")
+	fmt.Println("The verifier refused this program. In s3fs-ebpf the same walk")
+	fmt.Println("is expressed as a KFunc call (see kmod/tree_traversal.c and")
+	fmt.Println("the `make test-arena` subtest C), which runs unbounded C and")
+	fmt.Println("bypasses the eBPF verifier entirely.")
+	return 0
+}
+
+// -- Week 2: MinIO Slow Path skeleton -----------------------------------------
+
+// s3Flags registers the shared endpoint/bucket/credentials flags for
+// s3-list and s3-stat and returns a callback that constructs a Client
+// from the parsed values.
+func s3Flags(fs *flag.FlagSet) func() (*s3.Client, error) {
+	endpoint := fs.String("endpoint", "localhost:9000",
+		"S3-compatible endpoint (host:port, no scheme — use --ssl for https)")
+	bucket := fs.String("bucket", "s3fs-test", "Bucket name")
+	access := fs.String("access-key", envOr("S3FS_ACCESS_KEY", "minioadmin"), "Access key")
+	secret := fs.String("secret-key", envOr("S3FS_SECRET_KEY", "minioadmin"), "Secret key")
+	ssl := fs.Bool("ssl", false, "Use HTTPS")
+	return func() (*s3.Client, error) {
+		return s3.New(s3.Config{
+			Endpoint:  *endpoint,
+			Bucket:    *bucket,
+			AccessKey: *access,
+			SecretKey: *secret,
+			UseSSL:    *ssl,
+		})
+	}
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// runS3List lists objects in the configured bucket (optionally under a
+// prefix) and prints them. Exit 1 on connection or listing failure.
+func runS3List(args []string) int {
+	fs := flag.NewFlagSet("s3-list", flag.ExitOnError)
+	newClient := s3Flags(fs)
+	prefix := fs.String("prefix", "", "Object key prefix to enumerate")
+	fs.Parse(args)
+
+	client, err := newClient()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "s3-list: %v\n", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	objs, err := client.List(ctx, *prefix)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "s3-list: %v\n", err)
+		return 1
+	}
+	fmt.Printf("bucket=%s prefix=%q count=%d\n", client.Bucket(), *prefix, len(objs))
+	for _, o := range objs {
+		fmt.Printf("  %s\t%d\t%s\t%s\n",
+			o.Key, o.Size, o.ETag, o.LastModified.UTC().Format(time.RFC3339))
+	}
+	return 0
+}
+
+// runS3Stat fetches a single object's HEAD metadata and prints it.
+func runS3Stat(args []string) int {
+	fs := flag.NewFlagSet("s3-stat", flag.ExitOnError)
+	newClient := s3Flags(fs)
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "s3-stat: exactly one KEY argument required")
+		return 2
+	}
+	key := fs.Arg(0)
+
+	client, err := newClient()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "s3-stat: %v\n", err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	meta, err := client.Stat(ctx, key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "s3-stat: %v\n", err)
+		return 1
+	}
+	fmt.Printf("bucket=%s key=%s\n", client.Bucket(), meta.Key)
+	fmt.Printf("  size          %d\n", meta.Size)
+	fmt.Printf("  etag          %s\n", meta.ETag)
+	fmt.Printf("  content-type  %s\n", meta.ContentType)
+	fmt.Printf("  last-modified %s\n", meta.LastModified.UTC().Format(time.RFC3339))
+	return 0
 }

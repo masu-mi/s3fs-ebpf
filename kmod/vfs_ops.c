@@ -15,7 +15,9 @@
 
 #include "vfs_ops.h"
 
-#define S3FS_EBPF_MAGIC 0x53334642  /* "S3FB" */
+/* S3FS_EBPF_MAGIC lives in the shared header so the BPF fentry hook can
+ * filter by super_block::s_magic without a second source of truth. */
+#include "s3fs_shared_types.h"
 
 static const struct super_operations s3fs_ebpf_super_ops = {
 	.statfs		= simple_statfs,

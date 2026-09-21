@@ -2,9 +2,10 @@
 bin/
 **/*.o
 **/*.ko
-**/*.mod
-**/*.mod.c
-**/*.mod.o
+# Kbuild scoping (`**/*.mod` would also swallow daemon/go.mod).
+kmod/*.mod
+kmod/*.mod.c
+kmod/*.mod.o
 **/*.cmd
 **/.tmp_versions/
 **/Module.symvers

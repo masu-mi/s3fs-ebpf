@@ -2,7 +2,10 @@ CLANG   ?= clang
 BPFTOOL ?= bpftool
 ARCH    := $(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/')
 
-BPF_CFLAGS := -O2 -g -Wall -target bpf \
+# -mcpu=v3 turns on __BPF_FEATURE_ADDR_SPACE_CAST so clang emits
+# bpf_addr_space_cast when dereferencing __arena pointers (Week 2).
+# Requires clang 19+; on Ubuntu 24.04 set CLANG=clang-20.
+BPF_CFLAGS := -O2 -g -Wall -target bpf -mcpu=v3 \
               -D__TARGET_ARCH_$(ARCH) \
               -I. -I../include
 

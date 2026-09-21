@@ -40,21 +40,49 @@ struct s3fs_stat {
 	__u32 gid;
 };
 
-/* Slow-path event pushed via BPF_MAP_TYPE_RINGBUF to the Go daemon. */
+/* Slow-path event pushed via BPF_MAP_TYPE_RINGBUF to the Go daemon.
+ *
+ * Week 2 intentionally omits the resolved path: reconstructing it in a
+ * BPF program requires a bounded d_path()-style walk, which we defer to
+ * Week 3 once the kernel module owns the inode table and can hand us a
+ * stable key. For now the daemon looks up ino against its own S3-key
+ * index.
+ */
 struct s3fs_miss_event {
 	__u64 ino;
-	__u64 offset;
-	__u32 length;
-	__u32 op;               /* 0=stat 1=read 2=lookup */
-	char  path[S3FS_MAX_PATH];
+	__u32 op;               /* see enum s3fs_miss_op */
+	__u32 _pad;
 };
 
+enum s3fs_miss_op {
+	S3FS_OP_GETATTR = 0,
+	S3FS_OP_LOOKUP  = 1,
+	S3FS_OP_READ    = 2,
+};
+
+/* Per-CPU counter slots (indices into s3fs_counters map). */
+enum s3fs_stat_slot {
+	S3FS_STAT_FAST_HITS   = 0,
+	S3FS_STAT_SLOW_MISSES = 1,
+	S3FS_STAT_UNKNOWN_FS  = 2,
+	S3FS_STAT_SLOT_MAX,
+};
+
+/* Magic identifying an s3fs_ebpf super_block. Kept in sync with
+ * kmod/vfs_ops.c so the BPF fentry hook can filter by it. */
+#define S3FS_EBPF_MAGIC 0x53334642UL  /* "S3FB" */
+
 /*
- * Context passed via BPF_PROG_TEST_RUN to the SEC("syscall") test harness
- * added in Week 1. The daemon fills `idx` and `kfunc_arg`; the BPF program
- * writes `out_ino` (arena[idx].ino) and `out_kfunc` (s3fs_kfunc_echo result).
+ * Context passed via BPF_PROG_TEST_RUN to the SEC("syscall") test harness.
+ * Week 1 laid this out for an mmap-array; Week 2 promotes it to a real
+ * bpf_arena: the daemon mmaps the arena, writes stubs at byte offsets, and
+ * passes `arena_base_uaddr` = mmap base so the BPF program can reconstruct
+ * arena pointers (`__arena *`) via a scalar-to-address_space cast.
+ *
+ * Layout is padded to 8-byte boundaries; `_pad` keeps sizeof stable at 32.
  */
 struct s3fs_test_args {
+	__u64 arena_base_uaddr;
 	__u32 idx;
 	__u32 kfunc_arg;
 	__u64 out_ino;

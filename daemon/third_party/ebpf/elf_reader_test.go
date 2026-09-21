@@ -1,0 +1,1437 @@
+package ebpf
+
+import (
+	"bytes"
+	"encoding/binary"
+	"errors"
+	"flag"
+	"fmt"
+	"maps"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"testing"
+
+	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/btf"
+	"github.com/cilium/ebpf/internal"
+	"github.com/cilium/ebpf/internal/kallsyms"
+	"github.com/cilium/ebpf/internal/sys"
+	"github.com/cilium/ebpf/internal/testutils"
+
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+
+	"github.com/go-quicktest/qt"
+)
+
+var csCmpOpts = cmp.Options{
+	// Dummy Comparer that works with empty readers to support test cases.
+	cmp.Comparer(func(a, b bytes.Reader) bool {
+		if a.Len() == 0 && b.Len() == 0 {
+			return true
+		}
+		return false
+	}),
+	cmpopts.IgnoreTypes(btf.Spec{}),
+	cmpopts.IgnoreFields(CollectionSpec{}, "ByteOrder", "Types"),
+	cmpopts.IgnoreFields(ProgramSpec{}, "Instructions", "ByteOrder"),
+	cmpopts.IgnoreFields(MapSpec{}, "Key", "Value", "Contents"),
+	cmpopts.IgnoreFields(VariableSpec{}, "Type", "Value"),
+	cmpopts.IgnoreUnexported(ProgramSpec{}),
+}
+
+func TestLoadCollectionSpec(t *testing.T) {
+	coll := &CollectionSpec{
+		Maps: map[string]*MapSpec{
+			"hash_map": {
+				Name:       "hash_map",
+				Type:       Hash,
+				KeySize:    4,
+				ValueSize:  8,
+				MaxEntries: 1,
+				Flags:      sys.BPF_F_NO_PREALLOC,
+			},
+			"hash_map2": {
+				Name:       "hash_map2",
+				Type:       Hash,
+				KeySize:    4,
+				ValueSize:  8,
+				MaxEntries: 2,
+			},
+			"perf_event_array": {
+				Name:       "perf_event_array",
+				Type:       PerfEventArray,
+				MaxEntries: 4096,
+			},
+			".bss": {
+				Name:       ".bss",
+				Type:       Array,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+			},
+			".data": {
+				Name:       ".data",
+				Type:       Array,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+			},
+			".data.test": {
+				Name:       ".data.test",
+				Type:       Array,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+			},
+			".rodata": {
+				Name:       ".rodata",
+				Type:       Array,
+				KeySize:    4,
+				ValueSize:  24,
+				MaxEntries: 1,
+				Flags:      sys.BPF_F_RDONLY_PROG,
+			},
+			".rodata.test": {
+				Name:       ".rodata.test",
+				Type:       Array,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+				Flags:      sys.BPF_F_RDONLY_PROG,
+			},
+			".rodata.cst32": {
+				Name:       ".rodata.cst32",
+				Type:       Array,
+				KeySize:    4,
+				ValueSize:  32,
+				MaxEntries: 1,
+				Flags:      sys.BPF_F_RDONLY_PROG,
+			},
+		},
+		Programs: map[string]*ProgramSpec{
+			"xdp_prog": {
+				Name:        "xdp_prog",
+				Type:        XDP,
+				SectionName: "xdp",
+				AttachType:  AttachXDP,
+				License:     "MIT",
+			},
+			"no_relocation": {
+				Name:        "no_relocation",
+				Type:        SocketFilter,
+				SectionName: "socket",
+				License:     "MIT",
+			},
+			"asm_relocation": {
+				Name:        "asm_relocation",
+				Type:        SocketFilter,
+				SectionName: "socket/2",
+				License:     "MIT",
+			},
+			"data_sections": {
+				Name:        "data_sections",
+				Type:        SocketFilter,
+				SectionName: "socket/3",
+				License:     "MIT",
+			},
+			"global_fn3": {
+				Name:        "global_fn3",
+				Type:        UnspecifiedProgram,
+				SectionName: "other",
+				License:     "MIT",
+			},
+			"static_fn": {
+				Name:        "static_fn",
+				Type:        UnspecifiedProgram,
+				SectionName: "static",
+				License:     "MIT",
+			},
+			"anon_const": {
+				Name:        "anon_const",
+				Type:        SocketFilter,
+				SectionName: "socket/4",
+				License:     "MIT",
+			},
+		},
+		Variables: map[string]*VariableSpec{
+			"arg":  {Name: "arg", SectionName: ".rodata", Offset: 4},
+			"arg2": {Name: "arg2", SectionName: ".rodata.test", Offset: 0},
+			"arg3": {Name: "arg3", SectionName: ".data.test", Offset: 0},
+			"key1": {Name: "key1", SectionName: ".bss", Offset: 0},
+			"key2": {Name: "key2", SectionName: ".data", Offset: 0},
+			"key3": {Name: "key3", SectionName: ".rodata", Offset: 0},
+			"neg":  {Name: "neg", SectionName: ".rodata", Offset: 12},
+			"uneg": {Name: "uneg", SectionName: ".rodata", Offset: 8},
+		},
+	}
+
+	// BTF-only maps.
+	btfOnly := map[string]*MapSpec{
+		"btf_pin": {
+			Name:       "btf_pin",
+			Type:       Hash,
+			KeySize:    4,
+			ValueSize:  8,
+			MaxEntries: 1,
+			Pinning:    PinByName,
+		},
+		"bpf_decl_map": {
+			Name:       "bpf_decl_map",
+			Type:       Array,
+			KeySize:    4,
+			ValueSize:  8,
+			MaxEntries: 1,
+			Tags:       []string{"a", "b"},
+		},
+		"btf_decl_map": {
+			Name:       "btf_decl_map",
+			Type:       Array,
+			KeySize:    4,
+			ValueSize:  8,
+			MaxEntries: 1,
+			Tags:       []string{"a", "b"},
+		},
+		"btf_outer_map": {
+			Name:       "btf_outer_map",
+			Type:       ArrayOfMaps,
+			KeySize:    4,
+			ValueSize:  4,
+			MaxEntries: 1,
+			InnerMap: &MapSpec{
+				Name:       "btf_outer_map_inner",
+				Type:       Hash,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+			},
+		},
+		"btf_outer_map_anon": {
+			Name:       "btf_outer_map_anon",
+			Type:       ArrayOfMaps,
+			KeySize:    4,
+			ValueSize:  4,
+			MaxEntries: 1,
+			InnerMap: &MapSpec{
+				Name:       "btf_outer_map_anon_inner",
+				Type:       Hash,
+				KeySize:    4,
+				ValueSize:  4,
+				MaxEntries: 1,
+			},
+		},
+		"btf_typedef_map": {
+			Name:       "btf_typedef_map",
+			Type:       Array,
+			KeySize:    4,
+			ValueSize:  8,
+			MaxEntries: 1,
+		},
+	}
+
+	testutils.Files(t, testutils.Glob(t, "testdata/loader-*.elf"), func(t *testing.T, file string) {
+		got, err := LoadCollectionSpec(file)
+		qt.Assert(t, qt.IsNil(err))
+
+		// BTF map definition contains a value type, but the size should remain 0.
+		// The value type needs to be reflected in the MapSpec.
+		qt.Assert(t, qt.Equals(got.Maps["perf_event_array"].ValueSize, 0))
+		qt.Assert(t, qt.IsNotNil(got.Maps["perf_event_array"].Value))
+
+		// Copy and extend the CollectionSpec with BTF-only objects.
+		want := coll.Copy()
+		maps.Copy(want.Maps, btfOnly)
+
+		testLoadCollectionSpec(t, got, want)
+	})
+
+	testutils.Files(t, testutils.Glob(t, "testdata/loader_nobtf-*.elf"), func(t *testing.T, file string) {
+		got, err := LoadCollectionSpec(file)
+		qt.Assert(t, qt.IsNil(err))
+
+		testLoadCollectionSpec(t, got, coll.Copy())
+	})
+}
+
+func testLoadCollectionSpec(t *testing.T, got, want *CollectionSpec) {
+	t.Helper()
+
+	qt.Assert(t, qt.CmpEquals(got, want, csCmpOpts))
+
+	coll, err := newCollection(t, got, &CollectionOptions{
+		Maps:     MapOptions{PinPath: testutils.TempBPFFS(t)},
+		Programs: ProgramOptions{LogLevel: LogLevelBranch},
+	})
+	testutils.SkipIfNotSupported(t, err)
+	qt.Assert(t, qt.IsNil(err))
+
+	ret := mustRun(t, coll.Programs["xdp_prog"], nil)
+	qt.Assert(t, qt.Equals(ret, 7))
+}
+
+func BenchmarkELFLoader(b *testing.B) {
+	b.ReportAllocs()
+
+	for b.Loop() {
+		_, _ = LoadCollectionSpec("testdata/loader-el.elf")
+	}
+}
+
+func TestLoadAndAssign(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/loader-%s.elf")
+	coll, err := LoadCollectionSpec(file)
+	qt.Assert(t, qt.IsNil(err))
+
+	var obj struct {
+		Program *Program `ebpf:"xdp_prog"`
+	}
+	mustLoadAndAssign(t, coll, &obj, nil)
+	defer obj.Program.Close()
+
+	// Invalid arguments should not panic.
+	qt.Assert(t, qt.IsNotNil(coll.LoadAndAssign(nil, nil)))
+	qt.Assert(t, qt.IsNotNil(coll.LoadAndAssign((*int)(nil), nil)))
+	qt.Assert(t, qt.IsNotNil(coll.LoadAndAssign(0, nil)))
+
+	// Valid objects without an eligible assignment candidate should not error.
+	qt.Assert(t, qt.IsNil(coll.LoadAndAssign(new(struct{ Foo int }), nil)))
+
+	// Unexported, tagged fields are not assignable and should cause an error.
+	var u struct {
+		foo *Map `ebpf:"hash_map"`
+	}
+	qt.Assert(t, qt.IsNotNil(coll.LoadAndAssign(&u, nil)))
+}
+
+func TestDataSections(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/loader-%s.elf")
+	coll, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Log(coll.Programs["data_sections"].Instructions)
+
+	var obj struct {
+		Program *Program `ebpf:"data_sections"`
+	}
+
+	mustLoadAndAssign(t, coll, &obj, nil)
+	defer obj.Program.Close()
+
+	ret := mustRun(t, obj.Program, nil)
+	if ret != 0 {
+		t.Error("BPF assertion failed on line", ret)
+	}
+}
+
+func TestInlineASMConstant(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/loader-%s.elf")
+	coll, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spec := coll.Programs["asm_relocation"]
+	if spec.Instructions[0].Reference() != "MY_CONST" {
+		t.Fatal("First instruction is not a reference to MY_CONST")
+	}
+
+	// -1 is used by the loader to find unrewritten maps.
+	spec.Instructions[0].Constant = -1
+
+	t.Log(spec.Instructions)
+
+	var obj struct {
+		Program *Program `ebpf:"asm_relocation"`
+	}
+
+	mustLoadAndAssign(t, coll, &obj, nil)
+	obj.Program.Close()
+}
+
+func TestFreezeRodata(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.9", "sk_lookup program type")
+
+	file := testutils.NativeFile(t, "testdata/constants-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var obj struct {
+		Program *Program `ebpf:"freeze_rodata"`
+	}
+
+	qt.Assert(t, qt.IsNil(spec.Variables["ret"].Set(uint32(1))))
+
+	mustLoadAndAssign(t, spec, &obj, nil)
+	obj.Program.Close()
+}
+
+func TestCollectionSpecDetach(t *testing.T) {
+	coll := Collection{
+		Maps: map[string]*Map{
+			"foo": new(Map),
+		},
+		Programs: map[string]*Program{
+			"bar": new(Program),
+		},
+	}
+
+	foo := coll.DetachMap("foo")
+	if foo == nil {
+		t.Error("Program not returned from DetachMap")
+	}
+
+	if _, ok := coll.Programs["foo"]; ok {
+		t.Error("DetachMap doesn't remove map from Maps")
+	}
+
+	bar := coll.DetachProgram("bar")
+	if bar == nil {
+		t.Fatal("Program not returned from DetachProgram")
+	}
+
+	if _, ok := coll.Programs["bar"]; ok {
+		t.Error("DetachProgram doesn't remove program from Programs")
+	}
+}
+
+func TestLoadInvalidMap(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/invalid_map-%s.elf")
+	cs, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal("Can't load CollectionSpec", err)
+	}
+
+	ms, ok := cs.Maps["invalid_map"]
+	if !ok {
+		t.Fatal("invalid_map not found in CollectionSpec")
+	}
+
+	m, err := NewMap(ms)
+	t.Log(err)
+	if err == nil {
+		m.Close()
+		t.Fatal("Creating a Map from a MapSpec with non-zero Extra is expected to fail.")
+	}
+}
+
+func TestLoadInvalidMapMissingSymbol(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/invalid_map_static-%s.elf")
+	_, err := LoadCollectionSpec(file)
+	t.Log(err)
+	if err == nil {
+		t.Fatal("Loading a map with static qualifier should fail")
+	}
+}
+
+func TestLoadInitializedBTFMap(t *testing.T) {
+	testutils.Files(t, testutils.Glob(t, "testdata/btf_map_init-*.elf"), func(t *testing.T, file string) {
+		coll, err := LoadCollectionSpec(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		t.Run("NewCollection", func(t *testing.T) {
+			_, err := newCollection(t, coll, nil)
+			testutils.SkipIfNotSupported(t, err)
+			if err != nil {
+				t.Fatal("NewCollection failed:", err)
+			}
+		})
+
+		t.Run("prog_array", func(t *testing.T) {
+			m, ok := coll.Maps["prog_array_init"]
+			if !ok {
+				t.Fatal("map prog_array_init not found in program")
+			}
+
+			if len(m.Contents) != 1 {
+				t.Error("expecting exactly 1 item in MapSpec contents")
+			}
+
+			p := m.Contents[0]
+			if cmp.Equal(p.Key, 1) {
+				t.Errorf("expecting MapSpec entry Key to equal 1, got %v", p.Key)
+			}
+
+			if _, ok := p.Value.(string); !ok {
+				t.Errorf("expecting MapSpec entry Value to be a string, got %T", p.Value)
+			}
+
+			if p.Value != "tail_1" {
+				t.Errorf("expected MapSpec entry Value 'tail_1', got: %s", p.Value)
+			}
+		})
+
+		t.Run("array_of_maps", func(t *testing.T) {
+			m, ok := coll.Maps["outer_map_init"]
+			if !ok {
+				t.Fatal("map outer_map_init not found in program")
+			}
+
+			if len(m.Contents) != 1 {
+				t.Error("expecting exactly 1 item in MapSpec contents")
+			}
+
+			if m.Key == nil {
+				t.Error("Expected non-nil key")
+			}
+
+			if m.Value == nil {
+				t.Error("Expected non-nil value")
+			}
+
+			if m.InnerMap.Key == nil {
+				t.Error("Expected non-nil InnerMap key")
+			}
+
+			if m.InnerMap.Value == nil {
+				t.Error("Expected non-nil InnerMap value")
+			}
+
+			p := m.Contents[0]
+			if cmp.Equal(p.Key, 1) {
+				t.Errorf("expecting MapSpec entry Key to equal 1, got %v", p.Key)
+			}
+
+			if _, ok := p.Value.(string); !ok {
+				t.Errorf("expecting MapSpec entry Value to be a string, got %T", p.Value)
+			}
+
+			if p.Value != "inner_map" {
+				t.Errorf("expected MapSpec entry Value 'inner_map', got: %s", p.Value)
+			}
+		})
+	})
+}
+
+func TestLoadInvalidInitializedBTFMap(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/invalid_btf_map_init-%s.elf")
+	_, err := LoadCollectionSpec(file)
+	t.Log(err)
+	if !errors.Is(err, internal.ErrNotSupported) {
+		t.Fatal("Loading an initialized BTF map should be unsupported")
+	}
+}
+
+func TestStringSection(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/strings-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatalf("load collection spec: %s", err)
+	}
+
+	for name := range spec.Maps {
+		t.Log(name)
+	}
+
+	strMap := spec.Maps[".rodata.str1.1"]
+	if strMap == nil {
+		t.Fatal("Unable to find map '.rodata.str1.1' in loaded collection")
+	}
+
+	if !strMap.readOnly() {
+		t.Fatal("Read only data maps should be frozen")
+	}
+
+	if strMap.Flags != sys.BPF_F_RDONLY_PROG {
+		t.Fatal("Read only data maps should have the prog-read-only flag set")
+	}
+
+	coll, err := newCollection(t, spec, nil)
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatalf("new collection: %s", err)
+	}
+
+	prog := coll.Programs["filter"]
+	if prog == nil {
+		t.Fatal("program not found")
+	}
+
+	testMap := coll.Maps["my_map"]
+	if testMap == nil {
+		t.Fatal("test map not found")
+	}
+
+	_, err = prog.Run(&RunOptions{
+		Data: internal.EmptyBPFContext, // Min size for XDP programs
+	})
+	if err != nil {
+		t.Fatalf("prog run: %s", err)
+	}
+
+	key := []byte("This string is allocated in the string section\n\x00")
+	var value uint32
+	if err = testMap.Lookup(&key, &value); err != nil {
+		t.Fatalf("test map lookup: %s", err)
+	}
+
+	if value != 1 {
+		t.Fatal("Test map value not 1!")
+	}
+}
+
+func TestLoadRawTracepoint(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "4.17", "BPF_RAW_TRACEPOINT API")
+
+	file := testutils.NativeFile(t, "testdata/raw_tracepoint-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal("Can't parse ELF:", err)
+	}
+
+	coll, err := NewCollectionWithOptions(spec, CollectionOptions{
+		Programs: ProgramOptions{
+			LogLevel: LogLevelBranch,
+		},
+	})
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatal("Can't create collection:", err)
+	}
+
+	coll.Close()
+}
+
+func TestTailCall(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/btf_map_init-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var obj struct {
+		TailMain  *Program `ebpf:"tail_main"`
+		ProgArray *Map     `ebpf:"prog_array_init"`
+		// Windows evicts programs from the tail call array when the last
+		// user space reference is closed. This is not the case on Linux.
+		Tail *Program `ebpf:"tail_1"`
+	}
+
+	err = loadAndAssign(t, spec, &obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer obj.TailMain.Close()
+	defer obj.Tail.Close()
+	defer obj.ProgArray.Close()
+
+	ret := mustRun(t, obj.Tail, nil)
+
+	// Expect the tail_1 tail call to be taken, returning value 42.
+	if ret != 42 {
+		t.Fatalf("Expected tail call to return value 42, got %d", ret)
+	}
+}
+
+func TestKconfig(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/kconfig-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var obj struct {
+		Main *Program `ebpf:"kconfig"`
+	}
+
+	err = spec.LoadAndAssign(&obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer obj.Main.Close()
+
+	ret := mustRun(t, obj.Main, nil)
+	qt.Assert(t, qt.Equals(ret, 0), qt.Commentf("Failed assertion at line %d in testdata/kconfig.c", ret))
+}
+
+func TestKsym(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/ksym-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	qt.Assert(t, qt.IsNil(err))
+
+	var obj struct {
+		Main     *Program `ebpf:"ksym_test"`
+		ArrayMap *Map     `ebpf:"array_map"`
+	}
+
+	err = spec.LoadAndAssign(&obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	qt.Assert(t, qt.IsNil(err))
+	defer obj.Main.Close()
+	defer obj.ArrayMap.Close()
+
+	mustRun(t, obj.Main, nil)
+
+	ksyms := map[string]uint64{
+		"bpf_init":       0,
+		"bpf_trace_run1": 0,
+	}
+
+	qt.Assert(t, qt.IsNil(kallsyms.AssignAddresses(ksyms)))
+	qt.Assert(t, qt.Not(qt.Equals(ksyms["bpf_init"], 0)))
+	qt.Assert(t, qt.Not(qt.Equals(ksyms["bpf_trace_run1"], 0)))
+
+	var value uint64
+	qt.Assert(t, qt.IsNil(obj.ArrayMap.Lookup(uint32(0), &value)))
+	qt.Assert(t, qt.Equals(value, ksyms["bpf_init"]))
+
+	qt.Assert(t, qt.IsNil(obj.ArrayMap.Lookup(uint32(1), &value)))
+	qt.Assert(t, qt.Equals(value, ksyms["bpf_trace_run1"]))
+}
+
+func TestKsymWeakMissing(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/ksym-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	qt.Assert(t, qt.IsNil(err))
+
+	var obj struct {
+		Main *Program `ebpf:"ksym_missing_test"`
+	}
+
+	err = spec.LoadAndAssign(&obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	qt.Assert(t, qt.IsNil(err))
+	defer obj.Main.Close()
+
+	ret := mustRun(t, obj.Main, nil)
+	qt.Assert(t, qt.Equals(ret, 1))
+}
+
+func TestKfunc(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.18", "kfunc support")
+	file := testutils.NativeFile(t, "testdata/kfunc-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var obj struct {
+		Main *Program `ebpf:"call_kfunc"`
+	}
+
+	err = spec.LoadAndAssign(&obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatalf("%+v", err)
+	}
+	defer obj.Main.Close()
+
+	ret := mustRun(t, obj.Main, nil)
+
+	if ret != 1 {
+		t.Fatalf("Expected kfunc to return value 1, got %d", ret)
+	}
+}
+
+func TestWeakKfunc(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.18", "kfunc support")
+
+	// CAP_SYS_ADMIN is required to load kfuncs implemented in kernel modules.
+	// Assert that when kfuncs are weak, loading still works without the capability.
+	// CAP_BPF and CAP_PERFMON are still required to load BPF raw tracepoints programs
+	// such as the one in this test.
+	testutils.WithCapabilities(t, []testutils.Capability{testutils.CAP_BPF, testutils.CAP_PERFMON}, func() {
+		file := testutils.NativeFile(t, "testdata/kfunc-%s.elf")
+		spec, err := LoadCollectionSpec(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var obj struct {
+			Missing *Program `ebpf:"weak_kfunc_missing"`
+			Calling *Program `ebpf:"call_weak_kfunc"`
+		}
+
+		err = spec.LoadAndAssign(&obj, nil)
+		testutils.SkipIfNotSupported(t, err)
+		if err != nil {
+			t.Fatalf("%+v", err)
+		}
+		defer obj.Missing.Close()
+		defer obj.Calling.Close()
+	})
+}
+
+func TestInvalidKfunc(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.18", "kfunc support")
+	requireTestmod(t)
+
+	file := testutils.NativeFile(t, "testdata/invalid-kfunc-%s.elf")
+	coll, err := LoadCollection(file)
+	if err == nil {
+		coll.Close()
+		t.Fatal("Expected an error")
+	}
+
+	var ike *incompatibleKfuncError
+	if !errors.As(err, &ike) {
+		t.Fatalf("Expected an error wrapping incompatibleKfuncError, got %s", err)
+	}
+}
+
+func TestKfuncKmod(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.18", "Kernel module function calls")
+	requireTestmod(t)
+
+	file := testutils.NativeFile(t, "testdata/kfunc-kmod-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var obj struct {
+		Main *Program `ebpf:"call_kfunc"`
+	}
+
+	err = spec.LoadAndAssign(&obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatalf("%v+", err)
+	}
+	defer obj.Main.Close()
+
+	ret := mustRun(t, obj.Main, nil)
+
+	if ret != 1 {
+		t.Fatalf("Expected kfunc to return value 1, got %d", ret)
+	}
+}
+
+func TestSubprogRelocation(t *testing.T) {
+	testutils.SkipOnOldKernel(t, "5.13", "bpf_for_each_map_elem")
+
+	file := testutils.NativeFile(t, "testdata/subprog_reloc-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var obj struct {
+		Main    *Program `ebpf:"fp_relocation"`
+		HashMap *Map     `ebpf:"hash_map"`
+	}
+
+	err = loadAndAssign(t, spec, &obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer obj.Main.Close()
+	defer obj.HashMap.Close()
+
+	ret := mustRun(t, obj.Main, nil)
+
+	if ret != 42 {
+		t.Fatalf("Expected subprog reloc to return value 42, got %d", ret)
+	}
+}
+
+func TestUnassignedProgArray(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/btf_map_init-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// tail_main references a ProgArray that is not being assigned
+	// to this struct. Normally, this would clear all its entries
+	// and make any tail calls into the ProgArray result in a miss.
+	// The library needs to explicitly refuse such operations.
+	var obj struct {
+		TailMain *Program `ebpf:"tail_main"`
+		// ProgArray *Map     `ebpf:"prog_array_init"`
+	}
+
+	err = loadAndAssign(t, spec, &obj, nil)
+	testutils.SkipIfNotSupported(t, err)
+	defer obj.TailMain.Close()
+	qt.Assert(t, qt.IsNotNil(err))
+}
+
+func TestIPRoute2Compat(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/iproute2_map_compat-%s.elf")
+	spec, err := LoadCollectionSpec(file)
+	if err != nil {
+		t.Fatal("Can't parse ELF:", err)
+	}
+
+	ms, ok := spec.Maps["hash_map"]
+	if !ok {
+		t.Fatal("Map hash_map not found")
+	}
+
+	var id, pinning, innerID, innerIndex uint32
+
+	if ms.Extra == nil {
+		t.Fatal("missing extra bytes")
+	}
+
+	switch {
+	case binary.Read(ms.Extra, spec.ByteOrder, &id) != nil:
+		t.Fatal("missing id")
+	case binary.Read(ms.Extra, spec.ByteOrder, &pinning) != nil:
+		t.Fatal("missing pinning")
+	case binary.Read(ms.Extra, spec.ByteOrder, &innerID) != nil:
+		t.Fatal("missing inner_id")
+	case binary.Read(ms.Extra, spec.ByteOrder, &innerIndex) != nil:
+		t.Fatal("missing inner_idx")
+	}
+
+	if id != 0 || innerID != 0 || innerIndex != 0 {
+		t.Fatal("expecting id, inner_id and inner_idx to be zero")
+	}
+
+	if pinning != 2 {
+		t.Fatal("expecting pinning field to be 2 (PIN_GLOBAL_NS)")
+	}
+
+	// iproute2 (tc) pins maps in /sys/fs/bpf/tc/globals with PIN_GLOBAL_NS,
+	// which needs to be configured in this library using MapOptions.PinPath.
+	// For the sake of the test, we use a tempdir on bpffs below.
+	ms.Pinning = PinByName
+
+	coll, err := NewCollectionWithOptions(spec, CollectionOptions{
+		Maps: MapOptions{
+			PinPath: testutils.TempBPFFS(t),
+		},
+	})
+	testutils.SkipIfNotSupported(t, err)
+	if err != nil {
+		t.Fatal("Can't create collection:", err)
+	}
+
+	coll.Close()
+}
+
+func TestArena(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/arena-%s.elf")
+	coll, err := LoadCollectionSpec(file)
+	qt.Assert(t, qt.IsNil(err))
+
+	want := &CollectionSpec{
+		Maps: map[string]*MapSpec{
+			"arena": {
+				Name:       "arena",
+				Type:       Arena,
+				MaxEntries: 100,
+				Flags:      sys.BPF_F_MMAPABLE,
+				MapExtra:   1 << 44,
+			},
+		},
+		Programs:  map[string]*ProgramSpec{},
+		Variables: map[string]*VariableSpec{},
+	}
+	qt.Assert(t, qt.CmpEquals(coll, want, csCmpOpts))
+
+	testutils.SkipOnOldKernel(t, "6.9", "arena maps")
+	mustNewCollection(t, coll, nil)
+}
+
+func TestStructOps(t *testing.T) {
+	file := testutils.NativeFile(t, "testdata/struct_ops-%s.elf")
+	coll, err := LoadCollectionSpec(file)
+	qt.Assert(t, qt.IsNil(err))
+
+	userData := []byte{
+		// test_1 func ptr (8B)
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		// test_2 func ptr (8B)
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		// data (4B) + padding (4B)
+		0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00,
+	}
+
+	want := &CollectionSpec{
+		Maps: map[string]*MapSpec{
+			"testmod_ops": {
+				Name:       "testmod_ops",
+				Type:       StructOpsMap,
+				MaxEntries: 1,
+				Flags:      sys.BPF_F_LINK,
+				Key:        &btf.Int{Size: 4},
+				KeySize:    4,
+				ValueSize:  24,
+				Value: &btf.Struct{
+					Name: "bpf_testmod_ops",
+					Size: 24,
+					Members: []btf.Member{
+						{
+							Name: "test_1",
+							Type: &btf.Pointer{
+								Target: &btf.FuncProto{
+									Params: []btf.FuncParam{},
+									Return: &btf.Int{Name: "int", Size: 4, Encoding: btf.Signed}}},
+							Offset: 0,
+						},
+						{
+							Name: "test_2",
+							Type: &btf.Pointer{
+								Target: &btf.FuncProto{
+									Params: []btf.FuncParam{
+										{Type: &btf.Int{Name: "int", Size: 4, Encoding: btf.Signed}},
+										{Type: &btf.Int{Name: "int", Size: 4, Encoding: btf.Signed}},
+									},
+									Return: (*btf.Void)(nil),
+								},
+							},
+							Offset: 64,
+						},
+						{
+							Name:   "data",
+							Type:   &btf.Int{Name: "int", Size: 4, Encoding: btf.Signed},
+							Offset: 128, // bits
+						},
+					},
+				},
+				Contents: []MapKV{
+					{
+						Key:   uint32(0),
+						Value: userData,
+					},
+				},
+			},
+		},
+		Programs: map[string]*ProgramSpec{
+			"test_1": {
+				Name:        "test_1",
+				Type:        StructOps,
+				AttachTo:    "bpf_testmod_ops:test_1",
+				License:     "GPL",
+				SectionName: "struct_ops/test_1",
+				Instructions: asm.Instructions{
+					asm.Mov.Imm(asm.R0, 0),
+					asm.Return(),
+				},
+			},
+		},
+		Variables: map[string]*VariableSpec{},
+	}
+
+	testModOps, ok := coll.Maps["testmod_ops"]
+	if !ok {
+		t.Fatalf("testmod_ops doesn't exist")
+	}
+
+	data, ok := testModOps.Contents[0].Value.([]byte)
+	if !ok {
+		t.Fatalf("Contents[0].Value should be an array of byte")
+	}
+
+	qt.Assert(t, qt.CmpEquals(coll.Programs, want.Programs, csCmpOpts))
+	qt.Assert(t, qt.CmpEquals(coll.Maps, want.Maps, csCmpOpts))
+	qt.Assert(t, qt.CmpEquals(testModOps.Value, want.Maps["testmod_ops"].Value, csCmpOpts))
+	qt.Assert(t, qt.CmpEquals(data, userData, csCmpOpts))
+}
+
+var (
+	elfPath    = flag.String("elfs", os.Getenv("CI_KERNEL_SELFTESTS"), "`Path` containing libbpf-compatible ELFs (defaults to $CI_KERNEL_SELFTESTS)")
+	elfPattern = flag.String("elf-pattern", "*.o", "Glob `pattern` for object files that should be tested")
+)
+
+func TestLibBPFCompat(t *testing.T) {
+	if *elfPath == "" {
+		// Specify the path to the directory containing the eBPF for
+		// the kernel's selftests if you want to run this test.
+		// As of 5.2 that is tools/testing/selftests/bpf/
+		t.Skip("No path specified")
+	}
+
+	load := func(t *testing.T, spec *CollectionSpec, opts CollectionOptions, valid bool) {
+		// Disable retrying a program load with the log enabled, it leads
+		// to OOM kills.
+		opts.Programs.LogDisabled = true
+
+		coll, err := NewCollectionWithOptions(spec, opts)
+		testutils.SkipIfNotSupported(t, err)
+		var errno syscall.Errno
+		if errors.As(err, &errno) {
+			// This error is most likely from a syscall and caused by us not
+			// replicating some fixups done in the selftests or the test
+			// intentionally failing. This is expected, so skip the test
+			// instead of failing.
+			t.Skip("Skipping since the kernel rejected the program:", err)
+		}
+		if err == nil {
+			coll.Close()
+		}
+		if !valid {
+			if err == nil {
+				t.Fatal("Expected an error during load")
+			}
+		} else if err != nil {
+			t.Fatal("Error during loading:", err)
+		}
+	}
+
+	files := testutils.Glob(t, filepath.Join(*elfPath, *elfPattern),
+		// These files are only used as a source of btf.
+		"btf__core_reloc_*",
+	)
+
+	testutils.Files(t, files, func(t *testing.T, path string) {
+		name := selftestName(path)
+		switch name {
+		case "test_map_in_map", "test_select_reuseport_kern":
+			t.Skip("Skipping due to missing InnerMap in map definition")
+		case "test_core_autosize":
+			t.Skip("Skipping since the test generates dynamic BTF")
+		case "test_static_linked":
+			t.Skip("Skipping since .text contains 'subprog' twice")
+		case "netif_receive_skb",
+			"local_kptr_stash",
+			"local_kptr_stash_fail",
+			"type_cast",
+			"preempted_bpf_ma_op",
+			"percpu_alloc_fail":
+			// Error message like
+			//    fixup for CORERelocation(local_type_id, Struct:"bin_data"[0],
+			//    local_id=27): invalid immediate 31, expected 27 (fixup: local_type_id=27->1)
+			// See https://github.com/cilium/ebpf/issues/739
+			t.Skip("Skipping due to bug in libbpf type deduplication")
+		case "test_usdt", "test_urandom_usdt", "test_usdt_multispec":
+			t.Skip("Skipping due to missing support for usdt.bpf.h")
+		case "lsm_cgroup", "bpf_iter_ipv6_route", "test_core_extern",
+			"profiler1", "profiler2", "profiler3":
+			t.Skip("Skipping due to using weak CONFIG_* variables")
+		case "linked_maps", "linked_maps1", "linked_maps2", "linked_funcs1", "linked_funcs2",
+			"test_subskeleton", "test_subskeleton_lib":
+			t.Skip("Skipping due to relying on cross ELF linking")
+		case "test_log_fixup":
+			t.Skip("Skipping due to intentionally broken CO-RE relocations")
+		}
+
+		t.Parallel()
+
+		spec, err := LoadCollectionSpec(path)
+		testutils.SkipIfNotSupported(t, err)
+		if errors.Is(err, errUnsupportedBinding) {
+			t.Skip(err)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		switch name {
+		case "test_sk_assign":
+			// Test contains a legacy iproute2 bpf_elf_map definition.
+			for _, m := range spec.Maps {
+				if m.Extra == nil || m.Extra.Len() == 0 {
+					t.Fatalf("Expected extra bytes in map %s", m.Name)
+				}
+				m.Extra = nil
+			}
+
+		case "fexit_bpf2bpf",
+			"freplace_get_constant",
+			"freplace_global_func":
+			loadTargetProgram(t, spec, "test_pkt_access.bpf.o", "test_pkt_access")
+
+		case "freplace_cls_redirect":
+			loadTargetProgram(t, spec, "test_cls_redirect.bpf.o", "cls_redirect")
+
+		case "test_trace_ext":
+			loadTargetProgram(t, spec, "test_pkt_md_access.bpf.o", "test_pkt_md_access")
+
+		case "freplace_progmap":
+			loadTargetProgram(t, spec, "xdp_dummy.bpf.o", "xdp_dummy_prog")
+
+			if prog := spec.Programs["xdp_cpumap_prog"]; prog.AttachTo == "" {
+				prog.AttachTo = "xdp_dummy_prog"
+			}
+
+		case "freplace_attach_probe":
+			// Looks like the test should have a target, but 6.6 selftests don't
+			// seem to be using it.
+		}
+
+		var opts CollectionOptions
+		for _, mapSpec := range spec.Maps {
+			if mapSpec.Pinning != PinNone {
+				opts.Maps.PinPath = testutils.TempBPFFS(t)
+				break
+			}
+		}
+
+		coreFiles := sourceOfBTF(t, path)
+		if len(coreFiles) == 0 {
+			// NB: test_core_reloc_kernel.o doesn't have dedicated BTF and
+			// therefore goes via this code path.
+			load(t, spec, opts, true)
+			return
+		}
+
+		for _, coreFile := range coreFiles {
+			name := selftestName(coreFile)
+			t.Run(name, func(t *testing.T) {
+				// Some files like btf__core_reloc_arrays___err_too_small.o
+				// trigger an error on purpose. Use the name to infer whether
+				// the test should succeed.
+				var valid bool
+				switch name {
+				case "btf__core_reloc_existence___err_wrong_arr_kind",
+					"btf__core_reloc_existence___err_wrong_arr_value_type",
+					"btf__core_reloc_existence___err_wrong_int_kind",
+					"btf__core_reloc_existence___err_wrong_int_sz",
+					"btf__core_reloc_existence___err_wrong_int_type",
+					"btf__core_reloc_existence___err_wrong_struct_type":
+					// These tests are buggy upstream, see https://lore.kernel.org/bpf/20210420111639.155580-1-lmb@cloudflare.com/
+					valid = true
+				case "btf__core_reloc_ints___err_wrong_sz_16",
+					"btf__core_reloc_ints___err_wrong_sz_32",
+					"btf__core_reloc_ints___err_wrong_sz_64",
+					"btf__core_reloc_ints___err_wrong_sz_8",
+					"btf__core_reloc_arrays___err_wrong_val_type1",
+					"btf__core_reloc_arrays___err_wrong_val_type2":
+					// These tests are valid according to current libbpf behaviour,
+					// see commit 42765ede5c54ca915de5bfeab83be97207e46f68.
+					valid = true
+				case "btf__core_reloc_type_id___missing_targets",
+					"btf__core_reloc_flavors__err_wrong_name":
+					valid = false
+				case "btf__core_reloc_ints___err_bitfield":
+					// Bitfields are now valid.
+					valid = true
+				default:
+					valid = !strings.Contains(name, "___err_")
+				}
+
+				fh, err := os.Open(coreFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer fh.Close()
+
+				btfSpec, err := btf.LoadSpec(coreFile)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				opts := opts // copy
+				opts.Programs.KernelTypes = btfSpec
+				load(t, spec, opts, valid)
+			})
+		}
+	})
+}
+
+func loadTargetProgram(tb testing.TB, spec *CollectionSpec, file, program string) {
+	targetSpec, err := LoadCollectionSpec(filepath.Join(*elfPath, file))
+	if errors.Is(err, os.ErrNotExist) && strings.HasSuffix(file, ".bpf.o") {
+		// Prior to v6.1 BPF ELF used a plain .o suffix.
+		file = strings.TrimSuffix(file, ".bpf.o") + ".o"
+		targetSpec, err = LoadCollectionSpec(filepath.Join(*elfPath, file))
+	}
+	if err != nil {
+		tb.Fatalf("Can't read %s: %s", file, err)
+	}
+
+	qt.Assert(tb, qt.IsNotNil(targetSpec.Programs[program]))
+
+	coll, err := NewCollectionWithOptions(targetSpec, CollectionOptions{
+		Programs: ProgramOptions{LogDisabled: true},
+	})
+	if err != nil {
+		tb.Fatalf("Can't load target: %s", err)
+	}
+	tb.Cleanup(func() { coll.Close() })
+
+	target := coll.Programs[program]
+	for _, prog := range spec.Programs {
+		if prog.Type == Extension && prog.AttachType == AttachNone {
+			prog.AttachTarget = target
+			continue
+		}
+
+		if prog.Type == Tracing {
+			switch prog.AttachType {
+			case AttachTraceFEntry, AttachTraceFExit, AttachModifyReturn:
+				prog.AttachTarget = target
+				continue
+			}
+		}
+	}
+}
+
+func sourceOfBTF(tb testing.TB, path string) []string {
+	const testPrefix = "test_core_reloc_"
+	const btfPrefix = "btf__core_reloc_"
+
+	dir, base := filepath.Split(path)
+	if !strings.HasPrefix(base, testPrefix) {
+		return nil
+	}
+
+	base = strings.TrimSuffix(base[len(testPrefix):], ".o")
+	switch base {
+	case "bitfields_direct", "bitfields_probed":
+		base = "bitfields"
+	}
+
+	return testutils.Glob(tb, filepath.Join(dir, btfPrefix+base+"*.o"))
+}
+
+func TestELFSectionProgramTypes(t *testing.T) {
+	type testcase struct {
+		Section     string
+		ProgramType ProgramType
+		AttachType  AttachType
+		Flags       uint32
+		Extra       string
+	}
+
+	testcases := []testcase{
+		{"socket", SocketFilter, AttachNone, 0, ""},
+		{"socket/garbage", SocketFilter, AttachNone, 0, ""},
+		{"sk_reuseport/migrate", SkReuseport, AttachSkReuseportSelectOrMigrate, 0, ""},
+		{"sk_reuseport", SkReuseport, AttachSkReuseportSelect, 0, ""},
+		{"kprobe/", Kprobe, AttachNone, 0, ""},
+		{"kprobe/func", Kprobe, AttachNone, 0, "func"},
+		{"uprobe/", Kprobe, AttachNone, 0, ""},
+		{"kretprobe/", Kprobe, AttachNone, 0, ""},
+		{"uretprobe/", Kprobe, AttachNone, 0, ""},
+		{"tc", SchedCLS, AttachNone, 0, ""},
+		{"classifier", SchedCLS, AttachNone, 0, ""},
+		{"action", SchedACT, AttachNone, 0, ""},
+		{"tracepoint/", TracePoint, AttachNone, 0, ""},
+		{"tp/", TracePoint, AttachNone, 0, ""},
+		{"raw_tracepoint/", RawTracepoint, AttachNone, 0, ""},
+		{"raw_tp/", RawTracepoint, AttachNone, 0, ""},
+		{"raw_tracepoint.w/", RawTracepointWritable, AttachNone, 0, ""},
+		{"raw_tp.w/", RawTracepointWritable, AttachNone, 0, ""},
+		{"tp_btf/", Tracing, AttachTraceRawTp, 0, ""},
+		{"fentry/", Tracing, AttachTraceFEntry, 0, ""},
+		{"fmod_ret/", Tracing, AttachModifyReturn, 0, ""},
+		{"fexit/", Tracing, AttachTraceFExit, 0, ""},
+		{"fentry.s/", Tracing, AttachTraceFEntry, sys.BPF_F_SLEEPABLE, ""},
+		{"fmod_ret.s/", Tracing, AttachModifyReturn, sys.BPF_F_SLEEPABLE, ""},
+		{"fexit.s/", Tracing, AttachTraceFExit, sys.BPF_F_SLEEPABLE, ""},
+		{"freplace/", Extension, AttachNone, 0, ""},
+		{"lsm/foo", LSM, AttachLSMMac, 0, "foo"},
+		{"lsm.s/foo", LSM, AttachLSMMac, sys.BPF_F_SLEEPABLE, "foo"},
+		{"iter/bpf_map", Tracing, AttachTraceIter, 0, "bpf_map"},
+		{"iter.s/", Tracing, AttachTraceIter, sys.BPF_F_SLEEPABLE, ""},
+		{"syscall", Syscall, AttachNone, sys.BPF_F_SLEEPABLE, ""},
+		{"xdp.frags/devmap", XDP, AttachXDPDevMap, sys.BPF_F_XDP_HAS_FRAGS, ""},
+		{"xdp/devmap", XDP, AttachXDPDevMap, 0, ""},
+		{"xdp.frags/cpumap", XDP, AttachXDPCPUMap, sys.BPF_F_XDP_HAS_FRAGS, ""},
+		{"xdp/cpumap", XDP, AttachXDPCPUMap, 0, ""},
+		{"xdp.frags", XDP, AttachXDP, sys.BPF_F_XDP_HAS_FRAGS, ""},
+		{"xdp", XDP, AttachXDP, 0, ""},
+		{"perf_event", PerfEvent, AttachNone, 0, ""},
+		{"lwt_in", LWTIn, AttachNone, 0, ""},
+		{"lwt_out", LWTOut, AttachNone, 0, ""},
+		{"lwt_xmit", LWTXmit, AttachNone, 0, ""},
+		{"lwt_seg6local", LWTSeg6Local, AttachNone, 0, ""},
+		{"cgroup_skb/ingress", CGroupSKB, AttachCGroupInetIngress, 0, ""},
+		{"cgroup_skb/egress", CGroupSKB, AttachCGroupInetEgress, 0, ""},
+		{"cgroup/skb", CGroupSKB, AttachNone, 0, ""},
+		{"cgroup/sock_create", CGroupSock, AttachCGroupInetSockCreate, 0, ""},
+		{"cgroup/sock_release", CGroupSock, AttachCgroupInetSockRelease, 0, ""},
+		{"cgroup/sock", CGroupSock, AttachCGroupInetSockCreate, 0, ""},
+		{"cgroup/post_bind4", CGroupSock, AttachCGroupInet4PostBind, 0, ""},
+		{"cgroup/post_bind6", CGroupSock, AttachCGroupInet6PostBind, 0, ""},
+		{"cgroup/dev", CGroupDevice, AttachCGroupDevice, 0, ""},
+		{"sockops", SockOps, AttachCGroupSockOps, 0, ""},
+		{"sk_skb/stream_parser", SkSKB, AttachSkSKBStreamParser, 0, ""},
+		{"sk_skb/stream_verdict", SkSKB, AttachSkSKBStreamVerdict, 0, ""},
+		{"sk_skb/stream_verdict/foo", SkSKB, AttachSkSKBStreamVerdict, 0, ""},
+		{"sk_skb", SkSKB, AttachNone, 0, ""},
+		{"sk_skb/bar", SkSKB, AttachNone, 0, ""},
+		{"sk_msg", SkMsg, AttachSkMsgVerdict, 0, ""},
+		{"lirc_mode2", LircMode2, AttachLircMode2, 0, ""},
+		{"flow_dissector", FlowDissector, AttachFlowDissector, 0, ""},
+		{"cgroup/bind4", CGroupSockAddr, AttachCGroupInet4Bind, 0, ""},
+		{"cgroup/bind6", CGroupSockAddr, AttachCGroupInet6Bind, 0, ""},
+		{"cgroup/connect4", CGroupSockAddr, AttachCGroupInet4Connect, 0, ""},
+		{"cgroup/connect6", CGroupSockAddr, AttachCGroupInet6Connect, 0, ""},
+		{"cgroup/sendmsg4", CGroupSockAddr, AttachCGroupUDP4Sendmsg, 0, ""},
+		{"cgroup/sendmsg6", CGroupSockAddr, AttachCGroupUDP6Sendmsg, 0, ""},
+		{"cgroup/recvmsg4", CGroupSockAddr, AttachCGroupUDP4Recvmsg, 0, ""},
+		{"cgroup/recvmsg6", CGroupSockAddr, AttachCGroupUDP6Recvmsg, 0, ""},
+		{"cgroup/getpeername4", CGroupSockAddr, AttachCgroupInet4GetPeername, 0, ""},
+		{"cgroup/getpeername6", CGroupSockAddr, AttachCgroupInet6GetPeername, 0, ""},
+		{"cgroup/getsockname4", CGroupSockAddr, AttachCgroupInet4GetSockname, 0, ""},
+		{"cgroup/getsockname6", CGroupSockAddr, AttachCgroupInet6GetSockname, 0, ""},
+		{"cgroup/sysctl", CGroupSysctl, AttachCGroupSysctl, 0, ""},
+		{"cgroup/getsockopt", CGroupSockopt, AttachCGroupGetsockopt, 0, ""},
+		{"cgroup/setsockopt", CGroupSockopt, AttachCGroupSetsockopt, 0, ""},
+		{"sk_lookup/", SkLookup, AttachSkLookup, 0, ""},
+		{"kprobe.multi", Kprobe, AttachTraceKprobeMulti, 0, ""},
+		{"kretprobe.multi", Kprobe, AttachTraceKprobeMulti, 0, ""},
+		{"struct_ops", StructOps, AttachNone, 0, ""},
+		{"struct_ops.s", StructOps, AttachNone, sys.BPF_F_SLEEPABLE, ""},
+		{"struct_ops/foo", StructOps, AttachNone, 0, ""},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.Section, func(t *testing.T) {
+			pt, at, fl, extra := getProgType(tc.Section)
+			have := testcase{tc.Section, pt, at, fl, extra}
+			qt.Assert(t, qt.DeepEquals(have, tc))
+		})
+	}
+}
+
+func TestMatchSectionName(t *testing.T) {
+	for _, testcase := range []struct {
+		pattern string
+		input   string
+		matches bool
+		extra   string
+	}{
+		{"prefix/", "prefix/", true, ""},
+		{"prefix/", "prefix/a", true, "a"},
+		{"prefix/", "prefix/b", true, "b"},
+		{"prefix/", "prefix", false, ""},
+		{"prefix/", "junk", false, ""},
+
+		{"prefix+", "prefix/", true, ""},
+		{"prefix+", "prefix/a", true, "a"},
+		{"prefix+", "prefix/b", true, "b"},
+		{"prefix+", "prefix", true, ""},
+		{"prefix+", "junk", false, ""},
+
+		{"exact", "exact", true, ""},
+		{"exact", "exact/", true, ""},
+		{"exact", "exact/a", true, ""},
+		{"exact", "exactement", true, ""},
+		{"exact", "junk", false, ""},
+	} {
+		name := fmt.Sprintf("%s:%s", testcase.pattern, testcase.input)
+		t.Run(name, func(t *testing.T) {
+			extra, matches := matchSectionName(testcase.input, testcase.pattern)
+			qt.Assert(t, qt.Equals(matches, testcase.matches))
+			if testcase.matches {
+				qt.Assert(t, qt.Equals(extra, testcase.extra))
+			}
+		})
+	}
+}
+
+// selftestName takes a path to a file and derives a canonical name from it.
+//
+// It strips various suffixes used by the selftest build system.
+func selftestName(path string) string {
+	file := filepath.Base(path)
+
+	name := strings.TrimSuffix(file, ".o")
+	// Strip various suffixes.
+	// Various linking suffixes.
+	name = strings.TrimSuffix(name, ".linked3")
+	name = strings.TrimSuffix(name, ".llinked1")
+	name = strings.TrimSuffix(name, ".llinked2")
+	name = strings.TrimSuffix(name, ".llinked3")
+	// v6.1 started adding .bpf to all BPF ELF.
+	name = strings.TrimSuffix(name, ".bpf")
+
+	return name
+}

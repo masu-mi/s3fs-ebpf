@@ -8,27 +8,21 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
-	"structs"
 
 	"github.com/cilium/ebpf"
 )
-
-type s3fsfpS3fsInodeStub struct {
-	_       structs.HostLayout
-	Ino     uint64
-	Size    uint64
-	MtimeNs uint64
-	Mode    uint32
-	Pad     uint32
-}
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	s3fsfpMapS3fsShared      = "s3fs_shared"
-	s3fsfpProgS3fsFpGetattr  = "s3fs_fp_getattr"
-	s3fsfpProgS3fsTestShared = "s3fs_test_shared"
+	s3fsfpMapS3fsArena           = "s3fs_arena"
+	s3fsfpMapS3fsCounters        = "s3fs_counters"
+	s3fsfpMapS3fsEvents          = "s3fs_events"
+	s3fsfpMapS3fsInodeIndex      = "s3fs_inode_index"
+	s3fsfpProgS3fsDeepWalkReject = "s3fs_deep_walk_reject"
+	s3fsfpProgS3fsFpGetattr      = "s3fs_fp_getattr"
+	s3fsfpProgS3fsTestShared     = "s3fs_test_shared"
 )
 
 // loadS3fsfp returns the embedded CollectionSpec for s3fsfp.
@@ -73,15 +67,19 @@ type s3fsfpSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type s3fsfpProgramSpecs struct {
-	S3fsFpGetattr  *ebpf.ProgramSpec `ebpf:"s3fs_fp_getattr"`
-	S3fsTestShared *ebpf.ProgramSpec `ebpf:"s3fs_test_shared"`
+	S3fsDeepWalkReject *ebpf.ProgramSpec `ebpf:"s3fs_deep_walk_reject"`
+	S3fsFpGetattr      *ebpf.ProgramSpec `ebpf:"s3fs_fp_getattr"`
+	S3fsTestShared     *ebpf.ProgramSpec `ebpf:"s3fs_test_shared"`
 }
 
 // s3fsfpMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type s3fsfpMapSpecs struct {
-	S3fsShared *ebpf.MapSpec `ebpf:"s3fs_shared"`
+	S3fsArena      *ebpf.MapSpec `ebpf:"s3fs_arena"`
+	S3fsCounters   *ebpf.MapSpec `ebpf:"s3fs_counters"`
+	S3fsEvents     *ebpf.MapSpec `ebpf:"s3fs_events"`
+	S3fsInodeIndex *ebpf.MapSpec `ebpf:"s3fs_inode_index"`
 }
 
 // s3fsfpVariableSpecs contains global variables before they are loaded into the kernel.
@@ -110,12 +108,18 @@ func (o *s3fsfpObjects) Close() error {
 //
 // It can be passed to loadS3fsfpObjects or ebpf.CollectionSpec.LoadAndAssign.
 type s3fsfpMaps struct {
-	S3fsShared *ebpf.Map `ebpf:"s3fs_shared"`
+	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
+	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
+	S3fsEvents     *ebpf.Map `ebpf:"s3fs_events"`
+	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
 }
 
 func (m *s3fsfpMaps) Close() error {
 	return _S3fsfpClose(
-		m.S3fsShared,
+		m.S3fsArena,
+		m.S3fsCounters,
+		m.S3fsEvents,
+		m.S3fsInodeIndex,
 	)
 }
 
@@ -129,12 +133,14 @@ type s3fsfpVariables struct {
 //
 // It can be passed to loadS3fsfpObjects or ebpf.CollectionSpec.LoadAndAssign.
 type s3fsfpPrograms struct {
-	S3fsFpGetattr  *ebpf.Program `ebpf:"s3fs_fp_getattr"`
-	S3fsTestShared *ebpf.Program `ebpf:"s3fs_test_shared"`
+	S3fsDeepWalkReject *ebpf.Program `ebpf:"s3fs_deep_walk_reject"`
+	S3fsFpGetattr      *ebpf.Program `ebpf:"s3fs_fp_getattr"`
+	S3fsTestShared     *ebpf.Program `ebpf:"s3fs_test_shared"`
 }
 
 func (p *s3fsfpPrograms) Close() error {
 	return _S3fsfpClose(
+		p.S3fsDeepWalkReject,
 		p.S3fsFpGetattr,
 		p.S3fsTestShared,
 	)
