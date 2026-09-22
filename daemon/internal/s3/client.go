@@ -7,6 +7,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -69,6 +70,24 @@ func (c *Client) Stat(ctx context.Context, key string) (ObjectMeta, error) {
 		return ObjectMeta{}, fmt.Errorf("s3 stat %q: %w", key, err)
 	}
 	return toMeta(info), nil
+}
+
+// Get reads the entire object body into memory. Intended for the
+// Week 4 (a) arena admission path where the daemon writes the bytes
+// into arena pages that kmod's .read then serves. Not suitable for
+// large objects — callers should switch to a streaming variant once
+// tiered storage lands.
+func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
+	obj, err := c.mc.GetObject(ctx, c.cfg.Bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("s3 get %q: %w", key, err)
+	}
+	defer obj.Close()
+	buf, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, fmt.Errorf("s3 get %q read: %w", key, err)
+	}
+	return buf, nil
 }
 
 // List enumerates objects under `prefix`. Empty prefix means the whole

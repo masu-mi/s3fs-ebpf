@@ -269,6 +269,8 @@ func runFastpath(args []string) int {
 		"how often to print aggregated counters")
 	enableS3 := fs.Bool("s3", false,
 		"consume miss events and warm the arena from an S3-compatible backend")
+	dev := fs.String("dev", "/dev/s3fs_ebpf",
+		"kmod control device for arena-backed read admission")
 	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
 	fs.Parse(args)
 
@@ -317,8 +319,22 @@ func runFastpath(args []string) int {
 	// Pre-warm the arena from the kmod entry table so the first stat
 	// on each demo object hits the Fast Path instead of firing a
 	// miss. Without S3 we fall back to the compile-time sizes; with
-	// S3 we reflect real object metadata (size, mtime).
-	prewarm(context.Background(), progs, s3c)
+	// S3 we reflect real object metadata (size, mtime) and — the
+	// point of Week 4 (a) — copy the object body into the arena so
+	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
+	admits := prewarm(context.Background(), progs, s3c)
+	if len(admits) > 0 {
+		if err := admitArena(*dev, admits); err != nil {
+			fmt.Fprintf(os.Stderr, "[admit] %v — kmod fallback (kmalloc scratch) still works\n", err)
+		} else {
+			fmt.Printf("[admit] %d entries via %s\n", len(admits), *dev)
+			defer func() {
+				if err := admitArena(*dev, nil); err != nil {
+					fmt.Fprintf(os.Stderr, "[admit clear] %v\n", err)
+				}
+			}()
+		}
+	}
 
 	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
 
@@ -357,13 +373,18 @@ func runFastpath(args []string) int {
 }
 
 // prewarm populates the arena + inode_index from the kmod entry table
-// so the first stat on each demo object hits fast_hits. When s3c is
-// nil the compile-time fallback sizes are used; otherwise each entry
-// is resolved to real S3 metadata (size / mtime) before admission.
-func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) {
+// so the first stat on each demo object hits fast_hits, and when S3
+// is available copies each object's body into the arena and returns
+// the (ino, arena_off, size) triples the caller ioctls into kmod so
+// .read serves those bytes without a userspace bounce.
+//
+// Without S3 we still warm the stat cache but skip content admission —
+// kmod's kmalloc scratch buffer covers `cat` at reduced fidelity.
+func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) []admitEntry {
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
+	admits := make([]admitEntry, 0, len(fpebpf.Entries))
 	for _, entry := range fpebpf.Entries {
 		stub := fpebpf.InodeStub{
 			Ino:     entry.Ino,
@@ -372,6 +393,7 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) {
 			Mode:    entry.Mode,
 		}
 		source := "fallback"
+		var body []byte
 		if s3c != nil {
 			meta, err := s3c.Stat(timedCtx, entry.S3Key)
 			if err != nil {
@@ -381,16 +403,39 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) {
 				stub.Size = uint64(meta.Size)
 				stub.MtimeNs = uint64(meta.LastModified.UnixNano())
 				source = fmt.Sprintf("s3://%s", entry.S3Key)
+				body, err = s3c.Get(timedCtx, entry.S3Key)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[prewarm] ino=%d get: %v (skip admit)\n",
+						entry.Ino, err)
+					body = nil
+				}
 			}
 		}
 		off, err := progs.WarmCache(stub)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[prewarm] ino=%d admit: %v\n", entry.Ino, err)
+			fmt.Fprintf(os.Stderr, "[prewarm] ino=%d warm: %v\n", entry.Ino, err)
 			continue
 		}
-		fmt.Printf("[prewarm] ino=%d name=%s size=%d src=%s → offset=%d\n",
+		fmt.Printf("[prewarm] ino=%d name=%s size=%d src=%s → stub=%d\n",
 			entry.Ino, entry.Name, stub.Size, source, off)
+
+		if body != nil {
+			cOff, err := progs.AdmitContent(body)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[prewarm] ino=%d content: %v (skip admit)\n",
+					entry.Ino, err)
+				continue
+			}
+			admits = append(admits, admitEntry{
+				Ino:   entry.Ino,
+				Uaddr: progs.Arena().BaseAddr() + uint64(cOff),
+				Size:  uint64(len(body)),
+			})
+			fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d uaddr=0x%x\n",
+				entry.Ino, len(body), cOff, progs.Arena().BaseAddr()+uint64(cOff))
+		}
 	}
+	return admits
 }
 
 // warmFromS3 resolves a miss event through the S3 client and populates

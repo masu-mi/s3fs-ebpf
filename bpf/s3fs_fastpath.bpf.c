@@ -93,6 +93,17 @@ struct {
 extern __u32 s3fs_kfunc_echo(__u32 v) __ksym;
 
 /*
+ * Upstream arena allocator. Signature from vmlinux BTF:
+ *   bpf_arena_alloc_pages(map, addr_hint, page_cnt, node_id, flags)
+ * The allocator inserts pages into BOTH the user_vm and kern_vm PTEs;
+ * the user-fault path (arena_vma_fault) only maps user_vm, which is
+ * why kmod's copy_to_user() out of kern_vm returns EFAULT for pages
+ * daemon just wrote via mmap.
+ */
+extern void *bpf_arena_alloc_pages(void *map, void *addr, __u32 page_cnt,
+				   int node_id, __u64 flags) __ksym;
+
+/*
  * The verifier only accepts bpf_addr_space_cast in programs whose
  * prog->aux->arena is set — a wiring that happens as a side effect of
  * an LD_MAP_FD instruction referencing an arena map. Arena maps have
@@ -219,6 +230,51 @@ int s3fs_deep_walk_reject(struct s3fs_test_args *ctx)
 		n = n->next;
 	}
 	ctx->out_ino = sum;
+	return 0;
+}
+
+/*
+ * s3fs_arena_prealloc — force-fault in `ctx->idx` pages starting at
+ * user_vm_start so both user_vm and kern_vm PTEs are populated
+ * before the daemon writes and the kmod reads. Returns the arena
+ * address the allocator handed back in ctx->out_ino (0 on failure).
+ */
+SEC("syscall")
+int s3fs_arena_prealloc(struct s3fs_test_args *ctx)
+{
+	void *p;
+	void *hint;
+	__u8 __arena *b;
+	__u32 i;
+
+	s3fs_arena_pin();
+
+	if (!ctx || !ctx->idx)
+		return -1;
+	if (!ctx->arena_base_uaddr)
+		return -3;
+
+	/* Pin the allocation to user_vm_start so daemon's arena.WriteAt
+	 * offsets match kmod's later reads. Without this, the allocator
+	 * is free to pick any address inside kern_vm and the offsets
+	 * daemon writes at won't correspond to installed pages. */
+	hint = (void *)(unsigned long)ctx->arena_base_uaddr;
+	p = bpf_arena_alloc_pages(&s3fs_arena, hint, ctx->idx,
+				  -1 /* NUMA_NO_NODE */, 0);
+	if (!p)
+		return -2;
+
+	/* Touch every page. bpf_arena_alloc_pages reserves the range
+	 * and installs user_vm PTEs, but kern_vm PTEs only appear once
+	 * a BPF program writes via bpf_addr_space_cast — anything
+	 * writing through the user_vm mmap after this point still
+	 * touches the same physical page kmod's kern_vm reads see.
+	 * Bounded loop keeps the verifier happy. */
+	b = (__u8 __arena *)p;
+	for (i = 0; i < ctx->idx && i < 16; i++)
+		b[i * 4096] = 0;
+
+	ctx->out_ino = (__u64)(unsigned long)p;
 	return 0;
 }
 

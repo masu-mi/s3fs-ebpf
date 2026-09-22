@@ -40,4 +40,39 @@ struct s3fs_probe_kvbase {
 #define S3FS_IOC_PROBE_KVBASE \
 	_IOWR(S3FS_IOC_MAGIC, 0x01, struct s3fs_probe_kvbase)
 
+/*
+ * S3FS_IOC_ADMIT_ARENA — register per-ino userspace ranges that back
+ * file content.
+ *
+ * The daemon writes each object's bytes into its arena mmap, then
+ * submits this ioctl to tell kmod: "ino N's content lives at user_vm
+ * address `uaddr` for `size` bytes". kmod stores (ino → mm, uaddr,
+ * size) in a hash keyed by ino; .read then uses
+ * pin_user_pages_remote + kmap_local_page to reach the same physical
+ * pages the arena mmap holds and copy_to_user out of them.
+ *
+ * We use the daemon's user_vm view (not the arena's kernel-VM base)
+ * because 6.12's arena kern_vm range has no generic-context fault
+ * handler; only BPF programs can service the fault path. GUP over
+ * user_vm sidesteps that limitation by going through the daemon's
+ * process mm, which does have arena_vm_fault registered.
+ *
+ * Passing count=0 clears kmod's admission table (used on daemon exit
+ * to drop the mm reference cleanly).
+ */
+struct s3fs_admit_entry {
+	__u64 ino;
+	__u64 uaddr; /* daemon-side user_vm address of the object bytes */
+	__u64 size;
+};
+
+struct s3fs_admit_arena {
+	__u32 count;   /* in: number of entries; 0 clears the table */
+	__u32 _pad;
+	__u64 entries; /* in: user pointer to array of s3fs_admit_entry */
+};
+
+#define S3FS_IOC_ADMIT_ARENA \
+	_IOW(S3FS_IOC_MAGIC, 0x02, struct s3fs_admit_arena)
+
 #endif /* _S3FS_EBPF_UAPI_H */

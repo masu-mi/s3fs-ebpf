@@ -20,6 +20,7 @@ const (
 	s3fsfpMapS3fsCounters        = "s3fs_counters"
 	s3fsfpMapS3fsEvents          = "s3fs_events"
 	s3fsfpMapS3fsInodeIndex      = "s3fs_inode_index"
+	s3fsfpProgS3fsArenaPrealloc  = "s3fs_arena_prealloc"
 	s3fsfpProgS3fsDeepWalkReject = "s3fs_deep_walk_reject"
 	s3fsfpProgS3fsFpGetattr      = "s3fs_fp_getattr"
 	s3fsfpProgS3fsTestShared     = "s3fs_test_shared"
@@ -67,6 +68,7 @@ type s3fsfpSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type s3fsfpProgramSpecs struct {
+	S3fsArenaPrealloc  *ebpf.ProgramSpec `ebpf:"s3fs_arena_prealloc"`
 	S3fsDeepWalkReject *ebpf.ProgramSpec `ebpf:"s3fs_deep_walk_reject"`
 	S3fsFpGetattr      *ebpf.ProgramSpec `ebpf:"s3fs_fp_getattr"`
 	S3fsTestShared     *ebpf.ProgramSpec `ebpf:"s3fs_test_shared"`
@@ -133,6 +135,7 @@ type s3fsfpVariables struct {
 //
 // It can be passed to loadS3fsfpObjects or ebpf.CollectionSpec.LoadAndAssign.
 type s3fsfpPrograms struct {
+	S3fsArenaPrealloc  *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 	S3fsDeepWalkReject *ebpf.Program `ebpf:"s3fs_deep_walk_reject"`
 	S3fsFpGetattr      *ebpf.Program `ebpf:"s3fs_fp_getattr"`
 	S3fsTestShared     *ebpf.Program `ebpf:"s3fs_test_shared"`
@@ -140,6 +143,7 @@ type s3fsfpPrograms struct {
 
 func (p *s3fsfpPrograms) Close() error {
 	return _S3fsfpClose(
+		p.S3fsArenaPrealloc,
 		p.S3fsDeepWalkReject,
 		p.S3fsFpGetattr,
 		p.S3fsTestShared,

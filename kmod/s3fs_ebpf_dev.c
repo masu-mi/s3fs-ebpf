@@ -18,13 +18,17 @@
 #include <linux/bpf.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
+#include <linux/mm_types.h>
 #include <linux/module.h>
+#include <linux/sched/mm.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
 #include <linux/vmalloc.h>
 
 #include "s3fs_ebpf_dev.h"
 #include "s3fs_ebpf_uapi.h"
+#include "vfs_ops.h"
 
 /*
  * BTF-derived layout of struct bpf_arena on Linux 6.12. The upstream
@@ -95,6 +99,69 @@ static long s3fs_dev_probe_kvbase(void __user *uarg)
 	return 0;
 }
 
+/*
+ * S3FS_IOC_ADMIT_ARENA handler.
+ *
+ * count==0 clears kmod's admit table (dropping the previously held
+ * mm reference). Otherwise: grab a reference on the caller's mm
+ * (daemon's mm — the caller is the ioctl syscall in daemon context),
+ * copy the entry array from userspace, hand both off to the vfs-side
+ * admit table. Reference lifecycle: on success the mm reference
+ * passes to the admit table (dropped by a future count==0 admit or by
+ * module unload). On failure we drop it here.
+ */
+static long s3fs_dev_admit_arena(void __user *uarg)
+{
+	struct s3fs_admit_arena hdr;
+	struct s3fs_admit_entry *entries = NULL;
+	struct mm_struct *mm = NULL;
+	int err;
+
+	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
+		return -EFAULT;
+
+	if (hdr.count == 0) {
+		err = s3fs_ebpf_admit_replace(NULL, NULL, 0);
+		if (!err)
+			pr_info("s3fs_ebpf: admit cleared\n");
+		return err;
+	}
+
+	if (hdr.count > 4096)
+		return -E2BIG;
+
+	mm = get_task_mm(current);
+	if (!mm)
+		return -ESRCH;
+
+	entries = kcalloc(hdr.count, sizeof(*entries), GFP_KERNEL);
+	if (!entries) {
+		err = -ENOMEM;
+		goto out_put_mm;
+	}
+	if (copy_from_user(entries, (void __user *)(uintptr_t)hdr.entries,
+			   hdr.count * sizeof(*entries))) {
+		err = -EFAULT;
+		goto out_free_entries;
+	}
+
+	/* Hand mm ownership over on success. */
+	err = s3fs_ebpf_admit_replace(mm, entries, hdr.count);
+	if (err)
+		goto out_free_entries;
+
+	pr_info("s3fs_ebpf: admitted %u entries mm=%p (daemon)\n",
+		hdr.count, mm);
+	kfree(entries);
+	return 0;
+
+out_free_entries:
+	kfree(entries);
+out_put_mm:
+	mmput(mm);
+	return err;
+}
+
 static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	void __user *uarg = (void __user *)arg;
@@ -102,6 +169,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	switch (cmd) {
 	case S3FS_IOC_PROBE_KVBASE:
 		return s3fs_dev_probe_kvbase(uarg);
+	case S3FS_IOC_ADMIT_ARENA:
+		return s3fs_dev_admit_arena(uarg);
 	default:
 		return -ENOTTY;
 	}
@@ -133,4 +202,7 @@ int s3fs_ebpf_dev_register(void)
 void s3fs_ebpf_dev_unregister(void)
 {
 	misc_deregister(&s3fs_ebpf_misc);
+	/* No more ioctls can arrive; drop the admit table and release
+	 * the arena reference before the module unloads. */
+	s3fs_ebpf_admit_shutdown();
 }
