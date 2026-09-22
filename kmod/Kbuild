@@ -1,5 +1,5 @@
 obj-m := s3fs_kfunc.o
 
-s3fs_kfunc-objs := s3fs_kfunc_main.o vfs_ops.o tree_traversal.o
+s3fs_kfunc-objs := s3fs_kfunc_main.o vfs_ops.o tree_traversal.o s3fs_ebpf_dev.o
 
 ccflags-y += -I$(src) -I$(src)/../include
