@@ -12,6 +12,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 
+#include "s3fs_ebpf_dev.h"
 #include "tree_traversal.h"
 #include "vfs_ops.h"
 
@@ -55,12 +56,20 @@ static int __init s3fs_ebpf_init(void)
 		return ret;
 	}
 
+	ret = s3fs_ebpf_dev_register();
+	if (ret) {
+		unregister_filesystem(&s3fs_ebpf_fs_type);
+		s3fs_kfunc_unregister();
+		return ret;
+	}
+
 	pr_info("s3fs_ebpf: loaded (skeleton)\n");
 	return 0;
 }
 
 static void __exit s3fs_ebpf_exit(void)
 {
+	s3fs_ebpf_dev_unregister();
 	unregister_filesystem(&s3fs_ebpf_fs_type);
 	s3fs_kfunc_unregister();
 	pr_info("s3fs_ebpf: unloaded\n");
@@ -73,4 +82,6 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("bbsakura");
 MODULE_DESCRIPTION("s3fs-ebpf: VFS + KFunc skeleton for eBPF-driven S3 filesystem");
 MODULE_VERSION("0.0.1");
+/* bpf_map_get() lives in the BPF_INTERNAL namespace on 6.12; opt in. */
+MODULE_IMPORT_NS(BPF_INTERNAL);
 MODULE_ALIAS_FS("s3fs_ebpf");

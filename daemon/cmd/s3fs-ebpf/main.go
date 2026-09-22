@@ -43,6 +43,9 @@ Commands:
                arena walker and print the verifier's rejection log
   s3-list      Connect to an S3-compatible endpoint and list a bucket
   s3-stat      Connect to an S3-compatible endpoint and stat a single object
+  probe-kvbase Week 4 (a) spike: create an arena, ioctl(/dev/s3fs_ebpf,
+               S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, print
+               it alongside the user-VM base for comparison
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
 `
@@ -74,6 +77,8 @@ func main() {
 		os.Exit(runS3List(args))
 	case "s3-stat":
 		os.Exit(runS3Stat(args))
+	case "probe-kvbase":
+		os.Exit(runProbeKvbase(args))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
