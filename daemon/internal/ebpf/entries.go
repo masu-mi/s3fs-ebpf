@@ -32,6 +32,8 @@ var Entries = []Entry{
 		Mode: 0o100644, Fallback: 13, Prewarm: true},
 	{Ino: 103, Name: "lazy.txt", S3Key: "lazy.txt",
 		Mode: 0o100644, Fallback: 18, Prewarm: false},
+	{Ino: 104, Name: "big.bin", S3Key: "big.bin",
+		Mode: 0o100644, Fallback: 45, Prewarm: true},
 }
 
 // LookupByIno returns the entry with the matching ino, or nil.
