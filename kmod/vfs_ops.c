@@ -3,7 +3,7 @@
  * s3fs-ebpf: VFS glue.
  *
  * Week 3 materialises the mount point as a small in-memory filesystem
- * with three seed objects that stand in for S3 bucket contents:
+ * with three demo objects that stand in for S3 bucket contents:
  *
  *   hello.txt              ino=100  size=17
  *   world.txt              ino=101  size=13
@@ -11,9 +11,9 @@
  *
  * Content storage is per-inode kmalloc for now. Each inode carries a
  * `struct s3fs_file_data` on i_private that owns a growable buffer,
- * seeded from compile-time defaults at first lookup. read() and
- * write() work against that buffer, so `cat` returns the seed data and
- * `echo foo > hello.txt` mutates it in-place.
+ * initialised from compile-time initial content at first lookup.
+ * read() and write() work against that buffer, so `cat` returns the
+ * initial content and `echo foo > hello.txt` mutates it in-place.
  *
  * The Meetup-shape story is "arena is the zero-copy fabric between
  * daemon and kmod". Wiring kmod's file ops to serve from bpf_arena
@@ -47,26 +47,30 @@ struct s3fs_entry {
 	const char *name;
 	unsigned long ino;
 	umode_t mode;
-	const char *seed;   /* seed content, NUL-terminated */
-	size_t seed_size;   /* seed size in bytes, excludes NUL */
+	const char *initial_content;   /* NUL-terminated initial bytes */
+	size_t initial_content_size;   /* size in bytes, excludes NUL */
 };
 
-static const char hello_seed[]  = "hello, s3fs-ebpf\n";       /* 17 bytes */
-static const char world_seed[]  = "hello world!\n";           /* 13 bytes */
-static const char models_seed[] = "AI weights placeholder\n"; /* 23 bytes */
+static const char hello_content[]  = "hello, s3fs-ebpf\n";       /* 17 bytes */
+static const char world_content[]  = "hello world!\n";           /* 13 bytes */
+static const char models_content[] = "AI weights placeholder\n"; /* 23 bytes */
 
 /*
- * Seed table. Ordered by name (dcache_readdir emits in listed order).
+ * Entry table. Ordered by name (iterate_shared emits in listed order).
  * Update this if the demo bucket contents change; the daemon's
- * pre-warmer takes the same list from list_bucket().
+ * pre-warmer keeps an independent mirror until Week 4+ adds a
+ * bucket-sync ioctl.
  */
 static const struct s3fs_entry s3fs_entries[] = {
 	{ .name = "hello.txt",          .ino = 100, .mode = S_IFREG | 0644,
-	  .seed = hello_seed,  .seed_size = sizeof(hello_seed)  - 1 },
+	  .initial_content = hello_content,
+	  .initial_content_size = sizeof(hello_content)  - 1 },
 	{ .name = "models_weights.bin", .ino = 102, .mode = S_IFREG | 0644,
-	  .seed = models_seed, .seed_size = sizeof(models_seed) - 1 },
+	  .initial_content = models_content,
+	  .initial_content_size = sizeof(models_content) - 1 },
 	{ .name = "world.txt",          .ino = 101, .mode = S_IFREG | 0644,
-	  .seed = world_seed,  .seed_size = sizeof(world_seed)  - 1 },
+	  .initial_content = world_content,
+	  .initial_content_size = sizeof(world_content)  - 1 },
 };
 #define S3FS_NR_ENTRIES ARRAY_SIZE(s3fs_entries)
 
@@ -94,7 +98,8 @@ struct s3fs_file_data {
 	size_t cap;
 };
 
-static struct s3fs_file_data *s3fs_file_data_new(const void *seed, size_t seed_size)
+static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
+						 size_t initial_size)
 {
 	struct s3fs_file_data *fd = kzalloc(sizeof(*fd), GFP_KERNEL);
 
@@ -102,15 +107,15 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *seed, size_t seed_s
 		return NULL;
 	mutex_init(&fd->lock);
 
-	if (seed_size) {
-		fd->buf = kmalloc(seed_size, GFP_KERNEL);
+	if (initial_size) {
+		fd->buf = kmalloc(initial_size, GFP_KERNEL);
 		if (!fd->buf) {
 			kfree(fd);
 			return NULL;
 		}
-		memcpy(fd->buf, seed, seed_size);
-		fd->size = seed_size;
-		fd->cap  = seed_size;
+		memcpy(fd->buf, initial, initial_size);
+		fd->size = initial_size;
+		fd->cap  = initial_size;
 	}
 	return fd;
 }
@@ -291,7 +296,8 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 #endif
 
 	if (S_ISREG(e->mode)) {
-		fd = s3fs_file_data_new(e->seed, e->seed_size);
+		fd = s3fs_file_data_new(e->initial_content,
+					e->initial_content_size);
 		if (!fd) {
 			iput(inode);
 			return NULL;
@@ -301,7 +307,7 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		inode->i_op      = &s3fs_ebpf_file_iops;
 		inode->i_fop     = &s3fs_ebpf_file_fops;
 	} else {
-		/* Only regular files in the seed table for now. */
+		/* Only regular files in the entry table for now. */
 		iput(inode);
 		return NULL;
 	}

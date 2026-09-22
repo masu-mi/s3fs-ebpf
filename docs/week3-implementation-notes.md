@@ -8,14 +8,14 @@ Week 2 のノート (`week2-implementation-notes.md`) が「BPF/verifier/cilium/
 
 | 項目 | 状態 | 補足 |
 |---|---|---|
-| kmod が seed 3 オブジェクトを VFS に materialise | ✅ | `ls /mnt/s3demo` に並ぶ |
+| kmod が 3 デモオブジェクトを VFS に materialise | ✅ | `ls /mnt/s3demo` に並ぶ |
 | lookup + iterate_shared | ✅ | 完全カスタム (`simple_lookup` は使わない) |
-| read | ✅ | `cat` が seed content を返す |
+| read | ✅ | `cat` が initial content を返す |
 | write / truncate / append | ✅ | `echo >`, `echo >>`, `dd`, `>` (truncate) 全て通る |
 | S3 write-back | ❌ | in-memory only、Week 4+ |
 | ファイル内容の arena バッキング | ❌ | 現在は kmalloc プール、Week 4+ |
-| dynamic bucket sync (ioctl) | ❌ | seed table は compile-time 静的、Week 4+ |
-| daemon が Fast Path prewarm | ✅ | 起動時に seed 全 ino を admit |
+| dynamic bucket sync (ioctl) | ❌ | entry table は compile-time 静的、Week 4+ |
+| daemon が Fast Path prewarm | ✅ | 起動時に entry 全 ino を admit |
 | S3 metadata の real reflection | ✅ | `--s3` で size / mtime を上書き |
 
 ---
@@ -138,14 +138,17 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 
 ---
 
-## 5. daemon 側の seed テーブルミラー
+## 5. daemon 側のエントリテーブルミラー
 
-kmod の `s3fs_entries[]` (compile-time) と daemon の Go 側 seed を独立に持つ。将来的には ioctl 経由で kmod が渡す形にしたいが今週は文字列一致で運用。
+用語メモ: Week 3 の途中まで「seed」を 2 用途で被せていたので分割した。
 
-`daemon/internal/ebpf/seed.go`:
+- **initial content** (kmod 内): `struct s3fs_entry.initial_content` / `hello_content[]` などの const バイト列。最初の lookup で per-inode `s3fs_file_data` に memcpy される「起動時の中身」
+- **entry table** (kmod + daemon): kmod `s3fs_entries[]` / daemon `Entries` — mount point が公開する「オブジェクトの一覧」そのもの。Week 4+ で bucket-sync ioctl が入るまでは両側の compile-time 定義で一致させる
+
+`daemon/internal/ebpf/entries.go`:
 
 ```go
-var Seeds = []SeedEntry{
+var Entries = []Entry{
     {Ino: 100, Name: "hello.txt",           S3Key: "hello.txt",
      Mode: 0o100644, Fallback: 17},
     ...
@@ -157,7 +160,7 @@ var Seeds = []SeedEntry{
 - `Ino` は kmod のテーブルと一致必須 (kmod が inode->i_ino に代入する値)
 - `Name` は kmod の dentry 名 (Fast Path 側は使わないが人間可読ログ用)
 - `S3Key` は S3 側のオブジェクトキー。kmod の Name とは異なる (`models_weights.bin` ↔ `models/weights.bin` のような alias)
-- `Fallback` は S3 が使えない場合の size (kmod の compile-time seed size と一致)
+- `Fallback` は S3 が使えない場合の size (kmod の `initial_content_size` と一致)
 
 Week 4 で kmod → daemon の動的同期チャンネル (ioctl / netlink / debugfs) を張れば、この二重定義は解消できる。
 
@@ -168,15 +171,15 @@ Week 4 で kmod → daemon の動的同期チャンネル (ioctl / netlink / deb
 ```
 fastpath 起動
     ↓
-progs, _ := ebpf.Load()             // arena mmap + BPF load
+progs, _ := ebpf.Load()               // arena mmap + BPF load
     ↓
-for _, seed := range Seeds:
+for _, entry := range Entries:
     if s3c != nil:
-        meta = s3c.Stat(seed.S3Key)  // real S3 metadata
-        stub = InodeStub{seed.Ino, meta.Size, meta.LastModified, seed.Mode}
+        meta = s3c.Stat(entry.S3Key)  // real S3 metadata
+        stub = InodeStub{entry.Ino, meta.Size, meta.LastModified, entry.Mode}
     else:
-        stub = InodeStub{seed.Ino, seed.Fallback, now, seed.Mode}
-    progs.WarmCache(stub)            // arena に write + inode_index に install
+        stub = InodeStub{entry.Ino, entry.Fallback, now, entry.Mode}
+    progs.WarmCache(stub)             // arena に write + inode_index に install
     ↓
 fentry attach
     ↓
@@ -186,8 +189,8 @@ ringbuf consumer loop
 **踏んだ点:**
 
 - **prewarm が fentry attach より先** — 順序が逆だと prewarm 中に fentry が走って余分な miss を数える。
-- **S3 stat がタイムアウトした場合の fallback** — ネット切れや MinIO 未起動で prewarm が丸ごと止まらないよう、seed 単位で catch して fallback size を使う。
-- **arena は 4 KiB (1 page)** — 3 seed entries なので余裕。溢れたら `ErrCacheFull`。
+- **S3 stat がタイムアウトした場合の fallback** — ネット切れや MinIO 未起動で prewarm が丸ごと止まらないよう、entry 単位で catch して fallback size を使う。
+- **arena は 4 KiB (1 page)** — 3 entries なので余裕。溢れたら `ErrCacheFull`。
 
 ---
 

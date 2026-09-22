@@ -274,7 +274,7 @@ stat /mnt/s3demo      # 以降: fast_hits がインクリメントされ ringbuf
 
 ### Week 3: 実 VFS + fastpath prewarm フルスタック
 
-kmod が 3 つの seed オブジェクト (hello.txt / world.txt / models_weights.bin) を lookup / readdir / read / write できるようになったので、`stat`・`cat`・`echo >` が通常のファイルとして通ります。daemon の fastpath は起動時に seed 全 ino を prewarm するため、**1 発目の `stat` から Fast Path Hit** としてカウントされます。
+kmod が 3 つのデモオブジェクト (hello.txt / world.txt / models_weights.bin) を lookup / readdir / read / write できるようになったので、`stat`・`cat`・`echo >` が通常のファイルとして通ります。daemon の fastpath は起動時に entry table の全 ino を prewarm するため、**1 発目の `stat` から Fast Path Hit** としてカウントされます。
 
 ```bash
 # 1. kmod と mount
@@ -536,8 +536,8 @@ make readme        # daemon をビルドしてから README.md を再生成
 | **2 (b)** | eBPF Fast Path (`fentry/vfs_getattr_nosec` → hit/miss counter + ringbuf) | ✅ done (`s3fs-ebpf fastpath`) |
 | **2 (c)** | Verifier 拒否デモ | ✅ done (`s3fs-ebpf verifier-demo`) |
 | **2 (d)** | MinIO Slow Path 骨 (minio-go / bucket list & stat) | ✅ done (`s3fs-ebpf s3-list` / `s3-stat`) |
-| **3 (a)** | kmod が seed オブジェクトを VFS に materialise (lookup / readdir / read / write) | ✅ done (`ls` / `cat` / `echo >` が動作) |
-| **3 (b)** | daemon の fastpath 起動時 prewarm (seed 全 ino を arena に admit) | ✅ done (`--s3` で real S3 metadata を反映) |
+| **3 (a)** | kmod が entry table のオブジェクトを VFS に materialise (lookup / readdir / read / write) | ✅ done (`ls` / `cat` / `echo >` が動作) |
+| **3 (b)** | daemon の fastpath 起動時 prewarm (entry table の全 ino を arena に admit) | ✅ done (`--s3` で real S3 metadata を反映) |
 | **3 (c)** | file 内容の arena バッキング (現在は kmalloc プール) | pending |
 | **3 (d)** | Lua/WASM policy engine + hot reload | pending |
 | **3** | Lua/WASM ポリシー、CLI `stats` / `policy reload` | pending |
