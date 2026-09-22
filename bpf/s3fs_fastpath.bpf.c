@@ -51,17 +51,19 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #define S3FS_INDEX_MAX_ENTRIES 4096
 
 /*
- * s3fs_arena: single-page bpf_arena shared with the daemon.
+ * s3fs_arena: multi-page bpf_arena shared with the daemon.
  *
- * max_entries counts pages, not bytes. One page (4 KiB) fits the Week 2
- * probe's 32 * sizeof(struct s3fs_inode_stub) = 1024 B. The daemon mmaps
- * this map via cilium/ebpf's Map.Memory(); pages are demand-allocated on
- * the first userspace write, so we do NOT call bpf_arena_alloc_pages.
+ * max_entries counts pages, not bytes. 4096 pages = 16 MiB, enough to
+ * park a handful of small demo objects plus one large (1 MiB) test
+ * blob. The daemon mmaps this map via cilium/ebpf's Map.Memory();
+ * pages are demand-allocated on the first userspace write, so we do
+ * NOT call bpf_arena_alloc_pages. Bump this cap as the working set
+ * grows — 6.12 arena tops out at 4 GiB VA reservation regardless.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
-	__uint(max_entries, 1);
+	__uint(max_entries, 4096);
 } s3fs_arena SEC(".maps");
 
 /* ino -> arena byte offset. Populated by daemon. */

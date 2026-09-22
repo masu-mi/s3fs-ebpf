@@ -68,6 +68,7 @@ static const char hello_content[]  = "hello, s3fs-ebpf\n";       /* 17 bytes */
 static const char world_content[]  = "hello world!\n";           /* 13 bytes */
 static const char models_content[] = "AI weights placeholder\n"; /* 23 bytes */
 static const char lazy_content[]   = "(not fetched yet)\n";      /* 18 bytes */
+static const char big_content[]    = "(1 MiB blob — daemon will admit real bytes)\n"; /* 45 bytes */
 
 /*
  * Entry table. Ordered by name (iterate_shared emits in listed order).
@@ -81,6 +82,9 @@ static const char lazy_content[]   = "(not fetched yet)\n";      /* 18 bytes */
  * admits → signals → kmod retries → arena bytes returned.
  */
 static const struct s3fs_entry s3fs_entries[] = {
+	{ .name = "big.bin",            .ino = 104, .mode = S_IFREG | 0644,
+	  .initial_content = big_content,
+	  .initial_content_size = sizeof(big_content)    - 1 },
 	{ .name = "hello.txt",          .ino = 100, .mode = S_IFREG | 0644,
 	  .initial_content = hello_content,
 	  .initial_content_size = sizeof(hello_content)  - 1 },
@@ -533,44 +537,36 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 
 /*
  * Serve a read out of the admitted user_vm range via GUP + kmap.
- * Caller has copied (uaddr, size) out of the admit table under lock
- * and dropped it; mm is a raw pointer whose lifetime is guaranteed by
- * the reference kmod holds while the admit table is non-empty.
+ * Loops page-by-page until the request is satisfied or a page copy
+ * fails. Returning a short read is fine — the VFS caller will drive
+ * another .read for the remainder if `count` wasn't exhausted.
  *
- * PoC scope: single-page reads. All demo objects are <= PAGE_SIZE and
- * daemon-side arena writes never span pages, so a one-page pin
- * suffices. If a request straddles a page boundary we clamp to what
- * fits in the first page; the caller (VFS) will call again for the
- * remainder.
+ * Batching multiple pages into a single pin_user_pages_remote call
+ * would trim GUP overhead but requires a page-array stack buffer and
+ * more error-path branches; the tight-loop is good enough for PoC
+ * throughput measurements (a few hundred MB/s), and mostly bottlenecks
+ * on copy_to_user itself.
  */
 static ssize_t s3fs_admit_read(struct mm_struct *mm,
 			       u64 uaddr, u64 asize,
 			       char __user *user_buf,
 			       size_t count, loff_t *pos)
 {
-	struct page *page = NULL;
-	long pinned;
-	void *kva;
-	u64 abs_uaddr;
-	unsigned long page_offset;
-	size_t max_in_page;
-	ssize_t ret;
+	size_t remaining;
+	size_t total = 0;
 
 	if ((u64)*pos >= asize)
 		return 0;
 
-	abs_uaddr   = uaddr + (u64)*pos;
-	page_offset = abs_uaddr & (PAGE_SIZE - 1);
-	max_in_page = PAGE_SIZE - page_offset;
+	remaining = min_t(size_t, count, asize - (u64)*pos);
 
-	ret = min_t(size_t, count, asize - (u64)*pos);
-	ret = min_t(size_t, ret, max_in_page);
-
-	/* 6.12 pin_user_pages_remote asserts mmap_read_lock is held on
-	 * entry even when the `locked` out-parameter is NULL. Take it
-	 * ourselves; the function may drop and reacquire, so we only
-	 * unlock if it says we still hold it. */
-	{
+	while (remaining > 0) {
+		struct page *page = NULL;
+		void *kva;
+		u64 abs_uaddr = uaddr + (u64)*pos + total;
+		unsigned long page_offset = abs_uaddr & (PAGE_SIZE - 1);
+		size_t chunk = min_t(size_t, remaining, PAGE_SIZE - page_offset);
+		long pinned;
 		int locked = 1;
 
 		mmap_read_lock(mm);
@@ -579,19 +575,28 @@ static ssize_t s3fs_admit_read(struct mm_struct *mm,
 					       &locked);
 		if (locked)
 			mmap_read_unlock(mm);
+		if (pinned != 1)
+			break; /* short read; error propagates if total==0 */
+
+		kva = kmap_local_page(page);
+		if (copy_to_user(user_buf + total,
+				 (u8 *)kva + page_offset, chunk)) {
+			kunmap_local(kva);
+			unpin_user_pages(&page, 1);
+			break;
+		}
+		kunmap_local(kva);
+		unpin_user_pages(&page, 1);
+
+		total     += chunk;
+		remaining -= chunk;
 	}
-	if (pinned != 1)
-		return pinned < 0 ? pinned : -EFAULT;
 
-	kva = kmap_local_page(page);
-	if (copy_to_user(user_buf, (u8 *)kva + page_offset, ret))
-		ret = -EFAULT;
-	kunmap_local(kva);
-
-	unpin_user_pages(&page, 1);
-	if (ret > 0)
-		*pos += ret;
-	return ret;
+	if (total > 0) {
+		*pos += total;
+		return total;
+	}
+	return -EFAULT;
 }
 
 /* How long a .read waits for a daemon upcall to admit the ino before

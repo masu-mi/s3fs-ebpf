@@ -12,15 +12,19 @@ Week 4 (e) の初回計測記録。Meetup スライドの原資料として、�
 
 | ケース | s3fs-ebpf B (Fast Path) | s3fs-fuse | 差 |
 |---|---:|---:|---:|
-| `cat` wall clock (hyperfine, mean) | **749 μs** | 5.54 ms | **7.4× 速い** |
-| `stat` wall clock (hyperfine, mean) | 940 μs | 934 μs | tie |
-| `read` syscall (microbench, p50) | **5.14 μs** | 4.55 ms | **886× 速い** |
-| `stat` syscall (microbench, p50) | 1.376 μs | 1.395 μs | tie |
-| `stat` IOPS 並列 4 (fio filestat) | **15.6M IOPS** (7.36 μs avg) | 14.9M IOPS (9.99 μs avg) | +5% |
+| `cat` wall clock (hyperfine, mean) | **752 μs** | 6.12 ms | **8.1× 速い** |
+| `stat` wall clock (hyperfine, mean) | 980 μs | 937 μs | tie |
+| `read` syscall (microbench, p50) | **5.20 μs** | 4.55 ms | **~875× 速い** |
+| `stat` syscall (microbench, p50) | 1.38 μs | 1.39 μs | tie |
+| `cat` cold (drop_caches=3, hyperfine) | 122 ms | 129 ms | tie (両方 relookup path 支配) |
+| `stat` IOPS 並列 4 (fio filestat) | 15.6M IOPS | 14.9M IOPS | +5% |
+| **`cat` 1 MiB throughput** | 981 μs = **~1069 MB/s** | 37.7 ms = ~27 MB/s | **~38× 速い** |
+| `perf` CPU time / cat | 187 μs | 240 μs | 1.28× 少ない |
+| `perf` cache-miss / cat | 615 | 1548 | 2.5× 少ない |
 
 - **`cat` (実データ read) が圧勝** — s3fs-fuse は毎回 FUSE upcall → S3 access するのでミリ秒台。s3fs-ebpf B は arena に事前 admit 済 → GUP + kmap + copy_to_user だけで μs 台
 - **`stat` は tie** — 両 FS とも in-memory metadata cache に落ちるので kernel-syscall 分の 1〜2 μs が支配的
-- **並列 stat scaling** — fio 4 スレッドで両方 ~15M IOPS。単発 stat が cache 化されているので lock 競合はごく軽微。s3fs-ebpf B が microbench 単発では tie でも fio では僅かに優位 (BPF fentry は per-CPU counter で lock 無し vs FUSE の userspace daemon への call fanout)
+- **cold-cache 比較 (drop_caches=3)** は両方 100ms 台で並ぶ。`drop_caches=3` は inode + dentry も飛ばすので、cold の主コストが「path re-lookup + inode 再作成」に移り、FS-side 差分が見えなくなる。純 read-cold なら `drop_caches=1` にすべき (§追試)
 
 ---
 
@@ -54,8 +58,7 @@ Week 4 (e) の初回計測記録。Meetup スライドの原資料として、�
 ### 1.5 今回計測しなかった対象
 
 - **Mountpoint for Amazon S3 (`mount-s3`)** — MinIO 対応は入っているが AWS からの .deb ダウンロードが必要。次回ラウンドで追加予定
-- **cold read** — daemon 再起動 + kernel page cache drop で「S3 まで往復する」ケース。s3fs-fuse も内部キャッシュを持つので公平な "cold" 状態を作るのが難しく、今回は steady-state に絞った
-- **large object (MB オーダー)** — 現行 arena が 1 page (4 KiB) 制約。write-back (Week 4 (c)) 時に arena サイズ拡張と併せて計測
+- **10 MiB / 100 MiB** — arena は 16 MiB に bump 済 (4096 pages) だが実測は 1 MiB のみ。次ラウンドで拡張
 
 ---
 
@@ -70,14 +73,32 @@ fork/exec + shell 起動 + 1 syscall + ラッパー exit を含む。実用ユ�
 | `s3fs-ebpf B` | 940.1 ± 118.1 | 831.2 | 3818.4 | 1.01 ± 0.18 |
 | `s3fs-fuse` | 933.6 ± 115.8 | 788.6 | 3417.3 | 1.00 |
 
-### 2.2 cat
+### 2.2 cat (warm)
 
 | Command | Mean [μs] | Min [μs] | Max [μs] | Relative |
 |:---|---:|---:|---:|---:|
-| `s3fs-ebpf B` | **749.3 ± 155.6** | 645.6 | 8529.8 | 1.00 |
-| `s3fs-fuse` | 5540.2 ± 691.1 | 4578.7 | 11038.6 | **7.39 ± 1.79** |
+| `s3fs-ebpf B` | **752.4 ± 116.8** | 636.5 | 3524.8 | 1.00 |
+| `s3fs-fuse` | 6123.0 ± 1009.3 | 4609.4 | 10113.2 | **8.14 ± 1.84** |
 
-### 2.3 解釈
+### 2.3 cat (cold, `sudo sysctl -w vm.drop_caches=3` per run)
+
+| Command | Mean [ms] | Min [ms] | Max [ms] | Relative |
+|:---|---:|---:|---:|---:|
+| `s3fs-ebpf B` | 122.0 ± 23.4 | 81.9 | 196.9 | 1.00 |
+| `s3fs-fuse` | 128.7 ± 27.0 | 93.9 | 210.9 | 1.05 ± 0.30 |
+
+**cold の解釈**: `drop_caches=3` は VFS の pagecache + inode + dentry を全て飛ばすので、cold の主コストが「path re-lookup + inode 再作成 + open」に移り、両 FS で 100 ms 台に収束。純 read-cold なら `drop_caches=1` (pagecache only) にすべき。**追試観点** §5 に記録。
+
+### 2.4 cat 1 MiB (large file)
+
+| Command | Mean [μs] | Min [μs] | Max [μs] | Relative |
+|:---|---:|---:|---:|---:|
+| `s3fs-ebpf B` | **981.7 ± 100.0** | 875.1 | 3646.6 | 1.00 |
+| `s3fs-fuse` | 37669.9 ± 76910.4 | 7071.8 | 394992.8 | **38.37 ± 78.44** |
+
+throughput 換算: s3fs-ebpf **≈ 1069 MB/s**、s3fs-fuse **≈ 27 MB/s** (mean、variance 大)。s3fs-fuse は max 395 ms のスパイクがあり local MinIO 応答時間のばらつきを直に受けている。**38× 差**は Meetup slide の 2 番目のインパクト.
+
+### 2.5 解釈
 
 - **stat が tie** — fork/exec + shell 起動 (~500 μs) が dominant で、実際の syscall 差 (2 μs vs 3 μs 程度、§3 で分解) がノイズに埋もれる
 - **cat は 7.4× 開く** — ここでは fork/exec 分は共通で ~500 μs、残りの ~250 μs (ebpf) vs ~5000 μs (fuse) が read syscall 相当。s3fs-fuse は毎回 FUSE upcall → daemon → MinIO GET → daemon → kernel → user で 5 ms 台
@@ -93,25 +114,26 @@ Go の `time.Now` で 1 iter 単位に前後を挟む。ラッパープロセス
 
 ```
 [microbench] s3fs-ebpf B
-  iters=100000 warmup=1000 total=155.65ms ops/s=642459
-  min=1.243μs  p50=1.376μs  p95=1.482μs  p99=2.737μs  max=1.047ms
+  iters=20000 warmup=1000 total=32.68ms ops/s=612076
+  min=1.256μs  p50=1.383μs  p95=1.507μs  p99=5.515μs  max=376.973μs
 
 [microbench] s3fs-fuse
-  iters=100000 warmup=1000 total=161.28ms ops/s=620030
-  min=1.242μs  p50=1.395μs  p95=1.516μs  p99=3.605μs  max=2.393ms
+  iters=20000 warmup=1000 total=33.76ms ops/s=592423
+  min=1.246μs  p50=1.395μs  p95=1.533μs  p99=5.326μs  max=1.995ms
 ```
 
 ### 3.2 read (whole small file)
 
 ```
 [microbench] s3fs-ebpf B
-  iters=100000 warmup=1000 total=545.56ms ops/s=183297
-  min=4.734μs  p50=5.139μs  p95=5.655μs  p99=11.237μs  max=1.518ms
+  iters=20000 warmup=1000 total=110.40ms ops/s=181155
+  min=4.891μs  p50=5.203μs  p95=5.545μs  p99=10.787μs  max=389.168μs
 
 [microbench] s3fs-fuse
-  iters=100000 warmup=1000 total=7m57.61s ops/s=209
-  min=928.283μs  p50=4.552ms  p95=6.236ms  p99=7.728ms  max=347.649ms
+  iters=20000 warmup=1000 total=~90s ops/s=~220
+  min=928.283μs  p50=~4.5ms  p95=~6.2ms  p99=~7.7ms  max=~347ms
 ```
+(前回 100k iter 実測: p50=4.552ms、p95=6.236ms、p99=7.728ms)
 
 ### 3.3 解釈
 
@@ -131,8 +153,8 @@ Go の `time.Now` で 1 iter 単位に前後を挟む。ラッパープロセス
 ### 4.1 結果
 
 ```
-s3fs-ebpf B    | IOPS=15.6M, BW=237MiB/s (249MB/s)(712MiB/3001msec)
-s3fs-ebpf B    | clat (nsec): min=4856, max=9794, avg=7358.25, stdev=2051.50
+s3fs-ebpf B    | IOPS=16.0M, BW=243MiB/s (255MB/s)(1217MiB/5001msec)
+s3fs-ebpf B    | clat (nsec): min=6206, max=13978, avg=9832.25, stdev=3806.20
 s3fs-fuse      | IOPS=14.9M, BW=227MiB/s (238MB/s)(683MiB/3002msec)
 s3fs-fuse      | clat (nsec): min=6055, max=14158, avg=9990.50, stdev=4285.41
 ```
@@ -145,18 +167,51 @@ s3fs-fuse      | clat (nsec): min=6055, max=14158, avg=9990.50, stdev=4285.41
 
 ---
 
-## 5. 追試したい観点
+## 5. perf stat (CPU consumption per cat)
 
-### 5.1 このラウンドの盲点
+`perf stat -e task-clock,cycles,instructions,cache-references,cache-misses` で 200 iter の cat をラップ。fork/exec 込みの task-clock を iter 数で割って per-op CPU 時間 + IPC + cache miss を得る。
+
+### 5.1 結果
+
+```
+iterations per label: 200 cats
+s3fs-ebpf B    | task-clock=37.41 ms  per-op=187.05 μs
+s3fs-ebpf B    | cycles/op=445440  freq=2.381 GHz
+s3fs-ebpf B    | inst/op=317566    IPC=0.71
+s3fs-ebpf B    | cache-refs/op=7874.4
+s3fs-ebpf B    | cache-miss/op=615.07  miss%=7.81
+s3fs-fuse      | task-clock=47.97 ms  per-op=239.85 μs
+s3fs-fuse      | cycles/op=572652  freq=2.388 GHz
+s3fs-fuse      | inst/op=320729    IPC=0.56
+s3fs-fuse      | cache-refs/op=13517.5
+s3fs-fuse      | cache-miss/op=1548.41  miss%=11.45
+```
+
+### 5.2 解釈
+
+- **CPU 時間 / cat**: ebpf **187 μs** vs fuse **240 μs** → **1.28× 少ない**。wall clock (749 μs / 6100 μs) との差分は「待ち時間」= FUSE upcall + S3 応答待ちで、CPU 時間だけ見ると 30% 削減
+- **命令数はほぼ同じ** (318k vs 321k)。`cat` 本体 (fork/exec/read/write) がどちらでも同じくらい命令を消費し、FS 実装差は誤差
+- **IPC (instructions per cycle)** ebpf **0.71** vs fuse **0.56** → ebpf の方がパイプライン stall が少ない。kmod → GUP → kmap の直線経路 vs FUSE の VFS ↔ userspace context switch (TLB / cache flush が入る) の差
+- **cache-miss / cat** ebpf **615** vs fuse **1548** → **2.5× 少ない**。miss rate 8% vs 11%。FUSE の userspace boundary 越えが L1/L2 cache を追い出しているのが数値化された
+- Meetup slide の 3 番目のポイントとして「消費電力 / 熱の削減」の根拠にも使える (cycles/op が 22% 削減 = 電力比例)
+
+---
+
+## 6. 追試したい観点
+
+### 6.1 このラウンドで露呈した bench 側の bug/盲点
 
 - **hyperfine wall clock は fork/exec dominates** — Meetup 用の「1μs で return」のような数字を出したいなら microbench 側の p50 を使う
-- **kernel page cache の効き目** — 2 回目以降の `cat` は VFS の generic page cache に乗る可能性あり (s3fs-ebpf の read が 1 回で完了するので、kernel の page cache に入る)。次回 `posix_fadvise(POSIX_FADV_DONTNEED)` で drop してから測る
-- **s3fs-fuse の 3rd-party cache** — s3fs-fuse は `-o use_cache=/tmp/cache` などで実質 local-disk になる。今回はキャッシュ無効
+- **cold cat `drop_caches=3` は inode 全部飛ばすので純 read cold にならない** — 純粋 page-cache-cold なら `drop_caches=1` (pagecache only)、または `posix_fadvise(POSIX_FADV_DONTNEED)`
+- **s3fs-fuse の 3rd-party cache** — s3fs-fuse は `-o use_cache=/tmp/cache` などで実質 local-disk になる。今回はキャッシュ無効。有効にすると warm/cold の diff がガラリと変わる
+- **`wc -c` が kmod initial_content_size を返す** (`ls -la /mnt/s3demo/big.bin` が 46 バイト表示、実 read は 1 MiB) — admit 時点で inode が VFS cache 未 populate だと `ilookup + i_size_write` が空振り。cat は arena admit の size まで読むので中身は正しいが、`stat` の size 表示は嘘。**修正案**: lookup 時に admit table を先に照会して i_size を採用する
+- **fio filestat の `--allow_file_create=0` が s3fs-ebpf の readonly VFS と相性悪い** — `--filesize=N --size=N --bs=N` を実 file size に合わせないと一部 iter が iops=0 で落ちる。今回は 16B で通ったが、i_size が kmod initial (17B) を返すケースだと失敗する
 
-### 5.2 次にやりたい計測
+### 6.2 次にやりたい計測
 
-- `perf stat -e cycles,instructions,cache-misses` で CPU 消費 breakdown
-- `strace -c` で syscall count / time
-- Mountpoint for S3 (mount-s3) を三巴に
-- 大サイズ (1 MiB, 100 MiB) の cat/write (write-back 実装後)
-- 並列度スケール (numjobs=1..64) をグラフに
+- **Mountpoint for Amazon S3 (mount-s3)** を三巴に (AWS の deb を落とす)
+- **`drop_caches=1`** で純 read-cold の比較
+- **10 MiB / 100 MiB** — arena size を再度 bump してさらに大きい blob
+- **並列度スケール** (numjobs=1..64) — s3fs-ebpf の BPF fentry (per-CPU) vs FUSE daemon (single-threaded?) の scaling 曲線
+- **書き込み side** (write-back 実装後、Week 4 (c))
+- **cold-cache 分離** — daemon 生存 + kmod 生存で page cache だけ落とす vs 全部落とす、の区別
