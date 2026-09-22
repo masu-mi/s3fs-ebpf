@@ -25,11 +25,18 @@
 
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/hashtable.h>
+#include <linux/highmem.h>
+#include <linux/mm.h>
+#include <linux/mm_types.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/namei.h>
+#include <linux/overflow.h>
 #include <linux/pagemap.h>
+#include <linux/sched/mm.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/statfs.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
@@ -73,6 +80,143 @@ static const struct s3fs_entry s3fs_entries[] = {
 	  .initial_content_size = sizeof(world_content)  - 1 },
 };
 #define S3FS_NR_ENTRIES ARRAY_SIZE(s3fs_entries)
+
+/* -- Admit table: ino -> daemon user_vm backing --------------------------- */
+/*
+ * Populated by /dev/s3fs_ebpf's ADMIT_ARENA ioctl once the daemon has
+ * written each object's bytes into its arena mmap. .read pins the
+ * relevant pages via pin_user_pages_remote against the admitted mm,
+ * kmap_local_page's them, and copy_to_user's out of the resulting
+ * kernel VA. This routes around 6.12's arena kern_vm having no
+ * generic-context fault handler; the daemon's user_vm mapping does
+ * have arena_vm_fault, which GUP invokes on any missing PTE.
+ */
+struct s3fs_admit {
+	struct hlist_node node;
+	u64 ino;
+	u64 uaddr;
+	u64 size;
+};
+
+#define S3FS_ADMIT_HASH_BITS 6
+
+static DEFINE_HASHTABLE(s3fs_admits, S3FS_ADMIT_HASH_BITS);
+static DEFINE_SPINLOCK(s3fs_admits_lock);
+
+/* Reference on the daemon's mm, held while the admit table is
+ * non-empty. Dropped by shutdown or by replacing the admits with
+ * count=0. All entries in the table share this single mm. */
+static struct mm_struct *s3fs_admitted_mm;
+
+/* Set in fill_super so admit_replace can ilookup() cached inodes and
+ * refresh their i_size when the daemon publishes a new content size. */
+static struct super_block *s3fs_active_sb;
+
+static struct s3fs_admit *admit_lookup_locked(u64 ino)
+{
+	struct s3fs_admit *a;
+
+	hash_for_each_possible(s3fs_admits, a, node, ino)
+		if (a->ino == ino)
+			return a;
+	return NULL;
+}
+
+static void admit_clear_locked(void)
+{
+	struct s3fs_admit *a;
+	struct hlist_node *tmp;
+	unsigned int i;
+
+	hash_for_each_safe(s3fs_admits, i, tmp, a, node) {
+		hash_del(&a->node);
+		kfree(a);
+	}
+}
+
+int s3fs_ebpf_admit_replace(struct mm_struct *mm,
+			    const struct s3fs_admit_entry *entries,
+			    u32 count)
+{
+	struct s3fs_admit **staged = NULL;
+	struct mm_struct *prev_mm;
+	u32 i;
+	int err = 0;
+
+	if (count && (!entries || !mm))
+		return -EINVAL;
+
+	for (i = 0; i < count; i++) {
+		u64 end;
+
+		if (check_add_overflow(entries[i].uaddr,
+				       entries[i].size, &end))
+			return -EINVAL;
+	}
+
+	if (count) {
+		staged = kcalloc(count, sizeof(*staged), GFP_KERNEL);
+		if (!staged)
+			return -ENOMEM;
+		for (i = 0; i < count; i++) {
+			staged[i] = kmalloc(sizeof(*staged[i]), GFP_KERNEL);
+			if (!staged[i]) {
+				err = -ENOMEM;
+				goto out_free_staged;
+			}
+			INIT_HLIST_NODE(&staged[i]->node);
+			staged[i]->ino = entries[i].ino;
+			staged[i]->uaddr = entries[i].uaddr;
+			staged[i]->size = entries[i].size;
+		}
+	}
+
+	spin_lock(&s3fs_admits_lock);
+	admit_clear_locked();
+	for (i = 0; i < count; i++)
+		hash_add(s3fs_admits, &staged[i]->node, staged[i]->ino);
+	prev_mm = s3fs_admitted_mm;
+	s3fs_admitted_mm = count ? mm : NULL;
+	spin_unlock(&s3fs_admits_lock);
+
+	kfree(staged); /* array itself; nodes now live in the hash */
+	staged = NULL;
+
+	if (prev_mm)
+		mmput(prev_mm);
+
+	if (s3fs_active_sb) {
+		for (i = 0; i < count; i++) {
+			struct inode *inode = ilookup(s3fs_active_sb,
+						      entries[i].ino);
+			if (!inode)
+				continue;
+			i_size_write(inode, entries[i].size);
+			iput(inode);
+		}
+	}
+	return 0;
+
+out_free_staged:
+	while (i--)
+		kfree(staged[i]);
+	kfree(staged);
+	return err;
+}
+
+void s3fs_ebpf_admit_shutdown(void)
+{
+	struct mm_struct *prev;
+
+	spin_lock(&s3fs_admits_lock);
+	admit_clear_locked();
+	prev = s3fs_admitted_mm;
+	s3fs_admitted_mm = NULL;
+	spin_unlock(&s3fs_admits_lock);
+
+	if (prev)
+		mmput(prev);
+}
 
 static const struct s3fs_entry *find_entry(const struct qstr *qname)
 {
@@ -153,21 +297,95 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 
 /* -- File ops (regular files) --------------------------------------------- */
 
+/*
+ * Serve a read out of the admitted user_vm range via GUP + kmap.
+ * Caller has copied (uaddr, size) out of the admit table under lock
+ * and dropped it; mm is a raw pointer whose lifetime is guaranteed by
+ * the reference kmod holds while the admit table is non-empty.
+ *
+ * PoC scope: single-page reads. All demo objects are <= PAGE_SIZE and
+ * daemon-side arena writes never span pages, so a one-page pin
+ * suffices. If a request straddles a page boundary we clamp to what
+ * fits in the first page; the caller (VFS) will call again for the
+ * remainder.
+ */
+static ssize_t s3fs_admit_read(struct mm_struct *mm,
+			       u64 uaddr, u64 asize,
+			       char __user *user_buf,
+			       size_t count, loff_t *pos)
+{
+	struct page *page = NULL;
+	long pinned;
+	void *kva;
+	u64 abs_uaddr;
+	unsigned long page_offset;
+	size_t max_in_page;
+	ssize_t ret;
+
+	if ((u64)*pos >= asize)
+		return 0;
+
+	abs_uaddr   = uaddr + (u64)*pos;
+	page_offset = abs_uaddr & (PAGE_SIZE - 1);
+	max_in_page = PAGE_SIZE - page_offset;
+
+	ret = min_t(size_t, count, asize - (u64)*pos);
+	ret = min_t(size_t, ret, max_in_page);
+
+	pinned = pin_user_pages_remote(mm, abs_uaddr & PAGE_MASK, 1,
+				       0 /* read-only */, &page, NULL);
+	if (pinned != 1)
+		return pinned < 0 ? pinned : -EFAULT;
+
+	kva = kmap_local_page(page);
+	if (copy_to_user(user_buf, (u8 *)kva + page_offset, ret))
+		ret = -EFAULT;
+	kunmap_local(kva);
+
+	unpin_user_pages(&page, 1);
+	if (ret > 0)
+		*pos += ret;
+	return ret;
+}
+
 static ssize_t s3fs_ebpf_file_read(struct file *file, char __user *user_buf,
 				   size_t count, loff_t *pos)
 {
 	struct inode *inode = file_inode(file);
-	struct s3fs_file_data *fd = inode->i_private;
+	struct s3fs_file_data *fd;
+	struct s3fs_admit *admit;
+	struct mm_struct *mm = NULL;
+	u64 uaddr = 0;
+	u64 asize = 0;
 	ssize_t ret;
 
+	if (*pos < 0)
+		return -EINVAL;
+
+	/*
+	 * Fast path: if the daemon has admitted this ino, serve out of
+	 * its arena mmap via GUP. Copy the (uaddr, size) tuple under the
+	 * spinlock and grab the mm pointer; the mm reference held by
+	 * kmod keeps it alive across the actual pin/kmap/copy.
+	 */
+	spin_lock(&s3fs_admits_lock);
+	admit = admit_lookup_locked(inode->i_ino);
+	if (admit) {
+		uaddr = admit->uaddr;
+		asize = admit->size;
+		mm = s3fs_admitted_mm;
+	}
+	spin_unlock(&s3fs_admits_lock);
+
+	if (mm)
+		return s3fs_admit_read(mm, uaddr, asize, user_buf, count, pos);
+
+	/* Fallback: per-inode kmalloc scratch buffer. */
+	fd = inode->i_private;
 	if (!fd)
 		return -EIO;
 
 	mutex_lock(&fd->lock);
-	if (*pos < 0) {
-		ret = -EINVAL;
-		goto out;
-	}
 	if ((size_t)*pos >= fd->size) {
 		ret = 0;
 		goto out;
@@ -370,10 +588,17 @@ static void s3fs_ebpf_evict_inode(struct inode *inode)
 	}
 }
 
+static void s3fs_ebpf_put_super(struct super_block *sb)
+{
+	if (s3fs_active_sb == sb)
+		s3fs_active_sb = NULL;
+}
+
 static const struct super_operations s3fs_ebpf_super_ops = {
 	.statfs		= simple_statfs,
 	.drop_inode	= generic_delete_inode,
 	.evict_inode	= s3fs_ebpf_evict_inode,
+	.put_super	= s3fs_ebpf_put_super,
 };
 
 static const struct inode_operations s3fs_ebpf_dir_iops = {
@@ -418,5 +643,8 @@ int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (!sb->s_root)
 		return -ENOMEM;
 
+	/* Single-mount PoC: remember the sb so admit_replace can walk
+	 * cached inodes and refresh their i_size. Cleared in put_super. */
+	s3fs_active_sb = sb;
 	return 0;
 }

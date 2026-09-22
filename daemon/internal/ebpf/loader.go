@@ -58,8 +58,9 @@ type TestArgs struct {
 // the demo path load its own program by name.
 type runtimeObjs struct {
 	// Programs.
-	S3fsFpGetattr  *ebpf.Program `ebpf:"s3fs_fp_getattr"`
-	S3fsTestShared *ebpf.Program `ebpf:"s3fs_test_shared"`
+	S3fsFpGetattr     *ebpf.Program `ebpf:"s3fs_fp_getattr"`
+	S3fsTestShared    *ebpf.Program `ebpf:"s3fs_test_shared"`
+	S3fsArenaPrealloc *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 
 	// Maps.
 	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
@@ -70,7 +71,7 @@ type runtimeObjs struct {
 
 func (o *runtimeObjs) Close() error {
 	return _S3fsfpClose(
-		o.S3fsFpGetattr, o.S3fsTestShared,
+		o.S3fsFpGetattr, o.S3fsTestShared, o.S3fsArenaPrealloc,
 		o.S3fsArena, o.S3fsCounters, o.S3fsEvents, o.S3fsInodeIndex,
 	)
 }
@@ -293,6 +294,38 @@ func (p *Programs) WarmCache(stub InodeStub) (uint32, error) {
 // ErrCacheFull signals the arena has no more slots for InodeStubs.
 var ErrCacheFull = errors.New("arena cache full")
 
+// AdmitContent writes `data` into the arena at the next free slot and
+// returns its byte offset. Intended for the Week 4 (a) admit-arena
+// ioctl: kmod's .read serves these bytes directly out of the arena
+// page instead of from a per-inode kmalloc buffer. Shares the same
+// bump allocator as WarmCache; callers should call WarmCache first if
+// they want stubs at low offsets and content behind them.
+func (p *Programs) AdmitContent(data []byte) (uint32, error) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+
+	arenaSize := p.arena.Size()
+	nextOff := p.cacheNextOff
+	if uint64(nextOff)+uint64(len(data)) > uint64(arenaSize) {
+		return 0, ErrCacheFull
+	}
+	if len(data) > 0 {
+		if _, err := p.arena.WriteAt(data, int64(nextOff)); err != nil {
+			return 0, fmt.Errorf("arena write content: %w", err)
+		}
+	}
+	off := nextOff
+	p.cacheNextOff = nextOff + uint32(len(data))
+	return off, nil
+}
+
+// ArenaFD returns the file descriptor of the underlying arena map.
+// Used by the daemon to hand kmod an arena reference over the
+// /dev/s3fs_ebpf admit-arena ioctl.
+func (p *Programs) ArenaFD() int {
+	return p.arena.Map.FD()
+}
+
 // IsWarmed reports whether ino has already been admitted to the cache.
 // Callers use this to short-circuit an S3 round-trip when a burst of
 // queued miss events all reference the same ino (the ringbuf drains
@@ -348,6 +381,33 @@ func (p *Programs) RunTestShared(in TestArgs) (TestArgs, uint32, error) {
 		return TestArgs{}, 0, fmt.Errorf("BPF_PROG_TEST_RUN: %w", err)
 	}
 	return out, ret, nil
+}
+
+// PreallocArenaPages runs the SEC("syscall") wrapper around
+// bpf_arena_alloc_pages so both user_vm and kern_vm PTEs get
+// populated for `pages` pages pinned at user_vm_start. Returning
+// without error means kmod's kern_vm reads on those pages will no
+// longer EFAULT.
+func (p *Programs) PreallocArenaPages(pages uint32) error {
+	if pages == 0 {
+		return nil
+	}
+	in := TestArgs{
+		ArenaBaseUaddr: p.arena.BaseAddr(),
+		Idx:            pages,
+	}
+	out := TestArgs{}
+	ret, err := p.Objs.S3fsArenaPrealloc.Run(&ebpf.RunOptions{
+		Context:    in,
+		ContextOut: &out,
+	})
+	if err != nil {
+		return fmt.Errorf("arena prealloc %d pages: %w", pages, err)
+	}
+	if int32(ret) != 0 {
+		return fmt.Errorf("arena prealloc returned %d (out_ino=0x%x)", int32(ret), out.OutIno)
+	}
+	return nil
 }
 
 // Close releases all loaded programs, maps, and the arena mmap.
