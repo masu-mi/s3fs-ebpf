@@ -46,6 +46,8 @@ Commands:
   probe-kvbase Week 4 (a) spike: create an arena, ioctl(/dev/s3fs_ebpf,
                S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, print
                it alongside the user-VM base for comparison
+  microbench   Week 4 (e): tight-loop stat/read latency on a target path,
+               reports min/p50/p95/p99/max (no fork/exec overhead)
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
 `
@@ -79,6 +81,8 @@ func main() {
 		os.Exit(runS3Stat(args))
 	case "probe-kvbase":
 		os.Exit(runProbeKvbase(args))
+	case "microbench":
+		os.Exit(runMicrobench(args))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
