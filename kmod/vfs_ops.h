@@ -22,4 +22,18 @@ int  s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			     u32 count);
 void s3fs_ebpf_admit_shutdown(void);
 
+/*
+ * Read-miss upcall API — daemon-facing side.
+ * s3fs_read_miss_dequeue removes the head event (blocking or
+ * non-blocking) and copies it out. s3fs_read_miss_poll bridges the
+ * miscdevice .poll to the internal waitqueue. signal_admit wakes a
+ * pending .read waiter.
+ */
+struct file;
+struct poll_table_struct;
+ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
+			       bool nonblocking);
+__poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt);
+int s3fs_ebpf_signal_admit(u64 ino, int err);
+
 #endif /* _S3FS_EBPF_VFS_OPS_H */

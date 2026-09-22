@@ -21,6 +21,7 @@
 #include <linux/mm.h>
 #include <linux/mm_types.h>
 #include <linux/module.h>
+#include <linux/poll.h>
 #include <linux/sched/mm.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
@@ -162,6 +163,21 @@ out_put_mm:
 	return err;
 }
 
+/*
+ * S3FS_IOC_SIGNAL_ADMIT — daemon → kmod completion signal for a
+ * previously enqueued read-miss. `err` is written into the pending
+ * entry before completion; 0 means "admit table now has this ino,
+ * please retry".
+ */
+static long s3fs_dev_signal_admit(void __user *uarg)
+{
+	struct s3fs_signal_admit sig;
+
+	if (copy_from_user(&sig, uarg, sizeof(sig)))
+		return -EFAULT;
+	return s3fs_ebpf_signal_admit(sig.ino, sig.err);
+}
+
 static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	void __user *uarg = (void __user *)arg;
@@ -171,15 +187,47 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_probe_kvbase(uarg);
 	case S3FS_IOC_ADMIT_ARENA:
 		return s3fs_dev_admit_arena(uarg);
+	case S3FS_IOC_SIGNAL_ADMIT:
+		return s3fs_dev_signal_admit(uarg);
 	default:
 		return -ENOTTY;
 	}
+}
+
+/*
+ * .read on /dev/s3fs_ebpf drains read-miss events one at a time.
+ * Each read call must provide a buffer at least sizeof(event) bytes;
+ * short buffers get -EINVAL rather than partial events (event
+ * atomicity is easier to reason about than framing over a stream).
+ */
+static ssize_t s3fs_dev_read(struct file *filp, char __user *buf,
+			     size_t count, loff_t *ppos)
+{
+	struct s3fs_read_miss_event ev;
+	ssize_t n;
+
+	if (count < sizeof(ev))
+		return -EINVAL;
+
+	n = s3fs_read_miss_dequeue(&ev, filp->f_flags & O_NONBLOCK);
+	if (n < 0)
+		return n;
+	if (copy_to_user(buf, &ev, sizeof(ev)))
+		return -EFAULT;
+	return sizeof(ev);
+}
+
+static __poll_t s3fs_dev_poll(struct file *filp, struct poll_table_struct *pt)
+{
+	return s3fs_read_miss_poll(filp, pt);
 }
 
 static const struct file_operations s3fs_ebpf_dev_fops = {
 	.owner		= THIS_MODULE,
 	.unlocked_ioctl	= s3fs_dev_ioctl,
 	.compat_ioctl	= s3fs_dev_ioctl,
+	.read		= s3fs_dev_read,
+	.poll		= s3fs_dev_poll,
 	.llseek		= noop_llseek,
 };
 

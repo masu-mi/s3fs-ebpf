@@ -322,18 +322,21 @@ func runFastpath(args []string) int {
 	// S3 we reflect real object metadata (size, mtime) and — the
 	// point of Week 4 (a) — copy the object body into the arena so
 	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
-	admits := prewarm(context.Background(), progs, s3c)
-	if len(admits) > 0 {
-		if err := admitArena(*dev, admits); err != nil {
-			fmt.Fprintf(os.Stderr, "[admit] %v — kmod fallback (kmalloc scratch) still works\n", err)
-		} else {
-			fmt.Printf("[admit] %d entries via %s\n", len(admits), *dev)
-			defer func() {
-				if err := admitArena(*dev, nil); err != nil {
-					fmt.Fprintf(os.Stderr, "[admit clear] %v\n", err)
-				}
-			}()
-		}
+	initialAdmits := prewarm(context.Background(), progs, s3c)
+	if err := setAdmits(*dev, initialAdmits); err != nil {
+		fmt.Fprintf(os.Stderr, "[admit] %v — kmod fallback (kmalloc scratch) still works\n", err)
+	} else {
+		fmt.Printf("[admit] %d entries via %s\n", len(initialAdmits), *dev)
+		defer func() {
+			if err := clearAdmits(*dev); err != nil {
+				fmt.Fprintf(os.Stderr, "[admit clear] %v\n", err)
+			}
+		}()
+
+		// Read-miss upcall reader: services `cat` on any admitted
+		// entry with Prewarm=false, or any ino kmod knows about
+		// that daemon hasn't warmed yet.
+		go runReadMissLoop(ctx, *dev, progs, s3c)
 	}
 
 	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
@@ -386,6 +389,11 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) []admi
 
 	admits := make([]admitEntry, 0, len(fpebpf.Entries))
 	for _, entry := range fpebpf.Entries {
+		if !entry.Prewarm {
+			fmt.Printf("[prewarm] ino=%d name=%s skipped (waits for read-miss upcall)\n",
+				entry.Ino, entry.Name)
+			continue
+		}
 		stub := fpebpf.InodeStub{
 			Ino:     entry.Ino,
 			Size:    entry.Fallback,

@@ -311,9 +311,134 @@ wc -c /mnt/s3demo/hello.txt   # 17
 
 ## 9. 残タスク
 
-- **Week 4 (a) C**: read miss upcall (未 admit ino への read → daemon fetch → admit → retry)。設計は `docs/read-path-design.md` の §3 に集約
+- **Week 4 (a) C**: ✅ 完成 (§10 参照)
 - **Week 4 (b)**: dynamic bucket sync。admit ioctl のチャネルを再利用して kmod entry table を runtime 更新
 - **Week 4 (c)**: write-back to S3
 - **Week 4 (d)**: Lua/WASM policy engine
 - **Week 4 (e)**: benchmark。s3fs-fuse / Mountpoint との `stat` + `cat` latency 比較
 - **D (upstream patch)**: `bpf_arena_get_kern_vm_start` の EXPORT_SYMBOL_GPL、または kern_vm range 用 fault handler の追加。当てれば A′ 経路が復活し、B の GUP overhead が消える (数百ns オーダーの改善見込み)
+
+---
+
+## 10. Path C (read upcall) 実装で踏んだ点
+
+Path C の設計は `docs/read-path-design.md §3` にある。ここでは実装中に踏んだ地雷だけを残す。
+
+### 10.1 `pin_user_pages_remote` の lockdep WARN
+
+**症状:** B で使っていた `pin_user_pages_remote(mm, addr, 1, 0, &page, NULL)` を C の同じ path でも呼んだら (実際は C 経由で admit された ino を .read するときに B path を通るので同じ関数) dmesg に WARN のスタックトレースが出る:
+
+```
+WARNING: CPU: 2 PID: ... at include/linux/rwsem.h:80 __gup_longterm_locked+0x7d3/0x9f0
+Call Trace:
+ pin_user_pages_remote+0x73/0xf0
+ s3fs_admit_read+0xa1/0x170 [s3fs_kfunc]
+ s3fs_ebpf_file_read+0x3a2/0x5a0 [s3fs_kfunc]
+ vfs_read+0xf6/0x390
+```
+
+**原因:** 6.12 の `pin_user_pages_remote` は `mmap_read_lock(mm)` が既に取られていることを前提にする内部 assert が入っている。ドキュメント (kernel-doc および LWN の解説) は「internally handles locking」と書いてあるが実態は違う。`locked` out-parameter を NULL にした場合も、内部の `int local_locked = 1;` (「lock 済」を意味する) と共に下位関数へ渡されるので、lock を取っていないと WARN する。
+
+**対策 (`kmod/vfs_ops.c: s3fs_admit_read`):**
+
+```c
+int locked = 1;
+mmap_read_lock(mm);
+pinned = pin_user_pages_remote(mm, abs_uaddr & PAGE_MASK, 1,
+                                0 /* read-only */, &page, &locked);
+if (locked)
+    mmap_read_unlock(mm);
+```
+
+- `mmap_read_lock` を明示取得
+- `locked` を out-parameter として渡す。関数内部で drop + reacquire されうるので、返り値見て自分で unlock
+- 一発目の smoke で WARN 消失を確認 (dmesg | grep WARN が空)
+
+### 10.2 `admit_arena` ioctl の replace-all semantics
+
+**症状:** C の upcall handler で `admitArena(devPath, []admitEntry{{Ino: 103, ...}})` と 1 件だけ渡したら、既に prewarm 済の 100/101/102 が **消えた**。
+
+**原因:** kmod 側 `s3fs_ebpf_admit_replace` が **table 全置換** semantics だった。`hash_clear + hash_add for each entry` なので、`count=1` で呼ぶと過去の hash entries が消える。
+
+**対策 (`daemon/cmd/s3fs-ebpf/admit_arena.go`):** daemon 側で source of truth を持ち、常に全 snapshot を送る:
+
+```go
+var admits []admitEntry
+var admitMu sync.Mutex
+
+func addAdmit(devPath string, entry admitEntry) error {
+    admitMu.Lock()
+    admits = append(admits, entry)
+    snap := append([]admitEntry(nil), admits...)
+    admitMu.Unlock()
+    return admitArena(devPath, snap)
+}
+```
+
+- `setAdmits` (初期化)、`addAdmit` (追加)、`clearAdmits` (全消し) の 3 API に整理
+- kmod ioctl 側は現状のまま (replace-all のシンプルな semantics を維持)
+- 別案: `S3FS_IOC_APPEND_ARENA` ioctl を切って kmod 側で merge する。将来的にはこちらが素直だが、PoC scope で daemon-side 管理を選んだ
+
+### 10.3 pending completion の refcount lifecycle
+
+**症状:** 同 ino に複数 read が並行して届いたとき、pending entry を「共有する」か「個別に作る」かで挙動が変わる。個別だと event queue に同じ ino の miss event が何度も積まれて daemon が S3 Get を重複実行する。
+
+**対策 (`kmod/vfs_ops.c`):** `refcount_t` ベースの共有:
+
+```c
+struct s3fs_pending {
+    struct hlist_node node;
+    u64 ino;
+    struct completion done;
+    int err;
+    refcount_t refs;
+};
+
+static struct s3fs_pending *pending_get_or_create(u64 ino) {
+    /* Lookup + refcount_inc, or allocate with refcount=2 (hash + caller) */
+    ...
+}
+
+static void pending_put(struct s3fs_pending *p) {
+    if (refcount_dec_and_test(&p->refs)) kfree(p);
+}
+
+static void pending_unhash(struct s3fs_pending *p) {
+    /* hash_del + pending_put; called once by SIGNAL_ADMIT */
+    ...
+}
+```
+
+- 2 度目以降の miss は既存 pending にぶら下がる → daemon への miss event は 1 回だけ
+- `complete_all` (not `complete`) を使うので待機中の全 read が一斉に起きる
+- `signal_admit` が hash から抜いて 1 つ ref を落とす、待機側は自身の ref を drop
+
+### 10.4 char dev の event stream 設計判断
+
+**なぜ BPF ringbuf を使わなかったか:** BPF ringbuf は BPF program 側が `bpf_ringbuf_reserve/submit` で書く前提。kmod から直接書く場合は `__bpf_ringbuf_reserve` を呼ぶ必要があるが、これは export されていない可能性が高い (未確認)。仮に呼べても、arena namespace / verifier context の複雑さが増す。
+
+**採用した方式:** `/dev/s3fs_ebpf` の `.read` と `.poll` を miscdevice fops に配線 → 内部に `LIST_HEAD` + `wait_queue_head` を持ち、`s3fs_read_miss_dequeue` で 1 event 単位で drain。daemon 側は `os.File.Read` を loop するだけ。
+
+**利点:**
+- 完全に BPF から独立、標準 Linux miscdevice API のみ
+- daemon は `select(2)` / `poll(2)` が使える (Go の runtime も自然に対応)
+- 追加チャネル (netlink socket etc.) を張るより 1 char dev で ioctl/read/poll 全部済む
+
+### 10.5 daemon shutdown 時の未 completion pending
+
+**症状:** daemon が SIGINT で落ちるとき、kmod にまだ待機中の pending がある可能性 (upcall event を送ったが daemon が読む前 or 処理中に SIGINT)。
+
+**対策 (`kmod/vfs_ops.c: s3fs_ebpf_upcall_shutdown`):** admit clear と同じタイミングで pending 全部を `-ESHUTDOWN` で `complete_all`。待機中の `.read` は syscall から `-ESHUTDOWN` (`-108`) を返す。cat の場合はこれを EIO 相当として扱う。実用的にはこの状況は「daemon が死んだので cat も失敗」で許容範囲。
+
+- `s3fs_ebpf_admit_shutdown` から `s3fs_ebpf_upcall_shutdown` を呼ぶ形で lifecycle 統合
+- daemon 再起動時に stale な pending が残らない
+
+### 10.6 実測 timing
+
+| ケース | 経路 | 実測 time cat |
+|---|---|---|
+| prewarm 済 hello.txt (2 回目以降) | B: admit hit → GUP | ~0.001s |
+| unadmitted lazy.txt (初回) | C: miss → daemon Get → admit → retry → GUP | ~30ms (MinIO on localhost) |
+| unadmitted lazy.txt (2 回目) | B: admit hit → GUP | ~0.001s |
+
+C 初回に load される 30ms のほぼ全部は S3 Get の RTT。upcall + admit + signal のコード自体のオーバーヘッドは実質ゼロに近い (dmesg / daemon log の flush 時間で見えない)。
