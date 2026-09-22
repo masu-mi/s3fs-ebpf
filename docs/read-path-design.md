@@ -10,10 +10,10 @@ s3fs-ebpf における「kmod の `.read` が daemon が用意した実データ
 |---|---|---|---|---|---|
 | A′ | mount option + kmod が arena kern_vm 直参照 | ❌ 断念 | ○ | 最強 (design.md §2 直結) | 中 (だが kernel 内部依存で fragile) |
 | **B** | kmod が daemon user_vm を GUP + kmap 経由 read | **✅ 実装済** | ○ (物理 page 共有) | 強 | 小 |
-| C | kmod read miss → daemon upcall → daemon が S3/arena fetch → admit → kmod retry | 📝 設計スケッチ | △ (fetch は copy 経由) | 中 (Slow Path 完成) | 中 |
+| **C** | kmod read miss → daemon upcall → daemon が S3 fetch → admit → kmod 待機解除 | **✅ 実装済** | ○ (admit 後は B 経路で読む) | 強 (Slow Path 完成) | 中 |
 | D | upstream に patch を投げて A′ を復活 | 📝 提案 | ◎ (JIT 直参照相当) | 最強 + 上流貢献 | 大 (kernel rebuild + upstream review) |
 
-**現状の推奨**: B が primary、C は Slow Path として補完、D は Meetup 後に upstream 貢献として検討。
+**現状の構成**: B が prewarm 済 ino の Fast Path、C が未 admit ino への on-demand fetch (Slow Path)、fallback が daemon 不在時の kmod compile-time initial_content。D は Meetup 後の upstream 貢献候補。
 
 ---
 
@@ -207,7 +207,7 @@ s3fs_ebpf: admit cleared         ← daemon SIGINT 後
 
 ---
 
-## 3. Path C (deferred) — read miss upcall
+## 3. Path C (implemented) — read miss upcall
 
 ### 動機
 
@@ -262,7 +262,108 @@ kmod                          daemon               ─────────�
 - daemon が admit したら completion 発火
 - **一番真面目な設計** だが実装工数大、PoC の scope 外
 
-**推奨**: **(b) completion wait** を実装。透過性が上がる代わりに実装は 100 行程度。既存 admit ioctl + BPF ringbuf infrastructure で足りる (新規 kernel API 不要)。
+**採用**: **(b) completion wait**。透過的で `cat` から見て 1 発成功。BPF ringbuf ではなく **/dev/s3fs_ebpf の `.read` で miss event を直接ストリーム** する方式にした (BPF ringbuf は BPF program が書く前提で、kmod からの書き込みは非自明だったため)。
+
+### 実装した仕組み
+
+```text
+                                    [1] cat unadmitted ino
+kmod                          daemon
+─────────────                 ──────
+                                                   ┌──── VFS
+.read(inode, ...)                                  │
+  admit lookup → miss                              │
+  pending_get_or_create(ino)                       │
+  miss_enqueue(ino, off, count) ─┐                 │
+  wait_for_completion(2s)         └─►  poll(fd, POLLIN) → read(fd, &ev)
+                                       LookupByIno(ev.Ino) → S3Key
+                                       body := s3c.Get(S3Key)
+                                       AdmitContent(body) → arena offset
+                                       addAdmit(...) → full-table replace ioctl
+                                       signalAdmit(ino, 0)  ─┐
+              ◄──────────────────────────────────────────────┘
+  complete_all(&pending->done)
+  retry admit_snapshot → hit → GUP + kmap → copy_to_user
+```
+
+### 実装した API (最終形)
+
+**UAPI (`include/s3fs_ebpf_uapi.h`)**:
+
+```c
+/* Char dev .read で 1 event ずつ流れてくる */
+struct s3fs_read_miss_event {
+    __u64 ino;
+    __s64 offset;
+    __u32 count;
+    __u32 _pad;
+};
+
+struct s3fs_signal_admit {
+    __u64 ino;
+    __s32 err;   /* 0=OK, negative errno on failure */
+    __u32 _pad;
+};
+
+#define S3FS_IOC_SIGNAL_ADMIT _IOW(S3FS_IOC_MAGIC, 0x03, struct s3fs_signal_admit)
+```
+
+**kmod (`kmod/vfs_ops.c`)**:
+
+- `struct s3fs_pending` + `DEFINE_HASHTABLE(s3fs_pending, 4)` — refcounted completion per ino
+- `struct s3fs_miss_node` FIFO + `DECLARE_WAIT_QUEUE_HEAD(s3fs_miss_wq)` — event stream
+- `.read` の miss branch: `pending_get_or_create` → `miss_enqueue` → `wait_for_completion_interruptible_timeout(2*HZ)` → retry
+- `s3fs_ebpf_signal_admit(ino, err)` — SIGNAL_ADMIT ioctl handler が呼ぶ、`complete_all` + `pending_unhash`
+- `s3fs_ebpf_upcall_shutdown` — daemon 消失 / module unload 時に全 pending を `-ESHUTDOWN` で叩き起こす
+
+**miscdevice (`kmod/s3fs_ebpf_dev.c`)**:
+
+- `.read` = `s3fs_dev_read` → 内部で `s3fs_read_miss_dequeue`
+- `.poll` = `s3fs_dev_poll` → wait queue に register
+- `.unlocked_ioctl` に `S3FS_IOC_SIGNAL_ADMIT` を追加
+
+**daemon (`daemon/cmd/s3fs-ebpf/admit_arena.go`)**:
+
+- `runReadMissLoop(ctx, devPath, progs, s3c)` — goroutine、`/dev/s3fs_ebpf` を `os.Read` で drain
+- `handleReadMiss(ev)` — `LookupByIno` → `s3c.Get` → `AdmitContent` → `addAdmit` → `signalAdmit`
+- `admits []admitEntry` + `admitMu sync.Mutex` — daemon-side source of truth (kmod ioctl は「replace-all」semantics なので add 毎に全 snapshot を送る)
+- `setAdmits` / `addAdmit` / `clearAdmits` の 3 API で lifecycle 統一
+
+**daemon Entry 拡張 (`daemon/internal/ebpf/entries.go`)**:
+
+- `Prewarm bool` field 追加。false のエントリは起動時 skip → C 経路で on-demand 取得
+- `LookupByIno(ino)` — upcall handler が S3Key 解決に使う
+- lazy.txt (ino=103, Prewarm=false) を demo として追加
+
+### smoke test (2026-09-22 実測)
+
+```
+$ sudo insmod kmod/s3fs_kfunc.ko && sudo mount -t s3fs_ebpf none /mnt/s3demo
+$ sudo ./bin/s3fs-ebpf fastpath --s3 &
+    [prewarm] ino=100/101/102 → admit
+    [prewarm] ino=103 name=lazy.txt skipped (waits for read-miss upcall)
+    [admit] 3 entries via /dev/s3fs_ebpf
+
+$ cat /mnt/s3demo/lazy.txt
+lazy loaded from S3            ← C 経由で S3 の実バイト
+                                daemon log:
+                                    [upcall] miss ino=103 offset=0 count=131072
+                                    [upcall] ino=103 lazy.txt admitted 19 bytes
+
+$ time cat /mnt/s3demo/lazy.txt
+lazy loaded from S3
+cat  0.00s user 0.00s system 89% cpu 0.001 total   ← 2 発目は B 経路 (admit 済)
+
+$ sudo pkill -INT -f 's3fs-ebpf fastpath'
+$ cat /mnt/s3demo/lazy.txt
+(not fetched yet)              ← daemon 落ちたら kmod initial fallback
+```
+
+### 実装時の踏み跡 (詳細は week4a-implementation-notes.md §10)
+
+- **`pin_user_pages_remote` の lockdep WARN**: 6.12 では `mmap_read_lock` を明示的に取ってから呼ぶ必要あり (docs は歴史的に "handles locking internally" と書いてあるが実態は違う)
+- **`admit_arena` の replace-all semantics**: kmod ioctl 単体では add できないので daemon 側で全 snapshot を再送する形に。add 用の別 ioctl を切るか、daemon 側で状態を持つかの判断で後者を選択
+- **daemon 側 completion**: pending table は refcount ベースで並行 read が同じ ino で待てる。timeout は 2s に設定 (実運用は S3 latency の p99 に合わせて調整)
 
 ### C の詳細インターフェイス提案
 
@@ -329,23 +430,26 @@ if ev.Op == fpebpf.OpRead {
 }
 ```
 
-### C 実装の見積もり
+### C 実装の実測 (見積もり比)
 
-| 項目 | 変更ファイル | 行数目安 |
-|---|---|---|
-| UAPI 追加 | `include/s3fs_ebpf_uapi.h` | +15 |
-| pending table + wait/signal | `kmod/vfs_ops.c` | +80 |
-| SIGNAL_ADMIT ioctl handler | `kmod/s3fs_ebpf_dev.c` | +25 |
-| ringbuf に read miss event 発火 | `kmod/vfs_ops.c` (bpf helper 経由 or 直接 kmalloc + memcpy) | +30 |
-| daemon consumer 拡張 | `daemon/cmd/s3fs-ebpf/main.go` | +40 |
-| signalAdmit wrapper | `daemon/cmd/s3fs-ebpf/admit_arena.go` | +20 |
-| 合計 | — | ~210 |
+| 項目 | 変更ファイル | 見積 | 実測 |
+|---|---|---|---|
+| UAPI 追加 | `include/s3fs_ebpf_uapi.h` | +15 | +32 |
+| pending table + miss queue + wait/signal | `kmod/vfs_ops.c` | +80 | +190 |
+| 新 ioctl + `.read` / `.poll` 配線 | `kmod/s3fs_ebpf_dev.c` | +25 | +55 |
+| miss event 送出 (char dev 経由に変更、ringbuf 不要) | `kmod/vfs_ops.c` の一部 | +30 | +0 (上に含む) |
+| daemon reader goroutine + handler | `daemon/cmd/s3fs-ebpf/admit_arena.go` | +40 | +115 |
+| signalAdmit / addAdmit / clearAdmits | `daemon/cmd/s3fs-ebpf/admit_arena.go` | +20 | +50 |
+| Entry.Prewarm 追加 + lazy.txt | kmod/vfs_ops.c + daemon/internal/ebpf/entries.go + main.go | — | +40 |
+| 合計 | — | ~210 | ~480 |
 
-### C の未解決検討事項
+見積の 2 倍強。差分の主因は (a) BPF ringbuf 依存を捨てて char dev の read/poll チャネルに切ったので kmod 側の queue 管理コードが増えた、(b) admit の replace-all semantics を吸収する daemon 側の状態管理を追加した。逆に「BPF program 側の変更」は不要になった (kmod 完結)。
 
-- **ringbuf write from kmod**: 通常 ringbuf は BPF program が書く。kmod から直接書く場合、`bpf_ringbuf_output` の kernel-side 実体 (`__bpf_ringbuf_reserve` + `bpf_ringbuf_submit`) が export 済かを確認する必要あり。未 export ならおそらく別チャネル (netlink or 独自 char dev read syscall) が必要
-- **completion table のライフサイクル**: 同 ino に複数 read が並行して来た場合、pending entry を共有すべきか個別に作るか (refcount で共有が正解)
-- **タイムアウト時の挙動**: `-ETIMEDOUT` を返すか、daemon 不在なら kmod fallback (kmalloc) にフォールスルーするか (後者の方が Meetup 訴求は柔らかい)
+### 解消した設計上の懸念
+
+- ~~**ringbuf write from kmod**~~ → 採用せず。/dev/s3fs_ebpf の char dev read で FIFO を drain する方式にしたので、BPF 依存ゼロ、標準 Linux miscdevice API のみで完結
+- ~~**completion table のライフサイクル**~~ → `refcount_t` + `pending_get_or_create` + `pending_unhash` で共有・並行対応。同一 ino への複数 read は 1 つの completion を共有
+- ~~**タイムアウト時の挙動**~~ → 2s timeout で kmalloc fallback にフォールスルー。`cat` から見て「daemon 反応しなかったら kmod 内蔵初期値」で完結、EIO は返さない (透過性優先)
 
 ---
 
@@ -421,4 +525,4 @@ EXPORT_SYMBOL_GPL(bpf_arena_fault_in_range);
 | kernel を触りたくない、依存も減らしたい | B のみで完結、C は運用要件次第 |
 | latency を極限まで削りたい | D (kernel patch) が確定路線 |
 
-**現状の s3fs-ebpf の位置**: **B** が primary、`docs/motivation.md` sprint 上は Week 4 (a) 完了。C は Week 4 の中盤〜終盤、D は Meetup 後の「発表後の tech-debt 返済 & upstream フェーズ」で扱う想定。
+**現状の s3fs-ebpf の位置**: **B + C 実装完了** (2026-09-22)。`docs/motivation.md` sprint 上は Week 4 (a) 完了、実用 FS としての Slow Path も含めて第一段カバー。D は Meetup 後の「発表後の tech-debt 返済 & upstream フェーズ」で扱う想定。

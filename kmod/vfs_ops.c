@@ -23,10 +23,13 @@
  * VFS-facing signature change.
  */
 
+#include <linux/completion.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
 #include <linux/hashtable.h>
 #include <linux/highmem.h>
+#include <linux/jiffies.h>
+#include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/mm_types.h>
 #include <linux/module.h>
@@ -34,6 +37,8 @@
 #include <linux/namei.h>
 #include <linux/overflow.h>
 #include <linux/pagemap.h>
+#include <linux/poll.h>
+#include <linux/refcount.h>
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -41,6 +46,7 @@
 #include <linux/string.h>
 #include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/wait.h>
 
 #include "vfs_ops.h"
 
@@ -61,17 +67,26 @@ struct s3fs_entry {
 static const char hello_content[]  = "hello, s3fs-ebpf\n";       /* 17 bytes */
 static const char world_content[]  = "hello world!\n";           /* 13 bytes */
 static const char models_content[] = "AI weights placeholder\n"; /* 23 bytes */
+static const char lazy_content[]   = "(not fetched yet)\n";      /* 18 bytes */
 
 /*
  * Entry table. Ordered by name (iterate_shared emits in listed order).
  * Update this if the demo bucket contents change; the daemon's
  * pre-warmer keeps an independent mirror until Week 4+ adds a
  * bucket-sync ioctl.
+ *
+ * lazy.txt (ino=103) is intentionally NOT prewarmed by the daemon so
+ * `cat` on it exercises the Week 4 (a) C upcall path: kmod's .read
+ * misses admit → emits a read-miss event → daemon fetches from S3 →
+ * admits → signals → kmod retries → arena bytes returned.
  */
 static const struct s3fs_entry s3fs_entries[] = {
 	{ .name = "hello.txt",          .ino = 100, .mode = S_IFREG | 0644,
 	  .initial_content = hello_content,
 	  .initial_content_size = sizeof(hello_content)  - 1 },
+	{ .name = "lazy.txt",           .ino = 103, .mode = S_IFREG | 0644,
+	  .initial_content = lazy_content,
+	  .initial_content_size = sizeof(lazy_content)   - 1 },
 	{ .name = "models_weights.bin", .ino = 102, .mode = S_IFREG | 0644,
 	  .initial_content = models_content,
 	  .initial_content_size = sizeof(models_content) - 1 },
@@ -204,6 +219,8 @@ out_free_staged:
 	return err;
 }
 
+static void s3fs_ebpf_upcall_shutdown(void); /* forward */
+
 void s3fs_ebpf_admit_shutdown(void)
 {
 	struct mm_struct *prev;
@@ -216,6 +233,223 @@ void s3fs_ebpf_admit_shutdown(void)
 
 	if (prev)
 		mmput(prev);
+
+	/* Same lifecycle: daemon closed / module unloading. Fail any
+	 * blocked readers and drop queued events so nothing survives
+	 * into the next daemon incarnation. */
+	s3fs_ebpf_upcall_shutdown();
+}
+
+/* -- Read-miss upcall: pending completions + event queue ----------------- */
+/*
+ * Two data structures collaborate:
+ *
+ *   s3fs_pending — one entry per ino currently waiting for admit.
+ *                  refcounted so multiple concurrent readers on the
+ *                  same ino share the same completion.
+ *
+ *   s3fs_miss_events — FIFO of read_miss_event drained by the daemon
+ *                      via /dev/s3fs_ebpf's .read.
+ *
+ * .read on an unadmitted ino:  create pending  → enqueue event  →
+ *                              wait_for_completion  → retry admit.
+ * SIGNAL_ADMIT ioctl:          find pending  → complete + err.
+ * Char dev .read (daemon):     pop event head, block if empty.
+ */
+
+struct s3fs_pending {
+	struct hlist_node node;
+	u64 ino;
+	struct completion done;
+	int err;
+	refcount_t refs;
+};
+
+struct s3fs_miss_node {
+	struct list_head link;
+	struct s3fs_read_miss_event ev;
+};
+
+#define S3FS_PENDING_HASH_BITS 4  /* 16 buckets — few concurrent misses */
+
+static DEFINE_HASHTABLE(s3fs_pending, S3FS_PENDING_HASH_BITS);
+static DEFINE_SPINLOCK(s3fs_pending_lock);
+
+static LIST_HEAD(s3fs_miss_events);
+static DEFINE_SPINLOCK(s3fs_miss_lock);
+static DECLARE_WAIT_QUEUE_HEAD(s3fs_miss_wq);
+
+/* Look up an existing pending entry for `ino` and bump its refcount,
+ * or allocate a new one. Caller owns one reference on the returned
+ * entry (must pending_put on the way out). */
+static struct s3fs_pending *pending_get_or_create(u64 ino)
+{
+	struct s3fs_pending *p, *fresh;
+
+	spin_lock(&s3fs_pending_lock);
+	hash_for_each_possible(s3fs_pending, p, node, ino) {
+		if (p->ino == ino) {
+			refcount_inc(&p->refs);
+			spin_unlock(&s3fs_pending_lock);
+			return p;
+		}
+	}
+	spin_unlock(&s3fs_pending_lock);
+
+	fresh = kmalloc(sizeof(*fresh), GFP_KERNEL);
+	if (!fresh)
+		return NULL;
+	INIT_HLIST_NODE(&fresh->node);
+	fresh->ino = ino;
+	fresh->err = 0;
+	init_completion(&fresh->done);
+	refcount_set(&fresh->refs, 2); /* one for hash, one for caller */
+
+	spin_lock(&s3fs_pending_lock);
+	/* Re-check for a racing insert. */
+	hash_for_each_possible(s3fs_pending, p, node, ino) {
+		if (p->ino == ino) {
+			refcount_inc(&p->refs);
+			spin_unlock(&s3fs_pending_lock);
+			kfree(fresh);
+			return p;
+		}
+	}
+	hash_add(s3fs_pending, &fresh->node, ino);
+	spin_unlock(&s3fs_pending_lock);
+	return fresh;
+}
+
+static void pending_put(struct s3fs_pending *p)
+{
+	if (!p || !refcount_dec_and_test(&p->refs))
+		return;
+	kfree(p);
+}
+
+/* Remove pending entry from the hash. Called by SIGNAL_ADMIT after
+ * completing it so subsequent misses on the same ino start fresh. */
+static void pending_unhash(struct s3fs_pending *p)
+{
+	spin_lock(&s3fs_pending_lock);
+	if (!hlist_unhashed(&p->node)) {
+		hash_del(&p->node);
+		spin_unlock(&s3fs_pending_lock);
+		pending_put(p); /* drop the hash's reference */
+		return;
+	}
+	spin_unlock(&s3fs_pending_lock);
+}
+
+static int miss_enqueue(u64 ino, loff_t offset, size_t count)
+{
+	struct s3fs_miss_node *node = kmalloc(sizeof(*node), GFP_KERNEL);
+
+	if (!node)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&node->link);
+	node->ev.ino    = ino;
+	node->ev.offset = offset;
+	node->ev.count  = (u32)min_t(size_t, count, U32_MAX);
+	node->ev._pad   = 0;
+
+	spin_lock(&s3fs_miss_lock);
+	list_add_tail(&node->link, &s3fs_miss_events);
+	spin_unlock(&s3fs_miss_lock);
+	wake_up_interruptible(&s3fs_miss_wq);
+	return 0;
+}
+
+ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
+			       bool nonblocking)
+{
+	struct s3fs_miss_node *node = NULL;
+	int err;
+
+	for (;;) {
+		spin_lock(&s3fs_miss_lock);
+		if (!list_empty(&s3fs_miss_events)) {
+			node = list_first_entry(&s3fs_miss_events,
+						struct s3fs_miss_node, link);
+			list_del(&node->link);
+		}
+		spin_unlock(&s3fs_miss_lock);
+		if (node)
+			break;
+		if (nonblocking)
+			return -EAGAIN;
+		err = wait_event_interruptible(s3fs_miss_wq,
+			!list_empty(&s3fs_miss_events));
+		if (err)
+			return err;
+	}
+
+	*out = node->ev;
+	kfree(node);
+	return sizeof(*out);
+}
+
+__poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt)
+{
+	__poll_t mask = 0;
+
+	poll_wait(filp, &s3fs_miss_wq, pt);
+	spin_lock(&s3fs_miss_lock);
+	if (!list_empty(&s3fs_miss_events))
+		mask |= POLLIN | POLLRDNORM;
+	spin_unlock(&s3fs_miss_lock);
+	return mask;
+}
+
+int s3fs_ebpf_signal_admit(u64 ino, int err)
+{
+	struct s3fs_pending *p, *target = NULL;
+
+	spin_lock(&s3fs_pending_lock);
+	hash_for_each_possible(s3fs_pending, p, node, ino) {
+		if (p->ino == ino) {
+			target = p;
+			refcount_inc(&target->refs);
+			break;
+		}
+	}
+	spin_unlock(&s3fs_pending_lock);
+
+	if (!target)
+		return -ENOENT;
+
+	target->err = err;
+	complete_all(&target->done);
+	pending_unhash(target); /* drops the hash's ref */
+	pending_put(target);    /* drops our probe ref */
+	return 0;
+}
+
+/* Drain state on module unload. */
+static void s3fs_ebpf_upcall_shutdown(void)
+{
+	struct s3fs_pending *p;
+	struct hlist_node *tmp;
+	struct s3fs_miss_node *m, *mnext;
+	unsigned int i;
+
+	/* Fail every pending waiter so they wake up and return. */
+	spin_lock(&s3fs_pending_lock);
+	hash_for_each_safe(s3fs_pending, i, tmp, p, node) {
+		hash_del(&p->node);
+		p->err = -ESHUTDOWN;
+		complete_all(&p->done);
+		pending_put(p);
+	}
+	spin_unlock(&s3fs_pending_lock);
+
+	spin_lock(&s3fs_miss_lock);
+	list_for_each_entry_safe(m, mnext, &s3fs_miss_events, link) {
+		list_del(&m->link);
+		kfree(m);
+	}
+	spin_unlock(&s3fs_miss_lock);
+	wake_up_all(&s3fs_miss_wq);
 }
 
 static const struct s3fs_entry *find_entry(const struct qstr *qname)
@@ -332,8 +566,20 @@ static ssize_t s3fs_admit_read(struct mm_struct *mm,
 	ret = min_t(size_t, count, asize - (u64)*pos);
 	ret = min_t(size_t, ret, max_in_page);
 
-	pinned = pin_user_pages_remote(mm, abs_uaddr & PAGE_MASK, 1,
-				       0 /* read-only */, &page, NULL);
+	/* 6.12 pin_user_pages_remote asserts mmap_read_lock is held on
+	 * entry even when the `locked` out-parameter is NULL. Take it
+	 * ourselves; the function may drop and reacquire, so we only
+	 * unlock if it says we still hold it. */
+	{
+		int locked = 1;
+
+		mmap_read_lock(mm);
+		pinned = pin_user_pages_remote(mm, abs_uaddr & PAGE_MASK, 1,
+					       0 /* read-only */, &page,
+					       &locked);
+		if (locked)
+			mmap_read_unlock(mm);
+	}
 	if (pinned != 1)
 		return pinned < 0 ? pinned : -EFAULT;
 
@@ -348,38 +594,87 @@ static ssize_t s3fs_admit_read(struct mm_struct *mm,
 	return ret;
 }
 
+/* How long a .read waits for a daemon upcall to admit the ino before
+ * giving up and falling back to the compile-time kmalloc buffer. */
+#define S3FS_UPCALL_WAIT_JIFFIES  (2 * HZ)
+
+/* Look up the admit table for `ino`, copying (uaddr, size) and grabbing
+ * the current mm pointer under the spinlock. Returns true on hit. */
+static bool admit_snapshot(u64 ino, u64 *out_uaddr, u64 *out_size,
+			   struct mm_struct **out_mm)
+{
+	struct s3fs_admit *a;
+	bool hit = false;
+
+	spin_lock(&s3fs_admits_lock);
+	a = admit_lookup_locked(ino);
+	if (a) {
+		*out_uaddr = a->uaddr;
+		*out_size  = a->size;
+		*out_mm    = s3fs_admitted_mm;
+		hit = true;
+	}
+	spin_unlock(&s3fs_admits_lock);
+	return hit;
+}
+
 static ssize_t s3fs_ebpf_file_read(struct file *file, char __user *user_buf,
 				   size_t count, loff_t *pos)
 {
 	struct inode *inode = file_inode(file);
 	struct s3fs_file_data *fd;
-	struct s3fs_admit *admit;
 	struct mm_struct *mm = NULL;
+	struct s3fs_pending *pending;
 	u64 uaddr = 0;
 	u64 asize = 0;
+	long remaining;
+	int err;
 	ssize_t ret;
 
 	if (*pos < 0)
 		return -EINVAL;
 
-	/*
-	 * Fast path: if the daemon has admitted this ino, serve out of
-	 * its arena mmap via GUP. Copy the (uaddr, size) tuple under the
-	 * spinlock and grab the mm pointer; the mm reference held by
-	 * kmod keeps it alive across the actual pin/kmap/copy.
-	 */
-	spin_lock(&s3fs_admits_lock);
-	admit = admit_lookup_locked(inode->i_ino);
-	if (admit) {
-		uaddr = admit->uaddr;
-		asize = admit->size;
-		mm = s3fs_admitted_mm;
-	}
-	spin_unlock(&s3fs_admits_lock);
-
-	if (mm)
+	/* Fast path: admit hit → arena via GUP. */
+	if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm)
 		return s3fs_admit_read(mm, uaddr, asize, user_buf, count, pos);
 
+	/* Miss path (C): if a daemon is around, ask it to fetch, wait
+	 * for admit, then retry. Skip when no daemon is bound (no mm
+	 * reference) — that state means the fallback below is the
+	 * intended answer, not a transient wait. */
+	spin_lock(&s3fs_admits_lock);
+	mm = s3fs_admitted_mm;
+	spin_unlock(&s3fs_admits_lock);
+
+	if (mm) {
+		pending = pending_get_or_create(inode->i_ino);
+		if (!pending)
+			goto fallback;
+
+		err = miss_enqueue(inode->i_ino, *pos, count);
+		if (err) {
+			pending_put(pending);
+			goto fallback;
+		}
+
+		remaining = wait_for_completion_interruptible_timeout(
+				&pending->done, S3FS_UPCALL_WAIT_JIFFIES);
+		err = pending->err;
+		pending_put(pending);
+
+		if (remaining < 0)
+			return remaining; /* signal */
+		if (remaining == 0 || err)
+			goto fallback;    /* timeout or daemon-reported error */
+
+		/* Retry: admit should now be populated. If a concurrent
+		 * shutdown snuck in and dropped it we still fall back. */
+		if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm)
+			return s3fs_admit_read(mm, uaddr, asize,
+					       user_buf, count, pos);
+	}
+
+fallback:
 	/* Fallback: per-inode kmalloc scratch buffer. */
 	fd = inode->i_private;
 	if (!fd)

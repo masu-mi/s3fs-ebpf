@@ -75,4 +75,39 @@ struct s3fs_admit_arena {
 #define S3FS_IOC_ADMIT_ARENA \
 	_IOW(S3FS_IOC_MAGIC, 0x02, struct s3fs_admit_arena)
 
+/*
+ * S3FS_IOC_SIGNAL_ADMIT — wake a pending .read waiter.
+ *
+ * The daemon calls this after fetching an unadmitted object from S3
+ * and issuing an admit-arena. kmod's blocked read finds its pending
+ * entry keyed by ino, records the err code, and completes the
+ * waiter. err==0 signals success (the caller should retry the admit
+ * lookup and serve out of the arena page); err<0 propagates the
+ * error to the read syscall.
+ */
+struct s3fs_signal_admit {
+	__u64 ino;
+	__s32 err;
+	__u32 _pad;
+};
+
+#define S3FS_IOC_SIGNAL_ADMIT \
+	_IOW(S3FS_IOC_MAGIC, 0x03, struct s3fs_signal_admit)
+
+/*
+ * Read-miss event stream.
+ *
+ * kmod's .read on an unadmitted ino appends an event of this shape to
+ * an internal FIFO and wakes the char-dev read waitqueue. The daemon
+ * reads /dev/s3fs_ebpf like a stream, one struct per event (short
+ * reads return the current head atomically). O_NONBLOCK is honored;
+ * poll(2) returns POLLIN when at least one event is queued.
+ */
+struct s3fs_read_miss_event {
+	__u64 ino;
+	__s64 offset; /* where the miss was */
+	__u32 count;  /* bytes requested */
+	__u32 _pad;
+};
+
 #endif /* _S3FS_EBPF_UAPI_H */
