@@ -4,7 +4,7 @@
 FUSE を経由せずに Linux VFS へ直接ぶら下がる、次世代 S3 ファイルシステムの PoC。
 Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メモリ、6.9 導入・6.12 で安定）、カーネルモジュール上の **KFunc**（Verifier 制限突破）、**eBPF**（VFS フック）、**Go 製コントロールプレーン** の 4 段構成でメタデータ操作を IPC 0 回で完結させます。
 
-> **Status: Week 2 complete.** Week 1 の `bpf_arena` 疎通に加え、(a) `bpf_addr_space_cast` 経由で BPF から arena を dereference (`make test-arena`)、(b) `fentry/vfs_getattr_nosec` Fast Path で Hit/Miss を per-CPU カウンタ + ringbuf に分別 (`s3fs-ebpf fastpath`)、(c) 純 eBPF での深層 arena 走査が verifier に拒否される様子のライブデモ (`s3fs-ebpf verifier-demo`)、(d) minio-go 経由で MinIO/S3 と会話できる daemon スケルトン (`s3fs-ebpf s3-list` / `s3-stat`) まで揃っています。VFS 実装本体 (kmod の inode 生成 → BPF Fast Path が返す実データ) は Week 3 以降。
+> **Status: Week 3 in progress.** Week 2 の 4 サブトラック (`bpf_addr_space_cast`, `fastpath`, `verifier-demo`, `s3-list/stat`) に続いて Week 3 では kmod が実 inode を materialise し、`ls /mnt/s3demo` に 3 つのシード・オブジェクトが並び、`cat` / `echo >` で read / write が動作、`s3fs-ebpf fastpath [--s3]` の prewarm によって `stat` した瞬間から Fast Path Hit にカウントされます。次は arena 直参照 read (`kmalloc` → arena バッキング) と Lua/WASM policy engine。
 
 ---
 
@@ -272,6 +272,39 @@ stat /mnt/s3demo      # 以降: fast_hits がインクリメントされ ringbuf
 
 **設計上の注意** — fentry フックは kstat を「返さない」（fentry は observe 専用）。実際の getattr レスポンスは kernel module の `inode_operations.getattr` から arena を読んで埋める設計で、その配線は Week 3 (kmod 側の inode 生成) 以降。今の fastpath は Hit/Miss メトリクスと Slow Path キック (ringbuf → daemon → S3 fetch) の 2 役に絞っている。
 
+### Week 3: 実 VFS + fastpath prewarm フルスタック
+
+kmod が 3 つの seed オブジェクト (hello.txt / world.txt / models_weights.bin) を lookup / readdir / read / write できるようになったので、`stat`・`cat`・`echo >` が通常のファイルとして通ります。daemon の fastpath は起動時に seed 全 ino を prewarm するため、**1 発目の `stat` から Fast Path Hit** としてカウントされます。
+
+```bash
+# 1. kmod と mount
+sudo insmod kmod/s3fs_kfunc.ko
+sudo mkdir -p /mnt/s3demo && sudo mount -t s3fs_ebpf none /mnt/s3demo
+
+# 2. VFS 基本動作
+ls -la /mnt/s3demo                          # 3 files
+cat /mnt/s3demo/hello.txt                   # "hello, s3fs-ebpf"
+sudo bash -c 'echo "new content" > /mnt/s3demo/world.txt'
+cat /mnt/s3demo/world.txt                   # "new content"
+
+# 3. Fast Path 完全形 (--s3 で real S3 metadata を反映)
+make compose-up
+sudo ./bin/s3fs-ebpf fastpath --s3 --sample-every=1s
+#   [prewarm] ino=100 name=hello.txt size=16 src=s3://hello.txt → offset=0
+#   [prewarm] ino=102 name=models_weights.bin size=22 src=s3://models/weights.bin → offset=32
+#   [prewarm] ino=101 name=world.txt size=12 src=s3://world.txt → offset=64
+
+# 4. 別 shell で連続 stat → 全部 fast_hits に計上される
+for f in hello.txt world.txt models_weights.bin; do stat /mnt/s3demo/$f > /dev/null; done
+#   [counters/sample] fast_hits=9 slow_misses=0 unknown_fs=...
+```
+
+**現状の制約と Week 4 に持ち越すこと**:
+
+- kmod のファイル内容は per-inode `kmalloc` プール。Week 4 で arena バッキング (KFunc 経由で arena kernel-VM base を取得) に切り替え、BPF Fast Path が「実データを直接返す」形へ
+- kmod の entry table (`s3fs_entries[]`) が compile-time 静的。dynamic bucket sync (ioctl / netlink) は未実装。今の運用は「S3 バケットに `hello.txt` / `world.txt` / `models/weights.bin` を入れておく」規約で成立している
+- `write()` は成功するが S3 write-back は無し (memory-only)。Week 4 の dirty page 追跡 + async upload で対応
+
 ### 統合デモ: miss → S3 fetch → arena populate → 次回 hit
 
 `--s3` を付けると fastpath は miss ringbuf event を消費して S3 metadata を取得し、arena + `s3fs_inode_index` を warmup します。次の `stat` は Fast Path Hit として counter が動きます。
@@ -503,6 +536,10 @@ make readme        # daemon をビルドしてから README.md を再生成
 | **2 (b)** | eBPF Fast Path (`fentry/vfs_getattr_nosec` → hit/miss counter + ringbuf) | ✅ done (`s3fs-ebpf fastpath`) |
 | **2 (c)** | Verifier 拒否デモ | ✅ done (`s3fs-ebpf verifier-demo`) |
 | **2 (d)** | MinIO Slow Path 骨 (minio-go / bucket list & stat) | ✅ done (`s3fs-ebpf s3-list` / `s3-stat`) |
+| **3 (a)** | kmod が seed オブジェクトを VFS に materialise (lookup / readdir / read / write) | ✅ done (`ls` / `cat` / `echo >` が動作) |
+| **3 (b)** | daemon の fastpath 起動時 prewarm (seed 全 ino を arena に admit) | ✅ done (`--s3` で real S3 metadata を反映) |
+| **3 (c)** | file 内容の arena バッキング (現在は kmalloc プール) | pending |
+| **3 (d)** | Lua/WASM policy engine + hot reload | pending |
 | **3** | Lua/WASM ポリシー、CLI `stats` / `policy reload` | pending |
 | **4** | s3fs-fuse / Mountpoint との `stat` レイテンシ比較、Meetup 準備 | pending |
 
