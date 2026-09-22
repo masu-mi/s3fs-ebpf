@@ -308,6 +308,13 @@ func runFastpath(args []string) int {
 	} else {
 		fmt.Printf("[fastpath] s3 backend disabled — misses are reported but not cached\n")
 	}
+
+	// Pre-warm the arena from the kmod seed table so the first stat on
+	// each seeded file hits the Fast Path instead of firing a miss.
+	// Without S3 we fall back to the compile-time seed sizes; with S3
+	// we reflect real object metadata (size, mtime).
+	prewarm(context.Background(), progs, s3c)
+
 	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
 
 	go func() {
@@ -342,6 +349,43 @@ func runFastpath(args []string) int {
 
 	printCounters(progs, "final")
 	return 0
+}
+
+// prewarm seeds the arena + inode_index from the kmod entry table so
+// the first stat on each demo object hits fast_hits. When s3c is nil
+// the compile-time fallback sizes are used; otherwise each seed is
+// resolved to real S3 metadata (size / mtime) before admission.
+func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) {
+	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	for _, seed := range fpebpf.Seeds {
+		stub := fpebpf.InodeStub{
+			Ino:     seed.Ino,
+			Size:    seed.Fallback,
+			MtimeNs: uint64(time.Now().UnixNano()),
+			Mode:    seed.Mode,
+		}
+		source := "fallback"
+		if s3c != nil {
+			meta, err := s3c.Stat(timedCtx, seed.S3Key)
+			if err != nil {
+				fmt.Printf("[prewarm] ino=%d s3://%s stat: %v (using fallback)\n",
+					seed.Ino, seed.S3Key, err)
+			} else {
+				stub.Size = uint64(meta.Size)
+				stub.MtimeNs = uint64(meta.LastModified.UnixNano())
+				source = fmt.Sprintf("s3://%s", seed.S3Key)
+			}
+		}
+		off, err := progs.WarmCache(stub)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[prewarm] ino=%d admit: %v\n", seed.Ino, err)
+			continue
+		}
+		fmt.Printf("[prewarm] ino=%d name=%s size=%d src=%s → offset=%d\n",
+			seed.Ino, seed.Name, stub.Size, source, off)
+	}
 }
 
 // warmFromS3 resolves a miss event through the S3 client and populates

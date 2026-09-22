@@ -305,6 +305,19 @@ func (p *Programs) IsWarmed(ino uint64) bool {
 	return ok
 }
 
+// KnownInos returns a snapshot of all inos currently admitted to the
+// arena cache. Ordering is undefined. Used by CLI subcommands that
+// want to report cache state.
+func (p *Programs) KnownInos() []uint64 {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	out := make([]uint64, 0, len(p.cacheKnown))
+	for ino := range p.cacheKnown {
+		out = append(out, ino)
+	}
+	return out
+}
+
 // ReadCounters returns the aggregated (summed over CPUs) counter value
 // for each StatSlot* index. The returned slice has length StatSlotMax.
 func (p *Programs) ReadCounters() ([]uint64, error) {
