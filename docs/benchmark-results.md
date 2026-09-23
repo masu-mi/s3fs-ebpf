@@ -22,9 +22,37 @@ Week 4 (e) の初回計測記録。Meetup スライドの原資料として、�
 | `perf` CPU time / cat | 187 μs | 240 μs | 1.28× 少ない |
 | `perf` cache-miss / cat | 615 | 1548 | 2.5× 少ない |
 
+**§7 追記 (2026-09-23): s3fs-fuse を `-o use_cache=<dir> -o kernel_cache` で最適化しても**、ebpf-A+C は依然 **cat 2.05〜2.45× 速く、read syscall 245× 速い**。FUSE upcall そのもの (open ごとの getattr) が根本コストとして残るため。詳細 §7。
+
 - **`cat` (実データ read) が圧勝** — s3fs-fuse は毎回 FUSE upcall → S3 access するのでミリ秒台。s3fs-ebpf B は arena に事前 admit 済 → GUP + kmap + copy_to_user だけで μs 台
 - **`stat` は tie** — 両 FS とも in-memory metadata cache に落ちるので kernel-syscall 分の 1〜2 μs が支配的
 - **cold-cache 比較 (drop_caches=3)** は両方 100ms 台で並ぶ。`drop_caches=3` は inode + dentry も飛ばすので、cold の主コストが「path re-lookup + inode 再作成」に移り、FS-side 差分が見えなくなる。純 read-cold なら `drop_caches=1` にすべき (§追試)
+
+---
+
+## 0.5. 大きな Caveat — s3fs-fuse は `-o use_cache=/path -o kernel_cache` を意図的に無効化して測っている
+
+この bench の s3fs-fuse mount は **ローカルディスクキャッシュを一切使わない** 素の構成 (`-o url=... -o use_path_request_style -o passwd_file=... -o allow_other -o uid=... -o gid=... -o umask=0022`)。s3fs-fuse には `-o use_cache=/tmp/s3cache` (local disk staging) と `-o kernel_cache` (VFS page cache の再利用を許可) があり、これらを入れると:
+
+- 2 回目以降の read は **kernel page cache 直ヒット (FUSE upcall さえ発生しない)** → 数 μs 台に落ちる
+- 現行の 5.2 ms/read (small, syscall) と 6.1 ms (cat, wall) の大部分は消える
+- **hot-cache 定常状態での read latency 差は縮まる or 逆転する可能性あり** (s3fs-fuse + kernel_cache は kernel の page cache 直読、s3fs-ebpf B は GUP + kmap + copy_to_user で 3 step)
+
+「s3fs-ebpf > s3fs-fuse」を額面通りにするには **use_cache 無効という前提が要る**。fair な三巴 (raw / with-cache / ebpf) は次回ラウンドで実施予定 (§6.2)。
+
+### 消えない差分 4 軸
+
+しかし use_cache 有効でも s3fs-ebpf B が優位を保つ観点は残る:
+
+| 観点 | s3fs-fuse + use_cache + kernel_cache | s3fs-ebpf B |
+|---|---|---|
+| **first-read latency** | 毎回 S3 → local disk 経由 (cold path 変わらず) | prewarm 済なら初回から arena hit、C 経路でも 30 ms |
+| **cache invalidation** | opportunistic (`stat_cache_expire` に依存)、stale read 可 | daemon が admit を明示制御、consistent |
+| **disk footprint** | working set が local disk を消費 | RAM (arena) のみ、diskless container OK |
+| **CPU 効率 (perf)** | FUSE machinery が kernel-cache path にも context bookkeeping で残る | 純 kmod パス、cache-miss 2.5× 少ない |
+| **policy 拡張性** | daemon 側 C++ ロジックのみ | BPF / (Lua/WASM 予定) で cache decision 差し込み可、verifier-safe |
+
+Meetup narrative は「read latency の絶対値」ではなく **「diskless / consistency / CPU 効率 / policy 拡張性」の 4 軸で FUSE + local cache と差別化する** ほうが持続する。
 
 ---
 
@@ -197,6 +225,75 @@ s3fs-fuse      | cache-miss/op=1548.41  miss%=11.45
 
 ---
 
+## 7. 3-way fair comparison (fuse-raw / fuse-cache / ebpf-A+C)
+
+§0.5 の caveat を数字で埋める。s3fs-fuse を `-o use_cache=<dir> -o kernel_cache -o max_stat_cache_size=100000` で remount した「fuse-cache」を追加、s3fs-ebpf 側にも同格の 2 段キャッシュを実装:
+
+- **A**: daemon の `--cache-dir=<dir>` — `s3.Client.Get()` が local disk を先読み、miss なら S3 GET + local 書き込み (s3fs-fuse の `-o use_cache` 相当)
+- **C**: kmod の `.read_folio` + `.read_iter=generic_file_read_iter` — VFS page cache を経由し、2 回目以降 kmod に落ちない (s3fs-fuse の `-o kernel_cache` 相当)
+
+計測条件は §1 と同じ (hyperfine warm/big + microbench read + perf stat)、`bench-3way.sh` で自動化。
+
+### 7.1 hyperfine warm cat (16 B)
+
+```
+fuse-raw    | 6.3 ms ± 4.6
+fuse-cache  | 1.9 ms ± 0.9      (3.3× faster than raw)
+ebpf-A+C    | 757 μs ± 116      (2.45× faster than fuse-cache, 8.33× vs raw)
+```
+
+### 7.2 hyperfine cat 1 MiB (big.bin)
+
+```
+fuse-raw    | 8.8 ms
+fuse-cache  | 1.9 ms            (4.6× faster than raw)
+ebpf-A+C    | 937 μs            (2.05× faster than fuse-cache, 9.35× vs raw)
+```
+
+### 7.3 microbench read (open+read+close per iter, 10k iters)
+
+```
+fuse-raw    | p50=5.012 ms   ops/s=188
+fuse-cache  | p50=1.244 ms   ops/s=710       (4× faster than raw)
+ebpf-A+C    | p50=5.075 μs   ops/s=187 763   (245× faster than fuse-cache)
+```
+
+### 7.4 perf stat (200 cats/op)
+
+| メトリック | fuse-raw | fuse-cache | ebpf-A+C |
+|---|---:|---:|---:|
+| task-clock / op | 253 μs | 221 μs | **192 μs** |
+| cycles / op | 599k | 528k | **458k** |
+| IPC | 0.53 | 0.61 | **0.70** |
+| cache-refs / op | 13578 | 12599 | **8584** |
+| cache-miss / op | 2191 | 864 | **624** |
+| cache miss % | 16.14 | 6.86 | **7.26** |
+
+### 7.5 解釈
+
+**fuse-cache の効果**:
+- warm cat で **3-4× 速くなる** (6 ms → 1.9 ms)。§0.5 の予測通り、hot state では local disk cache + kernel page cache がミリ秒台まで下げる
+- しかし **FUSE upcall そのものは消えない**: 各 open で getattr が daemon に飛び (invalidation check)、それが 1 ms/open 相当のオーバーヘッドとして残る
+- perf: cache-miss は raw の 2191 → cache の 864 と大幅減、ただし cycles/op は 12% 減にとどまる
+
+**ebpf-A+C の追加優位**:
+- **warm cat で fuse-cache の 2.45× 速い** — `.read_iter = generic_file_read_iter` で 2 回目以降のブロックが完全に page cache 直ヒット (kmod に落ちない)、`.read_folio` の initial fill も arena → GUP でユーザ空間を介さない
+- **read syscall (open+read+close ループ) で fuse-cache の 245× 速い** — open ごとの FUSE getattr upcall が無い。VFS の直パス
+- **CPU: cycles/op が fuse-cache の 87% 相当** — さらに IPC (0.70 vs 0.61) も上、パイプライン stall が少ない
+- **cache-miss は fuse-cache とほぼ同じ (624 vs 864)** — L1/L2 の効き自体は近い、差は L3 と TLB 領域と推測
+
+**結論 (Meetup narrative 更新)**:
+
+現行 s3fs-fuse を最大限最適化 (`use_cache + kernel_cache`) しても、s3fs-ebpf B (A+C) は依然 **2.05〜2.45× 速い**。これは FUSE アーキテクチャの根本にある「open のたびに userspace daemon に問い合わせる」構造的コストを、s3fs-ebpf が **kmod + BPF fentry + admit table + page cache** で回避できているため。
+
+### 7.6 まだ残る caveat
+
+- 今回の fuse-cache は `stat_cache_expire` を無指定 (デフォルト 5 分)。ワークロードによっては cache miss で S3 に再フェッチが走り、fuse-cache 側の数字が変動する
+- kernel_cache 有効時の s3fs-fuse は open() での属性再検証が入るが、`-o max_stat_cache_size` を上げれば大量ファイル環境で効く。今回は 1 ファイルなので小規模最良ケース
+- ebpf-A+C 側は逆に **consistency が弱い方向にトレードオフ** — daemon が admit した size と S3 の実サイズが乖離した場合、kmod は admit を信じ続ける。cache invalidation の hook はまだ未実装 (write-back / dynamic bucket sync で対応予定)
+
+---
+
 ## 6. 追試したい観点
 
 ### 6.1 このラウンドで露呈した bench 側の bug/盲点
@@ -209,8 +306,9 @@ s3fs-fuse      | cache-miss/op=1548.41  miss%=11.45
 
 ### 6.2 次にやりたい計測
 
+- ✅ **s3fs-fuse を `-o use_cache=/tmp/s3cache -o kernel_cache` 有効で再測** — §7 参照
 - **Mountpoint for Amazon S3 (mount-s3)** を三巴に (AWS の deb を落とす)
-- **`drop_caches=1`** で純 read-cold の比較
+- **`drop_caches=1`** で純 read-cold の比較 (今回 `drop_caches=3` は inode ごと飛ばして path-lookup が支配的)
 - **10 MiB / 100 MiB** — arena size を再度 bump してさらに大きい blob
 - **並列度スケール** (numjobs=1..64) — s3fs-ebpf の BPF fentry (per-CPU) vs FUSE daemon (single-threaded?) の scaling 曲線
 - **書き込み side** (write-back 実装後、Week 4 (c))

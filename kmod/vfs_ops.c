@@ -535,72 +535,8 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 
 /* -- File ops (regular files) --------------------------------------------- */
 
-/*
- * Serve a read out of the admitted user_vm range via GUP + kmap.
- * Loops page-by-page until the request is satisfied or a page copy
- * fails. Returning a short read is fine — the VFS caller will drive
- * another .read for the remainder if `count` wasn't exhausted.
- *
- * Batching multiple pages into a single pin_user_pages_remote call
- * would trim GUP overhead but requires a page-array stack buffer and
- * more error-path branches; the tight-loop is good enough for PoC
- * throughput measurements (a few hundred MB/s), and mostly bottlenecks
- * on copy_to_user itself.
- */
-static ssize_t s3fs_admit_read(struct mm_struct *mm,
-			       u64 uaddr, u64 asize,
-			       char __user *user_buf,
-			       size_t count, loff_t *pos)
-{
-	size_t remaining;
-	size_t total = 0;
-
-	if ((u64)*pos >= asize)
-		return 0;
-
-	remaining = min_t(size_t, count, asize - (u64)*pos);
-
-	while (remaining > 0) {
-		struct page *page = NULL;
-		void *kva;
-		u64 abs_uaddr = uaddr + (u64)*pos + total;
-		unsigned long page_offset = abs_uaddr & (PAGE_SIZE - 1);
-		size_t chunk = min_t(size_t, remaining, PAGE_SIZE - page_offset);
-		long pinned;
-		int locked = 1;
-
-		mmap_read_lock(mm);
-		pinned = pin_user_pages_remote(mm, abs_uaddr & PAGE_MASK, 1,
-					       0 /* read-only */, &page,
-					       &locked);
-		if (locked)
-			mmap_read_unlock(mm);
-		if (pinned != 1)
-			break; /* short read; error propagates if total==0 */
-
-		kva = kmap_local_page(page);
-		if (copy_to_user(user_buf + total,
-				 (u8 *)kva + page_offset, chunk)) {
-			kunmap_local(kva);
-			unpin_user_pages(&page, 1);
-			break;
-		}
-		kunmap_local(kva);
-		unpin_user_pages(&page, 1);
-
-		total     += chunk;
-		remaining -= chunk;
-	}
-
-	if (total > 0) {
-		*pos += total;
-		return total;
-	}
-	return -EFAULT;
-}
-
-/* How long a .read waits for a daemon upcall to admit the ino before
- * giving up and falling back to the compile-time kmalloc buffer. */
+/* How long .read_folio waits for a daemon upcall to admit the ino
+ * before falling back to the compile-time kmalloc buffer. */
 #define S3FS_UPCALL_WAIT_JIFFIES  (2 * HZ)
 
 /* Look up the admit table for `ino`, copying (uaddr, size) and grabbing
@@ -621,84 +557,6 @@ static bool admit_snapshot(u64 ino, u64 *out_uaddr, u64 *out_size,
 	}
 	spin_unlock(&s3fs_admits_lock);
 	return hit;
-}
-
-static ssize_t s3fs_ebpf_file_read(struct file *file, char __user *user_buf,
-				   size_t count, loff_t *pos)
-{
-	struct inode *inode = file_inode(file);
-	struct s3fs_file_data *fd;
-	struct mm_struct *mm = NULL;
-	struct s3fs_pending *pending;
-	u64 uaddr = 0;
-	u64 asize = 0;
-	long remaining;
-	int err;
-	ssize_t ret;
-
-	if (*pos < 0)
-		return -EINVAL;
-
-	/* Fast path: admit hit → arena via GUP. */
-	if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm)
-		return s3fs_admit_read(mm, uaddr, asize, user_buf, count, pos);
-
-	/* Miss path (C): if a daemon is around, ask it to fetch, wait
-	 * for admit, then retry. Skip when no daemon is bound (no mm
-	 * reference) — that state means the fallback below is the
-	 * intended answer, not a transient wait. */
-	spin_lock(&s3fs_admits_lock);
-	mm = s3fs_admitted_mm;
-	spin_unlock(&s3fs_admits_lock);
-
-	if (mm) {
-		pending = pending_get_or_create(inode->i_ino);
-		if (!pending)
-			goto fallback;
-
-		err = miss_enqueue(inode->i_ino, *pos, count);
-		if (err) {
-			pending_put(pending);
-			goto fallback;
-		}
-
-		remaining = wait_for_completion_interruptible_timeout(
-				&pending->done, S3FS_UPCALL_WAIT_JIFFIES);
-		err = pending->err;
-		pending_put(pending);
-
-		if (remaining < 0)
-			return remaining; /* signal */
-		if (remaining == 0 || err)
-			goto fallback;    /* timeout or daemon-reported error */
-
-		/* Retry: admit should now be populated. If a concurrent
-		 * shutdown snuck in and dropped it we still fall back. */
-		if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm)
-			return s3fs_admit_read(mm, uaddr, asize,
-					       user_buf, count, pos);
-	}
-
-fallback:
-	/* Fallback: per-inode kmalloc scratch buffer. */
-	fd = inode->i_private;
-	if (!fd)
-		return -EIO;
-
-	mutex_lock(&fd->lock);
-	if ((size_t)*pos >= fd->size) {
-		ret = 0;
-		goto out;
-	}
-	ret = min_t(size_t, count, fd->size - (size_t)*pos);
-	if (copy_to_user(user_buf, fd->buf + *pos, ret)) {
-		ret = -EFAULT;
-		goto out;
-	}
-	*pos += ret;
-out:
-	mutex_unlock(&fd->lock);
-	return ret;
 }
 
 static ssize_t s3fs_ebpf_file_write(struct file *file,
@@ -781,10 +639,151 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 	return 0;
 }
 
+/* -- address_space_operations: page-cache-backed read -------------------- */
+/*
+ * Week 4 (e) C: switch reads from a bespoke .read handler to
+ * generic_file_read_iter, which uses the VFS page cache. Second and
+ * later reads on the same offset hit the mapping's folio directly and
+ * bypass this kmod entirely — matching s3fs-fuse's -o kernel_cache
+ * behavior, and closing the "hot cache" latency gap in the bench.
+ *
+ * The upcall / arena / kmalloc fallback logic all lives in .read_folio
+ * now; the folio serves as the destination buffer for a single page's
+ * worth of file content, then the page cache does the copy_to_user.
+ */
+
+static void s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
+				       loff_t pos,
+				       struct mm_struct *mm,
+				       u64 uaddr, u64 asize)
+{
+	size_t remaining, total = 0;
+	void *fkva;
+
+	if ((u64)pos >= asize) {
+		folio_zero_range(folio, 0, fs_size);
+		return;
+	}
+	remaining = min_t(size_t, fs_size, asize - (u64)pos);
+
+	fkva = kmap_local_folio(folio, 0);
+	while (remaining > 0) {
+		struct page *ap = NULL;
+		void *akva;
+		u64 abs = uaddr + (u64)pos + total;
+		unsigned long pgoff = abs & (PAGE_SIZE - 1);
+		size_t chunk = min_t(size_t, remaining, PAGE_SIZE - pgoff);
+		int locked = 1;
+		long pinned;
+
+		mmap_read_lock(mm);
+		pinned = pin_user_pages_remote(mm, abs & PAGE_MASK, 1, 0,
+					       &ap, &locked);
+		if (locked)
+			mmap_read_unlock(mm);
+		if (pinned != 1)
+			break; /* short — remainder gets zero-filled below */
+
+		akva = kmap_local_page(ap);
+		memcpy((u8 *)fkva + total, (u8 *)akva + pgoff, chunk);
+		kunmap_local(akva);
+		unpin_user_pages(&ap, 1);
+
+		total     += chunk;
+		remaining -= chunk;
+	}
+	if (total < fs_size)
+		memset((u8 *)fkva + total, 0, fs_size - total);
+	kunmap_local(fkva);
+}
+
+static void s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
+					 loff_t pos, struct s3fs_file_data *fd)
+{
+	void *fkva;
+	size_t avail = 0;
+
+	if (!fd) {
+		folio_zero_range(folio, 0, fs_size);
+		return;
+	}
+	mutex_lock(&fd->lock);
+	if ((size_t)pos < fd->size)
+		avail = min_t(size_t, fs_size, fd->size - (size_t)pos);
+	fkva = kmap_local_folio(folio, 0);
+	if (avail > 0)
+		memcpy(fkva, fd->buf + pos, avail);
+	if (avail < fs_size)
+		memset((u8 *)fkva + avail, 0, fs_size - avail);
+	kunmap_local(fkva);
+	mutex_unlock(&fd->lock);
+}
+
+static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
+{
+	struct inode *inode = folio->mapping->host;
+	struct mm_struct *mm = NULL;
+	u64 uaddr = 0, asize = 0;
+	loff_t pos = folio_pos(folio);
+	size_t fs_size = folio_size(folio);
+
+	/* Fast path: admit hit. */
+	if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm) {
+		s3fs_folio_fill_from_arena(folio, fs_size, pos, mm, uaddr, asize);
+		goto out;
+	}
+
+	/* Miss + daemon alive: trigger upcall, wait, retry. */
+	spin_lock(&s3fs_admits_lock);
+	mm = s3fs_admitted_mm;
+	spin_unlock(&s3fs_admits_lock);
+
+	if (mm) {
+		struct s3fs_pending *p = pending_get_or_create(inode->i_ino);
+
+		if (p) {
+			int err;
+			long remaining;
+
+			err = miss_enqueue(inode->i_ino, pos, fs_size);
+			if (err == 0) {
+				remaining = wait_for_completion_interruptible_timeout(
+					&p->done, S3FS_UPCALL_WAIT_JIFFIES);
+				err = p->err;
+				pending_put(p);
+				if (remaining > 0 && err == 0 &&
+				    admit_snapshot(inode->i_ino, &uaddr,
+						   &asize, &mm) && mm) {
+					s3fs_folio_fill_from_arena(folio,
+						fs_size, pos, mm, uaddr, asize);
+					goto out;
+				}
+			} else {
+				pending_put(p);
+			}
+		}
+	}
+
+	/* Fallback: per-inode kmalloc buffer. */
+	s3fs_folio_fill_from_kmalloc(folio, fs_size, pos, inode->i_private);
+
+out:
+	folio_mark_uptodate(folio);
+	folio_unlock(folio);
+	return 0;
+}
+
+static const struct address_space_operations s3fs_ebpf_aops = {
+	.read_folio	= s3fs_ebpf_read_folio,
+	.dirty_folio	= noop_dirty_folio,
+};
+
 static const struct file_operations s3fs_ebpf_file_fops = {
-	.llseek	= generic_file_llseek,
-	.read	= s3fs_ebpf_file_read,
-	.write	= s3fs_ebpf_file_write,
+	.llseek		= generic_file_llseek,
+	.read_iter	= generic_file_read_iter,
+	.write		= s3fs_ebpf_file_write,
+	.mmap		= generic_file_mmap,
+	.splice_read	= filemap_splice_read,
 };
 
 static const struct inode_operations s3fs_ebpf_file_iops = {
@@ -814,6 +813,9 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 #endif
 
 	if (S_ISREG(e->mode)) {
+		u64 admit_uaddr, admit_size;
+		struct mm_struct *admit_mm;
+
 		fd = s3fs_file_data_new(e->initial_content,
 					e->initial_content_size);
 		if (!fd) {
@@ -821,9 +823,22 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 			return NULL;
 		}
 		inode->i_private = fd;
-		inode->i_size    = fd->size;
+		/* Prefer admit size over the compile-time initial so that
+		 * generic_file_read_iter reads up to the S3-authoritative
+		 * length rather than being truncated to kmod's placeholder
+		 * (e.g. 46 bytes for big.bin instead of the real 1 MiB). */
+		if (admit_snapshot(e->ino, &admit_uaddr,
+				   &admit_size, &admit_mm) && admit_mm)
+			inode->i_size = admit_size;
+		else
+			inode->i_size = fd->size;
 		inode->i_op      = &s3fs_ebpf_file_iops;
 		inode->i_fop     = &s3fs_ebpf_file_fops;
+		inode->i_mapping->a_ops = &s3fs_ebpf_aops;
+		/* No dirty tracking: content is either in-arena (read-only
+		 * from VFS's view) or in the kmalloc scratch buffer that
+		 * .write mutates directly, bypassing the page cache. */
+		mapping_set_gfp_mask(inode->i_mapping, GFP_KERNEL);
 	} else {
 		/* Only regular files in the entry table for now. */
 		iput(inode);
