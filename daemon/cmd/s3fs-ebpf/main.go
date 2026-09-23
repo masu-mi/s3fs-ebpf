@@ -581,6 +581,8 @@ func s3Flags(fs *flag.FlagSet) func() (*s3.Client, error) {
 	access := fs.String("access-key", envOr("S3FS_ACCESS_KEY", "minioadmin"), "Access key")
 	secret := fs.String("secret-key", envOr("S3FS_SECRET_KEY", "minioadmin"), "Secret key")
 	ssl := fs.Bool("ssl", false, "Use HTTPS")
+	cacheDir := fs.String("cache-dir", envOr("S3FS_CACHE_DIR", ""),
+		"local staging directory for S3 objects (enables use_cache-equivalent short-circuit)")
 	return func() (*s3.Client, error) {
 		return s3.New(s3.Config{
 			Endpoint:  *endpoint,
@@ -588,6 +590,7 @@ func s3Flags(fs *flag.FlagSet) func() (*s3.Client, error) {
 			AccessKey: *access,
 			SecretKey: *secret,
 			UseSSL:    *ssl,
+			CacheDir:  *cacheDir,
 		})
 	}
 }
