@@ -54,4 +54,16 @@ ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
 __poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt);
 int s3fs_ebpf_signal_admit(u64 ino, int err);
 
+/*
+ * Write-back queue: kmod → daemon via S3FS_IOC_POP_FLUSH.
+ *
+ * s3fs_ebpf_flush_pop: dequeue one event; returns 0 on success (out
+ * populated), -EAGAIN if empty.
+ * s3fs_ebpf_read_dirty: copy up to `cap` bytes of ino's scratch
+ * buffer into user-space `uaddr`. Returns bytes copied on success,
+ * negative errno on failure.
+ */
+int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
+long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
+
 #endif /* _S3FS_EBPF_VFS_OPS_H */

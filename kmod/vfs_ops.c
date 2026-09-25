@@ -114,6 +114,33 @@ static struct s3fs_entry_dyn *s3fs_dyn_entries;
 static size_t s3fs_dyn_nr;
 
 /*
+ * Locally-created entries (via .create) live here until the next
+ * SYNC round from the daemon promotes them into the dynamic table.
+ * The daemon-side ino allocator is nudged after a successful PUT so
+ * assignIno returns the same ino we picked, giving iterate_shared a
+ * single view. When SYNC arrives, entries whose name+ino match a
+ * dyn entry are dropped from this list (no duplicates emitted).
+ *
+ * Protected by s3fs_entries_mtx (same mutex as s3fs_dyn_entries).
+ */
+struct s3fs_local_entry {
+	struct list_head link;
+	unsigned long ino;
+	umode_t mode;
+	u32 name_len;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+static LIST_HEAD(s3fs_local_entries);
+static size_t s3fs_local_nr;
+
+/* .create allocates from this range so ino doesn't collide with the
+ * daemon's ino allocator (starts at 100). The daemon registers the
+ * ino back with its allocator after a successful PUT, so the same
+ * ino survives when the entry gets promoted to the dyn table. */
+static u64 s3fs_local_next_ino = 1000000;
+
+/*
  * Snapshot copy of one entry, filled under s3fs_entries_mtx and
  * returned to callers who then use the fields without holding the
  * lock. `initial_content` is NULL for dynamic entries (daemon-owned,
@@ -134,9 +161,29 @@ struct s3fs_entry_snap {
 static bool resolve_entry_by_name(const char *name, size_t name_len,
 				  struct s3fs_entry_snap *out)
 {
+	struct s3fs_local_entry *le;
 	size_t i;
 
 	mutex_lock(&s3fs_entries_mtx);
+
+	/* Local additions win: freshly created files that haven't been
+	 * promoted into the dyn table yet must still be found here. */
+	list_for_each_entry(le, &s3fs_local_entries, link) {
+		if (le->name_len != name_len ||
+		    memcmp(le->name, name, name_len) != 0)
+			continue;
+		out->ino = le->ino;
+		out->size = 0; /* .create starts empty; fd->size covers subsequent writes */
+		out->mode = le->mode;
+		out->name_len = le->name_len;
+		memcpy(out->name, le->name, le->name_len);
+		out->name[le->name_len] = '\0';
+		out->initial_content = NULL;
+		out->initial_content_size = 0;
+		mutex_unlock(&s3fs_entries_mtx);
+		return true;
+	}
+
 	if (s3fs_dyn_entries) {
 		for (i = 0; i < s3fs_dyn_nr; i++) {
 			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[i];
@@ -567,6 +614,34 @@ static bool find_entry(const struct qstr *qname, struct s3fs_entry_snap *out)
  * of a still-admitted ino is handled by admit_replace's per-inode
  * invalidate.
  */
+/* Called with s3fs_entries_mtx held. Drop any local additions whose
+ * name+ino match an entry in the fresh dyn snapshot — the daemon has
+ * promoted them (via ino-allocator registration + next list). Local
+ * additions with a mismatched ino stay put so a rogue basename
+ * collision doesn't silently eat someone's write. */
+static void local_prune_promoted_locked(const struct s3fs_entry_dyn *entries,
+					size_t count)
+{
+	struct s3fs_local_entry *le, *tmp;
+	size_t i;
+
+	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
+		for (i = 0; i < count; i++) {
+			if (entries[i].ino != le->ino)
+				continue;
+			if (entries[i].name_len != le->name_len)
+				continue;
+			if (memcmp(entries[i].name, le->name,
+				   le->name_len) != 0)
+				continue;
+			list_del(&le->link);
+			s3fs_local_nr--;
+			kfree(le);
+			break;
+		}
+	}
+}
+
 int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 {
 	struct s3fs_entry_dyn *prev;
@@ -576,6 +651,7 @@ int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 	if (count && entries) {
 		s3fs_dyn_entries = entries;
 		s3fs_dyn_nr      = count;
+		local_prune_promoted_locked(entries, count);
 	} else {
 		s3fs_dyn_entries = NULL;
 		s3fs_dyn_nr      = 0;
@@ -589,9 +665,25 @@ int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 	return 0;
 }
 
+/* Drop all local additions — called on module unload. Individual
+ * inodes are torn down through the usual evict path. */
+static void local_entries_drain(void)
+{
+	struct s3fs_local_entry *le, *tmp;
+
+	mutex_lock(&s3fs_entries_mtx);
+	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
+		list_del(&le->link);
+		kfree(le);
+	}
+	s3fs_local_nr = 0;
+	mutex_unlock(&s3fs_entries_mtx);
+}
+
 void s3fs_ebpf_entries_shutdown(void)
 {
 	(void)s3fs_ebpf_entries_replace(NULL, 0);
+	local_entries_drain();
 }
 
 /* -- Per-inode content buffer -------------------------------------------- */
@@ -601,7 +693,125 @@ struct s3fs_file_data {
 	u8    *buf;
 	size_t size;
 	size_t cap;
+	bool   dirty;   /* set by .write, cleared after successful daemon flush */
 };
+
+/* -- Write-back flush queue --------------------------------------------- */
+/*
+ * .release / .fsync on a dirty inode appends here; the daemon drains
+ * via S3FS_IOC_POP_FLUSH. Single global list — one mount, one daemon.
+ * name[] carries the dentry's basename so the daemon can PUT even for
+ * inos that were minted locally by .create and haven't hit the ino
+ * allocator's S3Key map yet.
+ */
+struct s3fs_flush_item {
+	struct list_head link;
+	u64 ino;
+	u64 size;
+	u32 name_len;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+static LIST_HEAD(s3fs_flush_queue);
+static DEFINE_SPINLOCK(s3fs_flush_lock);
+
+static void flush_enqueue(u64 ino, u64 size,
+			  const char *name, size_t name_len)
+{
+	struct s3fs_flush_item *f;
+
+	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
+		return;
+	f = kzalloc(sizeof(*f), GFP_KERNEL);
+	if (!f)
+		return;
+	f->ino = ino;
+	f->size = size;
+	f->name_len = name_len;
+	memcpy(f->name, name, name_len);
+	spin_lock(&s3fs_flush_lock);
+	list_add_tail(&f->link, &s3fs_flush_queue);
+	spin_unlock(&s3fs_flush_lock);
+}
+
+/* Pop one item into *out; returns true if queue had something.
+ * Caller owns the copy; the internal item is freed here. */
+static bool flush_dequeue(struct s3fs_flush_item *out)
+{
+	struct s3fs_flush_item *f = NULL;
+
+	spin_lock(&s3fs_flush_lock);
+	if (!list_empty(&s3fs_flush_queue)) {
+		f = list_first_entry(&s3fs_flush_queue,
+				     struct s3fs_flush_item, link);
+		list_del(&f->link);
+	}
+	spin_unlock(&s3fs_flush_lock);
+	if (!f)
+		return false;
+	*out = *f;
+	kfree(f);
+	return true;
+}
+
+/* Called from unregister / put_super to drop any queued events so
+ * they don't linger past a daemon restart. */
+static void flush_queue_drain(void)
+{
+	struct s3fs_flush_item *f, *tmp;
+
+	spin_lock(&s3fs_flush_lock);
+	list_for_each_entry_safe(f, tmp, &s3fs_flush_queue, link) {
+		list_del(&f->link);
+		kfree(f);
+	}
+	spin_unlock(&s3fs_flush_lock);
+}
+
+int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
+{
+	struct s3fs_flush_item item;
+
+	if (!flush_dequeue(&item))
+		return -EAGAIN;
+	memset(out, 0, sizeof(*out));
+	out->ino      = item.ino;
+	out->size     = item.size;
+	out->name_len = item.name_len;
+	memcpy(out->name, item.name, item.name_len);
+	out->name[item.name_len] = '\0';
+	return 0;
+}
+
+long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+	size_t n;
+	long ret;
+
+	if (!s3fs_active_sb)
+		return -ENODEV;
+	inode = ilookup(s3fs_active_sb, ino);
+	if (!inode)
+		return -ENOENT;
+	fd = inode->i_private;
+	if (!fd) {
+		iput(inode);
+		return -EIO;
+	}
+
+	mutex_lock(&fd->lock);
+	n = min_t(size_t, fd->size, cap);
+	if (n && copy_to_user(uaddr, fd->buf, n)) {
+		ret = -EFAULT;
+	} else {
+		ret = (long)n;
+	}
+	mutex_unlock(&fd->lock);
+	iput(inode);
+	return ret;
+}
 
 static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 						 size_t initial_size)
@@ -716,6 +926,7 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 		i_size_write(inode, fd->size);
 	}
 	*pos = start + count;
+	fd->dirty = true;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 7, 0)
 	inode_set_mtime_to_ts(inode, current_time(inode));
 	inode_set_ctime_current(inode);
@@ -746,6 +957,7 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 		mutex_lock(&fd->lock);
 		if (new_size < (loff_t)fd->size) {
 			fd->size = new_size;
+			fd->dirty = true;
 		} else if (new_size > (loff_t)fd->size) {
 			err = s3fs_file_data_reserve(fd, new_size);
 			if (err) {
@@ -753,6 +965,7 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 				return err;
 			}
 			fd->size = new_size;
+			fd->dirty = true;
 		}
 		i_size_write(inode, new_size);
 		mutex_unlock(&fd->lock);
@@ -901,12 +1114,62 @@ static const struct address_space_operations s3fs_ebpf_aops = {
 	.dirty_folio	= noop_dirty_folio,
 };
 
+/*
+ * If `fd->dirty`, snapshot ino/size/name under fd->lock and enqueue a
+ * flush event. dirty is cleared here so a subsequent close/fsync
+ * without new writes is a no-op. The daemon PUT is fire-and-forget
+ * from kmod's POV; a failed PUT stays best-effort at PoC scope.
+ */
+static void s3fs_maybe_enqueue_flush(struct file *file)
+{
+	struct inode *inode = file_inode(file);
+	struct s3fs_file_data *fd = inode->i_private;
+	struct dentry *dentry = file->f_path.dentry;
+	u64 size;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+	size_t name_len;
+
+	if (!fd || !dentry)
+		return;
+
+	name_len = dentry->d_name.len;
+	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
+		return;
+	memcpy(name, dentry->d_name.name, name_len);
+
+	mutex_lock(&fd->lock);
+	if (!fd->dirty) {
+		mutex_unlock(&fd->lock);
+		return;
+	}
+	size = fd->size;
+	fd->dirty = false;
+	mutex_unlock(&fd->lock);
+
+	flush_enqueue(inode->i_ino, size, name, name_len);
+}
+
+static int s3fs_ebpf_file_release(struct inode *inode, struct file *file)
+{
+	s3fs_maybe_enqueue_flush(file);
+	return 0;
+}
+
+static int s3fs_ebpf_file_fsync(struct file *file, loff_t start,
+				loff_t end, int datasync)
+{
+	s3fs_maybe_enqueue_flush(file);
+	return 0;
+}
+
 static const struct file_operations s3fs_ebpf_file_fops = {
 	.llseek		= generic_file_llseek,
 	.read_iter	= generic_file_read_iter,
 	.write		= s3fs_ebpf_file_write,
 	.mmap		= generic_file_mmap,
 	.splice_read	= filemap_splice_read,
+	.release	= s3fs_ebpf_file_release,
+	.fsync		= s3fs_ebpf_file_fsync,
 };
 
 static const struct inode_operations s3fs_ebpf_file_iops = {
@@ -1005,11 +1268,78 @@ static struct dentry *s3fs_ebpf_lookup(struct inode *dir,
 }
 
 /*
+ * .create: mint a new file entry locally and enqueue an empty flush
+ * so the daemon PUTs a zero-byte object. Subsequent writes bump
+ * fd->size and mark dirty; .release enqueues a full flush.
+ *
+ * The ino is picked from a kmod-local range so it can't collide with
+ * daemon-assigned inos. On the next SYNC round the daemon includes
+ * this key (allocator was seeded via ino registration after PUT),
+ * local_prune_promoted_locked drops it from s3fs_local_entries, and
+ * iterate_shared stops double-emitting.
+ */
+static int s3fs_ebpf_create(struct mnt_idmap *idmap, struct inode *dir,
+			    struct dentry *dentry, umode_t mode, bool excl)
+{
+	struct s3fs_local_entry *le;
+	struct s3fs_entry_snap snap = { 0 };
+	struct inode *inode;
+	size_t nlen = dentry->d_name.len;
+	u64 ino;
+
+	if (nlen == 0 || nlen > S3FS_SYNC_NAME_MAX)
+		return -ENAMETOOLONG;
+
+	le = kzalloc(sizeof(*le), GFP_KERNEL);
+	if (!le)
+		return -ENOMEM;
+
+	mutex_lock(&s3fs_entries_mtx);
+	ino = s3fs_local_next_ino++;
+	le->ino      = ino;
+	le->mode     = S_IFREG | (mode & 0777);
+	le->name_len = nlen;
+	memcpy(le->name, dentry->d_name.name, nlen);
+	list_add_tail(&le->link, &s3fs_local_entries);
+	s3fs_local_nr++;
+	mutex_unlock(&s3fs_entries_mtx);
+
+	snap.ino      = ino;
+	snap.size     = 0;
+	snap.mode     = le->mode;
+	snap.name_len = nlen;
+	memcpy(snap.name, le->name, nlen);
+	inode = s3fs_ebpf_make_inode(dir->i_sb, &snap);
+	if (!inode) {
+		mutex_lock(&s3fs_entries_mtx);
+		list_del(&le->link);
+		s3fs_local_nr--;
+		mutex_unlock(&s3fs_entries_mtx);
+		kfree(le);
+		return -ENOMEM;
+	}
+	d_instantiate(dentry, inode);
+
+	/* Fire an empty flush so `touch newfile` becomes a 0-byte PUT
+	 * even without a subsequent write. The dentry name doubles as
+	 * the S3 key at PoC scope (flat bucket). */
+	flush_enqueue(ino, 0, le->name, nlen);
+	return 0;
+}
+
+/*
  * Emit one entry at ctx->pos - 2. Snapshot the fields under the
  * entries mutex, then release before calling dir_emit (which can
  * page-fault into user via filldir → copy_to_user). Returns true if
  * the caller should advance ctx->pos and keep going, false if we're
  * past the end or dir_emit signaled the buffer is full.
+ */
+/*
+ * Emit ordering: dyn entries (or bootstrap when no dyn) first,
+ * then local additions. `idx` walks the concatenation. This means
+ * a `ls` after `touch newfile` shows newfile at the end — good
+ * enough for PoC; sorted layout can come with the wider readdir
+ * cleanup.
  */
 static bool emit_one_entry(struct dir_context *ctx, size_t idx)
 {
@@ -1017,39 +1347,52 @@ static bool emit_one_entry(struct dir_context *ctx, size_t idx)
 	unsigned char dt;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 	u32 name_len;
+	size_t base_nr;
+	bool ok = false;
 
 	mutex_lock(&s3fs_entries_mtx);
-	if (s3fs_dyn_entries) {
-		const struct s3fs_entry_dyn *e;
+	base_nr = s3fs_dyn_entries ? s3fs_dyn_nr : S3FS_NR_BOOTSTRAP;
+	if (idx < base_nr) {
+		if (s3fs_dyn_entries) {
+			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[idx];
 
-		if (idx >= s3fs_dyn_nr) {
-			mutex_unlock(&s3fs_entries_mtx);
-			return false;
-		}
-		e = &s3fs_dyn_entries[idx];
-		ino      = e->ino;
-		dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
-		name_len = e->name_len;
-		memcpy(name, e->name, name_len);
-	} else {
-		const struct s3fs_entry *e;
-		size_t elen;
+			ino      = e->ino;
+			dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
+			name_len = e->name_len;
+			memcpy(name, e->name, name_len);
+		} else {
+			const struct s3fs_entry *e =
+				&s3fs_bootstrap_entries[idx];
+			size_t elen = strlen(e->name);
 
-		if (idx >= S3FS_NR_BOOTSTRAP) {
-			mutex_unlock(&s3fs_entries_mtx);
-			return false;
+			if (elen > S3FS_SYNC_NAME_MAX)
+				elen = S3FS_SYNC_NAME_MAX;
+			ino      = e->ino;
+			dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
+			name_len = elen;
+			memcpy(name, e->name, elen);
 		}
-		e    = &s3fs_bootstrap_entries[idx];
-		elen = strlen(e->name);
-		if (elen > S3FS_SYNC_NAME_MAX)
-			elen = S3FS_SYNC_NAME_MAX;
-		ino      = e->ino;
-		dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
-		name_len = elen;
-		memcpy(name, e->name, elen);
+		ok = true;
+	} else if (idx < base_nr + s3fs_local_nr) {
+		size_t local_idx = idx - base_nr;
+		struct s3fs_local_entry *le;
+		size_t i = 0;
+
+		list_for_each_entry(le, &s3fs_local_entries, link) {
+			if (i++ != local_idx)
+				continue;
+			ino      = le->ino;
+			dt       = S_ISDIR(le->mode) ? DT_DIR : DT_REG;
+			name_len = le->name_len;
+			memcpy(name, le->name, name_len);
+			ok = true;
+			break;
+		}
 	}
 	mutex_unlock(&s3fs_entries_mtx);
 
+	if (!ok)
+		return false;
 	if (!dir_emit(ctx, name, name_len, ino, dt))
 		return false;
 	return true;
@@ -1082,6 +1425,9 @@ static void s3fs_ebpf_put_super(struct super_block *sb)
 {
 	if (s3fs_active_sb == sb)
 		s3fs_active_sb = NULL;
+	/* Queued flush events reference inos on this sb; drop them so a
+	 * later mount doesn't see them. */
+	flush_queue_drain();
 }
 
 static const struct super_operations s3fs_ebpf_super_ops = {
@@ -1093,6 +1439,7 @@ static const struct super_operations s3fs_ebpf_super_ops = {
 
 static const struct inode_operations s3fs_ebpf_dir_iops = {
 	.lookup		= s3fs_ebpf_lookup,
+	.create		= s3fs_ebpf_create,
 };
 
 static const struct file_operations s3fs_ebpf_dir_fops = {

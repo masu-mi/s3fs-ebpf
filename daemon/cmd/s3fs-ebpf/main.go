@@ -374,6 +374,10 @@ func runFastpath(args []string) int {
 			lastSyncCount = len(fresh)
 		}
 	})
+	// Week 4 (c): drain the kmod write-back queue and PUT bytes to
+	// S3. Runs even without --s3 so the queue doesn't grow unbounded
+	// (in offline mode it just logs and drops each event).
+	go runFlushLoop(ctx, *dev, progs, s3c, 100*time.Millisecond)
 
 	for {
 		rec, err := reader.Read()

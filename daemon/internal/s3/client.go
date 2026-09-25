@@ -5,6 +5,7 @@
 package s3
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -93,6 +94,26 @@ func (c *Client) Stat(ctx context.Context, key string) (ObjectMeta, error) {
 // only (no ETag/If-None-Match); good enough to prove the fair-bench
 // scenario against s3fs-fuse's -o use_cache. Cache poisoning is not
 // a concern for the PoC — same trust boundary as arena admits.
+// Put uploads `data` as a single-shot PUT under `key`. Week 4 (c)
+// wires kmod's .release/.fsync flush events into this path so writes
+// through the mount become durable in the backing bucket. Any local
+// disk cache stays out of the loop — a PUT invalidates rather than
+// updates it, so a subsequent Get re-fetches the fresh body.
+func (c *Client) Put(ctx context.Context, key string, data []byte) error {
+	r := bytes.NewReader(data)
+	_, err := c.mc.PutObject(ctx, c.cfg.Bucket, key, r,
+		int64(len(data)), minio.PutObjectOptions{
+			ContentType: "application/octet-stream",
+		})
+	if err != nil {
+		return fmt.Errorf("s3 put %q: %w", key, err)
+	}
+	if c.cfg.CacheDir != "" {
+		_ = os.Remove(c.cachePath(key))
+	}
+	return nil
+}
+
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if c.cfg.CacheDir != "" {
 		if buf, ok := c.readCache(key); ok {

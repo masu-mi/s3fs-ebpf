@@ -147,4 +147,50 @@ struct s3fs_sync_entries {
 #define S3FS_IOC_SYNC_ENTRIES \
 	_IOW(S3FS_IOC_MAGIC, 0x04, struct s3fs_sync_entries)
 
+/*
+ * Write-back queue.
+ *
+ * kmod's .release / .fsync on a dirty regular file enqueues a
+ * flush event; the daemon periodically drains this queue via
+ * S3FS_IOC_POP_FLUSH and PUTs the current buffer bytes back to S3.
+ * A .create fop enqueues an empty flush (size=0) so `touch` results
+ * in a zero-byte PUT.
+ *
+ * The event carries the file's name (basename in the mount) so the
+ * daemon can resolve it back to an S3 key even for freshly-created
+ * inos that haven't hit an ino allocator yet.
+ *
+ * POP_FLUSH returns 0 with `event` populated on success, or -EAGAIN
+ * when the queue is empty (non-blocking; daemon polls on a ticker).
+ */
+struct s3fs_flush_event {
+	__u64 ino;
+	__u64 size;      /* current buffer size at enqueue time */
+	__u32 name_len;
+	__u32 _pad;
+	char  name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+#define S3FS_IOC_POP_FLUSH \
+	_IOR(S3FS_IOC_MAGIC, 0x05, struct s3fs_flush_event)
+
+/*
+ * S3FS_IOC_READ_DIRTY — pull `size` bytes from kmod's per-inode
+ * scratch buffer into the daemon's `uaddr` for PUT to S3.
+ *
+ * `size` is capped by the kmod's current `fd->size`; a shorter file
+ * returns min(cap, request). The kmod validates `uaddr` via
+ * copy_to_user; caller must have the buffer allocated in its own mm.
+ * Returns 0 on success and sets `out_bytes` to the actual copy size.
+ */
+struct s3fs_read_dirty {
+	__u64 ino;
+	__u64 uaddr;      /* in:  daemon-side buffer address */
+	__u64 size;       /* in:  buffer capacity */
+	__u64 out_bytes;  /* out: number of bytes actually copied */
+};
+
+#define S3FS_IOC_READ_DIRTY \
+	_IOWR(S3FS_IOC_MAGIC, 0x06, struct s3fs_read_dirty)
+
 #endif /* _S3FS_EBPF_UAPI_H */
