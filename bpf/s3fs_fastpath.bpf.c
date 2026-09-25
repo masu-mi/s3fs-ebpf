@@ -53,9 +53,9 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 /*
  * s3fs_arena: multi-page bpf_arena shared with the daemon.
  *
- * max_entries counts pages, not bytes. 4096 pages = 16 MiB, enough to
- * park a handful of small demo objects plus one large (1 MiB) test
- * blob. The daemon mmaps this map via cilium/ebpf's Map.Memory();
+ * max_entries counts pages, not bytes. 32768 pages = 128 MiB, enough
+ * to hold the 100 MiB bench blob plus the small demo files with
+ * headroom. The daemon mmaps this map via cilium/ebpf's Map.Memory();
  * pages are demand-allocated on the first userspace write, so we do
  * NOT call bpf_arena_alloc_pages. Bump this cap as the working set
  * grows — 6.12 arena tops out at 4 GiB VA reservation regardless.
@@ -63,7 +63,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
-	__uint(max_entries, 4096);
+	__uint(max_entries, 32768);
 } s3fs_arena SEC(".maps");
 
 /* ino -> arena byte offset. Populated by daemon. */
