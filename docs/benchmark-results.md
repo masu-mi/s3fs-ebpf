@@ -24,6 +24,12 @@ Week 4 (e) の初回計測記録。Meetup スライドの原資料として、�
 
 **§7 追記 (2026-09-23): s3fs-fuse を `-o use_cache=<dir> -o kernel_cache` で最適化しても**、ebpf-A+C は依然 **cat 2.05〜2.45× 速く、read syscall 245× 速い**。FUSE upcall そのもの (open ごとの getattr) が根本コストとして残るため。詳細 §7。
 
+**§8〜§10 追記 (2026-09-25、Week 4 (b)(c) 実装後):**
+
+- **write throughput**: `dd conv=notrunc` overwrite で ebpf は **1 MiB 4.9×、10 MiB 12×、100 MiB 17× 速い** (vs fuse-raw/cache 両方)。byte-for-byte roundtrip verified。§8
+- **大 blob**: arena を 128 MiB に bump し 10 MiB / 100 MiB を測定。**ebpf の cat throughput は 100 MiB で ~6.4 GB/s** (fuse の 10×)。§9
+- **並列スケール**: stat 8 jobs で ~22M IOPS プラトー、read は 5M IOPS プラトー。stat clat 64 jobs で ebpf 3874ns vs fuse-raw 4538ns。ebpf/fuse-cache は read hot-path で肉薄。§10
+
 - **`cat` (実データ read) が圧勝** — s3fs-fuse は毎回 FUSE upcall → S3 access するのでミリ秒台。s3fs-ebpf B は arena に事前 admit 済 → GUP + kmap + copy_to_user だけで μs 台
 - **`stat` は tie** — 両 FS とも in-memory metadata cache に落ちるので kernel-syscall 分の 1〜2 μs が支配的
 - **cold-cache 比較 (drop_caches=3)** は両方 100ms 台で並ぶ。`drop_caches=3` は inode + dentry も飛ばすので、cold の主コストが「path re-lookup + inode 再作成」に移り、FS-side 差分が見えなくなる。純 read-cold なら `drop_caches=1` にすべき (§追試)
@@ -309,7 +315,121 @@ ebpf-A+C    | p50=5.075 μs   ops/s=187 763   (245× faster than fuse-cache)
 - ✅ **s3fs-fuse を `-o use_cache=/tmp/s3cache -o kernel_cache` 有効で再測** — §7 参照
 - **Mountpoint for Amazon S3 (mount-s3)** を三巴に (AWS の deb を落とす)
 - **`drop_caches=1`** で純 read-cold の比較 (今回 `drop_caches=3` は inode ごと飛ばして path-lookup が支配的)
-- **10 MiB / 100 MiB** — arena size を再度 bump してさらに大きい blob
-- **並列度スケール** (numjobs=1..64) — s3fs-ebpf の BPF fentry (per-CPU) vs FUSE daemon (single-threaded?) の scaling 曲線
-- **書き込み side** (write-back 実装後、Week 4 (c))
+- ✅ **10 MiB / 100 MiB** — arena を 128 MiB に bump、§9 参照
+- ✅ **並列度スケール** (numjobs=1..64) — §10 参照
+- ✅ **書き込み side** (write-back 実装後、Week 4 (c)) — §8 参照
 - **cold-cache 分離** — daemon 生存 + kmod 生存で page cache だけ落とす vs 全部落とす、の区別
+
+---
+
+## 8. write throughput (Week 4 (c) 追跡)
+
+Week 4 (c) の write-back を数値化。`scripts/bench-write.sh` = `dd conv=notrunc` を hyperfine で 3 サイズ (1 MiB / 10 MiB / 100 MiB) × 3 mount (ebpf / fuse-raw / fuse-cache) で回す。close 時 flush なので dd 単独 wall time が「write() 完了 + close() flush enqueue」までを含み、実際の S3 PUT はほぼ close 直後 (100ms tick 内) に完了する。
+
+### 8.1 結果 (2026-09-25、mean ± σ)
+
+| Size    | ebpf (mean) | fuse-raw     | fuse-cache   | vs raw  | vs cache |
+|:--------|------------:|-------------:|-------------:|--------:|---------:|
+| 1 MiB   |  **10.8 ms ± 1.1** | 52.7 ms ± 4.0   | 48.6 ms ± 7.3   |  4.89× |  4.51× |
+| 10 MiB  |  **18.5 ms ± 2.0** | 217.2 ms ± 7.5  | 240.8 ms ± 24.3 | 11.73× | 13.00× |
+| 100 MiB |  **88 ms ± 32**    | 1516 ms ± 315   | 1232 ms ± 96    | 17.18× | 13.96× |
+
+byte-for-byte roundtrip (`diff`) は全 3 サイズで MATCH。
+
+### 8.2 解釈
+
+- **ebpf は size に対して sub-linear**: 100 MiB / 1 MiB = 100× の byte 数に対し time 8.2×。仮想メモリコピーとバックエンド PUT がバッチ化されている
+- **fuse-raw / fuse-cache は size 比例に近い**: FUSE upcall で 128 KiB ずつ daemon に渡って PUT に載る (fuse の max_write 制約)。1 MiB → 100 MiB で ~29× とほぼ線形スケール
+- **fuse-cache が fuse-raw より速いとは限らない**: writeback キャッシュは 100 MiB では効果が出るが、10 MiB では逆転している (write-out 順の scheduling ばらつき + local disk 書きの overhead)。**write に関しては cache が万能ではない**
+- **10 MiB 以降で ebpf の優位が拡大** (5x → 13x → 17x): write path が「buffer append + 1 回 PUT」で線形性は S3 GET/PUT 側だけになる。fuse 側は「userspace ↔ kernel 128 KiB ずつ」のブロック転送で余計な context switch が積み上がる
+- **implementation caveat**: 初期実装 (krealloc ベース) は 10 MiB 割当時に `__alloc_pages_noprof` の "order too large" WARN を出した。`kvmalloc` + `memcpy` に切り替えて解消 (bench-write の初回試行時に発覚、コミット `feat(writeback)` 上に修正パッチを含む)
+
+Meetup narrative の 4 個目に「書けるうえに fuse より 10× 速い」が乗る。
+
+---
+
+## 9. 大 blob throughput (10 MiB / 100 MiB)
+
+arena capacity を 4096 pages (16 MiB) → 32768 pages (128 MiB) に bump し、100 MiB blob が prewarm に載る構成。`scripts/bench-latency.sh` の large-file セクションを `BLOB_FILES=big.bin 10m.bin 100m.bin` の sweep に拡張。
+
+### 9.1 結果 (hyperfine cat throughput、warm state)
+
+| Blob    | s3fs-ebpf B (mean)  | s3fs-fuse (mean)   | 差    | ebpf 実効 throughput |
+|:--------|--------------------:|-------------------:|------:|---------------------:|
+| 1 MiB   |  **980.7 μs ± 309** | 9140.5 μs ± 1296   |  9.3× | **~1069 MB/s**       |
+| 10 MiB  |  **2.2 ms ± 0.3**   | 24.5 ms ± 4.1      | 11.3× | **~4.5 GB/s**        |
+| 100 MiB |  **15.6 ms ± 0.9**  | 154.9 ms ± 8.3     | 10.0× | **~6.4 GB/s**        |
+
+### 9.2 解釈
+
+- **10× 差が blob size を通じて保たれる**: FUSE の 128 KiB ブロック転送が線形コスト、arena の GUP + memcpy は memory-bandwidth bound
+- **10 MiB / 100 MiB で ebpf は memory-bandwidth に近づく**: 4.5 / 6.4 GB/s は L3-to-RAM 帯域の一部を掠っている
+- **arena bump のコスト**: 128 MiB を BPF map として予約するだけで RSS は増えない (デマンドページ)。実データを載せた分だけ物理メモリ消費。1 MiB 5 objects + 10 MiB + 100 MiB で ~112 MiB。実運用では働くセットに応じて sizing
+- **caveat**: 100 MiB を超える blob には現在の admit table shape (1 ino → 1 uaddr) を broken (arena に載らない)。**大ファイル対応は Week 4+ の別軸** (admit を range list に拡張、streaming read)
+
+---
+
+## 10. 並列度スケール (numjobs=1..64)
+
+`scripts/bench-scale.sh` = fio filestat (stat) + fio psync (read) を numjobs sweep。ebpf の mutex 経路と FUSE daemon の single-threaded 経路のスケール限界を可視化。
+
+### 10.1 stat sweep (fio filestat、aggregate IOPS)
+
+```
+label       job       IOPS    clat_ns
+ebpf          1      4029k   11709.00
+fuse-raw      1      3993k   11981.00
+fuse-cache    1      4027k    9426.00
+ebpf          2      8009k   14988.00
+fuse-raw      2      7975k   10114.50
+fuse-cache    2      7984k    9043.50
+ebpf          4      16.0M    7503.50
+fuse-raw      4      16.2M    7345.00
+fuse-cache    4      16.1M    8432.75
+ebpf          8      22.3M    4815.25
+fuse-raw      8      22.4M    6223.62
+fuse-cache    8      22.2M    7030.25
+ebpf         16      22.4M    4721.25
+fuse-raw     16      22.2M    4643.12
+fuse-cache   16      22.1M    5163.75
+ebpf         32      22.3M    3958.69
+fuse-raw     32      22.2M    4276.50
+fuse-cache   32      22.3M    4718.69
+ebpf         64      23.0M    3874.64
+fuse-raw     64      23.0M    4538.08
+fuse-cache   64      23.0M    3925.95
+```
+
+### 10.2 read sweep (fio psync、shared small file)
+
+```
+label       job       IOPS    clat_ns
+ebpf          1      1199k     408.46
+fuse-raw      1      1165k     404.03
+fuse-cache    1      1143k     422.69
+ebpf          2      2098k     512.87
+fuse-raw      2      2067k     510.32
+fuse-cache    2      2008k     532.78
+ebpf          4      4016k     558.33
+fuse-raw      4      4035k     538.24
+fuse-cache    4      3927k     561.99
+ebpf          8      5116k     953.17
+fuse-raw      8      4912k     974.51
+fuse-cache    8      5079k     934.10
+ebpf         16      5091k    1813.04
+fuse-raw     16      4931k    1874.77
+fuse-cache   16      4851k    1841.53
+ebpf         32      5176k    3754.56
+fuse-raw     32      4769k    3938.82
+fuse-cache   32      4880k    3925.63
+ebpf         64      5374k    7159.07
+fuse-raw     64      5343k    6919.38
+fuse-cache   64      4978k    7556.90
+```
+
+### 10.3 解釈
+
+- **stat**: 3 mount ともほぼ同一。8 jobs で ~22M IOPS のプラトー = **VFS/syscall 側の共通上限**。64 jobs で ebpf の clat 3874ns、fuse-raw 4538ns、fuse-cache 3926ns。s3fs-ebpf は syscall boundary から先が短い (in-kernel fast path) ぶん clat のバラツキも小さい
+- **read (small file, shared)**: 8 jobs 以降 ~5M IOPS で頭打ち。全 3 mount がほぼ hot page cache だけを叩いているので、上限は kernel の page cache 側 (folio_lock 争奪) にある
+- **write と違って read は fuse-cache が ebpf に肉薄する**: hot state で FUSE daemon への upcall が発生しない fuse-cache は、ebpf と同じ「page cache 直読」経路になる。ebpf の優位性は cold-path / write / consistency 制御に集約される
+- **caveat**: `bench-scale.sh` 初回は parallel-cat wrapper が hang した (bash `wait` が cat の child を捉えきれず do_wait 停止)。fio psync に置換した (single-file shared reads で FUSE daemon の scale 特性を測る目的は同じ)。docs 上は fio 版を採用

@@ -172,15 +172,21 @@ run_fio() {
 cat "$OUT_DIR/fio.md" >&2
 
 
-# ---------- 4. large file (1 MiB) throughput -------------------------
-if [ -f "$MP_EBPF/$BIG_FILE" ] && [ -f "$MP_FUSE/$BIG_FILE" ]; then
-	log "hyperfine: 1 MiB cat throughput"
-	hyperfine --warmup 2 --min-runs 20 --shell=none \
-		--export-markdown "$OUT_DIR/hf-big.md" \
-		--command-name 's3fs-ebpf B' "cat $MP_EBPF/$BIG_FILE" \
-		--command-name 's3fs-fuse'   "cat $MP_FUSE/$BIG_FILE" >&2
-else
-	log "skip large-file bench ($BIG_FILE missing on one mount)"
-fi
+# ---------- 4. large file cat throughput (1 MiB / 10 MiB / 100 MiB) ---
+# Ranges the arena capacity (kmod bumped to 128 MiB for Week 4 (e)).
+# BLOB_FILES env can override the size sweep; default hits the three
+# seeded blobs.
+BLOB_FILES=${BLOB_FILES:-big.bin 10m.bin 100m.bin}
+for blob in $BLOB_FILES; do
+	if [ ! -f "$MP_EBPF/$blob" ] || [ ! -f "$MP_FUSE/$blob" ]; then
+		log "skip $blob (missing on one mount)"
+		continue
+	fi
+	log "hyperfine: cat $blob throughput"
+	hyperfine --warmup 2 --min-runs 10 --shell=none \
+		--export-markdown "$OUT_DIR/hf-$blob.md" \
+		--command-name 's3fs-ebpf B' "cat $MP_EBPF/$blob" \
+		--command-name 's3fs-fuse'   "cat $MP_FUSE/$blob" >&2
+done
 
 log "done. results in $OUT_DIR/"

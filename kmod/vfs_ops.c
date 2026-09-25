@@ -823,7 +823,7 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 	mutex_init(&fd->lock);
 
 	if (initial_size) {
-		fd->buf = kmalloc(initial_size, GFP_KERNEL);
+		fd->buf = kvmalloc(initial_size, GFP_KERNEL);
 		if (!fd->buf) {
 			kfree(fd);
 			return NULL;
@@ -839,11 +839,16 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
 {
 	if (!fd)
 		return;
-	kfree(fd->buf);
+	kvfree(fd->buf);
 	kfree(fd);
 }
 
-/* Ensure `fd->cap >= needed`. Caller holds fd->lock. */
+/* Ensure `fd->cap >= needed`. Caller holds fd->lock.
+ *
+ * Uses kvmalloc + memcpy instead of krealloc so growth beyond the
+ * MAX_ORDER (~4 MiB on x86_64) bucket falls back to vmalloc rather
+ * than triggering the page allocator's "order too large" WARN. dd
+ * bs=10M count=1 was reproducing that WARN with plain krealloc. */
 static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 {
 	size_t new_cap;
@@ -852,15 +857,21 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 	if (needed <= fd->cap)
 		return 0;
 
-	/* Grow by rounding up to the next 4 KiB slab class. Prevents
-	 * pathological O(N^2) allocs when a user writes 1 byte at a
-	 * time. Cap is byte size, not element count. */
-	new_cap = round_up(needed, 4096);
-	newbuf  = krealloc(fd->buf, new_cap, GFP_KERNEL);
+	/* Round up to 4 KiB slab class for small growth; > 4 MiB rounds
+	 * to 2 MiB (vmalloc granularity) to keep amortized alloc cheap. */
+	if (needed >= (4UL << 20))
+		new_cap = round_up(needed, 2UL << 20);
+	else
+		new_cap = round_up(needed, 4096);
+
+	newbuf = kvmalloc(new_cap, GFP_KERNEL);
 	if (!newbuf)
 		return -ENOMEM;
-	if (new_cap > fd->cap)
-		memset(newbuf + fd->cap, 0, new_cap - fd->cap);
+	if (fd->buf) {
+		memcpy(newbuf, fd->buf, fd->size);
+		kvfree(fd->buf);
+	}
+	memset(newbuf + fd->size, 0, new_cap - fd->size);
 	fd->buf = newbuf;
 	fd->cap = new_cap;
 	return 0;
