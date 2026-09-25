@@ -110,4 +110,41 @@ struct s3fs_read_miss_event {
 	__u32 _pad;
 };
 
+/*
+ * S3FS_IOC_SYNC_ENTRIES — replace the kmod's dentry/inode entry table
+ * with a fresh snapshot.
+ *
+ * The daemon lists the S3 bucket, assigns an ino to each key
+ * (first-seen order, in-memory only), and pushes the full set here.
+ * kmod atomically swaps in the new table under a rwlock and flushes
+ * stale dentries so `ls` and lookup reflect the new state. Names must
+ * be NUL-safe and <= NAME_MAX; `mode` should include S_IFREG for
+ * regular files (dir support will land later).
+ *
+ * This is orthogonal to S3FS_IOC_ADMIT_ARENA: SYNC_ENTRIES declares
+ * "these files exist"; ADMIT_ARENA says "here is the content backing
+ * for these inos". Typical order per sync round is
+ * SYNC_ENTRIES → per-object prewarm → ADMIT_ARENA.
+ *
+ * count == 0 restores the compile-time bootstrap table (used at
+ * shutdown so the mount is still browsable if the daemon exits).
+ */
+#define S3FS_SYNC_NAME_MAX 255
+struct s3fs_sync_entry {
+	__u64 ino;
+	__u64 size;      /* authoritative size for i_size, from S3 stat */
+	__u32 mode;      /* S_IFREG | 0644 etc. */
+	__u32 name_len;  /* strlen(name), 0 < name_len <= S3FS_SYNC_NAME_MAX */
+	char  name[S3FS_SYNC_NAME_MAX + 1]; /* NUL-terminated for safety */
+};
+
+struct s3fs_sync_entries {
+	__u32 count;
+	__u32 _pad;
+	__u64 entries; /* user pointer to array of s3fs_sync_entry */
+};
+
+#define S3FS_IOC_SYNC_ENTRIES \
+	_IOW(S3FS_IOC_MAGIC, 0x04, struct s3fs_sync_entries)
+
 #endif /* _S3FS_EBPF_UAPI_H */

@@ -178,6 +178,79 @@ static long s3fs_dev_signal_admit(void __user *uarg)
 	return s3fs_ebpf_signal_admit(sig.ino, sig.err);
 }
 
+/*
+ * S3FS_IOC_SYNC_ENTRIES — replace the dynamic entry table.
+ *
+ * count==0 restores the bootstrap set. Otherwise we allocate the
+ * internal s3fs_entry_dyn array here, copy each UAPI entry over (with
+ * name_len clamped to S3FS_SYNC_NAME_MAX), and hand ownership to the
+ * vfs side. The vfs side kfree's the previous dynamic array under
+ * its own mutex and shrinks the dcache so stale dentries clear.
+ */
+static long s3fs_dev_sync_entries(void __user *uarg)
+{
+	struct s3fs_sync_entries hdr;
+	struct s3fs_sync_entry *ubuf = NULL;
+	struct s3fs_entry_dyn *kbuf = NULL;
+	int err;
+	u32 i;
+
+	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
+		return -EFAULT;
+
+	if (hdr.count == 0)
+		return s3fs_ebpf_entries_replace(NULL, 0);
+
+	if (hdr.count > 4096)
+		return -E2BIG;
+
+	ubuf = kvcalloc(hdr.count, sizeof(*ubuf), GFP_KERNEL);
+	if (!ubuf)
+		return -ENOMEM;
+	if (copy_from_user(ubuf, (void __user *)(uintptr_t)hdr.entries,
+			   hdr.count * sizeof(*ubuf))) {
+		err = -EFAULT;
+		goto out_free_ubuf;
+	}
+
+	kbuf = kvcalloc(hdr.count, sizeof(*kbuf), GFP_KERNEL);
+	if (!kbuf) {
+		err = -ENOMEM;
+		goto out_free_ubuf;
+	}
+	for (i = 0; i < hdr.count; i++) {
+		u32 nlen = ubuf[i].name_len;
+
+		if (nlen == 0 || nlen > S3FS_SYNC_NAME_MAX) {
+			err = -EINVAL;
+			goto out_free_kbuf;
+		}
+		kbuf[i].ino      = ubuf[i].ino;
+		kbuf[i].size     = ubuf[i].size;
+		kbuf[i].mode     = ubuf[i].mode;
+		kbuf[i].name_len = nlen;
+		memcpy(kbuf[i].name, ubuf[i].name, nlen);
+		kbuf[i].name[nlen] = '\0';
+	}
+
+	/* Hand ownership over on success. */
+	err = s3fs_ebpf_entries_replace(kbuf, hdr.count);
+	if (err)
+		goto out_free_kbuf;
+
+	/* pr_debug so periodic no-op syncs don't spam dmesg. Enable with
+	 * `echo -n 'module s3fs_kfunc +p' > /sys/kernel/debug/dynamic_debug/control`. */
+	pr_debug("s3fs_ebpf: synced %u entries\n", hdr.count);
+	kvfree(ubuf);
+	return 0;
+
+out_free_kbuf:
+	kvfree(kbuf);
+out_free_ubuf:
+	kvfree(ubuf);
+	return err;
+}
+
 static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	void __user *uarg = (void __user *)arg;
@@ -189,6 +262,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_admit_arena(uarg);
 	case S3FS_IOC_SIGNAL_ADMIT:
 		return s3fs_dev_signal_admit(uarg);
+	case S3FS_IOC_SYNC_ENTRIES:
+		return s3fs_dev_sync_entries(uarg);
 	default:
 		return -ENOTTY;
 	}
@@ -253,4 +328,7 @@ void s3fs_ebpf_dev_unregister(void)
 	/* No more ioctls can arrive; drop the admit table and release
 	 * the arena reference before the module unloads. */
 	s3fs_ebpf_admit_shutdown();
+	/* Free any dynamic entry table left over; readers can no longer
+	 * fire because the mount has been torn down before rmmod. */
+	s3fs_ebpf_entries_shutdown();
 }

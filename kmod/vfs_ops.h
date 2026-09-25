@@ -23,6 +23,24 @@ int  s3fs_ebpf_admit_replace(struct mm_struct *mm,
 void s3fs_ebpf_admit_shutdown(void);
 
 /*
+ * Entry table replace — daemon publishes the current bucket snapshot
+ * here; kmod atomically swaps in the new table and flushes the dcache
+ * so stale positive/negative dentries clear. Ownership of `entries`
+ * transfers to the module on a non-zero count; count==0 (or entries
+ * NULL) restores the compile-time bootstrap. Old dynamic array is
+ * freed inside; caller must not touch it after this returns.
+ */
+struct s3fs_entry_dyn {
+	unsigned long ino;
+	__u64 size;
+	umode_t mode;
+	__u32 name_len;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+};
+int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count);
+void s3fs_ebpf_entries_shutdown(void);
+
+/*
  * Read-miss upcall API — daemon-facing side.
  * s3fs_read_miss_dequeue removes the head event (blocking or
  * non-blocking) and copies it out. s3fs_read_miss_poll bridges the

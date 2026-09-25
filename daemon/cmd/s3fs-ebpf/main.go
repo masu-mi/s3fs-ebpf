@@ -275,6 +275,8 @@ func runFastpath(args []string) int {
 		"consume miss events and warm the arena from an S3-compatible backend")
 	dev := fs.String("dev", "/dev/s3fs_ebpf",
 		"kmod control device for arena-backed read admission")
+	syncEvery := fs.Duration("sync-every", 30*time.Second,
+		"how often to re-list the bucket and push the entry table to kmod (0 disables)")
 	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
 	fs.Parse(args)
 
@@ -320,9 +322,19 @@ func runFastpath(args []string) int {
 		fmt.Printf("[fastpath] s3 backend disabled — misses are reported but not cached\n")
 	}
 
-	// Pre-warm the arena from the kmod entry table so the first stat
-	// on each demo object hits the Fast Path instead of firing a
-	// miss. Without S3 we fall back to the compile-time sizes; with
+	// Week 4 (b): before the first prewarm, ask S3 what actually
+	// exists and push that snapshot to kmod so `ls /mnt/s3demo`
+	// reflects reality instead of the compile-time bootstrap. When
+	// s3c==nil this is a no-op — the mirror stays on bootstrap and
+	// kmod keeps its own bootstrap table.
+	if fresh, err := syncEntriesOnce(ctx, *dev, s3c); err != nil {
+		fmt.Fprintf(os.Stderr, "[sync] initial: %v (using bootstrap)\n", err)
+	} else {
+		fmt.Printf("[sync] initial: %d entries\n", len(fresh))
+	}
+
+	// Pre-warm the arena from the entry mirror so the first stat on
+	// each object hits the Fast Path instead of firing a miss. With
 	// S3 we reflect real object metadata (size, mtime) and — the
 	// point of Week 4 (a) — copy the object body into the arena so
 	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
@@ -350,6 +362,18 @@ func runFastpath(args []string) int {
 		reader.Close()
 	}()
 	go sampleCounters(ctx, progs, *sampleEvery)
+	// Periodic bucket sync: keep kmod's entry table + daemon mirror
+	// aligned with S3 without re-mounting. New keys become visible
+	// via `ls`, deleted keys stop resolving. When admit state is
+	// impacted (e.g. a size change) the next .read_folio re-fetches.
+	var lastSyncCount = len(fpebpf.Snapshot())
+	go runSyncLoop(ctx, *dev, s3c, *syncEvery, func(fresh []fpebpf.Entry) {
+		if len(fresh) != lastSyncCount {
+			fmt.Printf("[sync] delta: %d → %d entries\n",
+				lastSyncCount, len(fresh))
+			lastSyncCount = len(fresh)
+		}
+	})
 
 	for {
 		rec, err := reader.Read()
@@ -391,8 +415,9 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) []admi
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	admits := make([]admitEntry, 0, len(fpebpf.Entries))
-	for _, entry := range fpebpf.Entries {
+	live := fpebpf.Snapshot()
+	admits := make([]admitEntry, 0, len(live))
+	for _, entry := range live {
 		if !entry.Prewarm {
 			fmt.Printf("[prewarm] ino=%d name=%s skipped (waits for read-miss upcall)\n",
 				entry.Ino, entry.Name)

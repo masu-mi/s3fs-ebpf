@@ -71,17 +71,14 @@ static const char lazy_content[]   = "(not fetched yet)\n";      /* 18 bytes */
 static const char big_content[]    = "(1 MiB blob — daemon will admit real bytes)\n"; /* 45 bytes */
 
 /*
- * Entry table. Ordered by name (iterate_shared emits in listed order).
- * Update this if the demo bucket contents change; the daemon's
- * pre-warmer keeps an independent mirror until Week 4+ adds a
- * bucket-sync ioctl.
- *
- * lazy.txt (ino=103) is intentionally NOT prewarmed by the daemon so
- * `cat` on it exercises the Week 4 (a) C upcall path: kmod's .read
- * misses admit → emits a read-miss event → daemon fetches from S3 →
- * admits → signals → kmod retries → arena bytes returned.
+ * Bootstrap table. Serves the mount when the daemon hasn't sync'd yet
+ * (e.g. right after `mount` before `s3fs-ebpf fastpath` connects, or
+ * after the daemon exits and clears the dynamic table). The daemon's
+ * SYNC_ENTRIES ioctl replaces this with a live bucket snapshot at
+ * runtime; a count=0 sync restores the bootstrap so the mount stays
+ * browsable.
  */
-static const struct s3fs_entry s3fs_entries[] = {
+static const struct s3fs_entry s3fs_bootstrap_entries[] = {
 	{ .name = "big.bin",            .ino = 104, .mode = S_IFREG | 0644,
 	  .initial_content = big_content,
 	  .initial_content_size = sizeof(big_content)    - 1 },
@@ -98,7 +95,89 @@ static const struct s3fs_entry s3fs_entries[] = {
 	  .initial_content = world_content,
 	  .initial_content_size = sizeof(world_content)  - 1 },
 };
-#define S3FS_NR_ENTRIES ARRAY_SIZE(s3fs_entries)
+#define S3FS_NR_BOOTSTRAP ARRAY_SIZE(s3fs_bootstrap_entries)
+
+/*
+ * Live entry table. NULL means "use s3fs_bootstrap_entries";
+ * non-NULL means the daemon has pushed a snapshot via
+ * S3FS_IOC_SYNC_ENTRIES and readers must consult it instead. Names
+ * are embedded in each entry so lifetime tracks the kmalloc'd array.
+ *
+ * Protected by s3fs_entries_mtx (mutex, not rwlock): the reader paths
+ * — lookup and iterate_shared — call dir_emit / d_add which can sleep
+ * (page faults during copy_to_user), and a spin/rw lock would forbid
+ * that. Contention is fine at PoC scale: the writer (sync ioctl) is
+ * infrequent and readers are cheap.
+ */
+static DEFINE_MUTEX(s3fs_entries_mtx);
+static struct s3fs_entry_dyn *s3fs_dyn_entries;
+static size_t s3fs_dyn_nr;
+
+/*
+ * Snapshot copy of one entry, filled under s3fs_entries_mtx and
+ * returned to callers who then use the fields without holding the
+ * lock. `initial_content` is NULL for dynamic entries (daemon-owned,
+ * no compile-time placeholder); make_inode falls back to a 0-byte
+ * scratch buffer in that case, and .read_folio serves from the arena
+ * once the daemon admits or from the upcall miss path meanwhile.
+ */
+struct s3fs_entry_snap {
+	unsigned long ino;
+	u64 size;                  /* 0 = no authoritative size (bootstrap) */
+	umode_t mode;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+	u32 name_len;
+	const void *initial_content;
+	size_t initial_content_size;
+};
+
+static bool resolve_entry_by_name(const char *name, size_t name_len,
+				  struct s3fs_entry_snap *out)
+{
+	size_t i;
+
+	mutex_lock(&s3fs_entries_mtx);
+	if (s3fs_dyn_entries) {
+		for (i = 0; i < s3fs_dyn_nr; i++) {
+			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[i];
+
+			if (e->name_len != name_len ||
+			    memcmp(e->name, name, name_len) != 0)
+				continue;
+			out->ino = e->ino;
+			out->size = e->size;
+			out->mode = e->mode;
+			out->name_len = e->name_len;
+			memcpy(out->name, e->name, e->name_len);
+			out->name[e->name_len] = '\0';
+			out->initial_content = NULL;
+			out->initial_content_size = 0;
+			mutex_unlock(&s3fs_entries_mtx);
+			return true;
+		}
+		mutex_unlock(&s3fs_entries_mtx);
+		return false;
+	}
+	for (i = 0; i < S3FS_NR_BOOTSTRAP; i++) {
+		const struct s3fs_entry *e = &s3fs_bootstrap_entries[i];
+		size_t elen = strlen(e->name);
+
+		if (elen != name_len || memcmp(e->name, name, name_len) != 0)
+			continue;
+		out->ino = e->ino;
+		out->size = 0; /* bootstrap: no authoritative size — fall back to fd->size */
+		out->mode = e->mode;
+		out->name_len = elen;
+		memcpy(out->name, e->name, elen);
+		out->name[elen] = '\0';
+		out->initial_content = e->initial_content;
+		out->initial_content_size = e->initial_content_size;
+		mutex_unlock(&s3fs_entries_mtx);
+		return true;
+	}
+	mutex_unlock(&s3fs_entries_mtx);
+	return false;
+}
 
 /* -- Admit table: ino -> daemon user_vm backing --------------------------- */
 /*
@@ -464,19 +543,55 @@ static void s3fs_ebpf_upcall_shutdown(void)
 	wake_up_all(&s3fs_miss_wq);
 }
 
-static const struct s3fs_entry *find_entry(const struct qstr *qname)
+/* Backward-compatible wrapper used by lookup: fills `out` from
+ * whichever table is live. Returns true on hit. */
+static bool find_entry(const struct qstr *qname, struct s3fs_entry_snap *out)
 {
-	size_t i;
+	if (qname->len > S3FS_SYNC_NAME_MAX)
+		return false;
+	return resolve_entry_by_name(qname->name, qname->len, out);
+}
 
-	for (i = 0; i < S3FS_NR_ENTRIES; i++) {
-		const struct s3fs_entry *e = &s3fs_entries[i];
-		size_t elen = strlen(e->name);
+/*
+ * s3fs_ebpf_entries_replace — swap the live entry table.
+ *
+ * If `count == 0` (or `entries == NULL`), drop the dynamic table and
+ * revert to the bootstrap set so the mount stays browsable after
+ * daemon shutdown. Otherwise take ownership of `entries` (a kmalloc'd
+ * array of `count` elements). Old dynamic array is kfree'd here.
+ *
+ * The dcache holds inodes minted from the previous table, so we
+ * shrink it — a big hammer but correct for the PoC: negative dentries
+ * are dropped so stale-lookup ENOENT clears, and stale positive
+ * dentries are re-resolved on next access. i_size / content-visibility
+ * of a still-admitted ino is handled by admit_replace's per-inode
+ * invalidate.
+ */
+int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
+{
+	struct s3fs_entry_dyn *prev;
 
-		if (elen == qname->len &&
-		    memcmp(e->name, qname->name, elen) == 0)
-			return e;
+	mutex_lock(&s3fs_entries_mtx);
+	prev = s3fs_dyn_entries;
+	if (count && entries) {
+		s3fs_dyn_entries = entries;
+		s3fs_dyn_nr      = count;
+	} else {
+		s3fs_dyn_entries = NULL;
+		s3fs_dyn_nr      = 0;
 	}
-	return NULL;
+	mutex_unlock(&s3fs_entries_mtx);
+
+	kfree(prev);
+
+	if (s3fs_active_sb)
+		shrink_dcache_sb(s3fs_active_sb);
+	return 0;
+}
+
+void s3fs_ebpf_entries_shutdown(void)
+{
+	(void)s3fs_ebpf_entries_replace(NULL, 0);
 }
 
 /* -- Per-inode content buffer -------------------------------------------- */
@@ -802,7 +917,7 @@ static const struct inode_operations s3fs_ebpf_file_iops = {
 /* -- Directory / super ops ------------------------------------------------ */
 
 static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
-					  const struct s3fs_entry *e)
+					  const struct s3fs_entry_snap *e)
 {
 	struct inode *inode;
 	struct s3fs_file_data *fd;
@@ -835,13 +950,18 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 			return NULL;
 		}
 		inode->i_private = fd;
-		/* Prefer admit size over the compile-time initial so that
-		 * generic_file_read_iter reads up to the S3-authoritative
-		 * length rather than being truncated to kmod's placeholder
-		 * (e.g. 46 bytes for big.bin instead of the real 1 MiB). */
+		/* Size resolution priority:
+		 *   1. current admit (arena has the exact bytes)
+		 *   2. sync entry's size (S3-authoritative but not yet in arena)
+		 *   3. fd->size (compile-time placeholder for bootstrap)
+		 * Without (2), a newly sync'd entry would report i_size=0
+		 * and generic_file_read_iter would short-circuit before
+		 * .read_folio could upcall the daemon. */
 		if (admit_snapshot(e->ino, &admit_uaddr,
 				   &admit_size, &admit_mm) && admit_mm)
 			inode->i_size = admit_size;
+		else if (e->size > 0)
+			inode->i_size = e->size;
 		else
 			inode->i_size = fd->size;
 		inode->i_op      = &s3fs_ebpf_file_iops;
@@ -864,43 +984,85 @@ static struct dentry *s3fs_ebpf_lookup(struct inode *dir,
 				       struct dentry *dentry,
 				       unsigned int flags)
 {
-	const struct s3fs_entry *e;
+	struct s3fs_entry_snap snap;
 	struct inode *inode;
 
 	if (dentry->d_name.len > NAME_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
 
-	e = find_entry(&dentry->d_name);
-	if (!e) {
+	if (!find_entry(&dentry->d_name, &snap)) {
 		/* Cache the negative dentry so repeated ENOENT lookups
 		 * don't come back to us. Small win but honest. */
 		d_add(dentry, NULL);
 		return NULL;
 	}
 
-	inode = s3fs_ebpf_make_inode(dir->i_sb, e);
+	inode = s3fs_ebpf_make_inode(dir->i_sb, &snap);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 	d_add(dentry, inode);
 	return NULL;
 }
 
+/*
+ * Emit one entry at ctx->pos - 2. Snapshot the fields under the
+ * entries mutex, then release before calling dir_emit (which can
+ * page-fault into user via filldir → copy_to_user). Returns true if
+ * the caller should advance ctx->pos and keep going, false if we're
+ * past the end or dir_emit signaled the buffer is full.
+ */
+static bool emit_one_entry(struct dir_context *ctx, size_t idx)
+{
+	unsigned long ino;
+	unsigned char dt;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+	u32 name_len;
+
+	mutex_lock(&s3fs_entries_mtx);
+	if (s3fs_dyn_entries) {
+		const struct s3fs_entry_dyn *e;
+
+		if (idx >= s3fs_dyn_nr) {
+			mutex_unlock(&s3fs_entries_mtx);
+			return false;
+		}
+		e = &s3fs_dyn_entries[idx];
+		ino      = e->ino;
+		dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
+		name_len = e->name_len;
+		memcpy(name, e->name, name_len);
+	} else {
+		const struct s3fs_entry *e;
+		size_t elen;
+
+		if (idx >= S3FS_NR_BOOTSTRAP) {
+			mutex_unlock(&s3fs_entries_mtx);
+			return false;
+		}
+		e    = &s3fs_bootstrap_entries[idx];
+		elen = strlen(e->name);
+		if (elen > S3FS_SYNC_NAME_MAX)
+			elen = S3FS_SYNC_NAME_MAX;
+		ino      = e->ino;
+		dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
+		name_len = elen;
+		memcpy(name, e->name, elen);
+	}
+	mutex_unlock(&s3fs_entries_mtx);
+
+	if (!dir_emit(ctx, name, name_len, ino, dt))
+		return false;
+	return true;
+}
+
 static int s3fs_ebpf_iterate_shared(struct file *file, struct dir_context *ctx)
 {
-	size_t i;
-
 	if (!dir_emit_dots(file, ctx))
 		return 0;
 
 	/* ctx->pos: 0=".", 1="..", 2..N+1 = table entries. */
-	for (i = ctx->pos - 2; i < S3FS_NR_ENTRIES; i++) {
-		const struct s3fs_entry *e = &s3fs_entries[i];
-
-		if (!dir_emit(ctx, e->name, strlen(e->name),
-			      e->ino, DT_REG))
-			break;
+	while (emit_one_entry(ctx, ctx->pos - 2))
 		ctx->pos++;
-	}
 	return 0;
 }
 
