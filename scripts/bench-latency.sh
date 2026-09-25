@@ -150,11 +150,14 @@ run_fio() {
 	local mp=$1 label=$2
 	# --allow_file_create=0: fio が demo file を作り直そうとして
 	#   kmod の readonly unlink で失敗するのを回避。
-	# --filesize/--size/--bs は demo object (16 B) 相当。
+	# --size=1 --bs=1: 実 file size に依存しない最小単位。time_based=1
+	#   で runtime 秒回す。--filesize や大きな --size を与えると fio が
+	#   「file が指定サイズより小さい」と判断して unlink→再 layout を
+	#   試み、readonly FS で iops=0 になる。
 	fio --name="$label" --ioengine=filestat --filename="$mp/$FILE" \
 		--stat_type=stat --numjobs="$FIO_JOBS" \
 		--runtime="$FIO_TIME" --time_based=1 --group_reporting=1 \
-		--allow_file_create=0 --filesize=16 --size=16 --bs=16 \
+		--allow_file_create=0 --size=1 --bs=1 \
 		2>&1 | grep -E 'IOPS|clat \(nsec\)' \
 		| awk -v L="$label" '{ printf "%-14s | %s\n", L, $0 }'
 }
