@@ -251,6 +251,50 @@ out_free_ubuf:
 	return err;
 }
 
+/*
+ * S3FS_IOC_POP_FLUSH — daemon pulls one write-back event.
+ *
+ * Returns -EAGAIN if the queue is empty. Non-blocking; the daemon
+ * polls this on a ticker (typically 100ms) and drains all pending
+ * events per tick.
+ */
+static long s3fs_dev_pop_flush(void __user *uarg)
+{
+	struct s3fs_flush_event ev;
+	int err;
+
+	err = s3fs_ebpf_flush_pop(&ev);
+	if (err)
+		return err;
+	if (copy_to_user(uarg, &ev, sizeof(ev)))
+		return -EFAULT;
+	return 0;
+}
+
+/*
+ * S3FS_IOC_READ_DIRTY — daemon reads the current scratch bytes for
+ * `ino` into its own buffer. Returns 0 on success and writes
+ * `out_bytes` back; returns -EAGAIN when the ino is unknown (raced
+ * with an evict) so the daemon can drop the flush event silently.
+ */
+static long s3fs_dev_read_dirty(void __user *uarg)
+{
+	struct s3fs_read_dirty req;
+	long copied;
+
+	if (copy_from_user(&req, uarg, sizeof(req)))
+		return -EFAULT;
+	copied = s3fs_ebpf_read_dirty(req.ino,
+				      (void __user *)(uintptr_t)req.uaddr,
+				      req.size);
+	if (copied < 0)
+		return copied;
+	req.out_bytes = (u64)copied;
+	if (copy_to_user(uarg, &req, sizeof(req)))
+		return -EFAULT;
+	return 0;
+}
+
 static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	void __user *uarg = (void __user *)arg;
@@ -264,6 +308,10 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_signal_admit(uarg);
 	case S3FS_IOC_SYNC_ENTRIES:
 		return s3fs_dev_sync_entries(uarg);
+	case S3FS_IOC_POP_FLUSH:
+		return s3fs_dev_pop_flush(uarg);
+	case S3FS_IOC_READ_DIRTY:
+		return s3fs_dev_read_dirty(uarg);
 	default:
 		return -ENOTTY;
 	}

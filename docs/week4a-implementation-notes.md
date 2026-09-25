@@ -313,7 +313,7 @@ wc -c /mnt/s3demo/hello.txt   # 17
 
 - **Week 4 (a) C**: ✅ 完成 (§10 参照)
 - **Week 4 (b)**: ✅ 完成 (`docs/week4b-implementation-notes.md`)
-- **Week 4 (c)**: write-back to S3
+- **Week 4 (c)**: ✅ 完成 (`docs/week4c-implementation-notes.md`)
 - **Week 4 (d)**: Lua/WASM policy engine
 - **Week 4 (e)**: benchmark。s3fs-fuse / Mountpoint との `stat` + `cat` latency 比較
 - **D (upstream patch)**: `bpf_arena_get_kern_vm_start` の EXPORT_SYMBOL_GPL、または kern_vm range 用 fault handler の追加。当てれば A′ 経路が復活し、B の GUP overhead が消える (数百ns オーダーの改善見込み)

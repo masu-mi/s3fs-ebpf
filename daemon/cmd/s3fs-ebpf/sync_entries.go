@@ -104,6 +104,19 @@ func assignIno(s3Key string) uint64 {
 	return ino
 }
 
+// registerIno pins a specific `ino` to `s3Key`, overriding whatever
+// the allocator would have picked. Called by the flush loop after a
+// PUT for a locally-created file (kmod-picked ino) so the next sync
+// round emits the same ino and iterate_shared unifies the two views.
+func registerIno(s3Key string, ino uint64) {
+	inoMu.Lock()
+	defer inoMu.Unlock()
+	inoByKey[s3Key] = ino
+	if ino >= nextIno {
+		nextIno = ino + 1
+	}
+}
+
 // -- sync loop --------------------------------------------------------
 
 // buildEntriesFromS3 lists the bucket and turns each object into an
