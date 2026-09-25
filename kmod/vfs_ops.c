@@ -211,6 +211,14 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			if (!inode)
 				continue;
 			i_size_write(inode, entries[i].size);
+			/* Drop any stale page cache filled from the kmalloc
+			 * fallback path (or from a prior admit with a
+			 * different size). Uses folio_trylock, so folios
+			 * held by a concurrent .read_folio waiting on the
+			 * upcall are skipped rather than deadlocked — those
+			 * are pre-uptodate anyway and will be filled from
+			 * the arena on the retry after signal_admit fires. */
+			invalidate_mapping_pages(inode->i_mapping, 0, -1);
 			iput(inode);
 		}
 	}
@@ -796,13 +804,17 @@ static const struct inode_operations s3fs_ebpf_file_iops = {
 static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 					  const struct s3fs_entry *e)
 {
-	struct inode *inode = new_inode(sb);
+	struct inode *inode;
 	struct s3fs_file_data *fd;
 
+	/* iget_locked hashes the inode so admit_replace's ilookup(ino)
+	 * finds it. new_inode() would skip the hash and defeat that. */
+	inode = iget_locked(sb, e->ino);
 	if (!inode)
 		return NULL;
+	if (!(inode->i_state & I_NEW))
+		return inode;
 
-	inode->i_ino  = e->ino;
 	inode->i_mode = e->mode;
 	inode->i_uid  = GLOBAL_ROOT_UID;
 	inode->i_gid  = GLOBAL_ROOT_GID;
@@ -819,7 +831,7 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		fd = s3fs_file_data_new(e->initial_content,
 					e->initial_content_size);
 		if (!fd) {
-			iput(inode);
+			iget_failed(inode);
 			return NULL;
 		}
 		inode->i_private = fd;
@@ -841,9 +853,10 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		mapping_set_gfp_mask(inode->i_mapping, GFP_KERNEL);
 	} else {
 		/* Only regular files in the entry table for now. */
-		iput(inode);
+		iget_failed(inode);
 		return NULL;
 	}
+	unlock_new_inode(inode);
 	return inode;
 }
 
