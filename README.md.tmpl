@@ -394,16 +394,27 @@ AWS 本番 endpoint (`s3.us-west-2.amazonaws.com` 等) と IAM キーを指定�
 
 ## ベンチマーク
 
+`make bench*` 系は kmod insmod / mount / daemon 起動 / s3fs-fuse 対抗 mount / cleanup までを script 内 trap で完結させます。前提は `make compose-up` (MinIO/Prometheus/Grafana up) と `make all` (kmod + bpf + daemon 済) のみ:
+
 ```bash
-make bench              # 実行（要マウント）
-make bench-dry          # ジョブ定義の存在確認だけ
+make compose-up
+make all
+make bench              # latency bench (hyperfine + microbench + fio)     → /tmp/bench/
+make bench-write        # write-back throughput 1M/10M/100M                → /tmp/bench-write/
+make bench-scale        # 並列度スケール numjobs=1..64                     → /tmp/bench-scale/
+make bench-3way         # ebpf vs fuse-raw vs fuse-cache 3-way             → /tmp/bench-3way/
+make bench-dry          # 旧 runner.sh の存在確認だけ (Week 0/1 skeleton)
 ```
 
-- `bench/fio/stat_latency.fio` — `filestat` エンジンで 10,000 件の `stat` レイテンシ
-- `bench/fio/sequential_read.fio` — 大容量シーケンシャル read
-- `bench/bcc/vfs_latency.py` — `vfs_read` / `vfs_getattr` の log2 ヒストグラム
+計測 script は `scripts/bench-*.sh`。docs/benchmark-results.md §7-§10 に結果解釈。
 
-結果は `bench/results/<timestamp>/` へ。
+**手動ライフサイクル**:
+
+```bash
+make mount              # insmod + mount /mnt/s3demo
+make daemon-run         # daemon foreground; Ctrl+C で停止
+make unmount            # daemon-stop + umount + rmmod
+```
 
 ---
 

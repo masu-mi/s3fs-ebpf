@@ -29,11 +29,36 @@ mkdir -p "$OUT_DIR"
 log() { echo "[bench] $*" >&2; }
 
 check_prereq() {
-	for t in hyperfine s3fs fio; do
-		command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }
+	for t in hyperfine s3fs fio docker; do
+		command -v "$t" >/dev/null || { echo "missing $t (apt install $t or run scripts/setup-toolchain.sh)"; exit 1; }
 	done
-	mountpoint -q "$MP_FUSE" || { echo "$MP_FUSE not mounted"; exit 1; }
-	[ -f "$MP_FUSE/$FILE" ] || { echo "$MP_FUSE/$FILE missing"; exit 1; }
+	# MinIO must be reachable; the bench does docker exec ... mc cat/put etc.
+	docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
+		|| { echo "s3fs-ebpf-minio container missing — run 'make compose-up'"; exit 1; }
+	# fio object must exist on the S3 side, otherwise the fuse-mount
+	# ls will not see it (see docs/lessons-learned.md §3.1 note on the
+	# "hello.txt disappeared from MinIO" incident).
+	docker exec s3fs-ebpf-minio mc ls "local/s3fs-test/$FILE" >/dev/null 2>&1 \
+		|| { echo "s3://s3fs-test/$FILE missing in MinIO — seed the bucket first"; exit 1; }
+}
+
+# Auto-mount fuse-raw at $MP_FUSE so runs from a clean host (`make
+# compose-up; make all; make bench`) succeed. Previous behavior forced
+# the operator to pre-mount by hand.
+FUSE_STARTED=0
+start_fuse() {
+	if mountpoint -q "$MP_FUSE"; then
+		log "$MP_FUSE already mounted, reusing"
+		return
+	fi
+	log "mounting s3fs-fuse at $MP_FUSE"
+	sudo mkdir -p "$MP_FUSE"
+	sudo s3fs s3fs-test "$MP_FUSE" \
+		-o url=http://127.0.0.1:9000 -o use_path_request_style \
+		-o passwd_file=/etc/passwd-s3fs -o allow_other \
+		-o uid="$(id -u)" -o gid="$(id -g)" -o umask=0022 \
+		|| { echo "s3fs mount failed — check /etc/passwd-s3fs and MinIO"; exit 1; }
+	FUSE_STARTED=1
 }
 
 start_ebpf() {
@@ -44,6 +69,7 @@ start_ebpf() {
 	sleep 0.5
 	LD_LIBRARY_PATH=$HOME/.local/lib sudo -E \
 		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 --sample-every=60s \
+		--metrics-addr=:9600 \
 		>"$OUT_DIR/fastpath.log" 2>&1 &
 	for _ in $(seq 1 40); do
 		grep -q '\[admit\] ' "$OUT_DIR/fastpath.log" && break
@@ -59,10 +85,16 @@ stop_ebpf() {
 	sleep 1
 	sudo umount "$MP_EBPF" 2>/dev/null || true
 	sudo rmmod s3fs_kfunc 2>/dev/null || true
+	# Only unmount fuse if we brought it up (avoid stealing an
+	# operator-owned pre-existing mount).
+	if [ "$FUSE_STARTED" -eq 1 ]; then
+		sudo umount "$MP_FUSE" 2>/dev/null || true
+	fi
 }
 trap stop_ebpf EXIT
 
 check_prereq
+start_fuse
 start_ebpf
 
 # ---------- 1. hyperfine: end-to-end (fork/exec 込み) ------------------
