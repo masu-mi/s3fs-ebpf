@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
 	"golang.org/x/sys/unix"
 )
@@ -40,6 +41,7 @@ func setAdmits(devPath string, initial []admitEntry) error {
 	admits = append(admits[:0], initial...)
 	snap := append([]admitEntry(nil), admits...)
 	admitMu.Unlock()
+	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
 	return admitArena(devPath, snap)
 }
 
@@ -52,6 +54,7 @@ func addAdmit(devPath string, entry admitEntry) error {
 	admits = append(admits, entry)
 	snap := append([]admitEntry(nil), admits...)
 	admitMu.Unlock()
+	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
 	return admitArena(devPath, snap)
 }
 
@@ -61,6 +64,7 @@ func clearAdmits(devPath string) error {
 	admitMu.Lock()
 	admits = admits[:0]
 	admitMu.Unlock()
+	metrics.Global.AdmitsCurrent.Store(0)
 	return admitArena(devPath, nil)
 }
 
@@ -185,15 +189,18 @@ func runReadMissLoop(ctx context.Context, devPath string,
 
 func handleReadMiss(ctx context.Context, devPath string,
 	progs *fpebpf.Programs, s3c *s3.Client, ev readMissEvent) {
+	metrics.Global.ReadMissUpcalls.Add(1)
 	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d unknown — signaling ENOENT\n", ev.Ino)
+		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmit(devPath, ev.Ino, -2 /* -ENOENT */)
 		return
 	}
 	if s3c == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: no S3 backend — signaling ENODATA\n",
 			ev.Ino, entry.Name)
+		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmit(devPath, ev.Ino, -61 /* -ENODATA */)
 		return
 	}
@@ -202,21 +209,29 @@ func handleReadMiss(ctx context.Context, devPath string,
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s get: %v\n",
 			ev.Ino, entry.S3Key, err)
+		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
 		return
 	}
 	off, err := progs.AdmitContent(body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit content: %v\n", ev.Ino, err)
+		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmit(devPath, ev.Ino, -12 /* -ENOMEM */)
 		return
 	}
 	uaddr := progs.Arena().BaseAddr() + uint64(off)
+	// Track high-water arena usage. AdmitContent returns the offset
+	// where it wrote; assume monotonic (§4.5 note on arena gc未実装).
+	if hi := uint64(off) + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
+		metrics.Global.ArenaUsedBytes.Store(hi)
+	}
 
 	if err := addAdmit(devPath, admitEntry{
 		Ino: ev.Ino, Uaddr: uaddr, Size: uint64(len(body)),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit arena: %v\n", ev.Ino, err)
+		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
 		return
 	}

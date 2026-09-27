@@ -11,61 +11,208 @@
       "id": 1,
       "title": "Fast Path Hit Ratio",
       "type": "stat",
+      "description": "fast_hits / (fast_hits + slow_misses) over the last 1 min. Zero on cold start until BPF fentry sees getattr traffic.",
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(s3fs_ebpf_fast_path_hits_total[1m])) / (sum(rate(s3fs_ebpf_fast_path_hits_total[1m])) + sum(rate(s3fs_ebpf_slow_path_misses_total[1m])))"
+          "expr": "sum(rate(s3fs_ebpf_fast_path_hits_total[1m])) / clamp_min(sum(rate(s3fs_ebpf_fast_path_hits_total[1m])) + sum(rate(s3fs_ebpf_slow_path_misses_total[1m])), 1)"
         }
       ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] }
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "green", "value": 0.9 }
+            ]
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "id": 2,
-      "title": "VFS Requests / sec (fast vs slow)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 0 },
+      "title": "Admits (arena entries)",
+      "type": "stat",
+      "description": "Current number of ino → arena-uaddr entries in the admit table. Rises with prewarm/Path C admits.",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(s3fs_ebpf_fast_path_hits_total[1m])",   "legendFormat": "fast" },
-        { "refId": "B", "expr": "rate(s3fs_ebpf_slow_path_misses_total[1m])", "legendFormat": "slow" }
+        { "refId": "A", "expr": "s3fs_ebpf_admits_current" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "title": "Sync entries (dyn table)",
+      "type": "stat",
+      "description": "Entries in kmod's dyn entry table after the last successful sync round.",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "s3fs_ebpf_sync_entries_current" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "Arena usage",
+      "type": "gauge",
+      "description": "High-water bytes written by AdmitContent, divided by arena capacity. Grows monotonically until daemon restart — gc は未実装 (lessons §5.4).",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "s3fs_ebpf_arena_used_bytes / clamp_min(s3fs_ebpf_arena_capacity_bytes, 1)"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.7 },
+              { "color": "red", "value": 0.9 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "VFS getattr rate — fast vs slow",
+      "type": "timeseries",
+      "description": "Per-second rate of fentry-observed getattr calls, split by admit-hit (fast) and admit-miss (slow). unknown_fs は他 FS の getattr が来た数 (noise の目安)。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(s3fs_ebpf_fast_path_hits_total[30s])",    "legendFormat": "fast" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_slow_path_misses_total[30s])",  "legendFormat": "slow" },
+        { "refId": "C", "expr": "rate(s3fs_ebpf_unknown_fs_total[30s])",        "legendFormat": "unknown_fs" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
+    },
+    {
+      "id": 6,
+      "title": "Write-back throughput (bytes PUT to S3)",
+      "type": "timeseries",
+      "description": "Bytes/s that the flush loop wrote back. bench-write を回すと 100 MiB 単位のスパイクが見える。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_bytes_total[30s])", "legendFormat": "PUT bytes/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
+    },
+    {
+      "id": 7,
+      "title": "Read-miss upcalls (Path C)",
+      "type": "timeseries",
+      "description": "Rate of read-miss upcalls from kmod to daemon. Errors line rises when S3 Get / AdmitContent fail.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(s3fs_ebpf_read_miss_upcalls_total[30s])", "legendFormat": "upcalls" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_read_miss_errors_total[30s])",  "legendFormat": "errors" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
-      "id": 3,
-      "title": "Context Switches / sec (host)",
+      "id": 8,
+      "title": "Flush events / errors",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "description": "Rate of flush events drained + PUT failures. errors line がずっと > 0 なら S3 側の問題を疑う。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(node_context_switches_total[1m])" }
+        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_events_total[30s])", "legendFormat": "events" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_flush_errors_total[30s])", "legendFormat": "errors" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 9,
+      "title": "Sync rounds / errors",
+      "type": "timeseries",
+      "description": "Rate of successful sync rounds vs errors. 定期 --sync-every に沿って階段状に増える。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(s3fs_ebpf_sync_rounds_total[1m])", "legendFormat": "rounds" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_sync_errors_total[1m])", "legendFormat": "errors" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "title": "Host context switches / sec",
+      "type": "timeseries",
+      "description": "node_exporter からの host-side context switch。fuse-fs bench 中は高、ebpf-fs bench 中は低いことを期待。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(node_context_switches_total[30s])", "legendFormat": "context switches" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] }
     },
     {
-      "id": 4,
-      "title": "MinIO S3 requests / sec",
+      "id": 11,
+      "title": "Host CPU% (user / sys / iowait)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "description": "全 CPU 平均。bench 実行時の CPU 消費源を分解して見る。iowait が高いと S3 backend が bottleneck。",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "sum by (api) (rate(minio_s3_requests_total[1m]))", "legendFormat": "{{api}}" }
+        { "refId": "A", "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[30s])) * 100",   "legendFormat": "user" },
+        { "refId": "B", "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[30s])) * 100", "legendFormat": "sys"  },
+        { "refId": "C", "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[30s])) * 100", "legendFormat": "iowait" }
       ],
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
+    },
+    {
+      "id": 12,
+      "title": "MinIO S3 traffic (bytes)",
+      "type": "timeseries",
+      "description": "MinIO 側 metric。rate() で GET/PUT byte 速度を見る。exposition path が違う場合 (metric 名変更)、Prometheus targets タブで s3fs_ebpf_daemon / minio が UP か先に確認する。",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(minio_s3_traffic_received_bytes[30s])", "legendFormat": "received (uploaded)" },
+        { "refId": "B", "expr": "rate(minio_s3_traffic_sent_bytes[30s])",     "legendFormat": "sent (downloaded)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
-  "tags": ["s3fs-ebpf"],
+  "tags": ["s3fs-ebpf", "performance"],
   "templating": { "list": [] },
   "time": { "from": "now-15m", "to": "now" },
   "timezone": "",
   "title": "S3FS-eBPF Overview",
   "uid": "s3fs-ebpf-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

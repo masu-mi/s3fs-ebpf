@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
 	"golang.org/x/sys/unix"
 )
@@ -113,6 +114,7 @@ func drainFlushQueue(ctx context.Context, devFd int, devPath string,
 
 func handleFlush(ctx context.Context, devFd int, devPath string,
 	progs *fpebpf.Programs, s3c *s3.Client, ev *flushEvent) {
+	metrics.Global.FlushEvents.Add(1)
 	name := string(ev.Name[:ev.NameLen])
 
 	// Resolve S3 key: prefer the sync-mirrored entry, fall back to
@@ -135,6 +137,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[flush] ino=%d read dirty: %v\n",
 				ev.Ino, err)
+			metrics.Global.FlushErrors.Add(1)
 			return
 		}
 		buf = buf[:n]
@@ -144,9 +147,11 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	if err := s3c.Put(putCtx, s3key, buf); err != nil {
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d s3://%s put: %v\n",
 			ev.Ino, s3key, err)
+		metrics.Global.FlushErrors.Add(1)
 		return
 	}
 	registerIno(s3key, ev.Ino)
+	metrics.Global.FlushBytes.Add(uint64(len(buf)))
 	fmt.Printf("[flush] ino=%d s3://%s put %d bytes\n",
 		ev.Ino, s3key, len(buf))
 
@@ -161,7 +166,11 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d admit content: %v\n",
 			ev.Ino, err)
+		metrics.Global.FlushErrors.Add(1)
 		return
+	}
+	if hi := uint64(off) + uint64(len(buf)); hi > metrics.Global.ArenaUsedBytes.Load() {
+		metrics.Global.ArenaUsedBytes.Store(hi)
 	}
 	if err := addAdmit(devPath, admitEntry{
 		Ino:   ev.Ino,

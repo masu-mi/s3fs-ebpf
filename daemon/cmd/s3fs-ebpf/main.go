@@ -24,6 +24,7 @@ import (
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
 	"github.com/cilium/ebpf/ringbuf"
 )
@@ -277,8 +278,22 @@ func runFastpath(args []string) int {
 		"kmod control device for arena-backed read admission")
 	syncEvery := fs.Duration("sync-every", 30*time.Second,
 		"how often to re-list the bucket and push the entry table to kmod (0 disables)")
+	metricsAddr := fs.String("metrics-addr", ":9600",
+		"address for the Prometheus scrape endpoint (empty to disable)")
 	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
 	fs.Parse(args)
+
+	// Bring the metrics endpoint up early so Prometheus scrapes
+	// succeed even before the first admit/sync happens. Failure to
+	// bind is non-fatal — logged and daemon continues.
+	if *metricsAddr != "" {
+		go func(addr string) {
+			fmt.Printf("[metrics] serving on %s/metrics\n", addr)
+			if err := metrics.Serve(addr); err != nil {
+				fmt.Fprintf(os.Stderr, "[metrics] serve %s: %v\n", addr, err)
+			}
+		}(*metricsAddr)
+	}
 
 	progs, err := fpebpf.Load()
 	if err != nil {
@@ -316,6 +331,9 @@ func runFastpath(args []string) int {
 
 	fmt.Printf("[fastpath] attached fentry/vfs_getattr_nosec; arena base=0x%x size=%d\n",
 		progs.Arena().BaseAddr(), progs.Arena().Size())
+	// arena capacity is fixed for the lifetime of the daemon; publish
+	// once so the dashboard's usage% panel has a denominator.
+	metrics.Global.ArenaCapacityBytes.Store(uint64(progs.Arena().Size()))
 	if s3c != nil {
 		fmt.Printf("[fastpath] s3 backend: bucket=%s (will warm arena on miss)\n", s3c.Bucket())
 	} else {
@@ -472,6 +490,9 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) []admi
 				Uaddr: progs.Arena().BaseAddr() + uint64(cOff),
 				Size:  uint64(len(body)),
 			})
+			if hi := uint64(cOff) + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
+				metrics.Global.ArenaUsedBytes.Store(hi)
+			}
 			fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d uaddr=0x%x\n",
 				entry.Ino, len(body), cOff, progs.Arena().BaseAddr()+uint64(cOff))
 		}
@@ -543,6 +564,12 @@ func printCounters(progs *fpebpf.Programs, label string) {
 		fmt.Fprintf(os.Stderr, "read counters: %v\n", err)
 		return
 	}
+	// Mirror the BPF-side counters into the metrics endpoint. Store
+	// (not Add) because the BPF map is the source of truth — the
+	// per-CPU aggregate is what we want to expose, not the delta.
+	metrics.Global.FastPathHits.Store(c[fpebpf.StatFastHits])
+	metrics.Global.SlowPathMisses.Store(c[fpebpf.StatSlowMisses])
+	metrics.Global.UnknownFS.Store(c[fpebpf.StatUnknownFS])
 	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d\n",
 		label, c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS])
 }
