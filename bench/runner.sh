@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
-# runner.sh — orchestrate fio + BCC benchmarks against a mounted s3fs_ebpf target.
+# runner.sh — Week 0/1 skeleton bench runner. LEGACY.
+#
+# Current bench entry points are scripts/bench-*.sh (invoked via
+# `make bench` / `make bench-write` / `make bench-scale` /
+# `make bench-3way`). Those handle kmod insmod + mount + daemon
+# lifecycle end-to-end and don't need the demo file layout this
+# runner assumes (`nrfiles=10000` pre-created files under $MOUNT_POINT).
+#
+# Kept only for `make bench-dry` (verify fio job files parse). The
+# --dry-run path below is the only supported use.
 #
 # Env:
-#   MOUNT_POINT   default /mnt/s3data
+#   MOUNT_POINT   default /mnt/s3demo (was /mnt/s3data pre-Week-4)
 #   RESULT_ROOT   default ./bench/results
 #
 # Flags:
@@ -11,7 +20,7 @@ set -euo pipefail
 
 TOPDIR="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_DIR="${TOPDIR}/bench"
-MOUNT_POINT="${MOUNT_POINT:-/mnt/s3data}"
+MOUNT_POINT="${MOUNT_POINT:-/mnt/s3demo}"
 RESULT_ROOT="${RESULT_ROOT:-${BENCH_DIR}/results}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${RESULT_ROOT}/${STAMP}"
@@ -47,7 +56,12 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
 fi
 
 if ! mountpoint -q "${MOUNT_POINT}"; then
-    echo "ERROR: ${MOUNT_POINT} is not mounted. Run 's3fs-ebpf mount' first." >&2
+    echo "ERROR: ${MOUNT_POINT} is not mounted." >&2
+    echo "       This legacy runner requires a manual mount." >&2
+    echo "       For end-to-end bench with auto-mount, use:" >&2
+    echo "         make bench            # latency" >&2
+    echo "         make bench-write      # write throughput" >&2
+    echo "         make bench-scale      # parallel scale" >&2
     exit 1
 fi
 

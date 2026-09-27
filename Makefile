@@ -11,6 +11,12 @@ SCRIPTS_DIR := $(TOPDIR)/scripts
 
 COMPOSE_FILE := $(DEPLOY_DIR)/docker-compose.yml
 
+# Mount lifecycle defaults. MOUNT_POINT matches what scripts/bench-*.sh
+# and docs assume. FUSE_MOUNT is only used by the comparison benches.
+MOUNT_POINT ?= /mnt/s3demo
+FUSE_MOUNT  ?= /mnt/s3fuse
+METRICS_ADDR ?= :9600
+
 # Week 2 requires __BPF_FEATURE_ADDR_SPACE_CAST (clang 19+ with -mcpu=v3).
 # Ubuntu 24.04 ships clang-18.1 as /usr/bin/clang; noble-updates carries
 # clang-20 which we prefer when available. Override with `make CLANG=...`.
@@ -36,7 +42,9 @@ README      := $(TOPDIR)/README.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
 .PHONY: help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
-        vmlinux vmlinux-clean compose-up compose-down compose-logs bench bench-dry \
+        vmlinux vmlinux-clean compose-up compose-down compose-logs \
+        mount unmount daemon-run daemon-stop \
+        bench bench-write bench-scale bench-3way bench-dry \
         setup-kernel setup-toolchain readme test-arena clean
 
 ## help: Show this help (default target)
@@ -66,9 +74,18 @@ help:
 	@echo "  make compose-down   Stop the stack"
 	@echo "  make compose-logs   Tail compose logs"
 	@echo ""
-	@echo "Benchmarks:"
-	@echo "  make bench          Run fio + BCC jobs (requires mounted target)"
-	@echo "  make bench-dry      Verify job files without running (dry-run)"
+	@echo "Runtime lifecycle (kmod + mount + daemon):"
+	@echo "  make mount          insmod kmod + mount -t s3fs_ebpf on $(MOUNT_POINT)"
+	@echo "  make unmount        umount + rmmod (also stops any running daemon)"
+	@echo "  make daemon-run     Foreground: run bin/s3fs-ebpf fastpath (needs mount + compose-up)"
+	@echo "  make daemon-stop    SIGINT any running daemon"
+	@echo ""
+	@echo "Benchmarks (all auto-start compose-up requirement + kmod/mount/daemon in-script):"
+	@echo "  make bench          Latency bench (hyperfine + microbench + fio) vs s3fs-fuse"
+	@echo "  make bench-write    Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)"
+	@echo "  make bench-scale    Parallel scaling (numjobs=1..64) stat + read"
+	@echo "  make bench-3way     ebpf vs fuse-raw vs fuse-cache 3-way comparison"
+	@echo "  make bench-dry      Legacy runner.sh dry-run"
 	@echo ""
 	@echo "Week 1 verification (requires 6.12+ kernel):"
 	@echo "  make test-arena     insmod + run bpf_arena/KFunc round-trip probe + rmmod"
@@ -155,11 +172,77 @@ compose-logs:
 	docker compose -f $(COMPOSE_FILE) logs -f
 
 # -----------------------------------------------------------------------------
-# Benchmarks
+# Runtime lifecycle (kmod + mount + daemon)
 # -----------------------------------------------------------------------------
-bench:
-	$(BENCH_DIR)/runner.sh
+# Convenience targets so operators can bring the stack up manually and
+# leave it running while they watch Grafana. bench targets do the same
+# lifecycle internally (see scripts/bench-*.sh) so `make bench` from a
+# clean host works end-to-end.
 
+mount: kmod
+	@if ! lsmod | grep -q '^s3fs_kfunc'; then \
+		echo "==> insmod $(KMOD_DIR)/s3fs_kfunc.ko"; \
+		sudo insmod $(KMOD_DIR)/s3fs_kfunc.ko; \
+	fi
+	@if ! mountpoint -q $(MOUNT_POINT); then \
+		echo "==> mount -t s3fs_ebpf none $(MOUNT_POINT)"; \
+		sudo mkdir -p $(MOUNT_POINT); \
+		sudo mount -t s3fs_ebpf none $(MOUNT_POINT); \
+	fi
+	@echo "==> ready: $(MOUNT_POINT) (start daemon with 'make daemon-run')"
+
+unmount:
+	@$(MAKE) --no-print-directory daemon-stop
+	@if mountpoint -q $(MOUNT_POINT); then \
+		echo "==> umount $(MOUNT_POINT)"; \
+		sudo umount $(MOUNT_POINT); \
+	fi
+	@if lsmod | grep -q '^s3fs_kfunc'; then \
+		echo "==> rmmod s3fs_kfunc"; \
+		sudo rmmod s3fs_kfunc; \
+	fi
+
+daemon-run: daemon
+	@if pgrep -f 's3fs-ebpf fastpath' >/dev/null; then \
+		echo "==> daemon already running; 'make daemon-stop' first"; exit 1; \
+	fi
+	@if ! mountpoint -q $(MOUNT_POINT); then \
+		echo "==> $(MOUNT_POINT) not mounted; run 'make mount' first"; exit 1; \
+	fi
+	@echo "==> running $(DAEMON_BIN) fastpath (foreground, Ctrl+C to stop)"
+	LD_LIBRARY_PATH=$(KMOD_LDLIB):$$LD_LIBRARY_PATH sudo -E \
+		$(DAEMON_BIN) fastpath --s3 --metrics-addr=$(METRICS_ADDR) --sample-every=5s --sync-every=30s
+
+daemon-stop:
+	@if pgrep -f 's3fs-ebpf fastpath' >/dev/null; then \
+		echo "==> SIGINT s3fs-ebpf fastpath"; \
+		sudo pkill -INT -f 's3fs-ebpf fastpath' || true; \
+		sleep 1; \
+	fi
+
+# -----------------------------------------------------------------------------
+# Benchmarks (all invoke scripts/ which handle insmod + mount + daemon
+# lifecycle internally with trap-based cleanup; make bench from a
+# clean host after 'make compose-up; make all' should just work).
+# -----------------------------------------------------------------------------
+bench: all
+	@echo "==> latency bench (hyperfine + microbench + fio) — results in /tmp/bench/"
+	$(SCRIPTS_DIR)/bench-latency.sh
+
+bench-write: all
+	@echo "==> write-back throughput bench — results in /tmp/bench-write/"
+	$(SCRIPTS_DIR)/bench-write.sh
+
+bench-scale: all
+	@echo "==> parallel scaling bench — results in /tmp/bench-scale/"
+	$(SCRIPTS_DIR)/bench-scale.sh
+
+bench-3way: all
+	@echo "==> 3-way (ebpf vs fuse-raw vs fuse-cache) bench — results in /tmp/bench-3way/"
+	$(SCRIPTS_DIR)/bench-3way.sh
+
+# Legacy runner (Week 0/1 skeleton). Kept for the --dry-run flow;
+# scripts/bench-latency.sh replaces the actual bench execution.
 bench-dry:
 	$(BENCH_DIR)/runner.sh --dry-run
 
