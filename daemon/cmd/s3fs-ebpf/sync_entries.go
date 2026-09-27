@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
 	"golang.org/x/sys/unix"
 )
@@ -187,13 +188,17 @@ func syncEntriesOnce(ctx context.Context, devPath string, s3c *s3.Client) ([]fpe
 	defer cancel()
 	fresh, err := buildEntriesFromS3(timedCtx, s3c)
 	if err != nil {
+		metrics.Global.SyncErrors.Add(1)
 		return nil, fmt.Errorf("list: %w", err)
 	}
 	payload := entriesToSyncPayload(fresh)
 	if err := syncEntriesIoctl(devPath, payload); err != nil {
+		metrics.Global.SyncErrors.Add(1)
 		return nil, err
 	}
 	fpebpf.Replace(fresh)
+	metrics.Global.SyncRounds.Add(1)
+	metrics.Global.SyncEntriesCurrent.Store(uint64(len(fresh)))
 	return fresh, nil
 }
 

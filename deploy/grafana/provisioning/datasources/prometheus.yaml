@@ -1,8 +1,19 @@
 apiVersion: 1
 
+# UID を固定しないと Grafana が起動ごとに新 UID を割り当て、dashboard JSON の
+# "datasource": { "uid": "prometheus" } と mismatch して全パネルが "Datasource
+# not found" になる。ここで pin することで dashboard JSON と一致させる。
+# 既存 daemon persisted DB に auto-UID の同名 datasource が残っていると
+# collision するので、deleteDatasources で先に消してから再 provision する。
+
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
 datasources:
   - name: Prometheus
     type: prometheus
+    uid: prometheus
     access: proxy
     orgId: 1
     url: http://prometheus:9090
