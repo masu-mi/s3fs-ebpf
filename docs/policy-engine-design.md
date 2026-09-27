@@ -15,22 +15,22 @@ Week 4 (d) の Lua/WASM policy engine 実装に入る前の設計基盤。**な�
 - 上の 3 つを埋めた状態で language を選ぶ (§6 の未決定質問リストで管理)
 
 **non-goals**  
-- Lua/WASM の embed 実装、runtime 選定、具体的 API 決定 (別セッション)
+- **Lua / WASM の採用** — PoC scope では eBPF + DSL (CEL) + Go native で 100% cover できる方針に決着 (§4.5, §4.6, §5.4)。将来 task D (独自 origin adapter × 非 Go チーム × hot reload 必須) が現実化した時のみ再評価
 - benchmark (policy 適用前後の hit-rate)
 - CLI (`s3fs-ebpf policy load`) の詳細
-- 独自 DSL の設計 (Lua/WASM/CEL のどれかを borrow する前提)
+- 独自 DSL の設計 (CEL を借用する前提)
 - multi-mount / per-tenant policy (Week 5+)
-- kernel 内 (kmod/eBPF) での policy 評価 (常に daemon 側で評価)
+- **kernel 内 policy 評価 の禁止は撤回** — 元々「常に daemon 側」と書いていたが、user eBPF plug-in は kernel 内 (fentry attach) で走らせる形が可能かつ望ましい (§4.5)。super-hot event の kernel side 評価は積極的に採る
 
 ---
 
 ## 0.5. Meetup 3 分要旨
 
-> 1. **policy engine は「app の外に出したほうが正しい判断がある」ケースを狙う** — 単一アプリの単一 workload なら app に埋め込めば良い。**hot reload / 横断的政策 / 役割分業 / 規制** の 4 条件が 2 つ以上重なる時に外出しが正当化される。
+> 1. **policy engine は "app の外に出したほうが正しい判断がある" ケースを狙う** — 単一アプリの単一 workload なら app に埋め込めば良い。**hot reload / 横断的政策 / 役割分業 / 規制** の 4 条件が 2 つ以上重なる時に外出しが正当化される。
 >
-> 2. **FS lifecycle の意思決定点は 12 個ある** — startup / sync / stat / read-miss / admit / pressure / write / release / fsync / periodic / hit / evict。各点に「時間予算」があり、super-hot (per-read) は native、hot は Lua/CEL、warm 以上は WASM も OK — この**時間予算が language 選定の第 1 制約**。
+> 2. **FS lifecycle の意思決定点は 12 個ある** — 各点に「時間予算」があり (super-hot / hot / warm / cold)、この時間予算が language の下限を決める。**super-hot event (per-read) は language 呼び出しが不可能** — eBPF map の built-in policy に留める。
 >
-> 3. **algorithm 表現力は「event × state × primitive」で検証する** — LRU/LFU/ARC/TinyLFU/S3-FIFO/SIEVE がすべて engine の shape で表現できることを §4 のマトリクスで確認。**表現できない algorithm があれば event か primitive を拡張、使われない primitive があれば削る** — 設計の gate として機能する。
+> 3. **プログラマビリティも eBPF に統一する** — 政策を Lua や WASM に載せず、engine 出荷の built-in eBPF program (LRU/W-TinyLFU/S3-FIFO/SIEVE) を DSL (CEL) で選択 + パラメタライズ、novel algorithm は user が独自 eBPF program (`.bpf.o`) を書いて load する。**「eBPF FS + eBPF policy」で runtime を 1 個も追加せず**、verifier が safety を静的保証。§4.5 参照。
 
 ---
 
@@ -174,7 +174,7 @@ engine が primitive を提供し、policy は selector として振る舞うと
 - primitive の追加は engine 実装 (Go) で 1 か所、全 policy が使える
 - policy の複雑度が下がる (LRU を書き直す必要がない、`policy.lru(key, evict_fn)` を呼ぶだけ)
 
-**trade-off**: engine が primitive を持つ = engine の実装コストが大きくなる。逆に policy 側に state を許すと engine は軽量だが個々の policy が算術部分を書く。**PoC scope では engine 主導で試す**、複雑化したら policy 側に一部戻す。
+**trade-off**: engine が primitive を持つ = engine の実装コストが大きくなる。逆に policy 側に state を許すと engine は軽量だが個々の policy が算術部分を書く。**PoC scope では engine exclusive で試す** — policy 側は「どの primitive をどう使うか」の selector に徹する。それでも書けない novel algorithm は §4.5 の user eBPF plug-in で受ける (Lua/WASM のような general-purpose scripting runtime は導入しない)。
 
 ---
 
@@ -227,6 +227,142 @@ engine が primitive を提供し、policy は selector として振る舞うと
 
 ---
 
+## 4.5 primitives-first architecture — 3 層 + KFunc cross-cut
+
+§3.3 で「engine exclusive、policy は selector」、§4 で「algorithm は engine 提供の primitive で全部表現可能」と決めた帰結として、実装 architecture は 3 層 + cross-cut になる。**Lua / WASM は登場しない**。
+
+```
+Layer 1: DSL (CEL)                    ← 宣言的 selection + parameterization
+                                          "for *.log use fifo ttl=5s"
+Layer 2: 組込 eBPF policy program     ← engine 出荷、production 品質実装
+                                          LRU / LFU / W-TinyLFU / S3-FIFO / SIEVE / ARC / GDS
+Layer 3: user eBPF policy program     ← novel algorithm / domain-specific 挙動
+                                          `s3fs-ebpf policy load-bpf foo.bpf.o`
+Layer 0 (cross-cut): KFunc            ← 統計素性 + 汎用 primitive
+                                          hit-rate hist / freq estimator / RTT hist /
+                                          size dist / sequentiality detector /
+                                          LRU list ops / ghost FIFO / count-min sketch
+```
+
+### 4.5.1 各 Layer の責務
+
+**Layer 1 (DSL: CEL)**  
+`if path.matches("*.log") then use("fifo", ttl=5s) else use("w_tinylfu", window=0.05)` レベルの宣言。expression のみ (state 持てない)、compile time 型検査、~μs / eval で hot event も cover。Layer 2/3 の built-in / user program 名を selector で指名。
+
+**Layer 2 (built-in eBPF)**  
+engine が `.bpf.c` で書いて出荷する production-quality 実装群。ソースは repo に含まれ、bpf2go で load 済。policy DSL から名前 (`"lru"`, `"w_tinylfu"`) で参照される。**PoC 初期出荷分**: LRU、W-TinyLFU、S3-FIFO の 3 種で hit-rate 比較 bench の材料にする。
+
+**Layer 3 (user eBPF)**  
+user が自分で `.bpf.c` を書き、clang + BTF で compile、`s3fs-ebpf policy load-bpf my_policy.bpf.o` で load。engine 側は verifier check + BTF 検証 + 署名 (allowlist) で受け入れ。SEC 命名で hook 種別を宣言 (`SEC("policy/on_admit")` 等)。**主な用途**: novel algorithm (研究発表の実装)、domain-specific 挙動 (社内 workload 専用ルール)。
+
+**Layer 0 (KFunc)**  
+Layer 2 も Layer 3 も同じ KFunc set を呼び出せる、algorithm 実装の共通 building block:
+- **統計 accessor**: `get_hit_rate_5min(prefix) → u64`、`get_freq_estimate(key) → u32`、`get_size_class_hist(class) → u64`、`get_fetch_rtt_p99() → u64`
+- **primitive 操作**: `lru_touch(list_id, key)`、`lru_evict(list_id) → key`、`ghost_fifo_add(fifo_id, key)`、`count_min_add(sketch_id, key)`、`count_min_est(sketch_id, key) → u32`
+- **signal detector**: `sequentiality_score(ino) → u8`、`working_set_est(prefix) → u64`
+- **arena 情報**: `arena_used() → bytes`、`arena_free() → bytes`
+
+これらは kmod / daemon で Go / C 実装、eBPF program は `bpf_kfunc_call_*` で呼ぶ。**Layer 2 と Layer 3 に interface 差は無い** = user が engine 品質の実装を書ける (逆に engine 側は user と同じ制約で書くので dogfood が効く)。
+
+### 4.5.2 なぜ user 拡張も eBPF か (Lua / WASM を選ばない理由)
+
+|  | user eBPF | Lua / WASM |
+|---|---|---|
+| verifier による safety | ✓ 無限ループ・OOB・null 全部静的保証 | sandbox あるが runtime check |
+| latency 予測性 | ✓ 命令数 bounded、GC 無し | GC pause、JIT ばらつき |
+| hot event 実行 | ✓ kernel 側で fentry attach 可 | daemon 越え、hot event 無理 |
+| 既存 infra 再利用 | ✓ bpf2go / arena / KFunc 全部共有 | 新 runtime、embedding、sandbox 追加 |
+| debug story | △ bpf_trace_printk / bpftool | ○ VM が stack trace + logger 提供 |
+| 開発敷居 | △ clang + BTF、verifier debug | ○ Lua は Ops でも書ける |
+| ecosystem | △ cache algo の eBPF 実装は未成熟 | Caffeine (Java)、CacheLib (C++) 参考にはなる |
+| narrative coherence | ◎ "eBPF FS + eBPF policy" | △ 3 種類の runtime が混在 |
+
+**core rationale**: この project は既に eBPF native (arena、fentry、KFunc、bpf2go)。user 拡張も eBPF にすれば **runtime を 1 個も追加せず** verifier による safety を継承。開発敷居の高さは Layer 1 (DSL) と Layer 2 (built-in) で吸収し、Layer 3 (user eBPF) は「novel algorithm を書く少数の advanced user」に絞る。
+
+### 4.5.3 S3-FIFO を user eBPF で書ける feasibility
+
+S3-FIFO (Yang et al 2023) を Layer 3 で実装する検証:
+
+- **必要 state**:
+  - small FIFO (~10% cap) → `BPF_MAP_TYPE_QUEUE` or LRU_HASH で近似
+  - main FIFO → 同
+  - ghost FIFO (key のみ、data 無し) → `BPF_MAP_TYPE_HASH` fixed-size
+  - per-item 2-bit freq counter → `BPF_MAP_TYPE_HASH` の value に u8
+- **決定 logic**:
+  - `on_hit`: freq++ (`bpf_map_update_elem`)
+  - `on_admit`: small が full なら → main へ demote、ghost 経由 admit 判定
+  - `on_evict` (from main): freq が閾値超なら再挿入、else evict
+- **verifier friendly か**: unbounded loop なし、bounded 条件分岐のみ、map 操作は verifier 対応済 → **問題なし**
+
+**同様に SIEVE (1-bit visited)、W-TinyLFU (KFunc の count-min を呼ぶ)、GDS (KFunc の min-heap 操作) も表現可能**。unbounded loop が必須の algorithm (LIRS の stack pruning など) は tail call で分割、あるいは book-keeping 部分を KFunc 化して user 側は決定だけに絞る。
+
+### 4.5.4 novel algorithm の adoption path
+
+「SOSP で新 algorithm が発表された」→ engine 再ビルド待ちにしない道:
+
+1. user が論文を読んで `.bpf.c` に実装 (~数百行)
+2. clang + BTF で compile → `.bpf.o`
+3. `s3fs-ebpf policy load-bpf new_algo.bpf.o` (管理者権限)
+4. DSL で `use("new_algo")` に切り替え
+5. hit-rate 変化を bench で観測
+
+**deploy 単位が `.bpf.o` 1 個**、engine 側は無変更。**hot reload は eBPF link update で完結**、in-flight event の handling は verifier 保証 + engine の barrier で safety。この shape が **PoC の scope 内で真の "policy extensibility"** を実現する最短経路。
+
+### 4.5.5 primitives-first の risk と歯止め
+
+**risk**: primitive を無制限に追加すると DSL が事実上 Turing-complete になり (「便利ツール」の別形態)、engine 側の maintenance 負担が線形増加する。
+
+**歯止め (§8 の gate として追加予定)**:
+- primitive 追加は **「これがなければ書けない scenario が実在するか」** を毎回 verify
+- 「あったら便利」は追加しない、「無いと algorithm が表現不能」のみ追加
+- Layer 2 の built-in program 数も同様の gate (「LRU + W-TinyLFU + S3-FIFO」の 3 種を default、他は user eBPF で受ける)
+
+---
+
+## 4.6 origin update propagation の task 分解と language 判定
+
+「cache の origin (S3) 更新をどう検知して伝達するか」の path も policy 相当の judgment を含む。ここでも Lua/WASM を採らずに済むかを task 別に検証する。
+
+### 4.6.1 task 分解 (6 種)
+
+| task | 例 | 要求 | best fit |
+|---|---|---|---|
+| A. event ingestion | S3 SNS/SQS、Kafka、webhook 受信 | network I/O、SDK、retry、deserialize | **Go native** (AWS SDK 一級市民) |
+| B. event transform | S3 event JSON → 内部 invalidation command | JSON parse、filter、key mapping | **CEL** or Go |
+| C. dispatch scheduling | rate limit、dedup window、thundering herd 回避 | state + timer | **Go native** (goroutine + `x/time/rate`) or eBPF |
+| D. custom origin adapter | user が GCS/Azure/独自 HTTP を backing に | 完全な programming + I/O | Go **plug-in** or (稀に) Lua/WASM |
+| E. invalidation rule | "*.log は即時、cold/ は batch" | declarative | **CEL** |
+| F. app 通知 (inotify 風) | 更新を app 側に push | ringbuffer / socket | **eBPF ringbuf** or Unix socket |
+
+### 4.6.2 各 task の language 判定
+
+- **A (event ingestion)**: AWS SDK for Go を Lua から呼ぶより Go で書く方が短い。Lua で書いても結局 Go 側 host に I/O を委譲する構造。**Go native 一択**
+- **B (event transform)**: `records[].s3.object.key 抽出 → prefix match → 内部 command` は CEL の expression + jq 風 path で 100% 表現可能。compile-time 型検査つき。**CEL**
+- **C (dispatch scheduling)**: state + timer は daemon 側 goroutine + `golang.org/x/time/rate` で数十行。あるいは 6.11+ の BPF timer で eBPF 側実装も可。**Go native or eBPF**
+- **D (custom origin adapter)**: **唯一** Lua/WASM が意味を持ちうる領域。ただし 3 条件同時成立が必要 (次項)
+- **E (invalidation rule)**: 宣言的、CEL 最適。**CEL**
+- **F (app 通知)**: eBPF ringbuf に流して app が受信。**eBPF**
+
+### 4.6.3 task D で Lua/WASM が意味を持つ条件と判定
+
+user が独自 origin (S3 以外の社内 API 等) の adapter を書きたい場合、以下の 3 条件が同時成立すれば Lua/WASM の余地が出る:
+
+1. user が非 Go 開発者
+2. hot reload が必須 (daemon 停止不可)
+3. Go SDK が無い origin (社内独自 API 等)
+
+**s3fs-ebpf の想定 audience (BPF-friendly、system-level)** では稀。想定していない要件が現実に来たら再評価する。**PoC scope では**:
+
+- default: **Go plug-in interface** で origin adapter を切る (`type OriginAdapter interface { Fetch / List / Watch ... }`)
+- user 実装は Go で書いて engine 再ビルド or `plugin.Open`
+- Lua/WASM は §7 non-goals
+
+### 4.6.4 判定合成
+
+origin update propagation の 6 task は **Go native (A/C) + CEL (B/E) + eBPF (F) + Go plug-in (D)** の 4 手段で 100% cover できる。Lua/WASM を導入する ROI はない。
+
+---
+
 ## 5. 参照システムの survey (材料)
 
 各 system の「何を optimize / 何を compromise / 何が learning」を 1 パラグラフで。**全 20 個** (Cache 5、汎用 Embed 4、Kernel 2、Sandbox 6、Admission 3)。
@@ -253,13 +389,22 @@ engine が primitive を提供し、policy は selector として振る舞うと
 
 ### 5.4 Sandbox / language runtime
 
-- **Wasmtime + WIT (Bytecode Alliance)** — WASM component model、strong isolation、bindings 生成自動、AOT / JIT。**Optimize**: strong isolation、ML/CPU intensive にも耐える。**Compromise**: overhead 数 μs / call (hot event には重い)、ecosystem 発展途中。**Learning**: **warm / cold event と ML runtime ホストに最適**
-- **gopher-lua** — pure Go、Lua 5.1 subset、コルーチン、JIT なし (~10 μs / call)。**Optimize**: 依存ゼロ (cgo 不要)、embed 簡単。**Compromise**: JIT 無く数十 μs、Lua 5.3+ の一部機能欠落。**Learning**: **Go daemon 統合の第一候補**、warm event に最適
-- **go-lua** (Shopify) — gopher-lua より高速な pure Go Lua VM。**Learning**: gopher-lua の代替、選定時に compare
-- **CEL (Google common expression language)** — expression のみ、state なし、boolean / scalar 返却、K8s admission で実績 (~μs / eval)。**Optimize**: hot event に耐える、compile time 型検査、sandbox 完璧。**Compromise**: state が持てない (「宣言的判断」に限定)。**Learning**: **stateless class (§3.1 class 1) の判断には CEL が最良** — hot event の on_stat / on_write は CEL、warm 以降で state が要るところは Lua、というレイヤ分けが自然
-- **Rhai** — Rust embedded scripting、type-safe、Rust ecosystem 前提。**Learning**: Rust daemon なら候補、Go daemon には不向き
-- **Starlark** — Python subset、Bazel 発、determinism 強い (no I/O、no random)。**Optimize**: reproducibility が保証される (CI / test でも同じ結果)。**Compromise**: I/O 不可 = 外部システムと連携できない。**Learning**: **policy の determinism が要件になる scenario では Starlark が第一候補** — s3fs-ebpf の scenario では I/O 不可は厳しい (S3 meta を read できないと不便) が、規制 domain で「決定木の再現性」が要る場合は考慮
-- **Deno / QuickJS / boa (JS)** — sandbox 可、web ecosystem 統合。**Compromise**: overhead 大、JS 独特の型システム。**Learning**: 特別な理由がなければ Lua を先に検討
+**採用**:
+
+- **CEL (Google common expression language)** — expression のみ、state なし、boolean / scalar 返却、K8s admission で実績 (~μs / eval)。**Optimize**: hot event に耐える、compile time 型検査、sandbox 完璧。**Compromise**: state が持てない (「宣言的判断」に限定)。**Learning**: **s3fs-ebpf の Layer 1 DSL は CEL に決定** (§4.5)。state が要る全ての判断は Layer 2 / Layer 3 の eBPF program 側に押し、CEL は selector + parameterizer に徹する
+
+**採用しない (PoC 外、task D materialize 時に再評価)**:
+
+以下の 6 runtime は §4.5 で eBPF に一本化する方針が決まっているので採らない。将来 §4.6 の task D (独自 origin adapter × 非 Go チーム × hot reload 必須) が現実化した時、adapter plug-in language として再評価する:
+
+- **Wasmtime + WIT** — WASM component model、strong isolation、overhead 数 μs / call。将来 task D の第一候補
+- **gopher-lua** — pure Go、Lua 5.1 subset、~10 μs / call。将来 task D の第二候補
+- **go-lua** (Shopify) — gopher-lua より高速な代替
+- **Rhai** — Rust embedded scripting、Rust daemon なら候補
+- **Starlark** — Python subset、determinism 強い、reproducibility が要件なら候補
+- **Deno / QuickJS / boa (JS)** — 特別な理由がなければ非採用
+
+**採用しない rationale の中心**: これらは全て「Turing-complete script を daemon 内で走らせる runtime」で、user 拡張の escape hatch として位置付けが被る。escape hatch は **user eBPF plug-in** に一本化するのが coherence 上正しい (§4.5 の "eBPF FS + eBPF policy" narrative)。runtime を 1 個も増やさない選択。
 
 ### 5.5 Admission / webhook パターン
 
@@ -269,37 +414,56 @@ engine が primitive を提供し、policy は selector として振る舞うと
 
 ### 5.6 参照 system 合成 → decision framework
 
-上を合成すると、event 予算ごとに language の候補が絞られる:
+§4.5 / §4.6 の結論を反映した最終形。**Lua / WASM は登場しない**:
 
-| 予算 | 該当 event | language 候補 | 理由 |
+| 予算 | 該当 event | 手段 | 理由 |
 |---|---|---|---|
-| super-hot | on_hit (#11) | native / eBPF built-in policy | ~1 μs 予算、language 呼び出しは不可能 |
-| hot | on_stat, on_write (#3, #7) | CEL / native / (LuaJIT ならぎり) | 10-100 μs、state 少なめ |
-| warm | 6 events (#4-9 の一部) | gopher-lua / WASM (Wasmtime) | 100 μs〜数 ms 予算、state OK |
-| cold | on_startup, on_sync, on_periodic (#1, #2, #10) | WASM / gopher-lua / 外部 gRPC | 何でも許容 |
+| super-hot | on_hit (#11) | **built-in eBPF program** (LRU_HASH map の native evict、or Layer 2 の LRU/W-TinyLFU) | ~1 μs 予算、DSL 呼び出しでも重い |
+| hot | on_stat, on_write (#3, #7) | **CEL (Layer 1)** で selector、実処理は Layer 2/3 の eBPF | 10-100 μs、CEL は μs / eval |
+| warm | #4-9 の一部 | **CEL (selector) + Layer 2/3 eBPF (state 操作)** | 100 μs〜数 ms、eBPF program の実行時間で cover |
+| cold | on_startup, on_sync, on_periodic (#1, #2, #10) | **Go native (daemon)** で bookkeeping、必要なら CEL や eBPF program 呼び出し | 何でも許容、Go の SDK / ecosystem を活用 |
 
-**policy 単位で language を選ばせる (mixed engine)** が Envoy 型で最強だが、実装コスト大。**PoC scope では単一 language (gopher-lua 濃厚) + hot event は eBPF built-in で妥協** が現実的。
+**origin update propagation (§4.6)** も含めた全体:
+
+| task family | 手段 |
+|---|---|
+| cache 意思決定 (§2 の 12 event) | Layer 1 CEL + Layer 2/3 eBPF (§4.5) |
+| origin event ingestion / adapter | Go native (§4.6 task A, C, D) |
+| origin event transform / rule | CEL (§4.6 task B, E) |
+| app 通知 | eBPF ringbuf (§4.6 task F) |
+| 統計 accessor / signal detector | KFunc (Layer 0、§4.5) |
+
+**含意**: policy engine は **CEL + eBPF + Go の 3 手段** で構成、runtime 追加ゼロ。Envoy 型 mixed engine (Lua + WASM + native) を採らない選択が、s3fs-ebpf のように eBPF native な project では逆に正しい (Envoy は eBPF-native ではないので mixed が必要だっただけ)。
 
 ---
 
-## 6. language 選択の観点 (未決定質問リスト)
+## 6. 未決定質問リスト (§4.5 / §4.6 反映後)
 
-§0〜§5 が固まった後の別セッションで答えるべき questions。**§2〜§4 の taxonomy がある種類の質問には既に答えを含む**、その旨を書いておく。
+§4.5 (primitives-first + user eBPF) と §4.6 (origin task 分解) で大枠が決まったので、初版の Q リスト (Lua/WASM を前提とした選択質問) は再構成する。以下は **CEL + eBPF + Go 前提** で残る詳細質問:
 
-- **Q1**: hot event (on_hit) を policy hook にするか? → **No 濃厚** (§2.2、§5.6 の結論)。super-hot は eBPF LRU_HASH built-in、policy は cap や thresholds を宣言的に決めるのみ
-- **Q2**: state の owner は engine (query API 提供) か policy (自前で持つ) か? → **engine 主導** (§3.3 の decision)。primitive を engine で実装、policy は selector
-- **Q3**: policy の compositional API か single policy か? → **compositional 濃厚** (Caffeine 型、§5.1)。ただし PoC 初期は single policy から
-- **Q4**: hot reload での state 移行保証は必要か? → engine が state を持つ (Q2) なら policy 差替えで state は消えない。**必要**
-- **Q5**: policy 内 panic / infinite loop の fallback は何? → default LRU 相当 (engine built-in)。timeout budget を event 予算に応じて設定 (hot: 100 μs で timeout、warm: 5 ms で timeout)
-- **Q6**: observability (metrics / traces / hit-rate) は engine が提供 vs policy が output? → 両方。engine は built-in カウンタ、policy は `policy.emit_metric("name", val)` で追加可能
-- **Q7**: sandboxing の粒度 (syscall / alloc / time / rand)? → language 側の機能に依存。Lua / WASM とも syscall 遮断は engine 側でホスト API を限定
-- **Q8**: policy test harness の shape? → trace replay 型 (event stream を record して policy に再生) を第一候補、unit test 型 (single event → expected output) を補完
+- **Q1**: hot event (on_hit) を policy hook にするか? → **No** (§2.2、§5.6)。built-in eBPF (LRU_HASH map の kernel-native evict、or Layer 2 の LRU program) に task を落とし、DSL は cap / threshold を宣言するのみ  
+  → **確定**
+- **Q2**: state の owner は engine or policy? → **engine exclusive** (§3.3、§4.5)。primitive はすべて engine 出荷、Layer 2/3 の eBPF program が KFunc 経由で state を操作、Layer 1 CEL は selector のみ  
+  → **確定**
+- **Q3**: 政策の composition API は? → **DSL layer で compose**、Caffeine 型 (builder API を CEL の select + function call で表現)  
+  → 確定方向、具体的な CEL syntax は spike 時に固める
+- **Q4**: hot reload での state 移行? → engine が state を保持するので policy 差替えでは in-memory state 影響なし。**Layer 3 の user eBPF 差替え**は bpf_link_update で seamless、in-flight event handling は verifier + engine barrier で safety  
+  → 確定方向、in-flight event の semantics 詳細は spike で
+- **Q5**: policy panic / infinite loop の fallback は? → **verifier が静的に infinite loop を弾く** (eBPF 選択の副産物)。runtime panic は eBPF program 側にはほぼ無い (verifier がメモリ操作を全 check)、CEL 側 panic は engine 側 default policy (built-in LRU) にフォールバック  
+  → **確定** (verifier が Q5 の大半を解決)
+- **Q6**: observability は engine 提供 vs policy が emit? → **両方**。engine は built-in カウンタ (hit-rate、evict-rate、arena 使用量)、Layer 2/3 eBPF は `bpf_trace_printk` / perf event / ringbuf で metric 追加可、Layer 1 CEL は expression 内で `metric("name", value)` を CEL 拡張関数として提供
+- **Q7**: sandboxing の粒度? → **eBPF verifier 完全に一任**。syscall / alloc / time / rand の全制約が verifier + BPF program type の許可 helper set で決まる。追加 sandbox 実装不要  
+  → **確定** (eBPF 選択の副産物)
+- **Q8**: policy test harness の shape? → trace replay 型を第一候補 (event stream を record して policy に再生、hit-rate 差分計測)。unit test 型 (single event → expected output) を補完
+- **Q9 (新設)**: novel algorithm への対応は? → **user eBPF plug-in** (§4.5.4)。`.bpf.o` を管理者 API で load、DSL の `use()` で参照。engine 再ビルド不要
+- **Q10 (新設)**: user eBPF の署名 / 権限管理は? → **allowlist ベース**、`policy load-bpf` は root / CAP_BPF、file の SHA256 を engine 内 allowlist と照合、fail-close
 
-**回答順序**:
-1. Q1 (hot event 扱い) — language の下限を決める、最初に答える
-2. Q2, Q3 (state owner + composition) — API shape を決める
-3. Q4, Q5 (reload, fallback) — 運用要件
-4. Q6, Q7, Q8 (observability, sandbox, test) — 実装詳細
+**回答順序** (Q1/Q2/Q5/Q7/Q9 は §4.5 で解決済、残るは spike 時に固める):
+1. Q3 の CEL syntax spike (単一 hook で end-to-end 通す)
+2. Q4 の in-flight semantics 検証 (差替え瞬間の event 保証)
+3. Q6 の metric API 決定 (Prometheus export path 含む)
+4. Q8 の trace harness 設計 (event stream の record 形式)
+5. Q10 の署名検証実装
 
 ---
 
@@ -307,12 +471,16 @@ engine が primitive を提供し、policy は selector として振る舞うと
 
 明示的 non-goal (今回の scope 外):
 
+- **Lua / WASM の採用** — §4.5 / §4.6 / §5.4 の rationale で除外。user 拡張は eBPF plug-in、DSL は CEL、I/O は Go native の 3 手段で 100% cover。将来 §4.6 task D (独自 origin adapter × 非 Go チーム × hot reload 必須) の要件が現実化した時のみ再評価
 - **分散** — 複数 daemon 間の共有 policy state。1 mount / 1 daemon の PoC scope
 - **ML training loop** — features 収集は視野 (on_periodic の output に metrics 積める) が、learning 自体は out of scope。**Learned prefetch は外部 gRPC 呼び出し**で対応 (§4.2 gap #2)
 - **multi-tenancy** — per-mount policy (§1 の PII scenario)。Week 5+
-- **policy DSL の自作** — Lua / WASM / CEL のどれかを borrow、独自 DSL は書かない
-- **kernel-side policy hook** — hot event の kernel 内評価は eBPF map の built-in policy (LRU_HASH) に留める、policy engine は daemon 側のみ
+- **独自 DSL の設計** — **CEL を borrow**、独自 DSL は書かない
 - **write-through / write-around semantics 選択** — 現状 write-back のみ (Week 4 (c) の実装通り)。policy から選択可能にする改造は Week 5+
+- **user eBPF program の marketplace / registry** — allowlist ベースの手動 install。community 共有機構は Week 5+
+
+**方針変更点** (初版から):
+- kernel-side policy hook を **積極採用** に変更 (§0)。super-hot event は kernel 側 fentry attach で処理、daemon 越え不要
 
 将来検討 (backlog):
 - 各 policy の hit-rate を bench で比較 (Week 4 (e) の追加 bench)
@@ -337,10 +505,19 @@ doc を書き終えたら以下を self-check、埋め残しがあれば戻る:
    → ✓ §4.3 で確認済み
 5. **§5 の参照 system 一覧が最低 15 個**  
    → ✓ 20 個掲載 (Cache 5 + Embed 4 + Kernel 2 + Sandbox 6 + Admission 3)
-6. **§6 の未決定質問が 5〜10 件、次セッションで答えるべき順序に並んでいる**  
-   → ✓ 8 件、4 段階に順序付け
+6. **§6 の未決定質問が spike で答える順序に並んでいる**  
+   → ✓ Q3/Q4/Q6/Q8/Q10 が spike 順に並ぶ (Q1/Q2/Q5/Q7/Q9 は §4.5 で確定済)
 7. **Meetup 3 分要旨** が末尾にある (§0.5 として先頭に置いた)  
    → ✓ §0.5
+
+**追加 gate (§4.5.5 の risk 対応)**:
+
+8. **primitive / built-in eBPF program を追加するとき、"これがなければ書けない scenario が実在するか" を verify したか**  
+   → 新 primitive PR で必須 check、「あったら便利」は却下
+9. **user eBPF plug-in の受け入れが allowlist + verifier + BTF check の 3 段になっているか**  
+   → §6 Q10 の実装時に確認
+10. **Lua / WASM / その他 script runtime を導入したいときに §4.6 の task D 3 条件を全部満たしているか**  
+    → 満たしていなければ再評価不要、Go plug-in で対応
 
 ---
 
