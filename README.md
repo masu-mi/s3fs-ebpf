@@ -2,29 +2,53 @@
 # s3fs-ebpf
 
 FUSE を経由せずに Linux VFS へ直接ぶら下がる、次世代 S3 ファイルシステムの PoC。
-Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メモリ、6.9 導入・6.12 で安定）、カーネルモジュール上の **KFunc**（Verifier 制限突破）、**eBPF**（VFS フック）、**Go 製コントロールプレーン** の 4 段構成でメタデータ操作を IPC 0 回で完結させます。
+Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メモリ、6.9 導入・6.12 で安定）、カーネルモジュール上の **KFunc**（Verifier 制限突破 + Layer 0 primitives）、**eBPF struct_ops による policy engine**（Layer 2/3、hot swap 可能）、**Go 製コントロールプレーン** の 4 段構成でメタデータ操作を IPC 0 回で完結させます。
 
-> **Status: Week 3 in progress.** Week 2 の 4 サブトラック (`bpf_addr_space_cast`, `fastpath`, `verifier-demo`, `s3-list/stat`) に続いて Week 3 では kmod が実 inode を materialise し、`ls /mnt/s3demo` に 3 つのシード・オブジェクトが並び、`cat` / `echo >` で read / write が動作、`s3fs-ebpf fastpath [--s3]` の prewarm によって `stat` した瞬間から Fast Path Hit にカウントされます。次は arena 直参照 read (`kmalloc` → arena バッキング) と Lua/WASM policy engine。
+> **Status (2026-09-28)**: Week 0-4 完了。read + write path、動的な
+> policy engine (CEL + built-in eBPF + user eBPF + KFunc の 4 層)、
+> hit-rate bench で **W-TinyLFU 80% / SIEVE 62% / LRU 12% / freq2bit
+> 6.5%** を実測、Grafana に 21 panel。次段階は Meetup 登壇、および
+> Week 5+ の分散 / multi-tenant / 大ファイル対応。
+>
+> **すぐに使ってみたい場合**:
+> - 概要と数値 → [`docs/motivation.md §0`](docs/motivation.md)
+> - Meetup demo (35 分台本) → [`docs/demo-scenario.md`](docs/demo-scenario.md)
+> - policy engine の詳細 → [`docs/policy-engine-design.md`](docs/policy-engine-design.md)
+> - hit-rate bench 数値と caveats → [`docs/hit-rate-bench.md`](docs/hit-rate-bench.md)
+> - 実装ハマりポイント → [`docs/lessons-learned.md`](docs/lessons-learned.md)
+> - 残 backlog → [`docs/backlog.md`](docs/backlog.md)
 
 ---
 
 ## アーキテクチャ
 
 ```
-  syscall (stat / read / open)
+  syscall (stat / read / write / open)
               │
               ▼
   ┌──────────────────────────────────────────────┐
   │ Fast Path (Data Plane / Kernel)              │
-  │  eBPF (fentry) → KFunc (kmod)                │
+  │  eBPF (fentry + struct_ops policy vtable)    │
+  │  ↔ KFunc (kmod): Layer 0 primitives          │
   │  → bpf_arena 直参照で即応答                   │
   └──────────────┬──────────────────┬────────────┘
                  │ Hit              │ Miss
                  ▼                  ▼
         [ゼロコピー返却]     [Slow Path / User]
                               Go daemon → S3 (MinIO/AWS)
-                              Lua/WASM ポリシーで動的制御
+                              CEL DSL + eBPF policy hot swap
 ```
+
+### Policy engine の 4 layer
+
+| 層 | 内容 | 実装 |
+|---|---|---|
+| **Layer 1** | CEL (Google) DSL — prewarm 判定 / Layer 2 program 選択 | `policies/default.cel` |
+| **Layer 2** | built-in eBPF policy 9 種 (observe / LRU / SIEVE / S3-FIFO / **W-TinyLFU** / pressure / time_decay / size_aware / freq2bit) | `bpf/policy_*_ops.bpf.c` |
+| **Layer 3** | user eBPF plug (SHA256 allowlist で gate) | `--policy-bpf=file:<path>` |
+| **Layer 0** | KFunc primitives (`admit_count` / `softcap` / `evictions_total` / `time_ns` / `ino_size`) | `kmod/tree_traversal.c` |
+
+`POST /policy/reload` で **走行中に curl 一発で policy 差替え**、in-flight IO は古い vtable で完走。
 
 先行研究比較（ExtFUSE / RFUSE）と根拠は [`docs/related-works.md`](docs/related-works.md) にあります。
 
