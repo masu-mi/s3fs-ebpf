@@ -25,6 +25,7 @@ import (
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policy"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
 	"github.com/cilium/ebpf/ringbuf"
 )
@@ -280,8 +281,23 @@ func runFastpath(args []string) int {
 		"how often to re-list the bucket and push the entry table to kmod (0 disables)")
 	metricsAddr := fs.String("metrics-addr", ":9600",
 		"address for the Prometheus scrape endpoint (empty to disable)")
+	policyPath := fs.String("policy", "",
+		"path to a CEL policy file (see policies/default.cel). Empty disables the policy engine (default prewarm=all).")
 	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
 	fs.Parse(args)
+
+	// Load policy engine (Week 4 (d) P-01 spike: prewarm hook only).
+	// Missing or empty file returns an Engine that defaults every hook
+	// to the safe fallback (prewarm=true), so the mount is never
+	// stranded cold when a policy file is broken.
+	pol, err := policy.Load(*policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "policy load: %v\n", err)
+		return 1
+	}
+	if *policyPath != "" {
+		fmt.Printf("[policy] loaded %s\n", *policyPath)
+	}
 
 	// Bring the metrics endpoint up early so Prometheus scrapes
 	// succeed even before the first admit/sync happens. Failure to
@@ -365,7 +381,7 @@ func runFastpath(args []string) int {
 	// S3 we reflect real object metadata (size, mtime) and — the
 	// point of Week 4 (a) — copy the object body into the arena so
 	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
-	initialAdmits := prewarm(context.Background(), progs, s3c)
+	initialAdmits := prewarm(context.Background(), progs, s3c, pol)
 	if err := setAdmits(*dev, initialAdmits); err != nil {
 		fmt.Fprintf(os.Stderr, "[admit] %v — kmod fallback (kmalloc scratch) still works\n", err)
 	} else {
@@ -452,15 +468,26 @@ func runFastpath(args []string) int {
 //
 // Without S3 we still warm the stat cache but skip content admission —
 // kmod's kmalloc scratch buffer covers `cat` at reduced fidelity.
-func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) []admitEntry {
+func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client, pol *policy.Engine) []admitEntry {
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	live := fpebpf.Snapshot()
 	admits := make([]admitEntry, 0, len(live))
 	for _, entry := range live {
-		if !entry.Prewarm {
-			fmt.Printf("[prewarm] ino=%d name=%s skipped (waits for read-miss upcall)\n",
+		// Entry.Prewarm is the static bootstrap default; the policy
+		// engine, when loaded, overrides per-entry (P-01 spike). Both
+		// paths default to prewarm=true if the policy is broken /
+		// missing, so a misconfigured file doesn't strand the mount.
+		wantPrewarm := entry.Prewarm
+		if pol != nil {
+			wantPrewarm = pol.EvalPrewarm(policy.EntryInput{
+				Ino: entry.Ino, Name: entry.Name, S3Key: entry.S3Key,
+				Size: entry.Fallback, Mode: entry.Mode,
+			})
+		}
+		if !wantPrewarm {
+			fmt.Printf("[prewarm] ino=%d name=%s skipped (policy=false, waits for Path C)\n",
 				entry.Ino, entry.Name)
 			continue
 		}

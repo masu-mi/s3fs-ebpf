@@ -114,7 +114,7 @@
 
 design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 architecture 決定済。実装は下記の順で:
 
-- [ ] **P-01** `pe Q3` CEL syntax spike — 単一 hook (on_stat) で end-to-end 通す
+- [x] ✅ **P-01** `pe Q3` CEL syntax spike — 完 (次 commit)。`daemon/internal/policy/` + `policies/default.cel` を追加、`--policy` flag、prewarm hook が entry サイズ / 名前で判定。smoke: `size <= 32MiB && !name.endsWith(".log")` で 100m.bin と app.log が skip、Path C で cat 動作
 - [ ] **P-02** `pe Q4` in-flight semantics 検証 — `bpf_link_update` での差替え瞬間の event handling
 - [ ] **P-03** `pe Q6` metric API — policy 内 `metric("name", value)` の CEL 拡張関数、Prometheus export path
 - [ ] **P-04** `pe Q8` trace harness — event stream record 形式の設計
