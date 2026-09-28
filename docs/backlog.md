@@ -49,6 +49,8 @@
 
 ### C. Grafana / metric surface
 
+- [x] ✅ **C-04** kmod folio hit counter — 完 (次 commit)。`atomic_long_t s3fs_folio_hits` を read_folio の admit-hit 分岐で increment、`S3FS_IOC_STATS[1]` で export、daemon が `s3fs_ebpf_folio_hits_total` として mirror。Grafana panel 20/21 に true hit ratio (folio_hits / (folio_hits + read_miss_upcalls)) を stat + rate timeseries で追加。fentry-side fast_path_hits (getattr) と kmod-side folio_hits (実 read cache) を切り分けて見えるように。smoke で drop_caches 後の 5 read → folio_hits 3→8、upcall 0 で完全 arena hit を実測
+
 - [x] ✅ **C-01** MinIO metric 名 version 依存の確認 (`be §4-3`) — 完、`minio_s3_traffic_{received,sent}_bytes` は現行 MinIO で存在確認 (dashboard 変更不要)
 - [ ] **C-02** dashboard `rate(...[30s])` の window を `[1m]` に統一 (`be §4-3`)  
   Prometheus scrape 5s に対して 30s window は 6 サンプルで荒れる。1m に上げるか scrape interval を 1s に下げる。

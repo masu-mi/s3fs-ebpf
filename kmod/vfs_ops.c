@@ -266,6 +266,16 @@ atomic_t s3fs_admits_count = ATOMIC_INIT(0);
  * the Prometheus endpoint. Monotonically increasing counter. */
 atomic_long_t s3fs_evictions_total = ATOMIC_LONG_INIT(0);
 
+/*
+ * Cumulative count of .read_folio calls that served from the arena
+ * (admit_snapshot() hit → s3fs_folio_fill_from_arena). Different
+ * from the fentry-side fast_path_hits counter — this measures the
+ * kmod's read cache directly, whereas fentry counts getattr hits on
+ * the BPF-side inode_index. Divide by (folio_hits + read_miss_upcalls)
+ * for the true cache hit ratio.
+ */
+atomic_long_t s3fs_folio_hits = ATOMIC_LONG_INIT(0);
+
 /* Ring buffer of ino values evicted by policy vote since the last
  * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
  * head/tail. Overflow (queue full) is counted separately so the
@@ -1353,6 +1363,7 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 
 	/* Fast path: admit hit. */
 	if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm) {
+		atomic_long_inc(&s3fs_folio_hits);
 		/* Notify policy programs — recency refresh / freq bump /
 		 * visited-bit set. Fires per folio in the hot read path;
 		 * keep the wrappers lean (see policy_struct_ops.c). */

@@ -72,6 +72,11 @@ int  s3fs_ebpf_mark_dirty(u64 ino);
 #include <linux/atomic.h>
 extern atomic_long_t s3fs_evictions_total;
 
+/* Cumulative .read_folio calls that served from the arena (admit
+ * hit). Divide by (this + read_miss_upcalls) for the true kmod-side
+ * cache hit ratio. */
+extern atomic_long_t s3fs_folio_hits;
+
 /* Running admit hash size. Read from s3fs_kfunc_admit_count() in
  * tree_traversal.c so BPF policy programs can make pressure-aware
  * decisions. Updated under s3fs_admits_lock. */
