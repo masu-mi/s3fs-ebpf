@@ -44,12 +44,43 @@ type statsArg struct {
 	Values [statsMax]uint64
 }
 
+// drainEvictionsArg mirrors `struct s3fs_drain_evictions`.
+const evictLogMax = 256
+type drainEvictionsArg struct {
+	Cap      uint32
+	Filled   uint32
+	Overflow uint32
+	_pad     uint32
+	Inos     [evictLogMax]uint64
+}
+
 const (
-	s3fsIocPopFlush   = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x05
-	s3fsIocReadDirty  = (3 << 30) | (uint32(unsafe.Sizeof(readDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
-	s3fsIocMarkDirty  = (1 << 30) | (uint32(unsafe.Sizeof(markDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
-	s3fsIocStats      = (3 << 30) | (uint32(unsafe.Sizeof(statsArg{})) << 16) | (0xE3 << 8) | 0x08
+	s3fsIocPopFlush        = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x05
+	s3fsIocReadDirty       = (3 << 30) | (uint32(unsafe.Sizeof(readDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
+	s3fsIocMarkDirty       = (1 << 30) | (uint32(unsafe.Sizeof(markDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
+	s3fsIocStats           = (3 << 30) | (uint32(unsafe.Sizeof(statsArg{})) << 16) | (0xE3 << 8) | 0x08
+	s3fsIocDrainEvictions  = (3 << 30) | (uint32(unsafe.Sizeof(drainEvictionsArg{})) << 16) | (0xE3 << 8) | 0x09
 )
+
+// drainEvictions returns the ino list kmod evicted since the last
+// drain. Callers use this to prune their local admit snapshot so the
+// next admit_replace doesn't re-send evicted inos.
+func drainEvictions(devPath string) ([]uint64, uint32, error) {
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return nil, 0, fmt.Errorf("open %s: %w", devPath, err)
+	}
+	defer f.Close()
+	arg := drainEvictionsArg{Cap: evictLogMax}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
+		f.Fd(), uintptr(s3fsIocDrainEvictions),
+		uintptr(unsafe.Pointer(&arg))); errno != 0 {
+		return nil, 0, fmt.Errorf("ioctl DRAIN_EVICTIONS: %w", errno)
+	}
+	out := make([]uint64, arg.Filled)
+	copy(out, arg.Inos[:arg.Filled])
+	return out, arg.Overflow, nil
+}
 
 // readStats issues S3FS_IOC_STATS and returns the value slots. Slot 0
 // is s3fs_evictions_total; slot layout is UAPI-defined additive-only.

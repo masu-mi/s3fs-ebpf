@@ -254,6 +254,51 @@ static DEFINE_SPINLOCK(s3fs_admits_lock);
  * the Prometheus endpoint. Monotonically increasing counter. */
 atomic_long_t s3fs_evictions_total = ATOMIC_LONG_INIT(0);
 
+/* Ring buffer of ino values evicted by policy vote since the last
+ * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
+ * head/tail. Overflow (queue full) is counted separately so the
+ * daemon can degrade to a full snapshot reconcile. */
+#define S3FS_EVICT_LOG_CAP 512
+static DEFINE_SPINLOCK(s3fs_evict_log_lock);
+static u64 s3fs_evict_log[S3FS_EVICT_LOG_CAP];
+static u32 s3fs_evict_log_len; /* items in the buffer, [0, S3FS_EVICT_LOG_CAP] */
+static u32 s3fs_evict_log_overflow; /* dropped since last drain */
+
+static void evict_log_push(u64 ino)
+{
+	spin_lock(&s3fs_evict_log_lock);
+	if (s3fs_evict_log_len < S3FS_EVICT_LOG_CAP)
+		s3fs_evict_log[s3fs_evict_log_len++] = ino;
+	else
+		s3fs_evict_log_overflow++;
+	spin_unlock(&s3fs_evict_log_lock);
+}
+
+/* Copy up to `cap` entries into `out` and reset the buffer. Returns
+ * (filled, overflow) via pointers. */
+static void evict_log_drain(u64 *out, u32 cap, u32 *filled, u32 *overflow)
+{
+	u32 n;
+
+	spin_lock(&s3fs_evict_log_lock);
+	n = min(cap, s3fs_evict_log_len);
+	memcpy(out, s3fs_evict_log, n * sizeof(u64));
+	*filled = n;
+	*overflow = s3fs_evict_log_overflow;
+	/* Shift any leftover down (rare — daemon should keep up). */
+	if (n < s3fs_evict_log_len)
+		memmove(s3fs_evict_log, s3fs_evict_log + n,
+			(s3fs_evict_log_len - n) * sizeof(u64));
+	s3fs_evict_log_len -= n;
+	s3fs_evict_log_overflow = 0;
+	spin_unlock(&s3fs_evict_log_lock);
+}
+
+void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow)
+{
+	evict_log_drain(out, cap, filled, overflow);
+}
+
 /* Reference on the daemon's mm, held while the admit table is
  * non-empty. Dropped by shutdown or by replacing the admits with
  * count=0. All entries in the table share this single mm. */
@@ -459,7 +504,6 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			if (so_vote != 0 || fr_vote != 0) {
 				struct s3fs_admit *a;
 				struct hlist_node *tmp;
-				unsigned int bucket;
 				bool dropped = false;
 
 				spin_lock(&s3fs_admits_lock);
@@ -475,7 +519,10 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				spin_unlock(&s3fs_admits_lock);
 				if (dropped) {
 					evicted++;
-					(void)bucket; /* silence unused var on some kbuild variants */
+					/* Log for daemon feedback so it stops
+					 * re-sending this ino on the next
+					 * admit_replace round. */
+					evict_log_push(entries[i].ino);
 				}
 			}
 		}

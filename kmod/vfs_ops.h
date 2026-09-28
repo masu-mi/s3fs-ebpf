@@ -72,6 +72,11 @@ int  s3fs_ebpf_mark_dirty(u64 ino);
 #include <linux/atomic.h>
 extern atomic_long_t s3fs_evictions_total;
 
+/* Drain the ring buffer of policy-evicted inos. `out` holds up to
+ * `cap` slots; kmod writes the actual count into *filled and any
+ * dropped entries (since last drain) into *overflow. */
+void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow);
+
 /*
  * Policy hooks (Layer 2/3 fentry attach anchors). See
  * docs/policy-engine-design.md §4.5. Bodies are no-ops — BPF programs

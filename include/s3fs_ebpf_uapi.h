@@ -229,4 +229,28 @@ struct s3fs_stats {
 #define S3FS_IOC_STATS \
 	_IOWR(S3FS_IOC_MAGIC, 0x08, struct s3fs_stats)
 
+/*
+ * S3FS_IOC_DRAIN_EVICTIONS — pull the list of inos the policy has
+ * evicted from the admit hash since the last drain. Daemon polls
+ * this periodically to keep its snapshot consistent with kmod's
+ * actual hash; without it the daemon re-sends evicted inos on the
+ * next admit_replace and kmod evicts them again in a loop.
+ *
+ * Caller allocates `inos` (up to `cap` slots); kmod writes up to
+ * `filled` entries and drops them from its internal queue. Missing
+ * entries (queue overflow) surface as `overflow` count so the daemon
+ * can degrade gracefully (e.g. do a full-snapshot reconcile).
+ */
+#define S3FS_EVICT_LOG_MAX 256
+struct s3fs_drain_evictions {
+	__u32 cap;                              /* in: caller buffer capacity */
+	__u32 filled;                           /* out: entries written to inos[] */
+	__u32 overflow;                         /* out: kmod-side dropped due to queue full since last drain */
+	__u32 _pad;
+	__u64 inos[S3FS_EVICT_LOG_MAX];         /* out: evicted ino list */
+};
+
+#define S3FS_IOC_DRAIN_EVICTIONS \
+	_IOWR(S3FS_IOC_MAGIC, 0x09, struct s3fs_drain_evictions)
+
 #endif /* _S3FS_EBPF_UAPI_H */

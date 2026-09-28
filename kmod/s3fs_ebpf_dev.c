@@ -334,6 +334,27 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			return -EFAULT;
 		return 0;
 	}
+	case S3FS_IOC_DRAIN_EVICTIONS: {
+		struct s3fs_drain_evictions *req;
+		int err = 0;
+
+		req = kzalloc(sizeof(*req), GFP_KERNEL);
+		if (!req)
+			return -ENOMEM;
+		if (copy_from_user(req, uarg, sizeof(*req))) {
+			err = -EFAULT;
+			goto out_free_req;
+		}
+		if (req->cap > S3FS_EVICT_LOG_MAX)
+			req->cap = S3FS_EVICT_LOG_MAX;
+		s3fs_ebpf_drain_evictions(req->inos, req->cap,
+					  &req->filled, &req->overflow);
+		if (copy_to_user(uarg, req, sizeof(*req)))
+			err = -EFAULT;
+out_free_req:
+		kfree(req);
+		return err;
+	}
 	default:
 		return -ENOTTY;
 	}
