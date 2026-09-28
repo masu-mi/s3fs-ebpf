@@ -249,6 +249,18 @@ struct s3fs_admit {
 static DEFINE_HASHTABLE(s3fs_admits, S3FS_ADMIT_HASH_BITS);
 static DEFINE_SPINLOCK(s3fs_admits_lock);
 
+/* Running size of the admit hash. Updated in lock-step with hash_add
+ * / hash_del calls under s3fs_admits_lock. Exposed to BPF programs
+ * via the s3fs_kfunc_admit_count() KFunc so policies can make
+ * pressure-aware decisions (see bpf/policy_pressure_ops.bpf.c). */
+atomic_t s3fs_admits_count = ATOMIC_INIT(0);
+
+/* Soft threshold — evict pressure fires when count exceeds this.
+ * Exported via s3fs_kfunc_softcap() so BPF programs know the same
+ * number kmod's admit_replace loop uses. Must match the local
+ * `softcap` constant in s3fs_ebpf_admit_replace(). */
+#define S3FS_EVICT_SOFTCAP 8U
+
 /* Cumulative count of admit entries removed by policy_ops eviction
  * votes. Exposed via S3FS_IOC_STATS so the daemon can mirror it into
  * the Prometheus endpoint. Monotonically increasing counter. */
@@ -328,6 +340,7 @@ static void admit_clear_locked(void)
 		hash_del(&a->node);
 		kfree(a);
 	}
+	atomic_set(&s3fs_admits_count, 0);
 }
 
 /*
@@ -433,6 +446,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	admit_clear_locked();
 	for (i = 0; i < count; i++)
 		hash_add(s3fs_admits, &staged[i]->node, staged[i]->ino);
+	atomic_set(&s3fs_admits_count, count);
 	prev_mm = s3fs_admitted_mm;
 	/*
 	 * Keep the daemon mm reference live when the admit set transiently
@@ -515,7 +529,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 */
 	{
 		u32 fmodret_votes = 0, structops_votes = 0, evicted = 0;
-		const u32 softcap = 8;
+		const u32 softcap = S3FS_EVICT_SOFTCAP;
 
 		for (i = 0; i < count; i++) {
 			int fr_vote = s3fs_policy_on_evict(entries[i].ino);
@@ -541,6 +555,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 					if (a->ino != entries[i].ino)
 						continue;
 					hash_del(&a->node);
+					atomic_dec(&s3fs_admits_count);
 					kfree(a);
 					dropped = true;
 					break;

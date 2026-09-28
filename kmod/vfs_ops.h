@@ -72,6 +72,16 @@ int  s3fs_ebpf_mark_dirty(u64 ino);
 #include <linux/atomic.h>
 extern atomic_long_t s3fs_evictions_total;
 
+/* Running admit hash size. Read from s3fs_kfunc_admit_count() in
+ * tree_traversal.c so BPF policy programs can make pressure-aware
+ * decisions. Updated under s3fs_admits_lock. */
+extern atomic_t s3fs_admits_count;
+
+/* Soft cap that gates eviction voting — must equal the local
+ * `softcap` in s3fs_ebpf_admit_replace(). Duplicated as an extern
+ * so tree_traversal.c can expose it as a KFunc. */
+#define S3FS_EVICT_SOFTCAP 8U
+
 /* Drain the ring buffer of policy-evicted inos. `out` holds up to
  * `cap` slots; kmod writes the actual count into *filled and any
  * dropped entries (since last drain) into *overflow. */

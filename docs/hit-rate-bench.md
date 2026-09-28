@@ -18,16 +18,36 @@ Runs via `./scripts/bench-hitrate.sh`.
   `admit_snapshot()` miss → path-C upcall). Rate =
   `(N_ACCESS - Δmisses) / N_ACCESS`.
 
-## Result (2026-09-28, after W-TinyLFU + in-workload eval interleave)
+## Result (2026-09-28, after P-08 KFunc-driven pressure_ops)
 
 ```
 policy=observe         hits=  200  misses=    0  rate=100.00%  evictions=    0
+policy=lru_ops         hits=   14  misses=  186  rate=  7.00%  evictions=11782
 policy=freq2bit_ops    hits=   24  misses=  176  rate= 12.00%  evictions=10136
-policy=lru_ops         hits=   25  misses=  175  rate= 12.50%  evictions=10067
-policy=wtinylfu_ops    hits=   50  misses=  150  rate= 25.00%  evictions= 9163
-policy=sieve_ops       hits=  124  misses=   76  rate= 62.00%  evictions=  535
-policy=s3fifo_ops      hits=  125  misses=   75  rate= 62.50%  evictions=  874
+policy=wtinylfu_ops    hits=   50  misses=  150  rate= 25.00%  evictions= 9291
+policy=pressure_ops    hits=  104  misses=   96  rate= 52.00%  evictions= 1836
+policy=s3fifo_ops      hits=  124  misses=   76  rate= 62.00%  evictions=  880
+policy=sieve_ops       hits=  134  misses=   66  rate= 67.00%  evictions=  431
 ```
+
+Three tiers now:
+
+- **Modern** (SIEVE, S3-FIFO): 62-67 %
+- **Adaptive** (pressure_ops with KFunc): 52 % — the new
+  data point. Reads `s3fs_kfunc_admit_count()` /
+  `s3fs_kfunc_softcap()` at eviction time and switches from
+  SIEVE-generous to aggressive-clear-and-evict when pressure
+  ratio ≥ 1.5×. Sits between "modern" and the below tiers
+  because aggressive mode kicks in even for warm items.
+- **Simple** (W-TinyLFU-scoped, freq2bit, LRU): 7-25 %.
+
+pressure_ops is a demo vehicle for the Layer 0 KFunc set (P-08).
+Its number matters less than the fact it dynamically stops
+evicting once admits drop below softcap*1.5 — during a single
+admit_replace round with 30 entries and softcap=8, aggressive
+mode fires for the first ~18 evict-votes, then the running
+count drops to ~12 and the SIEVE branch takes over. Same
+policy, different eviction rate depending on live kmod state.
 
 Two clean tiers emerge:
 
@@ -53,12 +73,17 @@ numbers.
 ## Reading the numbers
 
 - **observe** never evicts — theoretical ceiling.
-- **SIEVE** (`policy_sieve_ops`): 62 %. The visited-bit +
+- **SIEVE** (`policy_sieve_ops`): 67 %. The visited-bit +
   second-chance clock behaves correctly for skewed reuse.
-- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier): 62.5 %. The
+- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier): 62 %. The
   Small/Main/Ghost split matches Yang et al SOSP 2023: items
   enter S, promote to M on re-hit, ghost record lets re-admits
-  skip S. Effectively tied with SIEVE here.
+  skip S. Within 5 pp of SIEVE.
+- **pressure_ops** (`policy_pressure_ops`, KFunc demo): 52 %.
+  Reads kmod-side admit count and softcap live via the Layer
+  0 KFunc set (P-08). Toggles between SIEVE-generous and
+  aggressive-evict on the fly. See `bpf/policy_pressure_ops.bpf.c`
+  for the ratio threshold.
 - **W-TinyLFU** (`policy_wtinylfu_ops`, scoped-down variant):
   25 %. See §"Reading W-TinyLFU" below — this is a stripped
   implementation, not the full paper.

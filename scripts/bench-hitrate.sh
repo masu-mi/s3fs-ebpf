@@ -32,7 +32,7 @@ SETTLE=${SETTLE:-15}            # seconds between prewarm and workload
 SYNC_EVERY=${SYNC_EVERY:-3s}    # daemon --sync-every value
 POST=${POST:-8}                 # counter mirror lag after workload
 INTERLEAVE=${INTERLEAVE:-25}    # POST /policy/eval every N accesses (0 disables)
-POLICIES=${POLICIES:-observe freq2bit_ops lru_ops sieve_ops s3fifo_ops wtinylfu_ops}
+POLICIES=${POLICIES:-observe freq2bit_ops lru_ops sieve_ops s3fifo_ops wtinylfu_ops pressure_ops}
 OUT=${OUT:-/tmp/bench-hitrate}
 
 mkdir -p "$OUT"
