@@ -7,35 +7,30 @@
 //
 // **This is a scoped-down variant, not the full paper.** We keep the
 // centerpiece — a Count-Min Sketch (CMS) frequency estimator that
-// on_hit bumps and on_evict thresholds against — and drop:
+// on_hit bumps and on_evict thresholds against — plus the paper's
+// aging step (halve every counter periodically). We still drop:
+//
 //   - Window LRU tier: the paper puts new admits into a small W-LRU
 //     (~1 %) before they compete for admission to Main. We don't have
-//     a window tier here; new admits land in the same pool.
-//   - Doorkeeper (Bloom filter for 1-hit wonders): omitted for
-//     verifier simplicity; the aging step below serves a similar role.
+//     a window tier here; new admits land in the same pool. Adding
+//     this needs per-ino tier state — see backlog P-06 future work.
+//   - Doorkeeper (Bloom filter for 1-hit wonders): omitted; aging
+//     picks up part of the same slack by preventing counter
+//     saturation on cold-item collisions.
 //   - TinyLFU's admission decision (evict-if-victim-freq < candidate-
 //     freq): our on_evict is called per-ino at capacity pressure and
-//     doesn't know the incoming candidate, so we threshold on absolute
-//     freq estimate instead.
+//     doesn't know the incoming candidate, so we threshold on
+//     absolute freq estimate instead.
 //
 // What we keep:
 //   - 4-hash × 256-slot CMS storing 4-bit saturating counters.
 //   - on_hit bumps all 4 slots (up to 15). Estimator = min across the
 //     4 hashes.
 //   - on_evict: cms_estimate(ino) < EVICT_THRESHOLD → vote evict.
-//   - Periodic aging (NOT IMPLEMENTED — see comment on cms_age): the
-//     BPF verifier rejects the CMS_W * CMS_D = 1024-slot iteration
-//     that TinyLFU's "reset by half" step would need. For the short
-//     bench workload (< 1000 hits) counters stay well under
-//     saturation without aging, so we accept the compromise. A
-//     production impl would either use bpf_loop() (verifier-friendly
-//     bounded iteration, kernel 5.17+) or reduce CMS geometry.
-//
-// Under the same Zipf(0.7) bench, this should rank between SIEVE and
-// LRU: the CMS captures frequency (a fuller signal than SIEVE's 1 bit)
-// but our missing Window-LRU tier means we can't distinguish
-// "just admitted, no history" from "old and cold" the way full
-// W-TinyLFU does.
+//   - Periodic aging: every AGE_INTERVAL admit rounds, halve every
+//     CMS counter via bpf_loop(). This mimics TinyLFU's "reset by
+//     half" step which keeps the sketch from saturating on hot items
+//     and drowning out late-arriving warm items.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -61,9 +56,7 @@ struct s3fs_policy_ops {
 #define CMS_D          4U     /* rows */
 #define CMS_MAX        15U    /* 4-bit counter saturation */
 #define EVICT_THRESHOLD 2U    /* on_evict votes when estimate < this */
-/* AGE_INTERVAL disabled — see cms_age comment. Kept as a comment
- * marker for the day we switch to bpf_loop(). */
-/* #define AGE_INTERVAL   32U */
+#define AGE_INTERVAL   4U     /* halve CMS every N on_admit calls */
 
 /* One flat array — index by row*W + slot. u8 wastes 4 bits per entry
  * but avoids bit-packing headaches in the verifier. */
@@ -98,9 +91,7 @@ static const __u32 seeds[CMS_D] = {
 };
 
 /* Hash ino into a CMS slot index for the given row. Multiply by a
- * mixing constant, XOR with a row-specific seed, then mask to width.
- * BPF verifier tolerates this without unrolling as long as the loop
- * is unrolled at compile time (we unroll manually below). */
+ * mixing constant, XOR with a row-specific seed, then mask to width. */
 static __always_inline __u32 cms_slot(__u64 ino, __u32 row_seed)
 {
 	__u64 h = ino * 0x9e3779b97f4a7c15ULL;
@@ -143,9 +134,26 @@ static __always_inline void cms_bump(__u64 ino)
 	}
 }
 
-/* cms_age intentionally omitted — the verifier rejects the
- * 1024-slot iteration this file's sketch would need. See the
- * header comment for the trade-off. */
+/* bpf_loop() callback for cms_age. Halves the counter at `idx`.
+ * Returning 0 tells the helper to continue; non-zero would terminate
+ * early. Signature matches the bpf_loop_callback_t typedef. */
+static long age_slot_cb(__u32 idx, void *ctx)
+{
+	__u8 *cp = bpf_map_lookup_elem(&wtinylfu_cms, &idx);
+
+	if (cp)
+		*cp >>= 1;
+	return 0;
+}
+
+/* Halve every CMS counter. Uses bpf_loop() to sidestep the verifier's
+ * per-program instruction budget: manually unrolling 1024 iterations
+ * exceeds the 1M limit, whereas bpf_loop delegates iteration to the
+ * kernel with a fixed bound at runtime. Requires kernel 5.17+. */
+static __always_inline void cms_age(void)
+{
+	bpf_loop(CMS_W * CMS_D, age_slot_cb, NULL, 0);
+}
 
 SEC("struct_ops.s/on_admit")
 int BPF_PROG(wtinylfu_admit, __u64 count, __u64 hint)
@@ -155,8 +163,13 @@ int BPF_PROG(wtinylfu_admit, __u64 count, __u64 hint)
 
 	k = PSTAT_INVOCATIONS;
 	sp = bpf_map_lookup_elem(&policy_stats, &k);
-	if (sp)
-		__sync_fetch_and_add(sp, 1);
+	if (sp) {
+		__u64 inv = __sync_fetch_and_add(sp, 1) + 1;
+		/* AGE_INTERVAL is a power of two, so this is a cheap
+		 * bitmask check for "every Nth call". */
+		if ((inv & (AGE_INTERVAL - 1)) == 0)
+			cms_age();
+	}
 	k = PSTAT_LAST_COUNT;
 	sp = bpf_map_lookup_elem(&policy_stats, &k);
 	if (sp)
