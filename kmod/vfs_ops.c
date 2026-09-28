@@ -240,8 +240,9 @@ static bool resolve_entry_by_name(const char *name, size_t name_len,
 struct s3fs_admit {
 	struct hlist_node node;
 	u64 ino;
-	u64 uaddr;
-	u64 size;
+	u64 uaddr;   /* daemon user_vm address of the range's bytes */
+	u64 size;    /* range length */
+	u64 offset;  /* file offset where the range starts (D-01) */
 };
 
 #define S3FS_ADMIT_HASH_BITS 6
@@ -330,6 +331,11 @@ static struct mm_struct *s3fs_admitted_mm;
  * refresh their i_size when the daemon publishes a new content size. */
 static struct super_block *s3fs_active_sb;
 
+/*
+ * "Any range" lookup — returns the first admit entry for `ino`.
+ * Used by eviction / debugging where the caller doesn't care which
+ * specific range covered a particular offset.
+ */
 static struct s3fs_admit *admit_lookup_locked(u64 ino)
 {
 	struct s3fs_admit *a;
@@ -337,6 +343,27 @@ static struct s3fs_admit *admit_lookup_locked(u64 ino)
 	hash_for_each_possible(s3fs_admits, a, node, ino)
 		if (a->ino == ino)
 			return a;
+	return NULL;
+}
+
+/*
+ * Range-aware lookup (D-01): returns the entry whose [offset,
+ * offset+size) covers `pos`. When the daemon admits a whole file as
+ * one range (offset=0, size=full_size), this collapses to the
+ * legacy behavior. Multiple entries per ino live in the same hash
+ * bucket (hash_add uses ino as key); the walk picks the range that
+ * matches the read position.
+ */
+static struct s3fs_admit *admit_lookup_at_locked(u64 ino, u64 pos)
+{
+	struct s3fs_admit *a;
+
+	hash_for_each_possible(s3fs_admits, a, node, ino) {
+		if (a->ino != ino)
+			continue;
+		if (pos >= a->offset && pos < a->offset + a->size)
+			return a;
+	}
 	return NULL;
 }
 
@@ -360,6 +387,11 @@ static void admit_clear_locked(void)
  * the admit spinlock; safe from any non-IRQ context (BPF struct_ops
  * and tracing programs both qualify — the critical section is a
  * single bucket walk).
+ *
+ * D-01 note: with range-list admits a single entry no longer
+ * necessarily equals full file size. This helper returns the size
+ * of _some_ range for the ino; policies that want the full file
+ * size should sum ranges (future kfunc) or read sync entries.
  */
 u64 s3fs_admit_size(u64 ino)
 {
@@ -470,6 +502,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			staged[i]->ino = entries[i].ino;
 			staged[i]->uaddr = entries[i].uaddr;
 			staged[i]->size = entries[i].size;
+			staged[i]->offset = entries[i].offset;
 		}
 	}
 
@@ -1447,19 +1480,32 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
  * before falling back to the compile-time kmalloc buffer. */
 #define S3FS_UPCALL_WAIT_JIFFIES  (2 * HZ)
 
-/* Look up the admit table for `ino`, copying (uaddr, size) and grabbing
- * the current mm pointer under the spinlock. Returns true on hit. */
-static bool admit_snapshot(u64 ino, u64 *out_uaddr, u64 *out_size,
+/*
+ * Range-aware admit snapshot (D-01). Finds the admit entry that
+ * covers file offset `pos` and returns arena bytes relative to it:
+ *
+ *   *out_uaddr    daemon user_vm address of `pos` within the range
+ *   *out_avail    bytes remaining in the range starting at `pos`
+ *
+ * Callers pass `pos` as the folio's file offset. On hit, they can
+ * read up to `*out_avail` bytes from `*out_uaddr` via GUP. When
+ * the daemon still uses whole-file admits (offset=0, size=file_size)
+ * this collapses to the legacy behavior (`*out_uaddr = base + pos`,
+ * `*out_avail = size - pos`).
+ */
+static bool admit_snapshot(u64 ino, u64 pos,
+			   u64 *out_uaddr, u64 *out_avail,
 			   struct mm_struct **out_mm)
 {
 	struct s3fs_admit *a;
 	bool hit = false;
 
 	spin_lock(&s3fs_admits_lock);
-	a = admit_lookup_locked(ino);
+	a = admit_lookup_at_locked(ino, pos);
 	if (a) {
-		*out_uaddr = a->uaddr;
-		*out_size  = a->size;
+		u64 within = pos - a->offset;
+		*out_uaddr = a->uaddr + within;
+		*out_avail = a->size - within;
 		*out_mm    = s3fs_admitted_mm;
 		hit = true;
 	}
@@ -1638,15 +1684,18 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	loff_t pos = folio_pos(folio);
 	size_t fs_size = folio_size(folio);
 
-	/* Fast path: admit hit. */
-	if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm) {
+	/* Fast path: admit hit. admit_snapshot() returns the arena
+	 * address for `pos` and the bytes available in the covering
+	 * range. fill_from_arena reads from the returned uaddr with
+	 * pos=0 (range-relative), copying up to `avail` bytes. */
+	if (admit_snapshot(inode->i_ino, (u64)pos, &uaddr, &asize, &mm) && mm) {
 		atomic_long_inc(&s3fs_folio_hits);
 		/* Notify policy programs — recency refresh / freq bump /
 		 * visited-bit set. Fires per folio in the hot read path;
 		 * keep the wrappers lean (see policy_struct_ops.c). */
 		s3fs_policy_on_hit(inode->i_ino);
 		(void)s3fs_policy_ops_eval_hit(inode->i_ino);
-		s3fs_folio_fill_from_arena(folio, fs_size, pos, mm, uaddr, asize);
+		s3fs_folio_fill_from_arena(folio, fs_size, 0, mm, uaddr, asize);
 		goto out;
 	}
 
@@ -1669,10 +1718,10 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 				err = p->err;
 				pending_put(p);
 				if (remaining > 0 && err == 0 &&
-				    admit_snapshot(inode->i_ino, &uaddr,
-						   &asize, &mm) && mm) {
+				    admit_snapshot(inode->i_ino, (u64)pos,
+						   &uaddr, &asize, &mm) && mm) {
 					s3fs_folio_fill_from_arena(folio,
-						fs_size, pos, mm, uaddr, asize);
+						fs_size, 0, mm, uaddr, asize);
 					goto out;
 				}
 			} else {
@@ -1845,16 +1894,16 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		}
 		inode->i_private = fd;
 		/* Size resolution priority:
-		 *   1. current admit (arena has the exact bytes)
-		 *   2. sync entry's size (S3-authoritative but not yet in arena)
-		 *   3. fd->size (compile-time placeholder for bootstrap)
-		 * Without (2), a newly sync'd entry would report i_size=0
-		 * and generic_file_read_iter would short-circuit before
-		 * .read_folio could upcall the daemon. */
-		if (admit_snapshot(e->ino, &admit_uaddr,
-				   &admit_size, &admit_mm) && admit_mm)
-			inode->i_size = admit_size;
-		else if (e->size > 0)
+		 *   1. sync entry's size (S3-authoritative)
+		 *   2. fd->size (compile-time placeholder for bootstrap)
+		 * Formerly we peeked at the admit table (arena bytes) but
+		 * with range-list admits (D-01) a single admit entry no
+		 * longer reflects the whole file size — a partial range
+		 * would falsely report a smaller i_size. Daemon must push
+		 * the authoritative size via sync entries.
+		 */
+		(void)admit_uaddr; (void)admit_size; (void)admit_mm;
+		if (e->size > 0)
 			inode->i_size = e->size;
 		else
 			inode->i_size = fd->size;

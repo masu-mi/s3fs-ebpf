@@ -19,11 +19,14 @@ import (
 
 // admitEntry mirrors `struct s3fs_admit_entry` in
 // include/s3fs_ebpf_uapi.h. `Uaddr` is the daemon-side user_vm
-// address of the object bytes.
+// address of the range's bytes. `Offset` is the file offset where
+// the range starts (D-01); Offset=0 & Size=full_file is the
+// whole-file admit (backward-compat default).
 type admitEntry struct {
-	Ino   uint64
-	Uaddr uint64
-	Size  uint64
+	Ino    uint64
+	Uaddr  uint64
+	Size   uint64
+	Offset uint64
 }
 
 // admitTable is the daemon-side source of truth for what kmod

@@ -65,8 +65,7 @@
 
 ### D. 大 file / 部分 read 対応 (`ll §5.1`)
 
-- [ ] **D-01** admit table を range list 化  
-  現在の shape は `1 ino → 1 uaddr + size`。100 MiB 超の blob で破綻。`[(offset, uaddr, size), ...]` の list に拡張、`.read_folio` が folio 位置を含む range だけ pin する形に。
+- [x] ✅ **D-01 (基盤)** admit table range list 化 — 完 (次 commit)。`struct s3fs_admit_entry` に `offset` u64 field を追加、kmod の同名 struct + Go 側 `admitEntry` も並行拡張。`admit_lookup_at_locked(ino, pos)` を新設して `[offset, offset+size)` に pos が入る range を返す方式に、`admit_snapshot()` は range 相対の uaddr + avail を返す形にリファクタ。`.read_folio` は fill_from_arena を pos=0 で呼び出す (range-relative 展開)。同一 ino に対して複数エントリ (hash bucket 内衝突) が持てるようになったため 100 MiB+ blob の partial admit が可能に。i_size は sync entry 由来のみに簡略化 (partial range の size を全 file size と誤認しないため)。backward compat: offset=0 & size=full_file の whole-file admit がそのまま働く (smoke で fresh mount + cat / write+fsync+cat の両 path OK、folio_hits/read_miss_upcalls が予想通り推移)。実 partial admit (daemon 側で大 file を分割) は followup
 - [ ] **D-02** arena を sliding window にする  
   D-01 と対で、arena は「working set 分だけ載せる、他は demand load」。eviction policy が要る (→ policy engine と統合)。
 
