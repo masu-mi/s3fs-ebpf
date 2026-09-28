@@ -85,6 +85,21 @@ __bpf_kfunc u64 s3fs_kfunc_time_ns(void)
 	return ktime_get_boottime_ns();
 }
 
+/*
+ * Return the admitted size (bytes) for `ino`, or 0 if not admitted.
+ * Wraps s3fs_admit_size() (vfs_ops.c) — that helper takes the admit
+ * spinlock for the hash walk. Safe from BPF context because
+ * struct_ops / tracing programs run in a non-IRQ, non-sleeping
+ * context and the spinlock section is a single bucket walk.
+ *
+ * Use case: size-aware policies. See bpf/policy_size_aware_ops.bpf.c
+ * for a demo that biases eviction toward large files under pressure.
+ */
+__bpf_kfunc u64 s3fs_kfunc_ino_size(u64 ino)
+{
+	return s3fs_admit_size(ino);
+}
+
 __bpf_kfunc_end_defs();
 
 /*
@@ -106,6 +121,7 @@ BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
 BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
 BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
 BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
+BTF_ID_FLAGS(func, s3fs_kfunc_ino_size)
 BTF_KFUNCS_END(s3fs_kfunc_ids_tracing)
 
 /* KFuncs callable from BPF_PROG_TYPE_SYSCALL (BPF_PROG_TEST_RUN harness). */
@@ -121,6 +137,7 @@ BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
 BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
 BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
 BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
+BTF_ID_FLAGS(func, s3fs_kfunc_ino_size)
 BTF_KFUNCS_END(s3fs_kfunc_ids_struct_ops)
 
 /*

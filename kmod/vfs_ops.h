@@ -82,6 +82,10 @@ extern atomic_t s3fs_admits_count;
  * so tree_traversal.c can expose it as a KFunc. */
 #define S3FS_EVICT_SOFTCAP 8U
 
+/* Per-ino size lookup. Returns 0 when the ino is not admitted.
+ * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock inside. */
+u64 s3fs_admit_size(u64 ino);
+
 /* Drain the ring buffer of policy-evicted inos. `out` holds up to
  * `cap` slots; kmod writes the actual count into *filled and any
  * dropped entries (since last drain) into *overflow. */
