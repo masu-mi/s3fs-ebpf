@@ -1,8 +1,86 @@
-# eBPF × KFunc × WASM 活用型 次世代 S3FS 統合アーキテクチャ設計書 & Meetup 発表仕様
+# eBPF × KFunc 活用型 次世代 S3FS 統合アーキテクチャ設計書 & Meetup 発表仕様
 
-`bpf_arena` によるゼロコピー shared memory、`bpf_obj_new` による動的メモリ構造、Verifier 制限を回避する **Custom KFunc（カーネルモジュール）**、および **WASM/Lua スクリプトエンジン** を組み合わせた、超低レイテンシ S3 ファイルシステム（S3FS）の設計・実装および Meetup 登壇仕様の全貌です。
+`bpf_arena` によるゼロコピー shared memory、Verifier 制限を回避する **Custom KFunc（カーネルモジュール）**、および **eBPF struct_ops による policy engine** を組み合わせた、超低レイテンシ S3 ファイルシステム（S3FS）の設計・実装および Meetup 登壇仕様の全貌です。
 
 ---
+
+## 0. 現状 (2026-09-28) — 実装ステータス
+
+> **この節は現実装との照合用**。以下の §1-§7 は Week 0 の initial
+> design で、CEL 採用や eBPF struct_ops の追加など Week 4 以降で
+> 進化した部分がある。Meetup 会場での実演は
+> [`docs/demo-scenario.md`](./demo-scenario.md) の Demo 0-8 台本を
+> 参照。実装の詳細は各セクションでリンクする専門 doc を見てほしい。
+
+### 完成した Building Blocks
+
+| 層 | 内容 | 詳細 |
+|---|---|---|
+| **Layer 0** | KFunc set 5 種 (`admit_count`, `softcap`, `evictions_total`, `time_ns`, `ino_size`) | `kmod/tree_traversal.c` |
+| **Layer 1** | CEL DSL (Google, K8s admission と同 stack) — prewarm 判定と Layer 2 program 選択 | `daemon/internal/policy/`, `policies/default.cel` |
+| **Layer 2** | built-in eBPF policy 9 種 (下記 hit-rate 表) | `bpf/policy_*_ops.bpf.c` |
+| **Layer 3** | user eBPF plug (`--policy-bpf=file:<path>`, SHA256 allowlist gated) | `daemon/internal/policyprog/` |
+| VFS + kmod | `s3fs_ebpf` FS type、`.getattr/.read_folio/.write/.release`、bpf_arena 連携 | `kmod/vfs_ops.c` |
+| Observability | 18 counter/gauge + 2 histogram (read-miss / flush latency) + 19 Grafana panel | `daemon/internal/metrics/`, `deploy/grafana/` |
+| Runtime API | POST `/policy/reload` (hot swap)、POST `/policy/eval` (bench trigger) | `daemon/cmd/s3fs-ebpf/main.go` |
+
+### hit-rate 比較 (Zipf α=0.7, 30 files, 200 access, softcap=8)
+
+同じ workload で **policy を変えるだけで hit rate が 6.5% → 80%**。
+`docs/hit-rate-bench.md` に詳細と再現手順、caveats。
+
+```
+policy=observe         100.00%    0 evict   ← ceiling (no eviction)
+policy=wtinylfu_ops     80.00%  270 evict   ← CMS + bpf_loop aging
+policy=s3fifo_ops       65.50%  783 evict   ← 3-tier {S, M, G} 論文準拠
+policy=sieve_ops        62.00%  535 evict   ← 1-bit second-chance clock
+policy=pressure_ops     54.00% 1627 evict   ← KFunc-driven adaptive
+policy=lru_ops          11.50% 10173 evict  ← age-based FIFO
+policy=freq2bit_ops      6.50% 11581 evict  ← 2-bit ref counter
+```
+
+さらに demo 専用の Layer 0 KFunc 消費 policy:
+
+- **`policy_pressure_ops`** — `admit_count` / `softcap` で SIEVE
+  strictness を動的に切替 (52-54%)
+- **`policy_time_decay_ops`** — `time_ns` で `last_hit_ns > 5s`
+  を evict (bench 対象外、demo 用)
+- **`policy_size_aware_ops`** — `ino_size` で SMALL/BIG bias
+  (44B bench で SIEVE 相当挙動)
+
+### 現在の narrative の三本柱
+
+1. **FUSE を経由しない → 10× stat latency** (`docs/benchmark-results.md`)
+2. **struct_ops で policy を curl 一発 hot swap** — in-flight IO
+   を中断せず algorithm を差替える shape (`docs/policy-engine-design.md §4.5`)
+3. **hit-rate は policy 選択で 6% → 80% 動く** — 実測、workload 固定
+
+### Initial design (§1-) からの主な変更点
+
+- **Lua/WASM → CEL + eBPF**: hot path の call overhead が Lua で
+  10μs 超だったので、cold-path 判定のみ CEL、実際の cache algorithm
+  は eBPF program として出荷。`docs/policy-engine-design.md §5-§6`
+- **Radix Tree/bpf_rbtree → hash table**: Verifier 突破の実装
+  難易度を下げるため、初期実装は Linux hashtable + KFunc lookup
+  helper (`s3fs_admit_size` etc.) の shape に変更
+- **単一 kmod で完結 → 3-layer + KFunc**: 政策と実装の分離
+  (Layer 1/2/3) を導入、user eBPF を allowlist で gate
+
+### 参照 doc (現行 implementation)
+
+- `docs/demo-scenario.md` — **Meetup デモ台本 (Demo 0-8, 35 min)**
+- `docs/policy-engine-design.md` — 3-layer architecture の詳細
+- `docs/policy-attach-comparison.md` — fmod_ret vs struct_ops
+- `docs/hit-rate-bench.md` — 上記の 80% 数値の出典と caveat
+- `docs/lessons-learned.md` — 実装ハマりポイント (arena mm/gup /
+  bpf_loop / struct_ops hot reload / iget_locked / etc.)
+- `docs/backlog.md` — 完了/残タスク一元管理
+
+---
+
+> **§1 以下は 2026-05 の initial design**。読み進める前に §0 の
+> "現状 (2026-09-28)" を必ず参照。実装は多くの決定を進化させて
+> いる (CEL 採用、struct_ops policy engine、KFunc set 拡張、etc.)。
 
 ## 1. 背景と既存実装との構造的比較
 
