@@ -6,9 +6,9 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 
 > **Status (2026-09-28)**: Week 0-4 完了。read + write path、動的な
 > policy engine (CEL + built-in eBPF + user eBPF + KFunc の 4 層)、
-> hit-rate bench で **W-TinyLFU 80% / SIEVE 62% / LRU 12% / freq2bit
-> 6.5%** を実測、Grafana に 21 panel。次段階は Meetup 登壇、および
-> Week 5+ の分散 / multi-tenant / 大ファイル対応。
+> hit-rate bench で **W-TinyLFU 88.5% / SIEVE 66% / LRU 7.5% /
+> freq2bit 6.5%** を実測、Grafana に 21 panel。次段階は Meetup
+> 登壇、および Week 5+ の分散 / multi-tenant / 大ファイル対応。
 >
 > **すぐに使ってみたい場合**:
 > - 概要と数値 → [`docs/motivation.md §0`](docs/motivation.md)

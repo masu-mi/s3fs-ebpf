@@ -26,17 +26,19 @@
 
 ### hit-rate 比較 (Zipf α=0.7, 30 files, 200 access, softcap=8)
 
-同じ workload で **policy を変えるだけで hit rate が 6.5% → 80%**。
+同じ workload で **policy を変えるだけで hit rate が 6.5% → 88.5%**。
 `docs/hit-rate-bench.md` に詳細と再現手順、caveats。
 
 ```
 policy=observe         100.00%    0 evict   ← ceiling (no eviction)
-policy=wtinylfu_ops     80.00%  270 evict   ← CMS + bpf_loop aging
-policy=s3fifo_ops       65.50%  783 evict   ← 3-tier {S, M, G} 論文準拠
-policy=sieve_ops        62.00%  535 evict   ← 1-bit second-chance clock
-policy=pressure_ops     54.00% 1627 evict   ← KFunc-driven adaptive
-policy=lru_ops          11.50% 10173 evict  ← age-based FIFO
-policy=freq2bit_ops      6.50% 11581 evict  ← 2-bit ref counter
+policy=wtinylfu_ops     88.50%  161 evict   ← CMS + bpf_loop aging
+policy=sieve_ops        66.00%  447 evict   ← 1-bit second-chance clock
+policy=size_aware_ops   65.00%  475 evict   ← per-ino KFunc (ino_size)
+policy=pressure_ops     54.00% 1704 evict   ← KFunc-driven adaptive
+policy=s3fifo_ops       46.00%  991 evict   ← 3-tier {S, M, G} 論文準拠
+policy=time_decay_ops   30.50% 6488 evict   ← KFunc-driven time decay
+policy=lru_ops           7.50% 11278 evict  ← age-based FIFO
+policy=freq2bit_ops      6.50% 11468 evict  ← 2-bit ref counter
 ```
 
 さらに demo 専用の Layer 0 KFunc 消費 policy:
