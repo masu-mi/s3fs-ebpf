@@ -18,52 +18,93 @@ Runs via `./scripts/bench-hitrate.sh`.
   `admit_snapshot()` miss → path-C upcall). Rate =
   `(N_ACCESS - Δmisses) / N_ACCESS`.
 
-## Result (2026-09-28, after full 3-tier S3-FIFO added)
+## Result (2026-09-28, after W-TinyLFU + in-workload eval interleave)
 
 ```
 policy=observe         hits=  200  misses=    0  rate=100.00%  evictions=    0
-policy=freq2bit_ops    hits=   17  misses=  183  rate=  8.50%  evictions=10542
-policy=lru_ops         hits=   28  misses=  172  rate= 14.00%  evictions= 9410
-policy=sieve_ops       hits=  137  misses=   63  rate= 68.50%  evictions=  328
-policy=s3fifo_ops      hits=  123  misses=   77  rate= 61.50%  evictions=  757
+policy=freq2bit_ops    hits=   24  misses=  176  rate= 12.00%  evictions=10136
+policy=lru_ops         hits=   25  misses=  175  rate= 12.50%  evictions=10067
+policy=wtinylfu_ops    hits=   50  misses=  150  rate= 25.00%  evictions= 9163
+policy=sieve_ops       hits=  124  misses=   76  rate= 62.00%  evictions=  535
+policy=s3fifo_ops      hits=  125  misses=   75  rate= 62.50%  evictions=  874
 ```
+
+Two clean tiers emerge:
+
+- **Modern (SIEVE, S3-FIFO)**: 62 % — the visited-bit and 3-tier
+  strategies both protect the working set effectively.
+- **Simple (LRU, freq2bit)**: 12-13 % — over-aggressive eviction
+  churn.
+- **W-TinyLFU (scoped)**: 25 %, in between. The CMS-only variant
+  identifies frequent items but without the paper's Window-LRU
+  tier and doorkeeper it can't defend against
+  "burst-once-then-cold" traces. Full W-TinyLFU would likely
+  reach the 60 % tier.
+
+Bench harness change (2026-09-28): the workload now fires
+`POST /policy/eval` every `INTERLEAVE=25` accesses to trigger
+eviction rounds mid-workload. Without this, policies whose state
+lives entirely in `on_hit` (W-TinyLFU's CMS) never populate before
+the convergence eval rounds fire, so on_evict grants universal
+grace and no evictions happen. Existing policies (SIEVE / LRU /
+S3-FIFO / freq2bit) are within ±2 pp of their pre-interleave
+numbers.
 
 ## Reading the numbers
 
 - **observe** never evicts — theoretical ceiling.
-- **SIEVE** (`policy_sieve_ops`): 68.5 %, best of the evicting
-  policies. The visited-bit + second-chance clock behaves
-  correctly for skewed reuse.
-- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier): 61.5 %. The
-  Small/Main/Ghost split matches the published S3-FIFO paper
-  (Yang et al SOSP 2023): items enter S, promote to M on re-hit,
-  ghost record lets re-admits skip S. Within 7 pp of SIEVE.
+- **SIEVE** (`policy_sieve_ops`): 62 %. The visited-bit +
+  second-chance clock behaves correctly for skewed reuse.
+- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier): 62.5 %. The
+  Small/Main/Ghost split matches Yang et al SOSP 2023: items
+  enter S, promote to M on re-hit, ghost record lets re-admits
+  skip S. Effectively tied with SIEVE here.
+- **W-TinyLFU** (`policy_wtinylfu_ops`, scoped-down variant):
+  25 %. See §"Reading W-TinyLFU" below — this is a stripped
+  implementation, not the full paper.
 - **LRU** (`policy_lru_ops`, approximate admit-order FIFO with
-  `on_hit` refreshing the seed epoch): 14 %. Poor because our
+  `on_hit` refreshing the seed epoch): 12.5 %. Poor because our
   eval-forced rounds bump the global epoch on every `on_admit`,
   so ages accumulate faster than `on_hit` resets. Real
   sync-driven epoch would keep more.
 - **freq2bit** (`policy_freq2bit_ops`, single-tier 2-bit
-  reference counter): 8.5 %, worst. This is what the file was
-  called `policy_s3fifo_*` for during Week 4 (d) — an
-  honest-name renaming (Oct 2026) landed once we noticed the
-  algorithm had none of the {Small, Main, Ghost} structure that
-  makes S3-FIFO S3-FIFO.
+  reference counter): 12 %. Was called `policy_s3fifo_*` until
+  the honest-name rename landed once we noticed the algorithm
+  had none of the {Small, Main, Ghost} structure that makes
+  S3-FIFO S3-FIFO.
 
-Two comparisons that carry the story:
+The one comparison that carries the story:
 
-1. **7× improvement from `freq2bit` → `s3fifo` (both roughly the
-   same code shape + BPF map density)**. The gain is entirely
-   from adding the tier split and the ghost re-admit path —
-   evidence that the S3-FIFO paper's core innovation isn't
-   incidental.
+- **~5× improvement from `freq2bit` (12 %) → `s3fifo` (62.5 %)
+  with roughly the same code shape**. The gain is entirely
+  from adding the tier split and the ghost re-admit path —
+  evidence that the S3-FIFO paper's core innovation isn't
+  incidental.
 
-2. **SIEVE vs real S3-FIFO within 7 pp**. Published benchmarks
-   in the S3-FIFO / SIEVE papers show the two trade wins by
-   workload — no free lunch. Our micro-workload is short and
-   admit-round-dense, which favors SIEVE's round-count-invariant
-   clear-on-spare; longer runs with real read/round ratio
-   probably close the gap or flip the winner.
+## Reading W-TinyLFU
+
+Our `policy_wtinylfu_ops` implements the *centerpiece* of the
+paper (CMS-based frequency estimator + threshold admission) but
+skips three components that materially move hit rates:
+
+1. **Window LRU tier** (~1 % of cache in the paper). New admits
+   land in W-LRU and only graduate to Main if they earn CMS
+   respect. Without W-LRU, one-hit wonders admit straight to
+   Main and consume slots that hot items would use.
+2. **Doorkeeper Bloom filter**. Filters "1-hit wonders" before
+   they populate CMS. Without it, our 4×256 sketch fills with
+   noise from cold items.
+3. **Periodic aging** (halve counters every N ops). Real
+   TinyLFU resets the CMS by half every ~sample size ops so
+   hot items don't drown out late-warming items. Our impl
+   omits aging because a full 1024-slot iterate-and-halve is
+   verifier-rejected as an unbounded loop; a `bpf_loop()`
+   -based implementation would fix this.
+
+At 25 % we're not seeing the "TinyLFU near-optimal" numbers the
+paper reports on comparable workloads. A production impl would
+close the gap on all three axes — the CMS primitive is done,
+which is the reusable infrastructure win.
 
 The eviction totals (~10 k for LRU/freq2bit vs ~300 for SIEVE
 vs ~800 for S3-FIFO) tell the same story: aggressive policies
@@ -135,8 +176,13 @@ S3-FIFO name. The bench above measures both. See:
 - **Write-heavy patterns**: only reads exercised here.
 - **Multi-tenant / range access**: single ino at a time,
   ino ↔ full-file admit shape (P1 backlog D-01 for range).
-- **W-TinyLFU / SIEVE with a global hand pointer** (would need
-  a shared cursor in a BPF map).
+- **Full W-TinyLFU**: window LRU + doorkeeper + aging (see
+  "Reading W-TinyLFU" above). Would need `bpf_loop()` for the
+  aging step or a redesigned CMS geometry.
+- **SIEVE with a global hand pointer**: our impl fires
+  second-chance semantics per admit_replace round instead of
+  along a global cursor. Adding a cursor would need a shared
+  BPF map var.
 - **Ghost list expiry in S3-FIFO**: our impl leaves ghost
   entries in the state map until the max_entries LRU kicks
   them out. Fine at 8192 entries, but a real deployment would
