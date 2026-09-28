@@ -160,4 +160,9 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 	// order matches Prometheus's expected grouping.
 	ReadMissLatency.writeTo(w)
 	FlushLatency.writeTo(w)
+
+	// Custom gauges emitted by CEL policy `metric(name, value)`
+	// calls. Bounded to CustomGaugeCap distinct names; ordered by
+	// name for stable scrape output. See metrics/custom.go.
+	writeCustom(w)
 }

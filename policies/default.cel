@@ -24,7 +24,14 @@
 # rotating logs go through Path C (on-demand) instead — the write-back
 # for logs would fight the sync loop, and >32 MiB weights we'd rather
 # demand-load to keep arena churn low.
-prewarm: entry.size <= 33554432 && !entry.name.endsWith(".log")
+#
+# `metric(name, value)` is a side-effect that publishes a gauge under
+# `s3fs_ebpf_policy_metric{name="<name>"}` for observability. Always
+# returns true so it can chain in && expressions. Bounded by
+# metrics.CustomGaugeCap distinct names. Emits the last-seen entry
+# size so a Grafana panel or Prometheus alert can watch policy input
+# distribution.
+prewarm: metric("last_entry_size", entry.size) && entry.size <= 33554432 && !entry.name.endsWith(".log")
 
 # Global policy selection: struct_ops SIEVE — best-in-class hit rate
 # on the Zipf micro-bench (see docs/hit-rate-bench.md) and cheapest
