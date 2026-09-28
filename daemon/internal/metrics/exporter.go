@@ -48,6 +48,8 @@ type Counters struct {
 	// arena backing store.
 	ArenaCapacityBytes atomic.Uint64 // gauge, arena.Size() (constant per run)
 	ArenaUsedBytes     atomic.Uint64 // gauge, high-water AdmitContent offset
+	ArenaFreeBytes     atomic.Uint64 // gauge, D-02 free-list total
+	ArenaFreeChunks    atomic.Uint64 // gauge, D-02 free-list length
 
 	// Layer 2/3 policy program (BPF fentry on s3fs_policy_on_admit).
 	// Sourced from the loaded .bpf.o's policy_stats map on every
@@ -141,6 +143,8 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_admits_current", "Entries in the daemon-side admit snapshot.", "gauge", Global.AdmitsCurrent.Load()},
 		{"s3fs_ebpf_arena_capacity_bytes", "BPF arena mmap size (constant per run).", "gauge", Global.ArenaCapacityBytes.Load()},
 		{"s3fs_ebpf_arena_used_bytes", "High-water AdmitContent offset — best-effort arena usage.", "gauge", Global.ArenaUsedBytes.Load()},
+		{"s3fs_ebpf_arena_free_bytes", "Bytes in the arena free-list (D-02 — evicted admits return here for reuse).", "gauge", Global.ArenaFreeBytes.Load()},
+		{"s3fs_ebpf_arena_free_chunks", "Number of ranges in the arena free-list.", "gauge", Global.ArenaFreeChunks.Load()},
 
 		// Layer 2/3 policy program hook counters.
 		{"s3fs_ebpf_policy_hook_invocations_total", "fentry invocations on s3fs_policy_on_admit (counted by the loaded policy BPF program).", "counter", Global.PolicyHookInvocations.Load()},

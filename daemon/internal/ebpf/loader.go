@@ -88,10 +88,25 @@ type Programs struct {
 
 	// cache admission state for WarmCache. cacheKnown deduplicates
 	// concurrent misses on the same ino; cacheNextOff is a bump
-	// allocator into the arena (no eviction — bounded by arena size).
+	// allocator into the arena.
+	//
+	// D-02: arenaFree is a free-list of {offset, size} chunks that
+	// eviction returns to. AdmitContent searches this list first
+	// (first-fit) before extending cacheNextOff. Turns the arena
+	// from a monotonic high-water buffer into a reusable pool.
 	cacheMu      sync.Mutex
 	cacheKnown   map[uint64]uint32
 	cacheNextOff uint32
+	arenaFree    []arenaChunk
+}
+
+// arenaChunk is one entry in the free-list — a range of bytes in
+// arena that used to hold admit content and is now available for
+// reuse. offset is the arena byte offset (matches AdmitContent's
+// return value); size is the chunk length.
+type arenaChunk struct {
+	offset uint32
+	size   uint32
 }
 
 // Load pulls the bpf2go collection into the kernel and returns a handle.
@@ -294,29 +309,101 @@ func (p *Programs) WarmCache(stub InodeStub) (uint32, error) {
 // ErrCacheFull signals the arena has no more slots for InodeStubs.
 var ErrCacheFull = errors.New("arena cache full")
 
-// AdmitContent writes `data` into the arena at the next free slot and
-// returns its byte offset. Intended for the Week 4 (a) admit-arena
-// ioctl: kmod's .read serves these bytes directly out of the arena
-// page instead of from a per-inode kmalloc buffer. Shares the same
-// bump allocator as WarmCache; callers should call WarmCache first if
-// they want stubs at low offsets and content behind them.
+// AdmitContent writes `data` into the arena and returns its byte
+// offset. Preferred allocation order (D-02):
+//
+//  1. First-fit match in the free-list: any evicted chunk large
+//     enough to hold `data` is reused (smallest-of-fits picked for
+//     minimal internal waste).
+//  2. Otherwise extend the bump allocator (cacheNextOff) if arena
+//     still has room.
+//
+// Chunks larger than `len(data)` are split — the used prefix goes to
+// the caller, the tail returns to the free-list. This lets 100 MiB+
+// blobs evict-and-refit at chunk granularity without arena bloat.
 func (p *Programs) AdmitContent(data []byte) (uint32, error) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 
 	arenaSize := p.arena.Size()
+	need := uint32(len(data))
+
+	// (1) First-fit in free-list. Pick the smallest chunk that
+	// still fits so we don't fragment large runs when a tiny admit
+	// arrives.
+	bestIdx := -1
+	var bestSize uint32
+	for i, c := range p.arenaFree {
+		if c.size < need {
+			continue
+		}
+		if bestIdx == -1 || c.size < bestSize {
+			bestIdx = i
+			bestSize = c.size
+		}
+	}
+	if bestIdx != -1 {
+		chunk := p.arenaFree[bestIdx]
+		// Remove selected chunk. Order doesn't matter.
+		p.arenaFree[bestIdx] = p.arenaFree[len(p.arenaFree)-1]
+		p.arenaFree = p.arenaFree[:len(p.arenaFree)-1]
+		if len(data) > 0 {
+			if _, err := p.arena.WriteAt(data, int64(chunk.offset)); err != nil {
+				return 0, fmt.Errorf("arena write reuse: %w", err)
+			}
+		}
+		// Return leftover to the free-list.
+		if chunk.size > need {
+			p.arenaFree = append(p.arenaFree, arenaChunk{
+				offset: chunk.offset + need,
+				size:   chunk.size - need,
+			})
+		}
+		return chunk.offset, nil
+	}
+
+	// (2) Bump allocator.
 	nextOff := p.cacheNextOff
-	if uint64(nextOff)+uint64(len(data)) > uint64(arenaSize) {
+	if uint64(nextOff)+uint64(need) > uint64(arenaSize) {
 		return 0, ErrCacheFull
 	}
-	if len(data) > 0 {
+	if need > 0 {
 		if _, err := p.arena.WriteAt(data, int64(nextOff)); err != nil {
 			return 0, fmt.Errorf("arena write content: %w", err)
 		}
 	}
 	off := nextOff
-	p.cacheNextOff = nextOff + uint32(len(data))
+	p.cacheNextOff = nextOff + need
 	return off, nil
+}
+
+// FreeArenaChunk returns a (offset, size) range to the free-list so
+// a subsequent AdmitContent can reuse it. Idempotent for zero-size.
+// D-02: called by the daemon's drain loop when kmod-side eviction
+// removes an admit whose arena range is no longer referenced.
+//
+// Adjacent chunks aren't merged today — the free-list is a flat set
+// with best-fit selection. Fragmentation is bounded by the number of
+// live evictions; a periodic compaction sweep is a followup.
+func (p *Programs) FreeArenaChunk(offset, size uint32) {
+	if size == 0 {
+		return
+	}
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	p.arenaFree = append(p.arenaFree, arenaChunk{offset: offset, size: size})
+}
+
+// ArenaFreeStats reports the current free-list state — total bytes
+// available and the number of chunks. Used by /metrics for the
+// arena_free_bytes gauge (D-02) and by CLI stats commands.
+func (p *Programs) ArenaFreeStats() (bytes uint64, chunks int) {
+	p.cacheMu.Lock()
+	defer p.cacheMu.Unlock()
+	for _, c := range p.arenaFree {
+		bytes += uint64(c.size)
+	}
+	return bytes, len(p.arenaFree)
 }
 
 // ArenaFD returns the file descriptor of the underlying arena map.

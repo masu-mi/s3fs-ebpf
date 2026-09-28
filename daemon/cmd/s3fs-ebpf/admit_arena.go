@@ -91,7 +91,13 @@ func clearAdmits(devPath string) error {
 // snapshot without pushing to kmod (kmod already dropped them via
 // policy vote — pushing would re-add them). Called by the eviction
 // feedback goroutine after S3FS_IOC_DRAIN_EVICTIONS.
-func dropAdmits(evicted []uint64) int {
+//
+// D-02: also returns each dropped entry's arena range to the
+// free-list so a subsequent AdmitContent can reuse the bytes. This
+// keeps the arena from growing monotonically under sustained
+// churn. `progs` may be nil when the loader isn't wired (offline
+// mode); free-list update is skipped in that case.
+func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
 	if len(evicted) == 0 {
 		return 0
 	}
@@ -101,10 +107,19 @@ func dropAdmits(evicted []uint64) int {
 	}
 	admitMu.Lock()
 	filtered := admits[:0]
-	dropped := 0
+	var freedRanges []arenaChunkPair
+	arenaBase := uint64(0)
+	if progs != nil {
+		arenaBase = progs.Arena().BaseAddr()
+	}
 	for _, e := range admits {
 		if _, ok := skip[e.Ino]; ok {
-			dropped++
+			if progs != nil && arenaBase != 0 && e.Uaddr >= arenaBase {
+				freedRanges = append(freedRanges, arenaChunkPair{
+					offset: uint32(e.Uaddr - arenaBase),
+					size:   uint32(e.Size),
+				})
+			}
 			continue
 		}
 		filtered = append(filtered, e)
@@ -112,7 +127,20 @@ func dropAdmits(evicted []uint64) int {
 	admits = filtered
 	admitMu.Unlock()
 	metrics.Global.AdmitsCurrent.Store(uint64(len(filtered)))
-	return dropped
+	if progs != nil {
+		for _, r := range freedRanges {
+			progs.FreeArenaChunk(r.offset, r.size)
+		}
+	}
+	return len(freedRanges)
+}
+
+// arenaChunkPair is dropAdmits's per-eviction bookkeeping — a
+// tiny value type so the "compute-then-free" split doesn't need to
+// hold admitMu while calling into progs.FreeArenaChunk.
+type arenaChunkPair struct {
+	offset uint32
+	size   uint32
 }
 
 // pruneAdmitsTo drops any admit whose ino is not in `keepInos`. Called
@@ -261,6 +289,16 @@ func runReadMissLoop(ctx context.Context, devPath string,
 	}
 }
 
+// PartialAdmitThreshold — files above this size are admitted as a
+// single chunk covering just the miss offset (D-01). Below, we
+// fetch the whole object (fewer requests, keeps small-file behavior
+// identical to pre-D-01). 4 MiB matches S3-tier defaults for small
+// PoC deployments; production would set larger.
+const (
+	partialAdmitThreshold = 4 * 1024 * 1024
+	partialAdmitChunk     = 4 * 1024 * 1024
+)
+
 func handleReadMiss(ctx context.Context, devPath string,
 	progs *fpebpf.Programs, s3c *s3.Client, ev readMissEvent) {
 	metrics.Global.ReadMissUpcalls.Add(1)
@@ -288,7 +326,26 @@ func handleReadMiss(ctx context.Context, devPath string,
 		return
 	}
 
-	body, err := s3c.Get(ctx, entry.S3Key)
+	// D-01 partial admit path. Small files (< threshold): fetch
+	// whole object, admit at offset=0. Large files: fetch just the
+	// chunk covering ev.Offset via S3 range GET, admit with the
+	// range's file offset so subsequent .read_folio reads at
+	// nearby offsets hit the same chunk.
+	var body []byte
+	var chunkOffset int64 = 0
+	fullSize := int64(entry.Fallback)
+	var err error
+	if fullSize > 0 && fullSize > partialAdmitThreshold {
+		// Align to chunk boundary containing the miss.
+		chunkOffset = (ev.Offset / partialAdmitChunk) * partialAdmitChunk
+		chunkSize := int64(partialAdmitChunk)
+		if chunkOffset+chunkSize > fullSize {
+			chunkSize = fullSize - chunkOffset
+		}
+		body, err = s3c.GetRange(ctx, entry.S3Key, chunkOffset, chunkSize)
+	} else {
+		body, err = s3c.Get(ctx, entry.S3Key)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s get: %v\n",
 			ev.Ino, entry.S3Key, err)
@@ -311,14 +368,22 @@ func handleReadMiss(ctx context.Context, devPath string,
 	}
 
 	if err := addAdmit(devPath, admitEntry{
-		Ino: ev.Ino, Uaddr: uaddr, Size: uint64(len(body)),
+		Ino:    ev.Ino,
+		Uaddr:  uaddr,
+		Size:   uint64(len(body)),
+		Offset: uint64(chunkOffset),
 	}); err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit arena: %v\n", ev.Ino, err)
 		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
 		return
 	}
-	fmt.Printf("[upcall] ino=%d %s admitted %d bytes → uaddr=0x%x\n",
-		ev.Ino, entry.Name, len(body), uaddr)
+	if chunkOffset > 0 {
+		fmt.Printf("[upcall] ino=%d %s admitted range [%d,%d) → uaddr=0x%x (partial)\n",
+			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)), uaddr)
+	} else {
+		fmt.Printf("[upcall] ino=%d %s admitted %d bytes → uaddr=0x%x\n",
+			ev.Ino, entry.Name, len(body), uaddr)
+	}
 	_ = signalAdmit(devPath, ev.Ino, 0)
 }
