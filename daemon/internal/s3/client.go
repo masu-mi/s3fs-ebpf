@@ -114,6 +114,22 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 	return nil
 }
 
+// Delete removes `key` from the backing bucket. Local cache entry
+// (if configured) is dropped too so a subsequent Get re-fetches
+// authoritative state (which will surface 404 or the newer key).
+// Called by the delete-drain loop after kmod's .unlink enqueues an
+// event (E-02).
+func (c *Client) Delete(ctx context.Context, key string) error {
+	err := c.mc.RemoveObject(ctx, c.cfg.Bucket, key, minio.RemoveObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("s3 delete %q: %w", key, err)
+	}
+	if c.cfg.CacheDir != "" {
+		_ = os.Remove(c.cachePath(key))
+	}
+	return nil
+}
+
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if c.cfg.CacheDir != "" {
 		if buf, ok := c.readCache(key); ok {

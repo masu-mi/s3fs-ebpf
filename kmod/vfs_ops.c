@@ -1155,6 +1155,90 @@ int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
 	return 0;
 }
 
+/* -- Delete queue (E-02: .unlink) --------------------------------------- */
+/*
+ * .unlink appends here; daemon drains via S3FS_IOC_POP_DELETE and
+ * issues S3 DELETE. Similar shape to the flush queue but distinct
+ * because delete has no `size` field and different daemon consumer
+ * (no readDirty / no admit refresh — the object goes away).
+ *
+ * Best-effort: a failed DELETE stays best-effort at PoC scope. If
+ * the daemon crashes between dequeue and PUT-DELETE the entry is
+ * lost from kmod but S3 still has it — next sync round will re-add
+ * it to the dyn table, effectively "un-deleting" from user's POV.
+ * Production would need a persistent delete log (backlog H-01 area).
+ */
+struct s3fs_delete_item {
+	struct list_head link;
+	u64 ino;
+	u32 name_len;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+static LIST_HEAD(s3fs_delete_queue);
+static DEFINE_SPINLOCK(s3fs_delete_lock);
+
+static void delete_enqueue(u64 ino, const char *name, size_t name_len)
+{
+	struct s3fs_delete_item *d;
+
+	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
+		return;
+	d = kzalloc(sizeof(*d), GFP_KERNEL);
+	if (!d)
+		return;
+	d->ino = ino;
+	d->name_len = name_len;
+	memcpy(d->name, name, name_len);
+	spin_lock(&s3fs_delete_lock);
+	list_add_tail(&d->link, &s3fs_delete_queue);
+	spin_unlock(&s3fs_delete_lock);
+}
+
+static bool delete_dequeue(struct s3fs_delete_item *out)
+{
+	struct s3fs_delete_item *d = NULL;
+
+	spin_lock(&s3fs_delete_lock);
+	if (!list_empty(&s3fs_delete_queue)) {
+		d = list_first_entry(&s3fs_delete_queue,
+				     struct s3fs_delete_item, link);
+		list_del(&d->link);
+	}
+	spin_unlock(&s3fs_delete_lock);
+	if (!d)
+		return false;
+	*out = *d;
+	kfree(d);
+	return true;
+}
+
+static void delete_queue_drain(void)
+{
+	struct s3fs_delete_item *d, *tmp;
+
+	spin_lock(&s3fs_delete_lock);
+	list_for_each_entry_safe(d, tmp, &s3fs_delete_queue, link) {
+		list_del(&d->link);
+		kfree(d);
+	}
+	spin_unlock(&s3fs_delete_lock);
+}
+
+int s3fs_ebpf_delete_pop(struct s3fs_delete_event *out)
+{
+	struct s3fs_delete_item item;
+
+	if (!delete_dequeue(&item))
+		return -EAGAIN;
+	memset(out, 0, sizeof(*out));
+	out->ino      = item.ino;
+	out->name_len = item.name_len;
+	memcpy(out->name, item.name, item.name_len);
+	out->name[item.name_len] = '\0';
+	return 0;
+}
+
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
 {
 	struct inode *inode;
@@ -1886,9 +1970,10 @@ static void s3fs_ebpf_put_super(struct super_block *sb)
 {
 	if (s3fs_active_sb == sb)
 		s3fs_active_sb = NULL;
-	/* Queued flush events reference inos on this sb; drop them so a
-	 * later mount doesn't see them. */
+	/* Queued flush / delete events reference inos on this sb; drop
+	 * them so a later mount doesn't see them. */
 	flush_queue_drain();
+	delete_queue_drain();
 }
 
 static const struct super_operations s3fs_ebpf_super_ops = {
@@ -1898,9 +1983,93 @@ static const struct super_operations s3fs_ebpf_super_ops = {
 	.put_super	= s3fs_ebpf_put_super,
 };
 
+/*
+ * Remove a `name` from s3fs_local_entries if present. Returns true if
+ * a local entry was actually removed. Caller must hold no locks —
+ * this acquires s3fs_entries_mtx internally.
+ */
+static bool local_entry_remove(const char *name, size_t name_len)
+{
+	struct s3fs_local_entry *le, *tmp;
+	bool removed = false;
+
+	mutex_lock(&s3fs_entries_mtx);
+	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
+		if (le->name_len != name_len ||
+		    memcmp(le->name, name, name_len) != 0)
+			continue;
+		list_del(&le->link);
+		s3fs_local_nr--;
+		kfree(le);
+		removed = true;
+		break;
+	}
+	mutex_unlock(&s3fs_entries_mtx);
+	return removed;
+}
+
+/*
+ * Drop the ino from the admit hash if present. Symmetric with the
+ * eviction-vote path; the ino won't be re-populated because the
+ * daemon-side snapshot removes it via evict-drain feedback on the
+ * next admit_replace round.
+ */
+static void admit_drop_ino_locked(u64 ino)
+{
+	struct s3fs_admit *a;
+	struct hlist_node *tmp;
+
+	spin_lock(&s3fs_admits_lock);
+	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
+		if (a->ino != ino)
+			continue;
+		hash_del(&a->node);
+		atomic_dec(&s3fs_admits_count);
+		kfree(a);
+		break;
+	}
+	spin_unlock(&s3fs_admits_lock);
+}
+
+/*
+ * .unlink — remove `dentry` from this FS. Enqueues a delete event so
+ * the daemon can DELETE the S3 object. Best-effort at PoC scope:
+ * local entries drop immediately, dyn entries only disappear on the
+ * next sync round (S3 LIST no longer returns the deleted key).
+ */
+static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
+{
+	struct inode *inode = d_inode(dentry);
+	size_t name_len = dentry->d_name.len;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+
+	if (!inode)
+		return -ENOENT;
+	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
+		return -ENAMETOOLONG;
+	memcpy(name, dentry->d_name.name, name_len);
+
+	/* Enqueue delete for the daemon regardless of local vs dyn — the
+	 * daemon is responsible for the S3 side. Failure to enqueue
+	 * (OOM) still lets us drop the local FS view; the file stays
+	 * on S3 until user retries or next daemon delete-drain. */
+	delete_enqueue(inode->i_ino, name, name_len);
+
+	/* Local-side cleanup. */
+	local_entry_remove(name, name_len);
+	admit_drop_ino_locked(inode->i_ino);
+
+	/* Drop link count so drop_inode fires evict_inode. */
+	drop_nlink(inode);
+	inode_set_ctime_current(inode);
+
+	return 0;
+}
+
 static const struct inode_operations s3fs_ebpf_dir_iops = {
 	.lookup		= s3fs_ebpf_lookup,
 	.create		= s3fs_ebpf_create,
+	.unlink		= s3fs_ebpf_unlink,
 };
 
 static const struct file_operations s3fs_ebpf_dir_fops = {
