@@ -76,6 +76,11 @@ policy=freq2bit_ops      6.50% 11468 evict  ← 2-bit ref counter
 - `docs/policy-attach-comparison.md` — fmod_ret vs struct_ops
 - `docs/hit-rate-bench.md` — 上記の 80% 数値の出典と caveat
 - `docs/trace-harness.md` — offline policy simulator の使い方
+- `docs/posix-and-practical-notes.md` — **FS 拡張の POSIX 準拠 +
+  実用性 (E-01/E-02/E-03/D-01/D-02)**
+- `docs/hook-timings-diagrams.md` — **フックポイント + 8 タイミング
+  のオブジェクト図** (read hit/miss、write+close、fsync、eviction、
+  unlink、rename)
 - `docs/lessons-learned.md` — 実装ハマりポイント (arena mm/gup /
   bpf_loop / struct_ops hot reload / iget_locked / etc.)
 - `docs/backlog.md` — 完了/残タスク一元管理
