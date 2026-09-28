@@ -31,7 +31,8 @@ ZIPF_ALPHA=${ZIPF_ALPHA:-0.9}   # skew — smaller = more uniform
 SETTLE=${SETTLE:-15}            # seconds between prewarm and workload
 SYNC_EVERY=${SYNC_EVERY:-3s}    # daemon --sync-every value
 POST=${POST:-8}                 # counter mirror lag after workload
-POLICIES=${POLICIES:-observe freq2bit_ops lru_ops sieve_ops s3fifo_ops}
+INTERLEAVE=${INTERLEAVE:-25}    # POST /policy/eval every N accesses (0 disables)
+POLICIES=${POLICIES:-observe freq2bit_ops lru_ops sieve_ops s3fifo_ops wtinylfu_ops}
 OUT=${OUT:-/tmp/bench-hitrate}
 
 mkdir -p "$OUT"
@@ -170,8 +171,8 @@ run_one() {
 	b_admits=$(read_counter s3fs_ebpf_admits_current)
 	log "$pol: baseline miss=$b_miss err=$b_reload evict=$b_evict admits_current=$b_admits"
 
-	log "$pol: running $N_ACCESS accesses"
-	local start_ns end_ns
+	log "$pol: running $N_ACCESS accesses (with in-workload eval every $INTERLEAVE)"
+	local start_ns end_ns i=0
 	start_ns=$(date +%s%N)
 	while read -r idx; do
 		# `cat` triggers open+getattr+read → fast_hits (fentry on
@@ -179,6 +180,16 @@ run_one() {
 		# ignored: after eviction the first re-cat blocks on upcall,
 		# but doesn't fail.
 		sudo cat "$MOUNT/hitrate_${idx}.txt" >/dev/null 2>&1 || true
+		i=$((i + 1))
+		# Interleave policy eval rounds so per-hit signal (CMS bump,
+		# visited bit, freq counter) has a chance to influence
+		# eviction decisions. Without this, policies that populate
+		# state only on hit (W-TinyLFU) never see the eviction path
+		# after convergence — the state was empty when the last
+		# forced-eval round ran, so on_evict granted universal grace.
+		if [ "$INTERLEAVE" -gt 0 ] && [ $((i % INTERLEAVE)) -eq 0 ]; then
+			curl -s -X POST "${METRICS_URL%/metrics}/policy/eval" >/dev/null
+		fi
 	done < <(gen_workload)
 	end_ns=$(date +%s%N)
 
