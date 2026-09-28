@@ -295,4 +295,23 @@ struct s3fs_delete_event {
 #define S3FS_IOC_POP_DELETE \
 	_IOR(S3FS_IOC_MAGIC, 0x0B, struct s3fs_delete_event)
 
+/*
+ * S3FS_IOC_POP_RENAME — pop one queued rename event (E-02).
+ *
+ * kmod's .rename enqueues here with both names. Daemon implements
+ * S3-side rename as CopyObject(old → new) + Delete(old).
+ *
+ * -EAGAIN when the queue is empty.
+ */
+struct s3fs_rename_event {
+	__u64 ino;
+	__u32 old_name_len;
+	__u32 new_name_len;
+	char  old_name[S3FS_SYNC_NAME_MAX + 1];
+	char  new_name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+#define S3FS_IOC_POP_RENAME \
+	_IOR(S3FS_IOC_MAGIC, 0x0C, struct s3fs_rename_event)
+
 #endif /* _S3FS_EBPF_UAPI_H */

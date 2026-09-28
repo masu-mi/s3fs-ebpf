@@ -130,6 +130,29 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// Rename implements S3-side rename as CopyObject (server-side) plus
+// Delete of the source. S3 has no atomic rename; a partial failure
+// leaves both keys, which the daemon logs. Two-step server-side —
+// no bytes flow through the daemon. Called from the rename-drain
+// loop after kmod's .rename enqueues an event (E-02).
+func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
+	src := minio.CopySrcOptions{Bucket: c.cfg.Bucket, Object: oldKey}
+	dst := minio.CopyDestOptions{Bucket: c.cfg.Bucket, Object: newKey}
+	if _, err := c.mc.CopyObject(ctx, dst, src); err != nil {
+		return fmt.Errorf("s3 copy %q → %q: %w", oldKey, newKey, err)
+	}
+	if err := c.mc.RemoveObject(ctx, c.cfg.Bucket, oldKey,
+		minio.RemoveObjectOptions{}); err != nil {
+		// New key already exists; report but don't roll back (we
+		// don't have a way to safely un-copy).
+		return fmt.Errorf("s3 delete src %q after copy: %w", oldKey, err)
+	}
+	if c.cfg.CacheDir != "" {
+		_ = os.Remove(c.cachePath(oldKey))
+	}
+	return nil
+}
+
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if c.cfg.CacheDir != "" {
 		if buf, ok := c.readCache(key); ok {

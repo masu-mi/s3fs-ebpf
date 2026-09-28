@@ -67,6 +67,7 @@ int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
 int  s3fs_ebpf_mark_dirty(u64 ino);
 int  s3fs_ebpf_delete_pop(struct s3fs_delete_event *out);
+int  s3fs_ebpf_rename_pop(struct s3fs_rename_event *out);
 
 /*
  * Blocking fsync completion signal (E-01). Daemon calls this after
