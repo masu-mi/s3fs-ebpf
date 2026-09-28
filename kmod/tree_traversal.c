@@ -43,6 +43,25 @@ __bpf_kfunc u32 s3fs_kfunc_echo(u32 v)
 	return v * 2u + 1u;
 }
 
+/*
+ * P-08 Layer 0 primitives — read-only kernel state exposed to Layer 2/3
+ * policy programs. Both KFuncs are safe from any BPF hook context:
+ * atomic_read is lock-free, softcap is a compile-time constant.
+ *
+ * BPF-side usage (see bpf/policy_pressure_ops.bpf.c):
+ *   extern __u32 s3fs_kfunc_admit_count(void) __ksym;
+ *   extern __u32 s3fs_kfunc_softcap(void) __ksym;
+ */
+__bpf_kfunc u32 s3fs_kfunc_admit_count(void)
+{
+	return (u32)atomic_read(&s3fs_admits_count);
+}
+
+__bpf_kfunc u32 s3fs_kfunc_softcap(void)
+{
+	return S3FS_EVICT_SOFTCAP;
+}
+
 __bpf_kfunc_end_defs();
 
 /*
@@ -55,15 +74,27 @@ __bpf_kfunc_end_defs();
 #define BTF_KFUNCS_END(name)   BTF_SET8_END(name)
 #endif
 
-/* KFuncs callable from BPF_PROG_TYPE_TRACING (fentry / kprobe programs). */
+/* KFuncs callable from BPF_PROG_TYPE_TRACING (fentry / fmod_ret /
+ * kprobe programs). The Layer 0 primitives (admit_count / softcap)
+ * live here so fmod_ret policies can consult them. */
 BTF_KFUNCS_START(s3fs_kfunc_ids_tracing)
 BTF_ID_FLAGS(func, s3fs_kfunc_traverse_stub, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
+BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
 BTF_KFUNCS_END(s3fs_kfunc_ids_tracing)
 
 /* KFuncs callable from BPF_PROG_TYPE_SYSCALL (BPF_PROG_TEST_RUN harness). */
 BTF_KFUNCS_START(s3fs_kfunc_ids_syscall)
 BTF_ID_FLAGS(func, s3fs_kfunc_echo)
 BTF_KFUNCS_END(s3fs_kfunc_ids_syscall)
+
+/* KFuncs callable from BPF_PROG_TYPE_STRUCT_OPS (policy vtables).
+ * Same admit_count/softcap set — struct_ops policies use them for
+ * pressure-aware eviction (see bpf/policy_pressure_ops.bpf.c). */
+BTF_KFUNCS_START(s3fs_kfunc_ids_struct_ops)
+BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
+BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
+BTF_KFUNCS_END(s3fs_kfunc_ids_struct_ops)
 
 /*
  * Policy hooks registered for BPF_MODIFY_RETURN (fmod_ret programs).
@@ -95,6 +126,11 @@ static const struct btf_kfunc_id_set s3fs_kfunc_set_syscall = {
 	.set   = &s3fs_kfunc_ids_syscall,
 };
 
+static const struct btf_kfunc_id_set s3fs_kfunc_set_struct_ops = {
+	.owner = THIS_MODULE,
+	.set   = &s3fs_kfunc_ids_struct_ops,
+};
+
 int s3fs_kfunc_register(void)
 {
 	int ret;
@@ -106,6 +142,11 @@ int s3fs_kfunc_register(void)
 
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					&s3fs_kfunc_set_syscall);
+	if (ret)
+		return ret;
+
+	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS,
+					&s3fs_kfunc_set_struct_ops);
 	if (ret)
 		return ret;
 
