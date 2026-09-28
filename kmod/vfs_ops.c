@@ -279,6 +279,23 @@ static void admit_clear_locked(void)
 	}
 }
 
+/*
+ * Policy hook — fentry attach anchor for Layer 2/3 BPF programs.
+ *
+ * Called after every admit_replace with (count, arena_used_hint).
+ * BPF programs use this as an observation point (build access-freq
+ * sketches, update ghost lists) and drive eviction via out-of-band
+ * ioctl paths. noinline + non-static so kallsyms / BTF picks up
+ * the symbol for fentry attachment. See policy-engine-design.md §4.5.
+ */
+noinline int s3fs_policy_on_admit(u64 count, u64 arena_used_hint)
+{
+	/* Body must be non-empty for GCC to preserve it under -O2 even
+	 * with noinline; a data barrier keeps the arg reads live. */
+	asm volatile("" :: "r"(count), "r"(arena_used_hint));
+	return 0;
+}
+
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			    const struct s3fs_admit_entry *entries,
 			    u32 count)
@@ -348,6 +365,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			iput(inode);
 		}
 	}
+
+	/* Policy hook fires after the admit snapshot lands. BPF programs
+	 * attach via fentry to observe / drive eviction. No-op in kmod;
+	 * see docs/policy-engine-design.md §4.5 Layer 2. */
+	s3fs_policy_on_admit((u64)count, (u64)0);
 	return 0;
 
 out_free_staged:

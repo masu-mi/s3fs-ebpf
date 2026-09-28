@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policy"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policyprog"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
 	"github.com/cilium/ebpf/ringbuf"
 )
@@ -283,6 +285,8 @@ func runFastpath(args []string) int {
 		"address for the Prometheus scrape endpoint (empty to disable)")
 	policyPath := fs.String("policy", "",
 		"path to a CEL policy file (see policies/default.cel). Empty disables the policy engine (default prewarm=all).")
+	policyBPF := fs.String("policy-bpf", "",
+		"policy program: 'builtin:<name>' (repo bpf/<name>.bpf.o) or 'file:<path>' (Layer 3 user .bpf.o). Empty disables policy hook.")
 	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
 	fs.Parse(args)
 
@@ -297,6 +301,37 @@ func runFastpath(args []string) int {
 	}
 	if *policyPath != "" {
 		fmt.Printf("[policy] loaded %s\n", *policyPath)
+	}
+
+	// Layer 2 / Layer 3 BPF policy program (Week 4 (d)). --policy-bpf
+	// takes 'builtin:<name>' (engine-shipped) or 'file:<path>' (user
+	// eBPF escape hatch, §4.5 Layer 3). Same load path, same attach.
+	repoRoot, _ := os.Getwd()
+	// Best-effort: if run from repo root or bin/, resolve upward.
+	if _, err := os.Stat(filepath.Join(repoRoot, "bpf")); err != nil {
+		if p := filepath.Dir(repoRoot); p != repoRoot {
+			if _, err := os.Stat(filepath.Join(p, "bpf")); err == nil {
+				repoRoot = p
+			}
+		}
+	}
+	var polProg *policyprog.Program
+	if bpfPath, err := policyprog.Resolve(*policyBPF, repoRoot); err != nil {
+		fmt.Fprintf(os.Stderr, "policy-bpf: %v\n", err)
+		return 1
+	} else if bpfPath != "" {
+		polProg, err = policyprog.Load(bpfPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "policy-bpf load: %v\n", err)
+			return 1
+		}
+		if err := polProg.Attach(); err != nil {
+			polProg.Close()
+			fmt.Fprintf(os.Stderr, "policy-bpf attach: %v\n", err)
+			return 1
+		}
+		defer polProg.Close()
+		fmt.Printf("[policy-bpf] loaded + attached %s\n", bpfPath)
 	}
 
 	// Bring the metrics endpoint up early so Prometheus scrapes
@@ -431,6 +466,14 @@ func runFastpath(args []string) int {
 	// S3. Runs even without --s3 so the queue doesn't grow unbounded
 	// (in offline mode it just logs and drops each event).
 	go runFlushLoop(ctx, *dev, progs, s3c, 100*time.Millisecond)
+
+	// Layer 2/3 policy program stats sampler. Reads the loaded BPF
+	// program's policy_stats map every N and mirrors into the
+	// metrics endpoint so Grafana can chart hook activity alongside
+	// the daemon-side counters. No-op when --policy-bpf is empty.
+	if polProg != nil {
+		go samplePolicyStats(ctx, polProg, 5*time.Second)
+	}
 
 	for {
 		rec, err := reader.Read()
@@ -591,6 +634,27 @@ func warmFromS3(ctx context.Context, progs *fpebpf.Programs, c *s3.Client, ev fp
 	}
 	fmt.Printf("[warm] ino=%d ← s3://%s (%d objects) → arena offset=%d\n",
 		ev.Ino, c.Bucket(), len(objs), off)
+}
+
+// samplePolicyStats mirrors the loaded policy BPF program's counters
+// into metrics.Global on a ticker. Uses lookups from the shared map
+// (see bpf/policy_observe.bpf.c PSTAT_* indices).
+func samplePolicyStats(ctx context.Context, p *policyprog.Program, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if v, err := p.ReadStat(policyprog.StatInvocations); err == nil {
+				metrics.Global.PolicyHookInvocations.Store(v)
+			}
+			if v, err := p.ReadStat(policyprog.StatLastCount); err == nil {
+				metrics.Global.PolicyLastAdmitCount.Store(v)
+			}
+		}
+	}
 }
 
 func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Duration) {
