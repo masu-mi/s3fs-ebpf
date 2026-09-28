@@ -71,9 +71,11 @@ policy=freq2bit_ops      6.50% 11468 evict  ← 2-bit ref counter
 ### 参照 doc (現行 implementation)
 
 - `docs/demo-scenario.md` — **Meetup デモ台本 (Demo 0-8, 35 min)**
+- `docs/writing-policies.md` — **自作 policy を書く実装ガイド**
 - `docs/policy-engine-design.md` — 3-layer architecture の詳細
 - `docs/policy-attach-comparison.md` — fmod_ret vs struct_ops
 - `docs/hit-rate-bench.md` — 上記の 80% 数値の出典と caveat
+- `docs/trace-harness.md` — offline policy simulator の使い方
 - `docs/lessons-learned.md` — 実装ハマりポイント (arena mm/gup /
   bpf_loop / struct_ops hot reload / iget_locked / etc.)
 - `docs/backlog.md` — 完了/残タスク一元管理

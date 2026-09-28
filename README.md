@@ -13,6 +13,7 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 > **すぐに使ってみたい場合**:
 > - 概要と数値 → [`docs/motivation.md §0`](docs/motivation.md)
 > - Meetup demo (35 分台本) → [`docs/demo-scenario.md`](docs/demo-scenario.md)
+> - **自作 policy を書く** → [`docs/writing-policies.md`](docs/writing-policies.md)
 > - policy engine の詳細 → [`docs/policy-engine-design.md`](docs/policy-engine-design.md)
 > - hit-rate bench 数値と caveats → [`docs/hit-rate-bench.md`](docs/hit-rate-bench.md)
 > - 実装ハマりポイント → [`docs/lessons-learned.md`](docs/lessons-learned.md)
@@ -157,6 +158,11 @@ Commands:
                it alongside the user-VM base for comparison
   microbench   Week 4 (e): tight-loop stat/read latency on a target path,
                reports min/p50/p95/p99/max (no fork/exec overhead)
+  hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
+               See --policy-allowlist and policies/allowlist.example.txt.
+  trace-replay Offline policy simulator (P-04). Feeds a workload trace or
+               a synthetic Zipf sequence through Go-side LRU/SIEVE sims
+               and reports per-policy hit rates in milliseconds.
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
 ```
