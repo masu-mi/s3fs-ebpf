@@ -67,6 +67,14 @@ int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
 int  s3fs_ebpf_mark_dirty(u64 ino);
 
+/*
+ * Blocking fsync completion signal (E-01). Daemon calls this after
+ * a PUT finishes (err=0 on success, negative errno on failure) to
+ * wake the fsync() caller blocked in .fsync. -ENOENT (no waiter) is
+ * an expected outcome for the .release fire-and-forget path.
+ */
+int s3fs_ebpf_signal_flush(u64 ino, int err);
+
 /* Cumulative policy-driven evictions from the admit table. Exposed
  * via a new stats ioctl for daemon-side Prometheus export. */
 #include <linux/atomic.h>
