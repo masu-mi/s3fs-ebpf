@@ -13,6 +13,8 @@
 # To compute a hash for a new user policy:
 #
 #   sha256sum path/to/user_policy.bpf.o
+#   # or, the built-in convenience CLI (same output format):
+#   ./bin/s3fs-ebpf hash-policy path/to/user_policy.bpf.o
 #
 # Then append the (hash description) pair here and restart the
 # daemon (allowlist is loaded once at startup by design).
