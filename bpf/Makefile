@@ -9,7 +9,7 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -mcpu=v3 \
               -D__TARGET_ARCH_$(ARCH) \
               -I. -I../include
 
-OBJS := s3fs_fastpath.bpf.o policy_observe.bpf.o
+OBJS := s3fs_fastpath.bpf.o policy_observe.bpf.o policy_s3fifo.bpf.o
 
 .PHONY: all clean vmlinux
 

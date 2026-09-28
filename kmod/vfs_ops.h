@@ -68,11 +68,14 @@ long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
 int  s3fs_ebpf_mark_dirty(u64 ino);
 
 /*
- * Policy hook (Layer 2/3 fentry attach anchor). See
- * docs/policy-engine-design.md §4.5. Called after every admit_replace
- * with the resulting snapshot count and a best-effort arena usage
- * hint. Body is a no-op — BPF programs supply the real behavior.
+ * Policy hooks (Layer 2/3 fentry attach anchors). See
+ * docs/policy-engine-design.md §4.5. Bodies are no-ops — BPF programs
+ * supply the real behavior via fentry attach. Return values are
+ * consumed by callers (kmod side) as advisory when the hook is
+ * BPF-overridden.
  */
 noinline int s3fs_policy_on_admit(u64 count, u64 arena_used_hint);
+noinline int s3fs_policy_on_evict(u64 ino);
+noinline int s3fs_policy_on_pressure(u64 count, u64 threshold);
 
 #endif /* _S3FS_EBPF_VFS_OPS_H */

@@ -331,7 +331,8 @@ func runFastpath(args []string) int {
 			return 1
 		}
 		defer polProg.Close()
-		fmt.Printf("[policy-bpf] loaded + attached %s\n", bpfPath)
+		fmt.Printf("[policy-bpf] loaded %s (%d fentry hooks attached)\n",
+			bpfPath, polProg.AttachedCount())
 	}
 
 	// Bring the metrics endpoint up early so Prometheus scrapes

@@ -280,19 +280,38 @@ static void admit_clear_locked(void)
 }
 
 /*
- * Policy hook — fentry attach anchor for Layer 2/3 BPF programs.
+ * Policy hooks — fentry attach anchors for Layer 2/3 BPF programs.
  *
- * Called after every admit_replace with (count, arena_used_hint).
- * BPF programs use this as an observation point (build access-freq
- * sketches, update ghost lists) and drive eviction via out-of-band
- * ioctl paths. noinline + non-static so kallsyms / BTF picks up
- * the symbol for fentry attachment. See policy-engine-design.md §4.5.
+ * Three hook points that BPF programs can attach to:
+ *   - on_admit(count, hint): after each admit_replace, observation
+ *     point for building access-freq sketches, ghost lists, etc.
+ *   - on_evict(ino): asks the policy whether `ino` should be evicted
+ *     from the admit table on capacity pressure. Return 1 = evict,
+ *     0 = keep. BPF programs use their own state maps to make the
+ *     decision (LRU tail check, freq threshold, etc.).
+ *   - on_pressure(count, threshold): fires when admit count crosses
+ *     the configured cap. Advisory only (no return value consumed);
+ *     BPF can log, emit metrics, or trigger ghost-list refresh.
+ *
+ * noinline + non-static so kallsyms / BTF picks up the symbols for
+ * fentry attachment. Bodies wrap args in asm volatile so -O2 doesn't
+ * drop them. See docs/policy-engine-design.md §4.5.
  */
 noinline int s3fs_policy_on_admit(u64 count, u64 arena_used_hint)
 {
-	/* Body must be non-empty for GCC to preserve it under -O2 even
-	 * with noinline; a data barrier keeps the arg reads live. */
 	asm volatile("" :: "r"(count), "r"(arena_used_hint));
+	return 0;
+}
+
+noinline int s3fs_policy_on_evict(u64 ino)
+{
+	asm volatile("" :: "r"(ino));
+	return 0; /* default: don't evict; BPF override returns 1 to evict */
+}
+
+noinline int s3fs_policy_on_pressure(u64 count, u64 threshold)
+{
+	asm volatile("" :: "r"(count), "r"(threshold));
 	return 0;
 }
 
@@ -370,6 +389,25 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 * attach via fentry to observe / drive eviction. No-op in kmod;
 	 * see docs/policy-engine-design.md §4.5 Layer 2. */
 	s3fs_policy_on_admit((u64)count, (u64)0);
+
+	/* Capacity pressure hook: fires when the new snapshot exceeds a
+	 * soft threshold (30 out of the hash's 64-bucket capacity at
+	 * S3FS_ADMIT_HASH_BITS=6). BPF programs use this as an advisory
+	 * signal to update ghost lists / freq sketches ahead of the
+	 * eviction round. Threshold is soft on purpose — daemon-side
+	 * pruneAdmitsTo is the actual enforcement path. */
+	if (count > (1u << S3FS_ADMIT_HASH_BITS) / 2)
+		s3fs_policy_on_pressure((u64)count,
+					(u64)((1u << S3FS_ADMIT_HASH_BITS) / 2));
+
+	/* Consult the policy on each entry in the new snapshot: 1 = evict
+	 * (skip re-add to the daemon-visible snapshot next round), 0 =
+	 * keep. BPF uses its own state maps (LRU tail, freq bucket) to
+	 * decide. Result is currently advisory — the daemon's prune loop
+	 * is where the vote is enforced (§P-09 spike scope; wiring the
+	 * kmod-side enforcement is a follow-up). */
+	for (i = 0; i < count; i++)
+		(void)s3fs_policy_on_evict(entries[i].ino);
 	return 0;
 
 out_free_staged:
