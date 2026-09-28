@@ -434,13 +434,25 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	for (i = 0; i < count; i++)
 		hash_add(s3fs_admits, &staged[i]->node, staged[i]->ino);
 	prev_mm = s3fs_admitted_mm;
-	s3fs_admitted_mm = count ? mm : NULL;
+	/*
+	 * Keep the daemon mm reference live when the admit set transiently
+	 * empties (full policy eviction). The daemon is still alive and
+	 * next .read_folio miss will upcall it to re-admit; nulling mm
+	 * here would send that miss straight to the zero-page kmalloc
+	 * fallback and break subsequent reads (P-07 hit-rate bench). The
+	 * mm pointer only gets cleared through s3fs_ebpf_admit_shutdown()
+	 * on daemon exit.
+	 */
+	if (count)
+		s3fs_admitted_mm = mm;
 	spin_unlock(&s3fs_admits_lock);
 
 	kfree(staged); /* array itself; nodes now live in the hash */
 	staged = NULL;
 
-	if (prev_mm)
+	/* Drop the previous mm ref only when we replaced it (count>0).
+	 * For count=0 we kept prev_mm as the active pointer — no put. */
+	if (count && prev_mm)
 		mmput(prev_mm);
 
 	if (s3fs_active_sb) {

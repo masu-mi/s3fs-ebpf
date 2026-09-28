@@ -390,6 +390,23 @@ func runFastpath(args []string) int {
 			fmt.Printf("[policy-bpf] hot-reloaded %s → %s\n", old.Path, newPath)
 			fmt.Fprintf(w, "reloaded to %s\n", newPath)
 		}
+		// POST /policy/eval: force an admit_replace with the current
+		// snapshot so the policy program's on_admit / on_evict fires
+		// another round without needing bucket-side churn. Bench
+		// harnesses use this to drive SIEVE's grace → clear → evict
+		// state machine on a controllable schedule.
+		metrics.EvalHandler = func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			n, err := refreshAdmits(*dev)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			fmt.Fprintf(w, "re-eval fired with %d admit entries\n", n)
+		}
 	}
 
 	// Bring the metrics endpoint up early so Prometheus scrapes

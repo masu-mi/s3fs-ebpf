@@ -69,6 +69,13 @@ var Global Counters
 // is active; the endpoint returns 503.
 var ReloadHandler http.HandlerFunc
 
+// EvalHandler is the daemon-supplied POST /policy/eval handler. It
+// forces a fresh admit_replace so the loaded policy program runs
+// another eviction round even when steady state (no admissions, no
+// evictions) would otherwise idle. Left nil when policy engine is
+// inactive.
+var EvalHandler http.HandlerFunc
+
 // Serve starts the metrics HTTP endpoint. Blocks until the server exits.
 // Callers should invoke this on a goroutine.
 func Serve(addr string) error {
@@ -83,6 +90,13 @@ func Serve(addr string) error {
 			return
 		}
 		ReloadHandler(w, r)
+	})
+	mux.HandleFunc("/policy/eval", func(w http.ResponseWriter, r *http.Request) {
+		if EvalHandler == nil {
+			http.Error(w, "policy engine not active", http.StatusServiceUnavailable)
+			return
+		}
+		EvalHandler(w, r)
 	})
 	return http.ListenAndServe(addr, mux)
 }

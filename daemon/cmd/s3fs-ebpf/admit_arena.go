@@ -58,6 +58,21 @@ func addAdmit(devPath string, entry admitEntry) error {
 	return admitArena(devPath, snap)
 }
 
+// refreshAdmits re-pushes the current snapshot to kmod without any
+// mutation. Used by POST /policy/eval to force a policy round when
+// steady state (no admissions, no evictions) would otherwise leave
+// the vtable idle. Bench harnesses rely on this to observe more than
+// the single prewarm-time eviction round.
+func refreshAdmits(devPath string) (int, error) {
+	admitMu.Lock()
+	snap := append([]admitEntry(nil), admits...)
+	admitMu.Unlock()
+	if err := admitArena(devPath, snap); err != nil {
+		return 0, err
+	}
+	return len(snap), nil
+}
+
 // clearAdmits empties the daemon-side snapshot and tells kmod to
 // drop the admit table. Called on daemon shutdown.
 func clearAdmits(devPath string) error {
