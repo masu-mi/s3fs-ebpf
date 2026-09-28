@@ -275,4 +275,24 @@ struct s3fs_drain_evictions {
 #define S3FS_IOC_SIGNAL_FLUSH \
 	_IOW(S3FS_IOC_MAGIC, 0x0A, struct s3fs_signal_admit)
 
+/*
+ * S3FS_IOC_POP_DELETE — pop one queued delete event (E-02).
+ *
+ * kmod's .unlink enqueues here with the ino + basename. Daemon
+ * drains the queue and issues S3 DELETE on the key.
+ *
+ * -EAGAIN when the queue is empty (daemon polls on a ticker).
+ * .name shape matches s3fs_flush_event so daemon can reuse the
+ * name→key resolution helper.
+ */
+struct s3fs_delete_event {
+	__u64 ino;
+	__u32 name_len;
+	__u32 _pad;
+	char  name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+#define S3FS_IOC_POP_DELETE \
+	_IOR(S3FS_IOC_MAGIC, 0x0B, struct s3fs_delete_event)
+
 #endif /* _S3FS_EBPF_UAPI_H */
