@@ -73,7 +73,7 @@
 ### E. write path 強化
 
 - [x] ✅ **E-01** `.fsync` を blocking にする — 完 (次 commit)。read-miss と同 pattern (`struct s3fs_flush_pending` + `wait_for_completion_interruptible_timeout` + `S3FS_IOC_SIGNAL_FLUSH`) で fsync が daemon PUT 完了まで blocking 化。`.release` は fire-and-forget のまま (close(2) を hang させない)。daemon は PUT 各 return path で signal_flush ioctl、-ENOENT は fire-and-forget path として silent 扱い。smoke で 27B write → fsync=91ms (blocked)、no-op fsync=8μs (dirty=false 早期 return) の 10000× 差を実測。3 mode 化 (eager / sync-fsync / sync-write) は未実装、現在 sync-fsync のみ POSIX 相当
-- [x] ✅ **E-02 (unlink 部分)** `.unlink` 実装 — 完 (次 commit)。kmod に `struct s3fs_delete_item` queue + `delete_enqueue` / `delete_dequeue` + `S3FS_IOC_POP_DELETE` ioctl (0x0B) を追加。`.unlink` inode op が local entry removal + admit hash drop + delete queue enqueue + drop_nlink を実行。daemon 側は `runDeleteLoop` (100ms tick) が pop + `s3c.Delete()`。smoke で touch+fsync → S3 に landed → rm → daemon が `[delete] s3://... deleted` → S3 から消失。`.rename` は未実装 (S3 に無いので copy+delete emulate、edge case 多く別 commit)
+- [x] ✅ **E-02** `.unlink` + `.rename` 対応 — 完 (次 commit)。unlink 側は kmod に delete queue + S3FS_IOC_POP_DELETE (0x0B)、`.unlink` op が local remove + admit drop + enqueue + drop_nlink、daemon runDeleteLoop が s3c.Delete。rename 側は同 pattern で rename queue + S3FS_IOC_POP_RENAME (0x0C) + `.rename` op (RENAME_NOREPLACE のみ、cross-dir EXDEV)、daemon runRenameLoop が s3c.Rename (server-side CopyObject + Delete)、ino → S3Key mapping 更新。smoke で unlink (touch+fsync → S3 に landed → rm → S3 から消失) + rename (before.txt → after.txt を S3 側で server-side 移動) の両 E2E path 検証
 - [ ] **E-03** flush の coalescing (`w4c §4-5`)  
   現状 close ごとに 1 PUT。「N ms dirty のまま or M bytes 溜まったら fsync」相当の coalescer。close-driven でも実用上は問題ない (優先度 low)。
 

@@ -1239,6 +1239,92 @@ int s3fs_ebpf_delete_pop(struct s3fs_delete_event *out)
 	return 0;
 }
 
+/* -- Rename queue (E-02: .rename) --------------------------------------- */
+/*
+ * .rename enqueues here with both old and new name. Daemon issues
+ * S3 CopyObject(old → new) + RemoveObject(old). Not atomic on S3;
+ * a partial failure leaves both keys. */
+struct s3fs_rename_item {
+	struct list_head link;
+	u64 ino;
+	u32 old_name_len;
+	u32 new_name_len;
+	char old_name[S3FS_SYNC_NAME_MAX + 1];
+	char new_name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+static LIST_HEAD(s3fs_rename_queue);
+static DEFINE_SPINLOCK(s3fs_rename_lock);
+
+static void rename_enqueue(u64 ino,
+			   const char *old_name, size_t old_len,
+			   const char *new_name, size_t new_len)
+{
+	struct s3fs_rename_item *r;
+
+	if (old_len == 0 || old_len > S3FS_SYNC_NAME_MAX ||
+	    new_len == 0 || new_len > S3FS_SYNC_NAME_MAX)
+		return;
+	r = kzalloc(sizeof(*r), GFP_KERNEL);
+	if (!r)
+		return;
+	r->ino = ino;
+	r->old_name_len = old_len;
+	r->new_name_len = new_len;
+	memcpy(r->old_name, old_name, old_len);
+	memcpy(r->new_name, new_name, new_len);
+	spin_lock(&s3fs_rename_lock);
+	list_add_tail(&r->link, &s3fs_rename_queue);
+	spin_unlock(&s3fs_rename_lock);
+}
+
+static bool rename_dequeue(struct s3fs_rename_item *out)
+{
+	struct s3fs_rename_item *r = NULL;
+
+	spin_lock(&s3fs_rename_lock);
+	if (!list_empty(&s3fs_rename_queue)) {
+		r = list_first_entry(&s3fs_rename_queue,
+				     struct s3fs_rename_item, link);
+		list_del(&r->link);
+	}
+	spin_unlock(&s3fs_rename_lock);
+	if (!r)
+		return false;
+	*out = *r;
+	kfree(r);
+	return true;
+}
+
+static void rename_queue_drain(void)
+{
+	struct s3fs_rename_item *r, *tmp;
+
+	spin_lock(&s3fs_rename_lock);
+	list_for_each_entry_safe(r, tmp, &s3fs_rename_queue, link) {
+		list_del(&r->link);
+		kfree(r);
+	}
+	spin_unlock(&s3fs_rename_lock);
+}
+
+int s3fs_ebpf_rename_pop(struct s3fs_rename_event *out)
+{
+	struct s3fs_rename_item item;
+
+	if (!rename_dequeue(&item))
+		return -EAGAIN;
+	memset(out, 0, sizeof(*out));
+	out->ino = item.ino;
+	out->old_name_len = item.old_name_len;
+	out->new_name_len = item.new_name_len;
+	memcpy(out->old_name, item.old_name, item.old_name_len);
+	out->old_name[item.old_name_len] = '\0';
+	memcpy(out->new_name, item.new_name, item.new_name_len);
+	out->new_name[item.new_name_len] = '\0';
+	return 0;
+}
+
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
 {
 	struct inode *inode;
@@ -1970,10 +2056,11 @@ static void s3fs_ebpf_put_super(struct super_block *sb)
 {
 	if (s3fs_active_sb == sb)
 		s3fs_active_sb = NULL;
-	/* Queued flush / delete events reference inos on this sb; drop
-	 * them so a later mount doesn't see them. */
+	/* Queued flush / delete / rename events reference inos on this
+	 * sb; drop them so a later mount doesn't see them. */
 	flush_queue_drain();
 	delete_queue_drain();
+	rename_queue_drain();
 }
 
 static const struct super_operations s3fs_ebpf_super_ops = {
@@ -2066,10 +2153,78 @@ static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
 	return 0;
 }
 
+/*
+ * Rename a local entry's name in place. Returns true on success.
+ * The old_name/new_name buffers must fit S3FS_SYNC_NAME_MAX.
+ */
+static bool local_entry_rename(const char *old_name, size_t old_len,
+			       const char *new_name, size_t new_len)
+{
+	struct s3fs_local_entry *le;
+	bool renamed = false;
+
+	mutex_lock(&s3fs_entries_mtx);
+	list_for_each_entry(le, &s3fs_local_entries, link) {
+		if (le->name_len != old_len ||
+		    memcmp(le->name, old_name, old_len) != 0)
+			continue;
+		memcpy(le->name, new_name, new_len);
+		le->name_len = new_len;
+		renamed = true;
+		break;
+	}
+	mutex_unlock(&s3fs_entries_mtx);
+	return renamed;
+}
+
+/*
+ * .rename — same-dir rename only (RENAME_EXCHANGE and cross-dir
+ * are rejected for simplicity). S3-side rename runs as CopyObject
+ * + Delete in the daemon; here we enqueue the event, update the
+ * local entry name (if this was a local file), and let the VFS
+ * side move the dcache dentry.
+ */
+static int s3fs_ebpf_rename(struct mnt_idmap *idmap,
+			    struct inode *old_dir, struct dentry *old_dentry,
+			    struct inode *new_dir, struct dentry *new_dentry,
+			    unsigned int flags)
+{
+	struct inode *inode = d_inode(old_dentry);
+	size_t old_len = old_dentry->d_name.len;
+	size_t new_len = new_dentry->d_name.len;
+	char old_name[S3FS_SYNC_NAME_MAX + 1];
+	char new_name[S3FS_SYNC_NAME_MAX + 1];
+
+	if (flags & ~RENAME_NOREPLACE)
+		return -EINVAL; /* no RENAME_EXCHANGE / RENAME_WHITEOUT */
+	if (old_dir != new_dir)
+		return -EXDEV; /* flat namespace at PoC scope */
+	if (!inode)
+		return -ENOENT;
+	if (old_len == 0 || old_len > S3FS_SYNC_NAME_MAX ||
+	    new_len == 0 || new_len > S3FS_SYNC_NAME_MAX)
+		return -ENAMETOOLONG;
+	memcpy(old_name, old_dentry->d_name.name, old_len);
+	memcpy(new_name, new_dentry->d_name.name, new_len);
+
+	/* Enqueue rename for daemon side (CopyObject + Delete). */
+	rename_enqueue(inode->i_ino, old_name, old_len, new_name, new_len);
+
+	/* Local-side: if the file lives in the local list, update its
+	 * name field. Dyn entries wait for the next sync to refresh —
+	 * VFS-side rename below still makes the new name lookupable
+	 * via dcache immediately. */
+	local_entry_rename(old_name, old_len, new_name, new_len);
+
+	inode_set_ctime_current(inode);
+	return 0;
+}
+
 static const struct inode_operations s3fs_ebpf_dir_iops = {
 	.lookup		= s3fs_ebpf_lookup,
 	.create		= s3fs_ebpf_create,
 	.unlink		= s3fs_ebpf_unlink,
+	.rename		= s3fs_ebpf_rename,
 };
 
 static const struct file_operations s3fs_ebpf_dir_fops = {

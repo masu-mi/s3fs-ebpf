@@ -636,6 +636,8 @@ func runFastpath(args []string) int {
 	// E-02: drain kmod delete queue and issue S3 DELETE for each.
 	// Runs on the same interval as flush; symmetric shape.
 	go runDeleteLoop(ctx, *dev, s3c, 100*time.Millisecond)
+	// E-02: drain rename queue (CopyObject + Delete server-side).
+	go runRenameLoop(ctx, *dev, s3c, 100*time.Millisecond)
 
 	// Layer 2/3 policy program stats sampler. Reads the loaded BPF
 	// program's policy_stats map every N and mirrors into the

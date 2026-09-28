@@ -307,6 +307,24 @@ static long s3fs_dev_pop_delete(void __user *uarg)
 }
 
 /*
+ * S3FS_IOC_POP_RENAME — daemon drains queued rename events (E-02).
+ * Same pattern as pop_delete but carries both names for the
+ * CopyObject + Delete pair.
+ */
+static long s3fs_dev_pop_rename(void __user *uarg)
+{
+	struct s3fs_rename_event ev;
+	int err;
+
+	err = s3fs_ebpf_rename_pop(&ev);
+	if (err)
+		return err;
+	if (copy_to_user(uarg, &ev, sizeof(ev)))
+		return -EFAULT;
+	return 0;
+}
+
+/*
  * S3FS_IOC_READ_DIRTY — daemon reads the current scratch bytes for
  * `ino` into its own buffer. Returns 0 on success and writes
  * `out_bytes` back; returns -EAGAIN when the ino is unknown (raced
@@ -345,6 +363,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_signal_flush(uarg);
 	case S3FS_IOC_POP_DELETE:
 		return s3fs_dev_pop_delete(uarg);
+	case S3FS_IOC_POP_RENAME:
+		return s3fs_dev_pop_rename(uarg);
 	case S3FS_IOC_SYNC_ENTRIES:
 		return s3fs_dev_sync_entries(uarg);
 	case S3FS_IOC_POP_FLUSH:
