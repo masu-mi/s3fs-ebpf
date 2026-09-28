@@ -118,7 +118,8 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **Layer 2 wiring** (P-01 の後続) — 完 (次 commit)。kmod に `s3fs_policy_on_admit` fentry anchor、`bpf/policy_observe.bpf.c` を出荷、daemon `--policy-bpf=builtin:policy_observe` で load + attach、policy_stats を /metrics に mirror
 - [x] ✅ **Layer 3 wiring** (P-01 の後続) — 完 (次 commit)。`--policy-bpf=file:<path>` で任意 .bpf.o を load、SEC 命名で attach、smoke で /tmp/user_policy.bpf.o の load + counter 増加を確認
 - [ ] **P-02** `pe Q4` in-flight semantics 検証 — `bpf_link_update` での差替え瞬間の event handling
-- [ ] **P-03** `pe Q6` metric API — policy 内 `metric("name", value)` の CEL 拡張関数、Prometheus export path
+- [x] ✅ **P-03 (part)** CEL Layer 1 → Layer 2 program select — 完 (次 commit)。`policy: "builtin:policy_s3fifo_ops"` を CEL 側に書いて daemon が起動時に eval、`--policy-bpf` flag より優先で attach。1 .cel file で prewarm + policy 選択の統合が実現。`metric()` CEL 拡張関数は残
+- [ ] **P-03 (rest)** `pe Q6` metric API — policy 内 `metric("name", value)` の CEL 拡張関数、Prometheus export path (label 対応が要)
 - [ ] **P-04** `pe Q8` trace harness — event stream record 形式の設計
 - [ ] **P-05** `pe Q10` user eBPF 署名検証 — allowlist + SHA256 fingerprint + `load-bpf` API
 - [x] ✅ **P-06 (S3-FIFO 部分)** built-in policy として S3-FIFO を出荷 — 完 (次 commit)。`bpf/policy_s3fifo.bpf.c` に 3 hook + freq map + evict_vote map。verifier 通過、3 fentry attach、smoke で invocations 増加確認。LRU / W-TinyLFU は同 shape の template として続く

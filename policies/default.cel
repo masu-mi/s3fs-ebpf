@@ -14,9 +14,18 @@
 # Hooks:
 #   prewarm: bool — should the daemon prewarm this entry at startup?
 #                    default (no policy loaded / eval err) = true
+#   policy:  string — which Layer 2 BPF policy program to attach.
+#                     Empty / not declared → --policy-bpf flag wins.
+#                     Values: "builtin:<name>" (repo bpf/<name>.bpf.o),
+#                             "file:<path>" (Layer 3 user .bpf.o), or
+#                             a bare name treated as builtin:<name>.
 
 # Prewarm everything ≤ 32 MiB except *.log files. Larger blobs and
 # rotating logs go through Path C (on-demand) instead — the write-back
 # for logs would fight the sync loop, and >32 MiB weights we'd rather
 # demand-load to keep arena churn low.
 prewarm: entry.size <= 33554432 && !entry.name.endsWith(".log")
+
+# Global policy selection: struct_ops S3-FIFO for atomic hot swap +
+# fmod_ret return-value dispatch (see docs/policy-attach-comparison.md).
+policy: "builtin:policy_s3fifo_ops"
