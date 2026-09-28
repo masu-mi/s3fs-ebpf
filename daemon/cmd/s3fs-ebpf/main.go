@@ -57,6 +57,9 @@ Commands:
                reports min/p50/p95/p99/max (no fork/exec overhead)
   hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
                See --policy-allowlist and policies/allowlist.example.txt.
+  trace-replay Offline policy simulator (P-04). Feeds a workload trace or
+               a synthetic Zipf sequence through Go-side LRU/SIEVE sims
+               and reports per-policy hit rates in milliseconds.
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
 `
@@ -94,6 +97,8 @@ func main() {
 		os.Exit(runMicrobench(args))
 	case "hash-policy":
 		os.Exit(runHashPolicy(args))
+	case "trace-replay":
+		os.Exit(runTraceReplay(args))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
