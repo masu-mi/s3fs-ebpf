@@ -60,10 +60,20 @@ struct s3fs_probe_kvbase {
  * Passing count=0 clears kmod's admission table (used on daemon exit
  * to drop the mm reference cleanly).
  */
+/*
+ * `offset` (D-01, added 2026-09): file offset where this range
+ * starts. offset==0 & size==file_size means whole-file admit
+ * (backward-compat default). Multiple entries per ino are allowed
+ * — daemon splits large files into ranges so a 200 MiB blob can
+ * be partially admitted into the 128 MiB arena. kmod's admit
+ * lookup walks entries at the same hash bucket and picks the range
+ * covering the folio pos.
+ */
 struct s3fs_admit_entry {
 	__u64 ino;
-	__u64 uaddr; /* daemon-side user_vm address of the object bytes */
-	__u64 size;
+	__u64 uaddr;  /* daemon-side user_vm address of the range bytes */
+	__u64 size;   /* range length in bytes */
+	__u64 offset; /* file offset where this range starts */
 };
 
 struct s3fs_admit_arena {
