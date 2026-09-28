@@ -60,7 +60,26 @@ const (
 	s3fsIocMarkDirty       = (1 << 30) | (uint32(unsafe.Sizeof(markDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
 	s3fsIocStats           = (3 << 30) | (uint32(unsafe.Sizeof(statsArg{})) << 16) | (0xE3 << 8) | 0x08
 	s3fsIocDrainEvictions  = (3 << 30) | (uint32(unsafe.Sizeof(drainEvictionsArg{})) << 16) | (0xE3 << 8) | 0x09
+	s3fsIocSignalFlush     = (1 << 30) | (uint32(unsafe.Sizeof(signalAdmitArg{})) << 16) | (0xE3 << 8) | 0x0A
 )
+
+// signalFlush notifies kmod that a flush PUT completed with `err`.
+// -ENOENT (no waiter) is a normal outcome for the .release path; we
+// call this after every PUT so both fire-and-forget and blocking
+// fsync go through the same completion signal. See E-01 in
+// docs/backlog.md and struct s3fs_flush_pending in kmod/vfs_ops.c.
+func signalFlush(devFd int, ino uint64, errCode int32) error {
+	arg := signalAdmitArg{Ino: ino, Err: errCode}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
+		uintptr(devFd), uintptr(s3fsIocSignalFlush),
+		uintptr(unsafe.Pointer(&arg))); errno != 0 {
+		if errno == unix.ENOENT {
+			return nil // no fsync() caller waiting — fire-and-forget path
+		}
+		return errno
+	}
+	return nil
+}
 
 // drainEvictions returns the ino list kmod evicted since the last
 // drain. Callers use this to prune their local admit snapshot so the
@@ -198,8 +217,18 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	// drops, not just the success path — matches the symmetric
 	// handleReadMiss timing added in 1cd4d37.
 	flush_started := time.Now()
+	// Track the PUT outcome so the deferred signalFlush knows what
+	// to hand back to the fsync() waiter. Zero = success; negated
+	// errno-shaped values flow through to fsync()'s return. Set to
+	// non-zero on any error branch before returning. -ENOENT (no
+	// waiter) is filtered inside signalFlush.
+	putErr := int32(0)
 	defer func() {
 		metrics.FlushLatency.Observe(time.Since(flush_started))
+		if err := signalFlush(devFd, ev.Ino, putErr); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"[flush] ino=%d signal_flush: %v\n", ev.Ino, err)
+		}
 	}()
 	name := string(ev.Name[:ev.NameLen])
 
@@ -214,6 +243,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	if s3c == nil {
 		fmt.Printf("[flush] drop ino=%d name=%s (no S3 backend)\n",
 			ev.Ino, name)
+		putErr = -61 /* -ENODATA — matches read-miss "no backend" */
 		return
 	}
 
@@ -229,6 +259,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 				fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
 					ev.Ino, mderr)
 			}
+			putErr = -5 /* -EIO — kmod-side buffer copy failed */
 			return
 		}
 		buf = buf[:n]
@@ -243,6 +274,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 			fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
 				ev.Ino, mderr)
 		}
+		putErr = -5 /* -EIO — S3 PUT failed */
 		return
 	}
 	registerIno(s3key, ev.Ino)

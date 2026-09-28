@@ -980,6 +980,113 @@ struct s3fs_flush_item {
 static LIST_HEAD(s3fs_flush_queue);
 static DEFINE_SPINLOCK(s3fs_flush_lock);
 
+/*
+ * Flush waiter — one per fsync() blocked on daemon PUT completion.
+ * .release path does NOT register one (fire-and-forget for close(2)),
+ * so signal_flush with no matching ino is a normal no-op.
+ *
+ * Shape mirrors s3fs_pending (read-miss upcall waiter). Refcount 2 on
+ * create: one for the hash slot, one for the fsync caller. Hash drops
+ * its ref on signal_flush; caller drops on wait return.
+ */
+struct s3fs_flush_pending {
+	struct hlist_node node;
+	u64 ino;
+	struct completion done;
+	int err;
+	refcount_t refs;
+};
+
+#define S3FS_FLUSH_PENDING_HASH_BITS 4 /* 16 buckets — few concurrent fsyncs */
+static DEFINE_HASHTABLE(s3fs_flush_pending, S3FS_FLUSH_PENDING_HASH_BITS);
+static DEFINE_SPINLOCK(s3fs_flush_pending_lock);
+
+static struct s3fs_flush_pending *flush_pending_get_or_create(u64 ino)
+{
+	struct s3fs_flush_pending *p, *fresh;
+
+	spin_lock(&s3fs_flush_pending_lock);
+	hash_for_each_possible(s3fs_flush_pending, p, node, ino) {
+		if (p->ino == ino) {
+			refcount_inc(&p->refs);
+			spin_unlock(&s3fs_flush_pending_lock);
+			return p;
+		}
+	}
+	spin_unlock(&s3fs_flush_pending_lock);
+
+	fresh = kmalloc(sizeof(*fresh), GFP_KERNEL);
+	if (!fresh)
+		return NULL;
+	INIT_HLIST_NODE(&fresh->node);
+	fresh->ino = ino;
+	fresh->err = 0;
+	init_completion(&fresh->done);
+	refcount_set(&fresh->refs, 2);
+
+	spin_lock(&s3fs_flush_pending_lock);
+	hash_for_each_possible(s3fs_flush_pending, p, node, ino) {
+		if (p->ino == ino) {
+			refcount_inc(&p->refs);
+			spin_unlock(&s3fs_flush_pending_lock);
+			kfree(fresh);
+			return p;
+		}
+	}
+	hash_add(s3fs_flush_pending, &fresh->node, ino);
+	spin_unlock(&s3fs_flush_pending_lock);
+	return fresh;
+}
+
+static void flush_pending_put(struct s3fs_flush_pending *p)
+{
+	if (!p || !refcount_dec_and_test(&p->refs))
+		return;
+	kfree(p);
+}
+
+static void flush_pending_unhash(struct s3fs_flush_pending *p)
+{
+	spin_lock(&s3fs_flush_pending_lock);
+	if (!hlist_unhashed(&p->node)) {
+		hash_del(&p->node);
+		spin_unlock(&s3fs_flush_pending_lock);
+		flush_pending_put(p); /* drop hash's ref */
+		return;
+	}
+	spin_unlock(&s3fs_flush_pending_lock);
+}
+
+/*
+ * Daemon → kmod signal: PUT completed with `err`. Wakes any fsync
+ * caller blocked on this ino. -ENOENT (no waiter) is a normal outcome
+ * for the .release path — daemon signals unconditionally and doesn't
+ * care whether anyone was listening.
+ */
+int s3fs_ebpf_signal_flush(u64 ino, int err)
+{
+	struct s3fs_flush_pending *p, *target = NULL;
+
+	spin_lock(&s3fs_flush_pending_lock);
+	hash_for_each_possible(s3fs_flush_pending, p, node, ino) {
+		if (p->ino == ino) {
+			target = p;
+			refcount_inc(&target->refs);
+			break;
+		}
+	}
+	spin_unlock(&s3fs_flush_pending_lock);
+
+	if (!target)
+		return -ENOENT;
+
+	target->err = err;
+	complete_all(&target->done);
+	flush_pending_unhash(target);
+	flush_pending_put(target);
+	return 0;
+}
+
 static void flush_enqueue(u64 ino, u64 size,
 			  const char *name, size_t name_len)
 {
@@ -1418,52 +1525,102 @@ static const struct address_space_operations s3fs_ebpf_aops = {
 	.dirty_folio	= noop_dirty_folio,
 };
 
+/* Wait up to this many jiffies for the daemon PUT to complete on
+ * fsync path. Longer than the read-miss timeout because PUT can be
+ * larger and involve dirty-buffer copy — 30 s covers big-blob upload
+ * to real S3 in most configs. Interruptible so SIGINT / Ctrl+C on
+ * the caller returns -EINTR promptly. */
+#define S3FS_FSYNC_WAIT_JIFFIES  (30 * HZ)
+
 /*
  * If `fd->dirty`, snapshot ino/size/name under fd->lock and enqueue a
  * flush event. dirty is cleared here so a subsequent close/fsync
- * without new writes is a no-op. The daemon PUT is fire-and-forget
- * from kmod's POV; a failed PUT stays best-effort at PoC scope.
+ * without new writes is a no-op.
+ *
+ * `wait` == false (called from .release):
+ *   Fire and forget. Daemon PUTs in the background; close(2) returns
+ *   immediately. Failure surfaces later on next fsync/close or in
+ *   metrics (s3fs_ebpf_flush_errors_total).
+ *
+ * `wait` == true (called from .fsync):
+ *   Register a completion under `ino` BEFORE enqueue so
+ *   signal_flush from the daemon can find us. Wait up to
+ *   S3FS_FSYNC_WAIT_JIFFIES for the completion, propagate PUT result
+ *   as fsync() return value. This gives POSIX-conforming fsync
+ *   semantics (E-01, `docs/backlog.md`).
+ *
+ * Returns 0 on success, negative errno on wait timeout / PUT failure.
  */
-static void s3fs_maybe_enqueue_flush(struct file *file)
+static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 {
 	struct inode *inode = file_inode(file);
 	struct s3fs_file_data *fd = inode->i_private;
 	struct dentry *dentry = file->f_path.dentry;
-	u64 size;
+	struct s3fs_flush_pending *p = NULL;
+	u64 size, ino;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 	size_t name_len;
+	int err = 0;
 
 	if (!fd || !dentry)
-		return;
+		return 0;
 
 	name_len = dentry->d_name.len;
 	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
-		return;
+		return 0;
 	memcpy(name, dentry->d_name.name, name_len);
 
 	mutex_lock(&fd->lock);
 	if (!fd->dirty) {
 		mutex_unlock(&fd->lock);
-		return;
+		return 0; /* nothing to flush — fsync on clean file is a no-op */
 	}
 	size = fd->size;
 	fd->dirty = false;
 	mutex_unlock(&fd->lock);
 
-	flush_enqueue(inode->i_ino, size, name, name_len);
+	ino = inode->i_ino;
+
+	if (wait) {
+		/* Register BEFORE enqueue so a fast daemon can't miss us. */
+		p = flush_pending_get_or_create(ino);
+		if (!p) {
+			/* Fall back to non-blocking on OOM — better a stale
+			 * dirty than a lost write. */
+			flush_enqueue(ino, size, name, name_len);
+			return -ENOMEM;
+		}
+	}
+
+	flush_enqueue(ino, size, name, name_len);
+
+	if (p) {
+		long remaining = wait_for_completion_interruptible_timeout(
+			&p->done, S3FS_FSYNC_WAIT_JIFFIES);
+		if (remaining < 0) {
+			err = -EINTR;
+		} else if (remaining == 0) {
+			err = -EIO; /* daemon dead / stuck */
+		} else {
+			err = p->err;
+		}
+		flush_pending_put(p);
+	}
+	return err;
 }
 
 static int s3fs_ebpf_file_release(struct inode *inode, struct file *file)
 {
-	s3fs_maybe_enqueue_flush(file);
+	/* close(2): fire and forget, do not block. */
+	(void)s3fs_maybe_enqueue_flush(file, false);
 	return 0;
 }
 
 static int s3fs_ebpf_file_fsync(struct file *file, loff_t start,
 				loff_t end, int datasync)
 {
-	s3fs_maybe_enqueue_flush(file);
-	return 0;
+	/* POSIX fsync: block until the daemon confirms PUT durability. */
+	return s3fs_maybe_enqueue_flush(file, true);
 }
 
 static const struct file_operations s3fs_ebpf_file_fops = {

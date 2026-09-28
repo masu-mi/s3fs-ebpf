@@ -72,8 +72,7 @@
 
 ### E. write path 強化
 
-- [ ] **E-01** `.fsync` を blocking にする (`w4c §4-1`, `ll §5.2`)  
-  現状は enqueue するだけで PUT を待たない。pending completion + signal_admit のパターンで blocking 化。3 mode (eager / synchronous fsync / synchronous write) を選択可能に。
+- [x] ✅ **E-01** `.fsync` を blocking にする — 完 (次 commit)。read-miss と同 pattern (`struct s3fs_flush_pending` + `wait_for_completion_interruptible_timeout` + `S3FS_IOC_SIGNAL_FLUSH`) で fsync が daemon PUT 完了まで blocking 化。`.release` は fire-and-forget のまま (close(2) を hang させない)。daemon は PUT 各 return path で signal_flush ioctl、-ENOENT は fire-and-forget path として silent 扱い。smoke で 27B write → fsync=91ms (blocked)、no-op fsync=8μs (dirty=false 早期 return) の 10000× 差を実測。3 mode 化 (eager / sync-fsync / sync-write) は未実装、現在 sync-fsync のみ POSIX 相当
 - [ ] **E-02** `.unlink` / `.rename` 対応 (`w4c §4-3`)  
   現状 `rm /mnt/s3demo/hello.txt` は EPERM。UAPI に `S3FS_IOC_PUSH_DELETE` を切って sync loop から S3 DELETE。rename は S3 に無いので copy + delete で emulate、edge case 多い。
 - [ ] **E-03** flush の coalescing (`w4c §4-5`)  

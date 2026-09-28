@@ -179,6 +179,23 @@ static long s3fs_dev_signal_admit(void __user *uarg)
 }
 
 /*
+ * S3FS_IOC_SIGNAL_FLUSH — daemon → kmod completion signal for a
+ * previously enqueued flush event (E-01). Reuses the signal_admit
+ * struct because the payload shape is identical {ino, err}. Returns
+ * -ENOENT when no fsync() caller is waiting on this ino, which is
+ * a normal outcome for the fire-and-forget .release path — daemon
+ * signals unconditionally after every PUT.
+ */
+static long s3fs_dev_signal_flush(void __user *uarg)
+{
+	struct s3fs_signal_admit sig;
+
+	if (copy_from_user(&sig, uarg, sizeof(sig)))
+		return -EFAULT;
+	return s3fs_ebpf_signal_flush(sig.ino, sig.err);
+}
+
+/*
  * S3FS_IOC_SYNC_ENTRIES — replace the dynamic entry table.
  *
  * count==0 restores the bootstrap set. Otherwise we allocate the
@@ -306,6 +323,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_admit_arena(uarg);
 	case S3FS_IOC_SIGNAL_ADMIT:
 		return s3fs_dev_signal_admit(uarg);
+	case S3FS_IOC_SIGNAL_FLUSH:
+		return s3fs_dev_signal_flush(uarg);
 	case S3FS_IOC_SYNC_ENTRIES:
 		return s3fs_dev_sync_entries(uarg);
 	case S3FS_IOC_POP_FLUSH:

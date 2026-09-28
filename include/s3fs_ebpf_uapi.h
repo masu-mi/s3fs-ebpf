@@ -256,4 +256,23 @@ struct s3fs_drain_evictions {
 #define S3FS_IOC_DRAIN_EVICTIONS \
 	_IOWR(S3FS_IOC_MAGIC, 0x09, struct s3fs_drain_evictions)
 
+/*
+ * S3FS_IOC_SIGNAL_FLUSH — wake a pending .fsync waiter (E-01).
+ *
+ * Blocking .fsync registers a completion under (ino), then dispatches
+ * a flush event to the daemon. After the daemon's S3 PUT resolves
+ * (success or failure) it calls this ioctl with the PUT result. kmod
+ * finds the pending entry and signals the fsync waiter to return.
+ *
+ * When no waiter exists (eager .release path — the default for
+ * close(2)) the daemon still calls this after PUT so the same code
+ * path handles both flush completion signals. Missing waiter returns
+ * -ENOENT which the daemon ignores.
+ *
+ * err semantics match signal_admit: err==0 = PUT succeeded, negative
+ * errno propagates to the fsync() return value.
+ */
+#define S3FS_IOC_SIGNAL_FLUSH \
+	_IOW(S3FS_IOC_MAGIC, 0x0A, struct s3fs_signal_admit)
+
 #endif /* _S3FS_EBPF_UAPI_H */
