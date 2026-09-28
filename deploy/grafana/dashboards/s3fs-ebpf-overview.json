@@ -296,6 +296,50 @@
         { "refId": "A", "expr": "sum(rate(s3fs_ebpf_flush_latency_seconds_bucket[1m])) by (le)", "format": "heatmap", "legendFormat": "{{le}}" }
       ],
       "options": { "calculate": false, "yAxis": { "unit": "s" }, "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64, "reverse": true } }
+    },
+    {
+      "id": 20,
+      "title": "kmod cache hit ratio (true)",
+      "type": "stat",
+      "description": "read_folio arena hits / (arena hits + upcalls). This is the actual cache hit rate at the kmod level, independent of fentry-side getattr counters. 100 % = every read served from arena.",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 70 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "s3fs_ebpf_folio_hits_total / clamp_min(s3fs_ebpf_folio_hits_total + s3fs_ebpf_read_miss_upcalls_total, 1)",
+          "legendFormat": "hit ratio"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "green", "value": 0.8 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 21,
+      "title": "kmod folio hits vs upcalls (rate)",
+      "type": "timeseries",
+      "description": "Per-second rate of arena-served folios vs upcall-served folios. The green area shrinking / red area growing = policy is evicting hot items.",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 70 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(s3fs_ebpf_folio_hits_total[1m])", "legendFormat": "arena hits/s" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_read_miss_upcalls_total[1m])", "legendFormat": "upcalls/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
     }
   ],
   "refresh": "5s",

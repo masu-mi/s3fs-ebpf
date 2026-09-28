@@ -837,6 +837,9 @@ func sampleKmodStats(ctx context.Context, devPath string, every time.Duration) {
 			if len(vals) >= 1 {
 				metrics.Global.PolicyEvictionsTotal.Store(vals[0])
 			}
+			if len(vals) >= 2 {
+				metrics.Global.FolioHits.Store(vals[1])
+			}
 		}
 	}
 }

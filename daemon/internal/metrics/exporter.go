@@ -59,6 +59,13 @@ type Counters struct {
 	// (fmod_ret / struct_ops vote → kmod hash_del). Sourced from
 	// S3FS_IOC_STATS[0].
 	PolicyEvictionsTotal atomic.Uint64 // counter
+
+	// kmod-side .read_folio arena hits — the "true" cache hit count
+	// (as opposed to fentry-side FastPathHits which measures getattr
+	// hits on the BPF-side inode_index). Sourced from
+	// S3FS_IOC_STATS[1]. Divide by (this + ReadMissUpcalls) for the
+	// real kmod cache hit ratio.
+	FolioHits atomic.Uint64 // counter
 }
 
 // Global is a package-level sink so any component can bump counters
@@ -139,6 +146,9 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_policy_hook_invocations_total", "fentry invocations on s3fs_policy_on_admit (counted by the loaded policy BPF program).", "counter", Global.PolicyHookInvocations.Load()},
 		{"s3fs_ebpf_policy_last_admit_count", "Snapshot count from the last admit_replace, as recorded by the policy BPF program.", "gauge", Global.PolicyLastAdmitCount.Load()},
 		{"s3fs_ebpf_policy_evictions_total", "Admit-table entries removed by policy eviction votes (kmod-side hash_del).", "counter", Global.PolicyEvictionsTotal.Load()},
+
+		// True kmod-side cache hit — read_folio served from arena.
+		{"s3fs_ebpf_folio_hits_total", "kmod-side .read_folio calls served from arena (true cache hit). Divide by (this + read_miss_upcalls_total) for hit ratio.", "counter", Global.FolioHits.Load()},
 	}
 	for _, m := range metrics {
 		fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)

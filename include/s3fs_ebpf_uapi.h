@@ -218,6 +218,9 @@ struct s3fs_mark_dirty {
  * `filled` (out); daemon reads the first `filled` slots.
  * Slot layout (additive-only, do not renumber):
  *   [0] s3fs_evictions_total — policy-driven evictions from admits
+ *   [1] s3fs_folio_hits      — .read_folio arena hits (kmod-side
+ *                              cache hits, divide by (this + read_miss
+ *                              _upcalls) for true hit ratio)
  */
 #define S3FS_STATS_MAX 16
 struct s3fs_stats {
