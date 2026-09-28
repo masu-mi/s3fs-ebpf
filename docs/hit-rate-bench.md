@@ -18,28 +18,34 @@ Runs via `./scripts/bench-hitrate.sh`.
   `admit_snapshot()` miss → path-C upcall). Rate =
   `(N_ACCESS - Δmisses) / N_ACCESS`.
 
-## Result (2026-09-28, after P-08 KFunc-driven pressure_ops)
+## Result (2026-09-28, after W-TinyLFU bpf_loop aging)
 
 ```
 policy=observe         hits=  200  misses=    0  rate=100.00%  evictions=    0
-policy=lru_ops         hits=   14  misses=  186  rate=  7.00%  evictions=11782
-policy=freq2bit_ops    hits=   24  misses=  176  rate= 12.00%  evictions=10136
-policy=wtinylfu_ops    hits=   50  misses=  150  rate= 25.00%  evictions= 9291
-policy=pressure_ops    hits=  104  misses=   96  rate= 52.00%  evictions= 1836
-policy=s3fifo_ops      hits=  124  misses=   76  rate= 62.00%  evictions=  880
-policy=sieve_ops       hits=  134  misses=   66  rate= 67.00%  evictions=  431
+policy=freq2bit_ops    hits=   13  misses=  187  rate=  6.50%  evictions=11581
+policy=lru_ops         hits=   23  misses=  177  rate= 11.50%  evictions=10173
+policy=pressure_ops    hits=  108  misses=   92  rate= 54.00%  evictions= 1627
+policy=sieve_ops       hits=  124  misses=   76  rate= 62.00%  evictions=  535
+policy=s3fifo_ops      hits=  131  misses=   69  rate= 65.50%  evictions=  783
+policy=wtinylfu_ops    hits=  160  misses=   40  rate= 80.00%  evictions=  270
 ```
 
-Three tiers now:
+**W-TinyLFU jumped from 25 % → 80 % once aging was restored via
+bpf_loop() — now the top evicting policy on this workload.**
+The previous 25 % result was the CMS drowning in unaged hit
+counts; halving every N admit rounds keeps sensitivity so
+cold-item false positives fade before they matter.
 
-- **Modern** (SIEVE, S3-FIFO): 62-67 %
-- **Adaptive** (pressure_ops with KFunc): 52 % — the new
-  data point. Reads `s3fs_kfunc_admit_count()` /
-  `s3fs_kfunc_softcap()` at eviction time and switches from
-  SIEVE-generous to aggressive-clear-and-evict when pressure
-  ratio ≥ 1.5×. Sits between "modern" and the below tiers
-  because aggressive mode kicks in even for warm items.
-- **Simple** (W-TinyLFU-scoped, freq2bit, LRU): 7-25 %.
+Three tiers:
+
+- **Modern with sketch** (W-TinyLFU): 80 %. CMS + aging picks
+  the hot items with the fewest evictions of anyone.
+- **Modern clock/tier** (SIEVE, S3-FIFO): 62-66 %.
+- **Adaptive** (pressure_ops with KFunc): 54 %. Reads
+  `s3fs_kfunc_admit_count()` / `s3fs_kfunc_softcap()` at
+  eviction time and switches from SIEVE-generous to
+  aggressive-clear-and-evict when pressure ratio ≥ 1.5×.
+- **Simple** (freq2bit, LRU): 7-12 %.
 
 pressure_ops is a demo vehicle for the Layer 0 KFunc set (P-08).
 Its number matters less than the fact it dynamically stops
@@ -85,8 +91,10 @@ numbers.
   aggressive-evict on the fly. See `bpf/policy_pressure_ops.bpf.c`
   for the ratio threshold.
 - **W-TinyLFU** (`policy_wtinylfu_ops`, scoped-down variant):
-  25 %. See §"Reading W-TinyLFU" below — this is a stripped
-  implementation, not the full paper.
+  80 %. See §"Reading W-TinyLFU" below — this is still a
+  stripped implementation (no Window-LRU tier, no doorkeeper)
+  but with CMS aging restored via `bpf_loop()` it now leads
+  the evicting policies.
 - **LRU** (`policy_lru_ops`, approximate admit-order FIFO with
   `on_hit` refreshing the seed epoch): 12.5 %. Poor because our
   eval-forced rounds bump the global epoch on every `on_admit`,
@@ -109,27 +117,34 @@ The one comparison that carries the story:
 ## Reading W-TinyLFU
 
 Our `policy_wtinylfu_ops` implements the *centerpiece* of the
-paper (CMS-based frequency estimator + threshold admission) but
-skips three components that materially move hit rates:
+paper (CMS-based frequency estimator + threshold admission)
+plus the aging step. Two components are still deferred:
 
 1. **Window LRU tier** (~1 % of cache in the paper). New admits
    land in W-LRU and only graduate to Main if they earn CMS
    respect. Without W-LRU, one-hit wonders admit straight to
-   Main and consume slots that hot items would use.
+   Main and consume slots that hot items would use. In practice
+   aging plus the softcap-driven eviction covers most of this
+   gap on our bench, but tail workloads (bursts of unique
+   items) will still hurt.
 2. **Doorkeeper Bloom filter**. Filters "1-hit wonders" before
-   they populate CMS. Without it, our 4×256 sketch fills with
-   noise from cold items.
-3. **Periodic aging** (halve counters every N ops). Real
-   TinyLFU resets the CMS by half every ~sample size ops so
-   hot items don't drown out late-warming items. Our impl
-   omits aging because a full 1024-slot iterate-and-halve is
-   verifier-rejected as an unbounded loop; a `bpf_loop()`
-   -based implementation would fix this.
+   they populate CMS. Without it, our 4×256 sketch collects
+   noise from cold items — aging clears it periodically, so
+   the net effect on hit rate is small.
 
-At 25 % we're not seeing the "TinyLFU near-optimal" numbers the
-paper reports on comparable workloads. A production impl would
-close the gap on all three axes — the CMS primitive is done,
-which is the reusable infrastructure win.
+At **80 %** we're within striking distance of the "TinyLFU
+near-optimal" numbers the paper reports on comparable Zipf
+workloads. The remaining gap is smaller than the CMS-vs-clock
+difference (SIEVE at 62 %), so future work is diminishing
+returns on this micro-workload — real value comes from
+mixed-load and burst scenarios.
+
+**Aging is the trick that mattered.** Before `bpf_loop()`
+landed we skipped the halving step because a pragma-unrolled
+1024-iteration loop exceeds the verifier's insn budget.
+`bpf_loop()` delegates iteration to the kernel with a fixed
+runtime bound, sidestepping the limit. Cost: one BPF helper
+call per age; the callback itself is 3 insns.
 
 The eviction totals (~10 k for LRU/freq2bit vs ~300 for SIEVE
 vs ~800 for S3-FIFO) tell the same story: aggressive policies
@@ -201,9 +216,10 @@ S3-FIFO name. The bench above measures both. See:
 - **Write-heavy patterns**: only reads exercised here.
 - **Multi-tenant / range access**: single ino at a time,
   ino ↔ full-file admit shape (P1 backlog D-01 for range).
-- **Full W-TinyLFU**: window LRU + doorkeeper + aging (see
-  "Reading W-TinyLFU" above). Would need `bpf_loop()` for the
-  aging step or a redesigned CMS geometry.
+- **Full W-TinyLFU**: window LRU + doorkeeper (aging is done —
+  see commit history and "Reading W-TinyLFU" above). Window
+  LRU needs per-ino tier state; doorkeeper is a fixed-size
+  Bloom filter — both feasible extensions.
 - **SIEVE with a global hand pointer**: our impl fires
   second-chance semantics per admit_replace round instead of
   along a global cursor. Adding a cursor would need a shared
