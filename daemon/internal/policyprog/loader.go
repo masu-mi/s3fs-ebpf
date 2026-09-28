@@ -26,15 +26,22 @@ const (
 	StatLastHint    = 2
 )
 
-// Program bundles a loaded policy program set (a .bpf.o may declare
-// multiple hooks — on_admit / on_evict / on_pressure). All fentry
-// programs are attached on Attach(); links stay alive until Close().
+// Program bundles a loaded policy program set. Two shapes are
+// supported and auto-detected from the .bpf.o:
+//
+//   - fentry / fmod_ret programs: individual attach per hook,
+//     N Link objects, hot swap = N link.Update calls
+//   - struct_ops program: single vtable map, 1 Link object,
+//     hot swap = 1 link.Update on the vtable
+//
+// See docs/policy-engine-design.md §4.5 for the trade-off analysis.
 type Program struct {
-	Coll  *ebpf.Collection
-	Progs map[string]*ebpf.Program // ebpf-section-name → program
-	Stats *ebpf.Map                // shared policy_stats map (may be nil)
-	Links []link.Link              // one per attached fentry
-	Path  string                   // source path for logs
+	Coll     *ebpf.Collection
+	Progs    map[string]*ebpf.Program // ebpf-section-name → program
+	Stats    *ebpf.Map                // shared policy_stats map (may be nil)
+	Links    []link.Link              // one per attached hook or 1 for struct_ops
+	Path     string                   // source path for logs
+	IsStruct bool                     // true when a struct_ops map was found
 }
 
 // Load reads a .bpf.o and returns a ready-to-attach Program. The
@@ -53,27 +60,40 @@ func Load(path string) (*Program, error) {
 		return nil, fmt.Errorf("policyprog: load %s: %w", path, err)
 	}
 	progs := make(map[string]*ebpf.Program)
+	isStruct := false
 	for name, p := range coll.Programs {
-		if p.Type() == ebpf.Tracing {
+		switch p.Type() {
+		case ebpf.Tracing:
 			progs[name] = p
+		case ebpf.StructOps:
+			progs[name] = p
+			isStruct = true
 		}
 	}
 	if len(progs) == 0 {
 		coll.Close()
-		return nil, fmt.Errorf("policyprog: %s has no fentry programs", path)
+		return nil, fmt.Errorf("policyprog: %s has no fentry or struct_ops programs", path)
 	}
 	stats := coll.Maps["policy_stats"] // may be nil (Layer 3 programs may skip)
-	return &Program{Coll: coll, Progs: progs, Stats: stats, Path: path}, nil
+	return &Program{Coll: coll, Progs: progs, Stats: stats, Path: path, IsStruct: isStruct}, nil
 }
 
-// Attach hooks every fentry program to its target (declared via SEC in
-// the .bpf.o). Programs bind by symbol at load time; attach just
-// activates them.
+// Attach binds the program(s) to their kmod-side targets. For
+// fentry/fmod_ret each program attaches independently; for struct_ops
+// the single vtable map attaches once via bpf(BPF_LINK_CREATE) with
+// attach_type BPF_STRUCT_OPS. cilium/ebpf abstracts both under
+// link.AttachStructOps / link.AttachTracing but you have to pick.
 func (p *Program) Attach() error {
+	if p.IsStruct {
+		return p.attachStructOps()
+	}
+	return p.attachTracing()
+}
+
+func (p *Program) attachTracing() error {
 	for name, prog := range p.Progs {
 		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
 		if err != nil {
-			// Partial attach: unwind the ones we already attached.
 			for _, done := range p.Links {
 				_ = done.Close()
 			}
@@ -84,6 +104,25 @@ func (p *Program) Attach() error {
 		p.Links = append(p.Links, l)
 	}
 	return nil
+}
+
+func (p *Program) attachStructOps() error {
+	// struct_ops maps carry the vtable. Find the one named after our
+	// kmod-registered type. Instance names come from the BPF source
+	// (`struct s3fs_policy_ops s3fifo_ops = { ... }`).
+	for name, m := range p.Coll.Maps {
+		if m.Type() != ebpf.StructOpsMap {
+			continue
+		}
+		l, err := link.AttachStructOps(link.StructOpsOptions{Map: m})
+		if err != nil {
+			return fmt.Errorf("policyprog: attach struct_ops map %s: %w",
+				name, err)
+		}
+		p.Links = append(p.Links, l)
+		return nil // exactly one vtable per policy
+	}
+	return fmt.Errorf("policyprog: no struct_ops map in %s", p.Path)
 }
 
 // Close detaches (if attached) and frees the collection.

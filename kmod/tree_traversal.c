@@ -16,6 +16,7 @@
 #include <linux/module.h>
 
 #include "tree_traversal.h"
+#include "vfs_ops.h" /* s3fs_policy_on_admit/evict/pressure prototypes */
 
 __bpf_kfunc_start_defs();
 
@@ -64,6 +65,25 @@ BTF_KFUNCS_START(s3fs_kfunc_ids_syscall)
 BTF_ID_FLAGS(func, s3fs_kfunc_echo)
 BTF_KFUNCS_END(s3fs_kfunc_ids_syscall)
 
+/*
+ * Policy hooks registered for BPF_MODIFY_RETURN (fmod_ret programs).
+ * Attaching a BPF program with SEC("fmod_ret/<name>") to these hooks
+ * lets the BPF program override the return value directly, so
+ * eviction votes / admission decisions flow through as function
+ * return values rather than side-channel maps. See
+ * docs/policy-engine-design.md §4.5 and P-10 in docs/backlog.md.
+ */
+BTF_SET8_START(s3fs_policy_fmodret_ids)
+BTF_ID_FLAGS(func, s3fs_policy_on_admit)
+BTF_ID_FLAGS(func, s3fs_policy_on_evict)
+BTF_ID_FLAGS(func, s3fs_policy_on_pressure)
+BTF_SET8_END(s3fs_policy_fmodret_ids)
+
+static const struct btf_kfunc_id_set s3fs_policy_fmodret_set = {
+	.owner = THIS_MODULE,
+	.set   = &s3fs_policy_fmodret_ids,
+};
+
 static const struct btf_kfunc_id_set s3fs_kfunc_set_tracing = {
 	.owner = THIS_MODULE,
 	.set   = &s3fs_kfunc_ids_tracing,
@@ -85,6 +105,12 @@ int s3fs_kfunc_register(void)
 
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL,
 					&s3fs_kfunc_set_syscall);
+	if (ret)
+		return ret;
+
+	/* Enable SEC("fmod_ret/s3fs_policy_on_*") programs to override
+	 * the hooks' return values (used for eviction votes etc.). */
+	ret = register_btf_fmodret_id_set(&s3fs_policy_fmodret_set);
 	if (ret)
 		return ret;
 

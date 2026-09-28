@@ -46,21 +46,18 @@ struct {
 	__uint(max_entries, 4096);
 } s3fifo_freq SEC(".maps");
 
-/* Eviction vote map: ino → 1 means "policy says evict on next round".
- * kmod-side / daemon-side enforcement polls this. Written from
- * on_evict; fentry return value itself is required to be 0 by the
- * verifier so we side-channel the decision here. */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, __u64);
-	__type(value, __u8);
-	__uint(max_entries, 4096);
-} s3fifo_evict_vote SEC(".maps");
+/* Prior versions kept an evict_vote map because SEC("fentry/...") is
+ * required to return 0. Now that kmod registers the policy hooks with
+ * register_btf_fmodret_id_set (see kmod/tree_traversal.c), we attach
+ * as SEC("fmod_ret/...") instead and return the vote directly. The
+ * side-channel map is gone; kmod consumes the return value. */
 
 #define FREQ_MAX 3
 
-/* on_admit: seed freq=0 for each admitted ino if not already tracked. */
-SEC("fentry/s3fs_policy_on_admit")
+/* on_admit: observation only (updates stats), always return 0. Using
+ * fmod_ret keeps the shape uniform with on_evict below even though we
+ * don't override the return value here. */
+SEC("fmod_ret/s3fs_policy_on_admit")
 int BPF_PROG(s3fifo_on_admit, __u64 count, __u64 hint)
 {
 	__u32 k;
@@ -82,40 +79,33 @@ int BPF_PROG(s3fifo_on_admit, __u64 count, __u64 hint)
 	return 0;
 }
 
-/* on_evict: BPF's vote on whether `ino` should be evicted.
- * Writes the decision to s3fifo_evict_vote[ino]:
- *   freq == 0 → vote 1 (evict)
- *   freq > 0  → decrement and vote 0 (keep, cooldown)
- *   missing   → seed freq=0, vote 0 (grace one round)
- * fentry programs must `return 0` (verifier enforces R0=0 on exit for
- * this attach type), so the decision is side-channeled via the map. */
-SEC("fentry/s3fs_policy_on_evict")
+/* on_evict: BPF's vote on whether `ino` should be evicted. Returned
+ * directly via fmod_ret — kmod side sees this as the function's
+ * actual return value (register_btf_fmodret_id_set() in kmod enables
+ * this; the previous version had to side-channel via a map because
+ * SEC("fentry/...") forces R0=0 at exit).
+ *   freq == 0 → return 1 (evict)
+ *   freq > 0  → decrement and return 0 (keep, cooldown)
+ *   missing   → seed freq=0, return 0 (grace one round) */
+SEC("fmod_ret/s3fs_policy_on_evict")
 int BPF_PROG(s3fifo_on_evict, __u64 ino)
 {
 	__u8 *fp = bpf_map_lookup_elem(&s3fifo_freq, &ino);
 	__u8 zero = 0;
-	__u8 vote_evict = 1;
-	__u8 vote_keep = 0;
 
 	if (!fp) {
 		bpf_map_update_elem(&s3fifo_freq, &ino, &zero, BPF_ANY);
-		bpf_map_update_elem(&s3fifo_evict_vote, &ino, &vote_keep, BPF_ANY);
 		return 0;
 	}
-	if (*fp == 0) {
-		bpf_map_update_elem(&s3fifo_evict_vote, &ino, &vote_evict, BPF_ANY);
-		return 0;
-	}
+	if (*fp == 0)
+		return 1;
 	*fp = *fp - 1;
-	bpf_map_update_elem(&s3fifo_evict_vote, &ino, &vote_keep, BPF_ANY);
 	return 0;
 }
 
-/* on_pressure: bump a freq for every entry currently in daemon view.
- * BPF has no visibility into the daemon's admit snapshot here, so this
- * is a no-op observation for now; wiring the pressure signal into the
- * ghost-list refresh is a follow-up. */
-SEC("fentry/s3fs_policy_on_pressure")
+/* on_pressure: observation only for now. Return value ignored by
+ * kmod side (advisory hook). */
+SEC("fmod_ret/s3fs_policy_on_pressure")
 int BPF_PROG(s3fifo_on_pressure, __u64 count, __u64 threshold)
 {
 	return 0;
