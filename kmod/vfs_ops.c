@@ -344,6 +344,27 @@ static void admit_clear_locked(void)
 }
 
 /*
+ * Return the admitted size for `ino`, or 0 if the ino is not in the
+ * admit hash. Exposed to BPF policy programs via the
+ * s3fs_kfunc_ino_size() KFunc (see kmod/tree_traversal.c). Acquires
+ * the admit spinlock; safe from any non-IRQ context (BPF struct_ops
+ * and tracing programs both qualify — the critical section is a
+ * single bucket walk).
+ */
+u64 s3fs_admit_size(u64 ino)
+{
+	struct s3fs_admit *a;
+	u64 size = 0;
+
+	spin_lock(&s3fs_admits_lock);
+	a = admit_lookup_locked(ino);
+	if (a)
+		size = a->size;
+	spin_unlock(&s3fs_admits_lock);
+	return size;
+}
+
+/*
  * Policy hooks — fentry attach anchors for Layer 2/3 BPF programs.
  *
  * Three hook points that BPF programs can attach to:
