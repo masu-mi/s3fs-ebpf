@@ -55,6 +55,8 @@ Commands:
                it alongside the user-VM base for comparison
   microbench   Week 4 (e): tight-loop stat/read latency on a target path,
                reports min/p50/p95/p99/max (no fork/exec overhead)
+  hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
+               See --policy-allowlist and policies/allowlist.example.txt.
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
 `
@@ -90,6 +92,8 @@ func main() {
 		os.Exit(runProbeKvbase(args))
 	case "microbench":
 		os.Exit(runMicrobench(args))
+	case "hash-policy":
+		os.Exit(runHashPolicy(args))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
@@ -143,6 +147,44 @@ func runPolicy(args []string) int {
 }
 
 // -- Week 1: test-arena -------------------------------------------------------
+
+// runHashPolicy prints the SHA256 of a user policy .bpf.o so an
+// operator can copy-paste it into --policy-allowlist. Kept minimal
+// (no flags) — the CLI is a convenience wrapper around
+// policyprog.HashFile(). Idiomatic use:
+//
+//	$ s3fs-ebpf hash-policy /tmp/user.bpf.o
+//	6c9d3d6cf141bd92c34f85d67f95dd3156b705404b6e29572664a9ba1704eebc  /tmp/user.bpf.o
+//
+// Output shape matches `sha256sum`'s so it's directly appendable to
+// an allowlist file (just add a description on the same line).
+func runHashPolicy(args []string) int {
+	fs := flag.NewFlagSet("hash-policy", flag.ExitOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr,
+			"usage: s3fs-ebpf hash-policy <path> [<path>...]\n\n"+
+				"Print SHA256 of one or more .bpf.o files in\n"+
+				"allowlist-appendable form. See\n"+
+				"policies/allowlist.example.txt for the entry format.\n")
+	}
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) == 0 {
+		fs.Usage()
+		return 2
+	}
+	code := 0
+	for _, p := range rest {
+		h, err := policyprog.HashFile(p)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "hash-policy: %s: %v\n", p, err)
+			code = 1
+			continue
+		}
+		fmt.Printf("%s  %s\n", h, p)
+	}
+	return code
+}
 
 const (
 	testInodes        = 32
