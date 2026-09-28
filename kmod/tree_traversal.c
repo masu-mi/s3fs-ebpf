@@ -13,6 +13,7 @@
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
 
 #include "tree_traversal.h"
@@ -62,6 +63,28 @@ __bpf_kfunc u32 s3fs_kfunc_softcap(void)
 	return S3FS_EVICT_SOFTCAP;
 }
 
+/*
+ * Cumulative admit-table evictions driven by policy vote. Wraps
+ * around unsigned semantics past 2^32 — plenty for PoC. Use case:
+ * a policy compares against its own snapshot to decide "am I still
+ * evicting?" without pushing a stat back through policy_stats.
+ */
+__bpf_kfunc u32 s3fs_kfunc_evictions_total(void)
+{
+	return (u32)atomic_long_read(&s3fs_evictions_total);
+}
+
+/*
+ * Monotonic ns since boot (including suspend), sampled at call
+ * time. Coarse enough for time-based decay policies (age off items
+ * whose last-hit was > N seconds ago) without needing per-ino
+ * wall-clock. Safe from any BPF context — no locks, no scheduling.
+ */
+__bpf_kfunc u64 s3fs_kfunc_time_ns(void)
+{
+	return ktime_get_boottime_ns();
+}
+
 __bpf_kfunc_end_defs();
 
 /*
@@ -75,12 +98,14 @@ __bpf_kfunc_end_defs();
 #endif
 
 /* KFuncs callable from BPF_PROG_TYPE_TRACING (fentry / fmod_ret /
- * kprobe programs). The Layer 0 primitives (admit_count / softcap)
- * live here so fmod_ret policies can consult them. */
+ * kprobe programs). The Layer 0 primitives live here so fmod_ret
+ * policies can consult them. */
 BTF_KFUNCS_START(s3fs_kfunc_ids_tracing)
 BTF_ID_FLAGS(func, s3fs_kfunc_traverse_stub, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
 BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
+BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
+BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
 BTF_KFUNCS_END(s3fs_kfunc_ids_tracing)
 
 /* KFuncs callable from BPF_PROG_TYPE_SYSCALL (BPF_PROG_TEST_RUN harness). */
@@ -89,11 +114,13 @@ BTF_ID_FLAGS(func, s3fs_kfunc_echo)
 BTF_KFUNCS_END(s3fs_kfunc_ids_syscall)
 
 /* KFuncs callable from BPF_PROG_TYPE_STRUCT_OPS (policy vtables).
- * Same admit_count/softcap set — struct_ops policies use them for
- * pressure-aware eviction (see bpf/policy_pressure_ops.bpf.c). */
+ * Full Layer 0 set — struct_ops policies get everything the fmod_ret
+ * side has (see bpf/policy_pressure_ops.bpf.c for a consumer). */
 BTF_KFUNCS_START(s3fs_kfunc_ids_struct_ops)
 BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
 BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
+BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
+BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
 BTF_KFUNCS_END(s3fs_kfunc_ids_struct_ops)
 
 /*
