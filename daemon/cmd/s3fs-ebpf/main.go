@@ -315,8 +315,22 @@ func runFastpath(args []string) int {
 			}
 		}
 	}
+	// CEL policy hook may override --policy-bpf. Precedence:
+	//   1. CEL `policy: <expr>` if it evaluates to non-empty string
+	//   2. --policy-bpf flag
+	//   3. no BPF program attached
+	// The CEL path lets a single .cel file bundle prewarm decisions +
+	// which Layer 2 program to attach.
+	policyBPFEffective := *policyBPF
+	if celName := pol.EvalPolicyName(); celName != "" {
+		if *policyBPF != "" && *policyBPF != celName {
+			fmt.Printf("[policy] CEL policy=%q overrides --policy-bpf=%q\n",
+				celName, *policyBPF)
+		}
+		policyBPFEffective = celName
+	}
 	var polProg *policyprog.Program
-	if bpfPath, err := policyprog.Resolve(*policyBPF, repoRoot); err != nil {
+	if bpfPath, err := policyprog.Resolve(policyBPFEffective, repoRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "policy-bpf: %v\n", err)
 		return 1
 	} else if bpfPath != "" {

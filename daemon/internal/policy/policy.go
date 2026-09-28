@@ -33,12 +33,13 @@ type EntryInput struct {
 }
 
 // Engine holds compiled programs for each declared hook. Currently
-// only `prewarm` is wired; §4.5 Layer 1 event set will add on_read_miss
-// etc. as their CEL programs land.
+// `prewarm` (per-entry bool) and `policy` (global string returning a
+// Layer 2 program name / builtin:/file: URI) are wired.
 type Engine struct {
-	mu      sync.RWMutex
-	source  string             // originating file path, for logs
-	prewarm cel.Program        // may be nil (policy did not declare it)
+	mu           sync.RWMutex
+	source       string      // originating file path, for logs
+	prewarm      cel.Program // may be nil (policy did not declare it)
+	policyName   cel.Program // returns string; global scope, no entry
 }
 
 // Load reads a CEL policy from `path`. Format: newline-separated
@@ -83,6 +84,8 @@ func Load(path string) (*Engine, error) {
 		switch name {
 		case "prewarm":
 			eng.prewarm = prog
+		case "policy":
+			eng.policyName = prog
 		default:
 			fmt.Fprintf(os.Stderr, "[policy] %s:%d ignoring unknown hook %q\n",
 				path, lineno+1, name)
@@ -127,6 +130,32 @@ func (e *Engine) EvalPrewarm(in EntryInput) bool {
 
 // Source returns the loaded policy's file basename, for log context.
 func (e *Engine) Source() string { return e.source }
+
+// EvalPolicyName returns the CEL-selected policy program name (a
+// builtin:<name> / file:<path> URI, or a bare name that Resolve
+// treats as builtin). Empty string means "no policy: hook declared,
+// caller should fall back to CLI flag / no policy".
+func (e *Engine) EvalPolicyName() string {
+	e.mu.RLock()
+	prog := e.policyName
+	e.mu.RUnlock()
+	if prog == nil {
+		return ""
+	}
+	out, _, err := prog.Eval(map[string]any{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[policy] %s policy eval: %v (using empty)\n",
+			e.source, err)
+		return ""
+	}
+	s, ok := out.(types.String)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "[policy] %s policy: non-string result %v\n",
+			e.source, out.Value())
+		return ""
+	}
+	return string(s)
+}
 
 // -- internals ---------------------------------------------------------
 
