@@ -1,8 +1,9 @@
 // Package metrics exposes a Prometheus scrape endpoint on :9600.
-// Hand-rolled text exposition (no client_golang dependency) — the
-// metric set is small enough that a switch to client_golang is not
-// worth pulling in the transitive dep tree at PoC scope. Migrate
-// when we need histograms or per-label cardinality.
+// Hand-rolled text exposition (no client_golang dependency) —
+// counters/gauges live in the Counters struct below, histograms in
+// histogram.go. Both render in this file's handle(). Migrate to
+// client_golang when we need labeled cardinality or exemplars; the
+// current shape is enough for PoC observability.
 package metrics
 
 import (
@@ -144,4 +145,8 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintf(w, "# TYPE %s %s\n", m.name, m.mtype)
 		fmt.Fprintf(w, "%s %d\n", m.name, m.value)
 	}
+	// Histograms live in their own type — see histogram.go. Emit
+	// after the flat counters/gauges so the text-format parser
+	// order matches Prometheus's expected grouping.
+	ReadMissLatency.writeTo(w)
 }

@@ -148,11 +148,11 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [ ] **I-02** `drop_caches=1` で純 read-cold の比較 (現状 `drop_caches=3` は inode 全部飛ばして path lookup が支配的)
 - [ ] **I-03** cold-cache 分離 (daemon 生存 + kmod 生存で page cache だけ落とす vs 全部落とす)
 - [ ] **I-04** fuse-cache を bench-latency にも追加 (現状 bench-3way のみ)
-- [ ] **I-05** latency histogram を Prometheus に export (現状 counter/gauge のみ、`prometheus/client_golang` 移行が要る)
+- [x] ✅ **I-05** latency histogram を Prometheus に export — 完 (次 commit)。`daemon/internal/metrics/histogram.go` に hand-rolled Prometheus histogram を追加、`ReadMissLatency` が handleReadMiss の全 return path (成功 + ENOENT/EIO/ENODATA) を timing。Grafana dashboard に p50/p95/p99 timeseries + heatmap の 2 panel 追加。client_golang 全面移行は未 (P-J-01 参照)
 
 ### J. metric / observability 深化 (`be §4-3, §4-4`)
 
-- [ ] **J-01** `client_golang` に移行して `HistogramVec` 追加 (read/write p50/p95/p99)
+- [x] ✅ **J-01 (part)** hand-rolled histogram で read-miss latency を計測 — 完 (I-05 と同 commit)。`s3fs_ebpf_read_miss_latency_seconds` histogram (13 bucket、[1ms..10s +Inf]) を Grafana dashboard に描画。client_golang 全面移行は残り (label 対応 / exemplar 使用時に着手予定)
 - [ ] **J-02** `runtime/metrics` を expose (Go GC pause、goroutine 数)
 - [ ] **J-03** CPU% panel に nice / softirq / irq / steal を追加 (BPF fentry が softirq に載っているか観察)
 - [ ] **J-04** write throughput panel に req/s + bytes/req を legend で分解

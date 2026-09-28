@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
@@ -260,6 +261,15 @@ func runReadMissLoop(ctx context.Context, devPath string,
 func handleReadMiss(ctx context.Context, devPath string,
 	progs *fpebpf.Programs, s3c *s3.Client, ev readMissEvent) {
 	metrics.Global.ReadMissUpcalls.Add(1)
+	// Time the full miss-service path (S3 Get + arena write +
+	// admit_replace) and observe on every return path — including
+	// the ENOENT / EIO / ENODATA branches so the histogram reflects
+	// real tail behavior, not just the happy path. Bench uses this
+	// to compare policies by upcall latency, not just hit rate.
+	miss_started := time.Now()
+	defer func() {
+		metrics.ReadMissLatency.Observe(time.Since(miss_started))
+	}()
 	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d unknown — signaling ENOENT\n", ev.Ino)
