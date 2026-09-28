@@ -18,42 +18,54 @@ Runs via `./scripts/bench-hitrate.sh`.
   `admit_snapshot()` miss → path-C upcall). Rate =
   `(N_ACCESS - Δmisses) / N_ACCESS`.
 
-## Result (2026-09-28, after W-TinyLFU bpf_loop aging)
+## Result (2026-09-28, 全 9 policy 揃い)
 
 ```
 policy=observe         hits=  200  misses=    0  rate=100.00%  evictions=    0
-policy=freq2bit_ops    hits=   13  misses=  187  rate=  6.50%  evictions=11581
-policy=lru_ops         hits=   23  misses=  177  rate= 11.50%  evictions=10173
-policy=pressure_ops    hits=  108  misses=   92  rate= 54.00%  evictions= 1627
-policy=sieve_ops       hits=  124  misses=   76  rate= 62.00%  evictions=  535
-policy=s3fifo_ops      hits=  131  misses=   69  rate= 65.50%  evictions=  783
-policy=wtinylfu_ops    hits=  160  misses=   40  rate= 80.00%  evictions=  270
+policy=freq2bit_ops    hits=   13  misses=  187  rate=  6.50%  evictions=11468
+policy=lru_ops         hits=   15  misses=  185  rate=  7.50%  evictions=11278
+policy=time_decay_ops  hits=   61  misses=  139  rate= 30.50%  evictions= 6488
+policy=s3fifo_ops      hits=   92  misses=  108  rate= 46.00%  evictions=  991
+policy=pressure_ops    hits=  108  misses=   92  rate= 54.00%  evictions= 1704
+policy=size_aware_ops  hits=  130  misses=   70  rate= 65.00%  evictions=  475
+policy=sieve_ops       hits=  132  misses=   68  rate= 66.00%  evictions=  447
+policy=wtinylfu_ops    hits=  177  misses=   23  rate= 88.50%  evictions=  161
 ```
 
-**W-TinyLFU jumped from 25 % → 80 % once aging was restored via
-bpf_loop() — now the top evicting policy on this workload.**
-The previous 25 % result was the CMS drowning in unaged hit
-counts; halving every N admit rounds keeps sensitivity so
-cold-item false positives fade before they matter.
+**W-TinyLFU リードが確立** (88.5 %、次位 SIEVE 66 % との差 22 pp)。
+CMS + aging の組合せが Zipf 型 workload で強い。以下 3 tier に
+分かれる:
 
-Three tiers:
+- **Top (>60%)**: W-TinyLFU 88.5, SIEVE 66, size_aware 65, s3fifo 46
+- **KFunc-driven demo (30-55%)**: pressure 54, time_decay 30.5
+- **Simple (<10%)**: LRU 7.5, freq2bit 6.5
 
-- **Modern with sketch** (W-TinyLFU): 80 %. CMS + aging picks
-  the hot items with the fewest evictions of anyone.
-- **Modern clock/tier** (SIEVE, S3-FIFO): 62-66 %.
-- **Adaptive** (pressure_ops with KFunc): 54 %. Reads
-  `s3fs_kfunc_admit_count()` / `s3fs_kfunc_softcap()` at
-  eviction time and switches from SIEVE-generous to
-  aggressive-clear-and-evict when pressure ratio ≥ 1.5×.
-- **Simple** (freq2bit, LRU): 7-12 %.
+### KFunc-driven policy の見どころ
 
-pressure_ops is a demo vehicle for the Layer 0 KFunc set (P-08).
-Its number matters less than the fact it dynamically stops
-evicting once admits drop below softcap*1.5 — during a single
-admit_replace round with 30 entries and softcap=8, aggressive
-mode fires for the first ~18 evict-votes, then the running
-count drops to ~12 and the SIEVE branch takes over. Same
-policy, different eviction rate depending on live kmod state.
+Layer 0 KFunc (P-08) の shape を demo する 3 policy が入った:
+
+- **`pressure_ops`** (54 %) — `s3fs_kfunc_admit_count()` /
+  `softcap()` で SIEVE strictness を切替。1 admit_replace round
+  内で evictions が積み上がって admit_count が下がる → 動的に
+  aggressive → sieve に自動 switch。live kmod state を read する
+  shape の証明
+- **`time_decay_ops`** (30.5 %) — `s3fs_kfunc_time_ns()` で
+  `now - last_hit_ns > 5s` を evict。access pattern より wall
+  clock 支配で hit rate 低め、DECAY_NS=5s が Zipf workload には
+  短すぎる。長い DECAY_NS でチューニングすれば SIEVE 相当に
+  なる想定
+- **`size_aware_ops`** (65 %) — `s3fs_kfunc_ino_size(ino)` で
+  SMALL_THRESHOLD=4KB 未満 / 以上を bias。今 bench の files は
+  全て 44 B なので SIEVE 相当挙動、mixed size workload だと
+  BIG_MISS_CAP grace が効いてくる
+
+### s3fifo_ops のばらつき
+
+`s3fifo_ops` は run ごとに 46-66 % で振れる。原因は 3-tier の
+S/M/G Ghost が 8-9 個の admit hash と softcap=8 の狭い working
+set で敏感に反応するため。より大きい softcap / working set では
+安定する見込み。W-TinyLFU の 88.5 %、SIEVE の 66 % は run 間で
+±3 pp 程度に収まる。
 
 Two clean tiers emerge:
 
@@ -79,17 +91,27 @@ numbers.
 ## Reading the numbers
 
 - **observe** never evicts — theoretical ceiling.
-- **SIEVE** (`policy_sieve_ops`): 67 %. The visited-bit +
+- **SIEVE** (`policy_sieve_ops`): 66 %. The visited-bit +
   second-chance clock behaves correctly for skewed reuse.
-- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier): 62 %. The
-  Small/Main/Ghost split matches Yang et al SOSP 2023: items
-  enter S, promote to M on re-hit, ghost record lets re-admits
-  skip S. Within 5 pp of SIEVE.
-- **pressure_ops** (`policy_pressure_ops`, KFunc demo): 52 %.
+- **size_aware_ops** (`policy_size_aware_ops`, KFunc demo):
+  65 %. Uses `s3fs_kfunc_ino_size()` for SMALL/BIG file bias.
+  Degrades to SIEVE-equivalent on the all-small-file bench;
+  BIG_MISS_CAP grace only fires when mixed-size workloads run.
+- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier): 46 %. The
+  Small/Main/Ghost split matches Yang et al SOSP 2023 but is
+  sensitive to the small (softcap=8) working set — bench-run
+  variance is ±20 pp. Larger softcap / more admits stabilise
+  it.
+- **pressure_ops** (`policy_pressure_ops`, KFunc demo): 54 %.
   Reads kmod-side admit count and softcap live via the Layer
   0 KFunc set (P-08). Toggles between SIEVE-generous and
   aggressive-evict on the fly. See `bpf/policy_pressure_ops.bpf.c`
   for the ratio threshold.
+- **time_decay_ops** (`policy_time_decay_ops`, KFunc demo):
+  30.5 %. Uses `s3fs_kfunc_time_ns()` for wall-clock decay
+  (DECAY_NS=5s). Access-pattern-agnostic → suffers on
+  Zipf-shaped bursts. Meant as a proof-of-KFunc-time shape,
+  not a production recommendation.
 - **W-TinyLFU** (`policy_wtinylfu_ops`, scoped-down variant):
   80 %. See §"Reading W-TinyLFU" below — this is still a
   stripped implementation (no Window-LRU tier, no doorkeeper)
@@ -200,12 +222,14 @@ S3-FIFO name. The bench above measures both. See:
 ## What this unblocks
 
 - P-07 objective met: numerical evidence that policy choice
-  matters — 8× improvement (SIEVE vs freq2bit) and 7×
-  improvement (S3-FIFO vs freq2bit) on a workload where
-  softcap has real bite.
+  matters — 13× improvement (W-TinyLFU vs freq2bit) on a
+  workload where softcap has real bite.
 - Meetup demo material: "swap the policy, hit rate goes from
-  9 % to 69 %, live." The POST endpoints (`/policy/reload` +
+  6.5 % to 88.5 %, live." The POST endpoints (`/policy/reload` +
   `/policy/eval`) make that a curl-only demo.
+- Layer 0 KFunc proven on 3 demo policies (pressure /
+  time_decay / size_aware) — all live-read kmod-side state
+  during on_evict decisions.
 
 ## What this does not cover
 
