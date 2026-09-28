@@ -212,4 +212,21 @@ struct s3fs_mark_dirty {
 #define S3FS_IOC_MARK_DIRTY \
 	_IOW(S3FS_IOC_MAGIC, 0x07, struct s3fs_mark_dirty)
 
+/*
+ * S3FS_IOC_STATS — read misc kmod-side counters that don't fit into
+ * the existing per-event streams. Extensible via `count` (in) /
+ * `filled` (out); daemon reads the first `filled` slots.
+ * Slot layout (additive-only, do not renumber):
+ *   [0] s3fs_evictions_total — policy-driven evictions from admits
+ */
+#define S3FS_STATS_MAX 16
+struct s3fs_stats {
+	__u32 count;             /* in: number of slots caller allocated */
+	__u32 filled;            /* out: number of slots kmod wrote */
+	__u64 values[S3FS_STATS_MAX];
+};
+
+#define S3FS_IOC_STATS \
+	_IOWR(S3FS_IOC_MAGIC, 0x08, struct s3fs_stats)
+
 #endif /* _S3FS_EBPF_UAPI_H */

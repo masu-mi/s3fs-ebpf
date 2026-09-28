@@ -319,6 +319,21 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			return -EFAULT;
 		return s3fs_ebpf_mark_dirty(req.ino);
 	}
+	case S3FS_IOC_STATS: {
+		struct s3fs_stats st;
+
+		if (copy_from_user(&st, uarg, sizeof(st)))
+			return -EFAULT;
+		if (st.count > S3FS_STATS_MAX)
+			st.count = S3FS_STATS_MAX;
+		memset(st.values, 0, sizeof(st.values));
+		if (st.count > 0)
+			st.values[0] = (u64)atomic_long_read(&s3fs_evictions_total);
+		st.filled = st.count;
+		if (copy_to_user(uarg, &st, sizeof(st)))
+			return -EFAULT;
+		return 0;
+	}
 	default:
 		return -ENOTTY;
 	}

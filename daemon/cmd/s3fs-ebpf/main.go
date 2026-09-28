@@ -441,6 +441,7 @@ func runFastpath(args []string) int {
 		reader.Close()
 	}()
 	go sampleCounters(ctx, progs, *sampleEvery)
+	go sampleKmodStats(ctx, *dev, 5*time.Second)
 	// Periodic bucket sync: keep kmod's entry table + daemon mirror
 	// aligned with S3 without re-mounting. New keys become visible
 	// via `ls`, deleted keys stop resolving. When admit state is
@@ -667,6 +668,29 @@ func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Dura
 			return
 		case <-t.C:
 			printCounters(progs, "sample")
+		}
+	}
+}
+
+// sampleKmodStats polls S3FS_IOC_STATS on a ticker so metrics.Global
+// mirrors kmod-side counters (currently just PolicyEvictionsTotal).
+// Independent from sampleCounters (BPF map) and samplePolicyStats
+// (policy program map) because the source of truth is different.
+func sampleKmodStats(ctx context.Context, devPath string, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			vals, err := readStats(devPath)
+			if err != nil {
+				continue
+			}
+			if len(vals) >= 1 {
+				metrics.Global.PolicyEvictionsTotal.Store(vals[0])
+			}
 		}
 	}
 }
