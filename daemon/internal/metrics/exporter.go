@@ -64,6 +64,11 @@ type Counters struct {
 // without threading a handle. Bumped from goroutines; atomics only.
 var Global Counters
 
+// ReloadHandler is the daemon-supplied POST /policy/reload handler
+// (registered by fastpath at startup). Left nil when no policy engine
+// is active; the endpoint returns 503.
+var ReloadHandler http.HandlerFunc
+
 // Serve starts the metrics HTTP endpoint. Blocks until the server exits.
 // Callers should invoke this on a goroutine.
 func Serve(addr string) error {
@@ -71,6 +76,13 @@ func Serve(addr string) error {
 	mux.HandleFunc("/metrics", handle)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("/policy/reload", func(w http.ResponseWriter, r *http.Request) {
+		if ReloadHandler == nil {
+			http.Error(w, "policy engine not active", http.StatusServiceUnavailable)
+			return
+		}
+		ReloadHandler(w, r)
 	})
 	return http.ListenAndServe(addr, mux)
 }

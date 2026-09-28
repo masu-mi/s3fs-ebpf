@@ -124,22 +124,38 @@ static int s3fs_policy_init_member(const struct btf_type *t,
 	return 0;
 }
 
-/* reg: publish the vtable to the RCU pointer. */
+/* reg: publish the vtable to the RCU pointer. Callable while another
+ * vtable is already active — hot reload flow attaches the new one
+ * before closing the old, so reg replaces the active pointer and the
+ * subsequent unreg on the old vtable must NOT clear the new one. */
 static int s3fs_policy_reg(void *kdata, struct bpf_link *link)
 {
 	struct s3fs_policy_ops *ops = kdata;
 
 	rcu_assign_pointer(s3fs_policy_active, ops);
-	pr_info("s3fs_ebpf: policy struct_ops registered\n");
+	pr_info("s3fs_ebpf: policy struct_ops registered (ops=%p)\n", ops);
 	return 0;
 }
 
-/* unreg: clear the vtable and wait for outstanding readers to drop. */
+/* unreg: clear the vtable only if the pointer still points at THIS
+ * kdata. During hot reload the new reg has already overwritten
+ * s3fs_policy_active before the old link's unreg fires; clearing
+ * unconditionally would strand kmod without an active policy while
+ * the new vtable is still attached. */
 static void s3fs_policy_unreg(void *kdata, struct bpf_link *link)
 {
-	rcu_assign_pointer(s3fs_policy_active, NULL);
-	synchronize_rcu();
-	pr_info("s3fs_ebpf: policy struct_ops unregistered\n");
+	struct s3fs_policy_ops *ops = kdata;
+	struct s3fs_policy_ops *cur;
+
+	cur = rcu_dereference_protected(s3fs_policy_active, 1);
+	if (cur == ops) {
+		rcu_assign_pointer(s3fs_policy_active, NULL);
+		synchronize_rcu();
+		pr_info("s3fs_ebpf: policy struct_ops unregistered (was active)\n");
+	} else {
+		pr_info("s3fs_ebpf: policy struct_ops unregistered (superseded, keeping %p)\n",
+			cur);
+	}
 }
 
 /* update: hot-swap the vtable atomically (single pointer swap). */

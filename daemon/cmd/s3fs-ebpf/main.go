@@ -17,9 +17,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -347,6 +350,46 @@ func runFastpath(args []string) int {
 		defer polProg.Close()
 		fmt.Printf("[policy-bpf] loaded %s (%d fentry hooks attached)\n",
 			bpfPath, polProg.AttachedCount())
+
+		// Wire up POST /policy/reload for hot swap. New program is
+		// loaded + attached BEFORE the old one is closed so the kmod
+		// side sees "new reg → old unreg (superseded)" and never
+		// goes without an active vtable (guarded by kmod-side
+		// s3fs_policy_unreg check).
+		metrics.ReloadHandler = func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			body, _ := io.ReadAll(r.Body)
+			target := string(body)
+			target = strings.TrimSpace(target)
+			if target == "" {
+				http.Error(w, "empty body: expected builtin:<name> or file:<path>",
+					http.StatusBadRequest)
+				return
+			}
+			newPath, err := policyprog.Resolve(target, repoRoot)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			newProg, err := policyprog.Load(newPath)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if err := newProg.Attach(); err != nil {
+				newProg.Close()
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			old := polProg
+			polProg = newProg
+			old.Close()
+			fmt.Printf("[policy-bpf] hot-reloaded %s → %s\n", old.Path, newPath)
+			fmt.Fprintf(w, "reloaded to %s\n", newPath)
+		}
 	}
 
 	// Bring the metrics endpoint up early so Prometheus scrapes
