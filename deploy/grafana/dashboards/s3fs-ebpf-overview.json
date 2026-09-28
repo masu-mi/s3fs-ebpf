@@ -269,6 +269,33 @@
         { "refId": "A", "expr": "sum(rate(s3fs_ebpf_read_miss_latency_seconds_bucket[1m])) by (le)", "format": "heatmap", "legendFormat": "{{le}}" }
       ],
       "options": { "calculate": false, "yAxis": { "unit": "s" }, "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64, "reverse": true } }
+    },
+    {
+      "id": 18,
+      "title": "Flush latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "description": "Daemon-side write-back path: readDirty + S3 PUT + arena admit refresh. Symmetric with the read-miss panel — together they show both directions of the miss/flush cycle.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 62 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(s3fs_ebpf_flush_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(s3fs_ebpf_flush_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(s3fs_ebpf_flush_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "mean", "max"] } }
+    },
+    {
+      "id": 19,
+      "title": "Flush latency distribution (heatmap)",
+      "type": "heatmap",
+      "description": "Full bucket distribution for the flush path.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 62 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(s3fs_ebpf_flush_latency_seconds_bucket[1m])) by (le)", "format": "heatmap", "legendFormat": "{{le}}" }
+      ],
+      "options": { "calculate": false, "yAxis": { "unit": "s" }, "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64, "reverse": true } }
     }
   ],
   "refresh": "5s",

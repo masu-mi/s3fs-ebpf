@@ -114,3 +114,14 @@ var ReadMissLatency = NewHistogram(
 	"Wall-clock time from receiving a read-miss upcall to signalAdmit.",
 	DefaultLatencyBounds,
 )
+
+// FlushLatency mirrors ReadMissLatency for the write-back path —
+// wall-clock time from dequeuing a flush event to completing the
+// S3 PUT + arena admit refresh. Failure branches (read-dirty,
+// PUT, admit) are observed too so the histogram shows real tail
+// behavior, not just the happy path.
+var FlushLatency = NewHistogram(
+	"s3fs_ebpf_flush_latency_seconds",
+	"Wall-clock time from dequeuing a flush event to completing S3 PUT + admit refresh.",
+	DefaultLatencyBounds,
+)

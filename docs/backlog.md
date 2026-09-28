@@ -154,6 +154,7 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 ### J. metric / observability 深化 (`be §4-3, §4-4`)
 
 - [x] ✅ **J-01 (part)** hand-rolled histogram で read-miss latency を計測 — 完 (I-05 と同 commit)。`s3fs_ebpf_read_miss_latency_seconds` histogram (13 bucket、[1ms..10s +Inf]) を Grafana dashboard に描画。client_golang 全面移行は残り (label 対応 / exemplar 使用時に着手予定)
+- [x] ✅ **J-01 (flush)** 対称に flush latency も histogram 化 — 完 (次 commit)。`FlushLatency` を追加して `handleFlush` を defer で計測 (readDirty + S3 Put + arena admit refresh の合計)。Grafana に p50/p95/p99 timeseries + heatmap の 2 panel 追加。smoke で 10 flush events (touch + write × 5) の分布 (2 in ≤5ms, 8 in 5-25ms) を実測
 - [ ] **J-02** `runtime/metrics` を expose (Go GC pause、goroutine 数)
 - [ ] **J-03** CPU% panel に nice / softirq / irq / steal を追加 (BPF fentry が softirq に載っているか観察)
 - [ ] **J-04** write throughput panel に req/s + bytes/req を legend で分解
