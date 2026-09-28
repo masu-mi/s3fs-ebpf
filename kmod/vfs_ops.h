@@ -65,5 +65,6 @@ int s3fs_ebpf_signal_admit(u64 ino, int err);
  */
 int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
+int  s3fs_ebpf_mark_dirty(u64 ino);
 
 #endif /* _S3FS_EBPF_VFS_OPS_H */

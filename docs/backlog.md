@@ -33,32 +33,23 @@
 
 ### A. FS 機能 (correctness / user-visible)
 
-- [ ] **A-01** daemon exit 時に SYNC clear ioctl を送る (`w4b §4-1`)  
-  現状 daemon SIGINT でも kmod dyn entries が残る。`defer syncEntriesIoctl(devPath, nil)` を追加。既存 `clearAdmits` と対称化。
-- [ ] **A-02** admit の cleanup を sync delta と連動 (`w4b §4-2`)  
-  S3 rm で sync が entry を落とすと dentry も消えるが admit hash に古い ino が残る (harmless だが肥大化)。sync round 直後に `admits = admits ∩ dyn_entries` を追加。
-- [ ] **A-03** flush PUT 失敗時に dirty flag を戻す (`w4c §4-2`)  
-  現状 PUT 失敗すると dirty=false のまま。次の write が無ければ再送されない。daemon 側で kmod に「flush failed」ioctl を送るか、fresh flush event を再 enqueue。
-- [ ] **A-04** warmFromS3 の "no S3 key mapping yet — Week 3" ログを削除 (`w4ac §5-2`)  
-  `main.go` に古いログ出しが残る。`fpebpf.LookupByIno` で置換 (log noise のみ、動作には影響なし)。
+- [x] ✅ **A-01** daemon exit 時に SYNC clear ioctl を送る (`w4b §4-1`) — 完 (次 commit)
+- [x] ✅ **A-02** admit の cleanup を sync delta と連動 (`w4b §4-2`) — 完 (次 commit)、`pruneAdmitsTo`
+- [x] ✅ **A-03** flush PUT 失敗時に dirty flag を戻す (`w4c §4-2`) — 完 (次 commit)、新 ioctl `S3FS_IOC_MARK_DIRTY`
+- [x] ✅ **A-04** warmFromS3 の "no S3 key mapping yet — Week 3" ログを削除 (`w4ac §5-2`) — 完 (次 commit)
 
 ### B. bench / 環境の使い勝手
 
-- [ ] **B-01** microbench 100k iters が s3fs-fuse で 8 分 (`be §4-1`)  
-  bench-latency.sh に `MICRO_ITERS` 環境変数を default 5000 に下げるか "quick mode" を切る。または fuse 側だけ iters を減らす。
-- [ ] **B-02** bench 中 SIGINT で microbench が panic (`be §4-1`)  
-  `open /mnt/s3fuse/hello.txt: no such file or directory` の log.Fatal → error return に。microbench.go:71 の `mustOp` を error 返却型に。
+- [x] ✅ **B-01** microbench 100k iters が s3fs-fuse で 8 分 (`be §4-1`) — 完 (次 commit)、default 100000 → 5000
+- [x] ✅ **B-02** bench 中 SIGINT で microbench が panic (`be §4-1`) — 完 (次 commit)、`mustOp` → `doOp` (error return)
 - [ ] **B-03** fuse mount が busy で umount 失敗する対策 (`be §4-2`)  
   bench script の trap で `umount -l` を fallback に。子 process が fuse fd を握っているケースで発生。
-- [ ] **B-04** `bench/runner.sh` + `bench/fio/*` + `bench/bcc/*` を削除 (`be §4-5`)  
-  Week 0 skeleton で実質使われていない (`make bench-dry` の存在確認だけ)。`bench-dry` target も同時に消せる。
-- [ ] **B-05** README.md 再生成 (`be §4-5`)  
-  `README.md.tmpl` の bench 節を更新済だが `make readme` を叩いていない。envsubst 経由なので 1 コマンド。
+- [x] ✅ **B-04** `bench/runner.sh` + `bench/fio/*` + `bench/bcc/*` を削除 (`be §4-5`) — 完 (次 commit)、Makefile bench-dry も同時削除
+- [x] ✅ **B-05** README.md 再生成 (`be §4-5`) — 完 (次 commit)
 
 ### C. Grafana / metric surface
 
-- [ ] **C-01** MinIO metric 名 version 依存の確認 (`be §4-3`)  
-  panel 12 `minio_s3_traffic_received_bytes` が 0 のとき、`curl http://localhost:9000/minio/v2/metrics/cluster` で実際の metric 名を確認して dashboard 更新。
+- [x] ✅ **C-01** MinIO metric 名 version 依存の確認 (`be §4-3`) — 完、`minio_s3_traffic_{received,sent}_bytes` は現行 MinIO で存在確認 (dashboard 変更不要)
 - [ ] **C-02** dashboard `rate(...[30s])` の window を `[1m]` に統一 (`be §4-3`)  
   Prometheus scrape 5s に対して 30s window は 6 サンプルで荒れる。1m に上げるか scrape interval を 1s に下げる。
 - [ ] **C-03** flush errors panel を stat + threshold に (`be §4-4`)  

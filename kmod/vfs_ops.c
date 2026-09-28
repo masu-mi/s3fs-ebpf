@@ -813,6 +813,28 @@ long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
 	return ret;
 }
 
+int s3fs_ebpf_mark_dirty(u64 ino)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+
+	if (!s3fs_active_sb)
+		return -ENODEV;
+	inode = ilookup(s3fs_active_sb, ino);
+	if (!inode)
+		return -ENOENT;
+	fd = inode->i_private;
+	if (!fd) {
+		iput(inode);
+		return -EIO;
+	}
+	mutex_lock(&fd->lock);
+	fd->dirty = true;
+	mutex_unlock(&fd->lock);
+	iput(inode);
+	return 0;
+}
+
 static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 						 size_t initial_size)
 {

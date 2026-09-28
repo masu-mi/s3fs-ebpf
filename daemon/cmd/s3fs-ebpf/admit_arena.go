@@ -68,6 +68,33 @@ func clearAdmits(devPath string) error {
 	return admitArena(devPath, nil)
 }
 
+// pruneAdmitsTo drops any admit whose ino is not in `keepInos`. Called
+// after a bucket sync when a key disappeared from S3: kmod's dyn entry
+// is already gone (shrink_dcache flushed the dentry), but the admit
+// hash keeps the orphan ino. Without this, long-running daemons leak
+// arena buffer + admit entries. See docs/week4b-implementation-notes.md
+// §4-2.
+func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
+	admitMu.Lock()
+	pruned := admits[:0]
+	dropped := 0
+	for _, e := range admits {
+		if _, ok := keepInos[e.Ino]; ok {
+			pruned = append(pruned, e)
+		} else {
+			dropped++
+		}
+	}
+	admits = pruned
+	snap := append([]admitEntry(nil), admits...)
+	admitMu.Unlock()
+	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
+	if dropped == 0 {
+		return nil // no delta, skip the ioctl
+	}
+	return admitArena(devPath, snap)
+}
+
 // admitArenaArg mirrors `struct s3fs_admit_arena`.
 type admitArenaArg struct {
 	Count   uint32

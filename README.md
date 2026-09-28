@@ -128,6 +128,11 @@ Commands:
                arena walker and print the verifier's rejection log
   s3-list      Connect to an S3-compatible endpoint and list a bucket
   s3-stat      Connect to an S3-compatible endpoint and stat a single object
+  probe-kvbase Week 4 (a) spike: create an arena, ioctl(/dev/s3fs_ebpf,
+               S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, print
+               it alongside the user-VM base for comparison
+  microbench   Week 4 (e): tight-loop stat/read latency on a target path,
+               reports min/p50/p95/p99/max (no fork/exec overhead)
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
 ```
@@ -180,9 +185,17 @@ Observability stack (docker compose):
   make compose-down   Stop the stack
   make compose-logs   Tail compose logs
 
-Benchmarks:
-  make bench          Run fio + BCC jobs (requires mounted target)
-  make bench-dry      Verify job files without running (dry-run)
+Runtime lifecycle (kmod + mount + daemon):
+  make mount          insmod kmod + mount -t s3fs_ebpf on /mnt/s3demo
+  make unmount        umount + rmmod (also stops any running daemon)
+  make daemon-run     Foreground: run bin/s3fs-ebpf fastpath (needs mount + compose-up)
+  make daemon-stop    SIGINT any running daemon
+
+Benchmarks (all auto-start compose-up requirement + kmod/mount/daemon in-script):
+  make bench          Latency bench (hyperfine + microbench + fio) vs s3fs-fuse
+  make bench-write    Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)
+  make bench-scale    Parallel scaling (numjobs=1..64) stat + read
+  make bench-3way     ebpf vs fuse-raw vs fuse-cache 3-way comparison
 
 Week 1 verification (requires 6.12+ kernel):
   make test-arena     insmod + run bpf_arena/KFunc round-trip probe + rmmod
@@ -459,16 +472,27 @@ AWS 本番 endpoint (`s3.us-west-2.amazonaws.com` 等) と IAM キーを指定�
 
 ## ベンチマーク
 
+`make bench*` 系は kmod insmod / mount / daemon 起動 / s3fs-fuse 対抗 mount / cleanup までを script 内 trap で完結させます。前提は `make compose-up` (MinIO/Prometheus/Grafana up) と `make all` (kmod + bpf + daemon 済) のみ:
+
 ```bash
-make bench              # 実行（要マウント）
-make bench-dry          # ジョブ定義の存在確認だけ
+make compose-up
+make all
+make bench              # latency bench (hyperfine + microbench + fio)     → /tmp/bench/
+make bench-write        # write-back throughput 1M/10M/100M                → /tmp/bench-write/
+make bench-scale        # 並列度スケール numjobs=1..64                     → /tmp/bench-scale/
+make bench-3way         # ebpf vs fuse-raw vs fuse-cache 3-way             → /tmp/bench-3way/
+make bench-dry          # 旧 runner.sh の存在確認だけ (Week 0/1 skeleton)
 ```
 
-- `bench/fio/stat_latency.fio` — `filestat` エンジンで 10,000 件の `stat` レイテンシ
-- `bench/fio/sequential_read.fio` — 大容量シーケンシャル read
-- `bench/bcc/vfs_latency.py` — `vfs_read` / `vfs_getattr` の log2 ヒストグラム
+計測 script は `scripts/bench-*.sh`。docs/benchmark-results.md §7-§10 に結果解釈。
 
-結果は `bench/results/<timestamp>/` へ。
+**手動ライフサイクル**:
+
+```bash
+make mount              # insmod + mount /mnt/s3demo
+make daemon-run         # daemon foreground; Ctrl+C で停止
+make unmount            # daemon-stop + umount + rmmod
+```
 
 ---
 
@@ -501,8 +525,7 @@ s3fs-ebpf/
 ├── include/         C/Go/eBPF 共有型定義
 ├── policies/        Lua/WASM キャッシュポリシー
 ├── deploy/          docker-compose（MinIO + Prom + Grafana + node_exporter）
-├── bench/           fio / BCC 性能試験ジョブ
-├── scripts/         セットアップ・ヘルパスクリプト
+├── scripts/         セットアップ・ヘルパスクリプト + bench (bench-latency/write/scale/3way)
 ├── docs/            設計 / 背景 / 先行研究
 ├── Makefile         トップレベル
 ├── README.md        自動生成

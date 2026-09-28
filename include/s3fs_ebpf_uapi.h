@@ -193,4 +193,23 @@ struct s3fs_read_dirty {
 #define S3FS_IOC_READ_DIRTY \
 	_IOWR(S3FS_IOC_MAGIC, 0x06, struct s3fs_read_dirty)
 
+/*
+ * S3FS_IOC_MARK_DIRTY — daemon → kmod: re-mark the ino's fd as dirty.
+ *
+ * Called by the daemon flush loop when a S3 PUT fails. Without this,
+ * .release cleared the dirty flag before enqueue, so a failed PUT
+ * would silently lose the write until the next user-driven write().
+ * Marking dirty again lets the next .release / .fsync re-enqueue.
+ *
+ * No completion signalling — the mark is fire-and-forget. If the
+ * inode has been evicted between .release and the PUT, kmod
+ * silently ignores the request (ino not in inode_hashtable).
+ */
+struct s3fs_mark_dirty {
+	__u64 ino;
+};
+
+#define S3FS_IOC_MARK_DIRTY \
+	_IOW(S3FS_IOC_MAGIC, 0x07, struct s3fs_mark_dirty)
+
 #endif /* _S3FS_EBPF_UAPI_H */
