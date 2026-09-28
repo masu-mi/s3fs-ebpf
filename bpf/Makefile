@@ -12,7 +12,8 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -mcpu=v3 \
 OBJS := s3fs_fastpath.bpf.o policy_observe.bpf.o \
         policy_freq2bit.bpf.o policy_freq2bit_ops.bpf.o \
         policy_lru_ops.bpf.o policy_sieve_ops.bpf.o \
-        policy_s3fifo_ops.bpf.o policy_wtinylfu_ops.bpf.o \
+        policy_s3fifo_ops.bpf.o \
+        policy_wtinylfu_ops.bpf.o policy_wtinylfu_full_ops.bpf.o \
         policy_pressure_ops.bpf.o policy_time_decay_ops.bpf.o \
         policy_size_aware_ops.bpf.o
 
