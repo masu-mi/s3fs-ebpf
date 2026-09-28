@@ -77,6 +77,7 @@ BTF_SET8_START(s3fs_policy_fmodret_ids)
 BTF_ID_FLAGS(func, s3fs_policy_on_admit)
 BTF_ID_FLAGS(func, s3fs_policy_on_evict)
 BTF_ID_FLAGS(func, s3fs_policy_on_pressure)
+BTF_ID_FLAGS(func, s3fs_policy_on_hit)
 BTF_SET8_END(s3fs_policy_fmodret_ids)
 
 static const struct btf_kfunc_id_set s3fs_policy_fmodret_set = {
