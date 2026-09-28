@@ -55,4 +55,19 @@ int BPF_PROG(observe_on_admit, __u64 count, __u64 arena_used_hint)
 	return 0;
 }
 
+/* Baseline observer for the per-folio hit hook. Rebuys the invocations
+ * counter so /metrics increments per hit — useful for smoke-checking
+ * that on_hit fires at the expected rate before switching to a real
+ * algorithm (SIEVE/LRU/S3-FIFO). No decision made. */
+SEC("fmod_ret/s3fs_policy_on_hit")
+int BPF_PROG(observe_on_hit, __u64 ino)
+{
+	__u32 k = PSTAT_INVOCATIONS;
+	__u64 *p = bpf_map_lookup_elem(&policy_stats, &k);
+
+	if (p)
+		__sync_fetch_and_add(p, 1);
+	return 0;
+}
+
 char _license[] SEC("license") = "GPL";

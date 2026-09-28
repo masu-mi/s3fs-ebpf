@@ -77,6 +77,25 @@ int s3fs_policy_ops_eval_pressure(u64 count, u64 threshold)
 	return ret;
 }
 
+/*
+ * on_hit fires on every read-path admit lookup that returned present
+ * (see s3fs_ebpf_read_folio). Called per folio, so it's the hottest
+ * of the four hooks — keep the wrapper lean and don't consume the
+ * return value; hit signals are advisory (recency / freq updates).
+ */
+int s3fs_policy_ops_eval_hit(u64 ino)
+{
+	struct s3fs_policy_ops *ops;
+	int ret = 0;
+
+	rcu_read_lock();
+	ops = rcu_dereference(s3fs_policy_active);
+	if (ops && ops->on_hit)
+		ret = ops->on_hit(ino);
+	rcu_read_unlock();
+	return ret;
+}
+
 /* --- struct_ops framework glue --- */
 
 /* CFI stubs. Modern kernels validate every indirect BPF call against
@@ -86,11 +105,13 @@ int s3fs_policy_ops_eval_pressure(u64 count, u64 threshold)
 static int __s3fs_stub_admit(u64 c, u64 h)     { return 0; }
 static int __s3fs_stub_evict(u64 ino)          { return 0; }
 static int __s3fs_stub_pressure(u64 c, u64 t)  { return 0; }
+static int __s3fs_stub_hit(u64 ino)            { return 0; }
 
 static struct s3fs_policy_ops s3fs_policy_cfi_stubs = {
 	.on_admit    = __s3fs_stub_admit,
 	.on_evict    = __s3fs_stub_evict,
 	.on_pressure = __s3fs_stub_pressure,
+	.on_hit      = __s3fs_stub_hit,
 };
 
 /* verifier_ops: minimal — allow the base helper set. */

@@ -380,6 +380,18 @@ noinline int s3fs_policy_on_pressure(u64 count, u64 threshold)
 	return s3fs_policy_default_ret;
 }
 
+/*
+ * on_hit: fires on every admit-hit in the read path. Policies use
+ * this signal to refresh recency (LRU seed) / bump frequency
+ * (S3-FIFO 2-bit counter) / set visited bit (SIEVE clock). Return
+ * value is currently ignored — hit signals are advisory.
+ */
+noinline int s3fs_policy_on_hit(u64 ino)
+{
+	(void)ino;
+	return s3fs_policy_default_ret;
+}
+
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			    const struct s3fs_admit_entry *entries,
 			    u32 count)
@@ -1293,6 +1305,11 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 
 	/* Fast path: admit hit. */
 	if (admit_snapshot(inode->i_ino, &uaddr, &asize, &mm) && mm) {
+		/* Notify policy programs — recency refresh / freq bump /
+		 * visited-bit set. Fires per folio in the hot read path;
+		 * keep the wrappers lean (see policy_struct_ops.c). */
+		s3fs_policy_on_hit(inode->i_ino);
+		(void)s3fs_policy_ops_eval_hit(inode->i_ino);
 		s3fs_folio_fill_from_arena(folio, fs_size, pos, mm, uaddr, asize);
 		goto out;
 	}

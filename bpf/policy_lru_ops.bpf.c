@@ -70,6 +70,7 @@ struct s3fs_policy_ops {
 	int (*on_admit)(__u64 count, __u64 arena_used_hint);
 	int (*on_evict)(__u64 ino);
 	int (*on_pressure)(__u64 count, __u64 threshold);
+	int (*on_hit)(__u64 ino);
 };
 
 SEC("struct_ops.s/on_admit")
@@ -123,11 +124,27 @@ int BPF_PROG(lru_pressure, __u64 count, __u64 threshold)
 	return 0;
 }
 
+/* on_hit: refresh the seed to the current epoch — "reset age". This is
+ * the whole reason a hit matters to LRU: an entry that keeps getting
+ * accessed keeps looking young to on_evict's `epoch - seed >= CAP_AGE`
+ * comparison. Fires per folio in the read hot path. */
+SEC("struct_ops.s/on_hit")
+int BPF_PROG(lru_hit, __u64 ino)
+{
+	__u32 k = 0;
+	__u64 *ep = bpf_map_lookup_elem(&lru_epoch, &k);
+	__u64 now = ep ? *ep : 0;
+
+	bpf_map_update_elem(&lru_seed, &ino, &now, BPF_ANY);
+	return 0;
+}
+
 SEC(".struct_ops.link")
 struct s3fs_policy_ops lru_ops = {
 	.on_admit    = (void *)lru_admit,
 	.on_evict    = (void *)lru_evict,
 	.on_pressure = (void *)lru_pressure,
+	.on_hit      = (void *)lru_hit,
 };
 
 char _license[] SEC("license") = "GPL";

@@ -19,7 +19,10 @@ struct s3fs_policy_ops {
 	int (*on_admit)(__u64 count, __u64 arena_used_hint);
 	int (*on_evict)(__u64 ino);
 	int (*on_pressure)(__u64 count, __u64 threshold);
+	int (*on_hit)(__u64 ino);
 };
+
+#define FREQ_MAX 3
 
 /* Per-ino 2-bit saturating frequency counter, same shape as the
  * fmod_ret variant. Missing key = never admitted. */
@@ -93,6 +96,24 @@ int BPF_PROG(s3fifo_pressure, __u64 count, __u64 threshold)
 	return 0;
 }
 
+/* Per-folio read-path signal: 2-bit saturating freq++. See the
+ * fmod_ret sibling policy_s3fifo.bpf.c for the algorithm rationale
+ * (kept in sync by hand — no shared header for BPF-side code). */
+SEC("struct_ops.s/on_hit")
+int BPF_PROG(s3fifo_hit, __u64 ino)
+{
+	__u8 *fp = bpf_map_lookup_elem(&s3fifo_freq, &ino);
+	__u8 seed = 1;
+
+	if (!fp) {
+		bpf_map_update_elem(&s3fifo_freq, &ino, &seed, BPF_ANY);
+		return 0;
+	}
+	if (*fp < FREQ_MAX)
+		*fp = *fp + 1;
+	return 0;
+}
+
 /* The struct_ops vtable. Field names must match kmod's `struct
  * s3fs_policy_ops` — verifier binds function pointers via BTF. */
 SEC(".struct_ops.link")
@@ -100,6 +121,7 @@ struct s3fs_policy_ops s3fifo_ops = {
 	.on_admit    = (void *)s3fifo_admit,
 	.on_evict    = (void *)s3fifo_evict,
 	.on_pressure = (void *)s3fifo_pressure,
+	.on_hit      = (void *)s3fifo_hit,
 };
 
 char _license[] SEC("license") = "GPL";

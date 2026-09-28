@@ -111,10 +111,13 @@ int BPF_PROG(s3fifo_on_pressure, __u64 count, __u64 threshold)
 	return 0;
 }
 
-/* Optional hit hook (not attached in the current spike; kept as a
- * reference for how a per-hit counter would look once we route
- * .read_folio hits through a policy hook). */
-static __always_inline int s3fifo_touch(__u64 ino)
+/* on_hit: per-folio access in the read path. Increments the 2-bit
+ * saturating freq (up to FREQ_MAX) so on_evict's decrement-or-vote
+ * step has a meaningful signal to work with. Fires on every folio,
+ * so keep it O(1). Missing key = never admitted; seed freq=1 rather
+ * than 0 so a first-time hit is "known active" from the start. */
+SEC("fmod_ret/s3fs_policy_on_hit")
+int BPF_PROG(s3fifo_on_hit, __u64 ino)
 {
 	__u8 *fp = bpf_map_lookup_elem(&s3fifo_freq, &ino);
 	__u8 seed = 1;

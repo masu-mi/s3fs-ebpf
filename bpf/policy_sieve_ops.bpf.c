@@ -64,6 +64,7 @@ struct s3fs_policy_ops {
 	int (*on_admit)(__u64 count, __u64 arena_used_hint);
 	int (*on_evict)(__u64 ino);
 	int (*on_pressure)(__u64 count, __u64 threshold);
+	int (*on_hit)(__u64 ino);
 };
 
 SEC("struct_ops.s/on_admit")
@@ -116,11 +117,25 @@ int BPF_PROG(sieve_pressure, __u64 count, __u64 threshold)
 	return 0;
 }
 
+/* on_hit: the missing piece for real SIEVE. Set visited=1 so a
+ * subsequent on_evict pass gives the entry the second-chance branch
+ * (clear + keep) instead of the eviction branch. Fires per folio in
+ * the read hot path; O(1) map update. */
+SEC("struct_ops.s/on_hit")
+int BPF_PROG(sieve_hit, __u64 ino)
+{
+	__u8 one = 1;
+
+	bpf_map_update_elem(&sieve_visited, &ino, &one, BPF_ANY);
+	return 0;
+}
+
 SEC(".struct_ops.link")
 struct s3fs_policy_ops sieve_ops = {
 	.on_admit    = (void *)sieve_admit,
 	.on_evict    = (void *)sieve_evict,
 	.on_pressure = (void *)sieve_pressure,
+	.on_hit      = (void *)sieve_hit,
 };
 
 char _license[] SEC("license") = "GPL";

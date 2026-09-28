@@ -87,5 +87,6 @@ void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow);
 int s3fs_policy_on_admit(u64 count, u64 arena_used_hint);
 int s3fs_policy_on_evict(u64 ino);
 int s3fs_policy_on_pressure(u64 count, u64 threshold);
+int s3fs_policy_on_hit(u64 ino);
 
 #endif /* _S3FS_EBPF_VFS_OPS_H */

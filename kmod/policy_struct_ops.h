@@ -23,6 +23,7 @@ struct s3fs_policy_ops {
 	int (*on_admit)(u64 count, u64 arena_used_hint);
 	int (*on_evict)(u64 ino);
 	int (*on_pressure)(u64 count, u64 threshold);
+	int (*on_hit)(u64 ino);
 };
 
 /* Kmod entry points: call these from hot paths in vfs_ops.c. Each
@@ -30,6 +31,7 @@ struct s3fs_policy_ops {
 int s3fs_policy_ops_eval_admit(u64 count, u64 arena_used_hint);
 int s3fs_policy_ops_eval_evict(u64 ino);
 int s3fs_policy_ops_eval_pressure(u64 count, u64 threshold);
+int s3fs_policy_ops_eval_hit(u64 ino);
 
 int  s3fs_policy_struct_ops_register(void);
 void s3fs_policy_struct_ops_unregister(void);
