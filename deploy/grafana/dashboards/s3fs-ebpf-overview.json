@@ -340,12 +340,40 @@
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
+    },
+    {
+      "id": 22,
+      "title": "Policy custom metric ($policy_metric_name)",
+      "type": "timeseries",
+      "description": "Gauge emitted by CEL policies via metric(name, value) — see policies/default.cel. Use the dropdown to pick which name to graph. All (default) overlays every metric on one panel.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 76 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "s3fs_ebpf_policy_metric{name=~\"$policy_metric_name\"}", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "mean", "max"] } }
     }
   ],
   "refresh": "5s",
   "schemaVersion": 39,
   "tags": ["s3fs-ebpf", "performance"],
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "policy_metric_name",
+        "label": "Policy metric",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(s3fs_ebpf_policy_metric, name)", "refId": "PrometheusVariableQueryEditor-VariableQuery" },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "sort": 1
+      }
+    ]
+  },
   "time": { "from": "now-15m", "to": "now" },
   "timezone": "",
   "title": "S3FS-eBPF Overview",

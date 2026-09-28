@@ -330,11 +330,17 @@ http://localhost:3000 → S3FS-eBPF Overview
 
 1. **Fast Path Hit Ratio** (top-left) — fentry から見た hit 率
 2. **Admits (arena entries)** — softcap 越えで policy が evict している
-3. **Read-miss latency (p50 / p95 / p99)** — upcall service 時間
-4. **Read-miss latency distribution (heatmap)** — tail の分布
-5. **Flush latency** — write-back の対称 panel
-6. **Policy hook rate** — 現 policy がどれくらい呼ばれてるか
-7. **Policy evictions** — 累計 / rate/s
+3. **kmod cache hit ratio (true)** — folio hits / (hits + upcalls) の
+   実 hit 率、閾値カラー付き
+4. **Read-miss latency (p50 / p95 / p99)** — upcall service 時間
+5. **Read-miss latency distribution (heatmap)** — tail の分布
+6. **Flush latency** — write-back の対称 panel
+7. **Policy hook rate** — 現 policy がどれくらい呼ばれてるか
+8. **Policy evictions** — 累計 / rate/s
+9. **Policy custom metric ($policy_metric_name)** — CEL の
+   metric(name, value) で emit された gauge を dropdown で切替表示。
+   `docs/hit-rate-bench.md` の bench で pubulish される
+   `last_entry_size` が見える
 
 ### say
 
