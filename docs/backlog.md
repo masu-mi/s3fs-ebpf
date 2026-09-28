@@ -114,14 +114,17 @@
 
 design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 architecture 決定済。実装は下記の順で:
 
-- [x] ✅ **P-01** `pe Q3` CEL syntax spike — 完 (次 commit)。`daemon/internal/policy/` + `policies/default.cel` を追加、`--policy` flag、prewarm hook が entry サイズ / 名前で判定。smoke: `size <= 32MiB && !name.endsWith(".log")` で 100m.bin と app.log が skip、Path C で cat 動作
+- [x] ✅ **P-01** `pe Q3` CEL syntax spike — 完 (commit 8cbc8d1)。`daemon/internal/policy/` + `policies/default.cel` を追加、`--policy` flag、prewarm hook が entry サイズ / 名前で判定
+- [x] ✅ **Layer 2 wiring** (P-01 の後続) — 完 (次 commit)。kmod に `s3fs_policy_on_admit` fentry anchor、`bpf/policy_observe.bpf.c` を出荷、daemon `--policy-bpf=builtin:policy_observe` で load + attach、policy_stats を /metrics に mirror
+- [x] ✅ **Layer 3 wiring** (P-01 の後続) — 完 (次 commit)。`--policy-bpf=file:<path>` で任意 .bpf.o を load、SEC 命名で attach、smoke で /tmp/user_policy.bpf.o の load + counter 増加を確認
 - [ ] **P-02** `pe Q4` in-flight semantics 検証 — `bpf_link_update` での差替え瞬間の event handling
 - [ ] **P-03** `pe Q6` metric API — policy 内 `metric("name", value)` の CEL 拡張関数、Prometheus export path
 - [ ] **P-04** `pe Q8` trace harness — event stream record 形式の設計
 - [ ] **P-05** `pe Q10` user eBPF 署名検証 — allowlist + SHA256 fingerprint + `load-bpf` API
-- [ ] **P-06** built-in policy として LRU / W-TinyLFU / S3-FIFO を出荷 (`pe §4.5.4`)
+- [ ] **P-06** built-in policy として LRU / W-TinyLFU / S3-FIFO を出荷 (`pe §4.5.4`) — observe を baseline に、algorithm 実装を .bpf.c で追加
 - [ ] **P-07** hit-rate 比較 bench を Week 4 (e) に追加 (`pe §7 backlog`)
 - [ ] **P-08** KFunc set の 1 次実装 (統計 accessor / primitive 操作 / signal detector) (`pe §4.5.1 Layer 0`)
+- [ ] **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 現状 on_admit のみ、eviction を BPF driven にするには hook 増設が必要
 
 ---
 

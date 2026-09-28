@@ -67,4 +67,12 @@ int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
 int  s3fs_ebpf_mark_dirty(u64 ino);
 
+/*
+ * Policy hook (Layer 2/3 fentry attach anchor). See
+ * docs/policy-engine-design.md §4.5. Called after every admit_replace
+ * with the resulting snapshot count and a best-effort arena usage
+ * hint. Body is a no-op — BPF programs supply the real behavior.
+ */
+noinline int s3fs_policy_on_admit(u64 count, u64 arena_used_hint);
+
 #endif /* _S3FS_EBPF_VFS_OPS_H */
