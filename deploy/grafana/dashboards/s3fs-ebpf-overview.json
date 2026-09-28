@@ -242,6 +242,33 @@
       ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 16,
+      "title": "Read-miss latency (p50 / p95 / p99)",
+      "type": "timeseries",
+      "description": "Daemon-side upcall service time (S3 Get + arena write + admit ioctl). Computed with histogram_quantile over 5m windows. p99 spikes track cold-object fetches; p50 is warm-hit-arena baseline.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum(rate(s3fs_ebpf_read_miss_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum(rate(s3fs_ebpf_read_miss_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum(rate(s3fs_ebpf_read_miss_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "mean", "max"] } }
+    },
+    {
+      "id": 17,
+      "title": "Read-miss latency distribution (heatmap)",
+      "type": "heatmap",
+      "description": "Full bucket distribution over time — dense stripes = steady behavior, scattered dots = tail spikes.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(s3fs_ebpf_read_miss_latency_seconds_bucket[1m])) by (le)", "format": "heatmap", "legendFormat": "{{le}}" }
+      ],
+      "options": { "calculate": false, "yAxis": { "unit": "s" }, "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64, "reverse": true } }
     }
   ],
   "refresh": "5s",
