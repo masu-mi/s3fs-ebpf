@@ -1007,6 +1007,7 @@ struct s3fs_flush_item {
 	u64 ino;
 	u64 size;
 	u32 name_len;
+	u32 flags;  /* S3FS_FLUSH_FLAG_* (E-03) */
 	char name[S3FS_SYNC_NAME_MAX + 1];
 };
 
@@ -1121,7 +1122,7 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 }
 
 static void flush_enqueue(u64 ino, u64 size,
-			  const char *name, size_t name_len)
+			  const char *name, size_t name_len, u32 flags)
 {
 	struct s3fs_flush_item *f;
 
@@ -1133,6 +1134,7 @@ static void flush_enqueue(u64 ino, u64 size,
 	f->ino = ino;
 	f->size = size;
 	f->name_len = name_len;
+	f->flags = flags;
 	memcpy(f->name, name, name_len);
 	spin_lock(&s3fs_flush_lock);
 	list_add_tail(&f->link, &s3fs_flush_queue);
@@ -1183,6 +1185,7 @@ int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
 	out->ino      = item.ino;
 	out->size     = item.size;
 	out->name_len = item.name_len;
+	out->flags    = item.flags;
 	memcpy(out->name, item.name, item.name_len);
 	out->name[item.name_len] = '\0';
 	return 0;
@@ -1806,12 +1809,15 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 		if (!p) {
 			/* Fall back to non-blocking on OOM — better a stale
 			 * dirty than a lost write. */
-			flush_enqueue(ino, size, name, name_len);
+			flush_enqueue(ino, size, name, name_len, 0);
 			return -ENOMEM;
 		}
 	}
 
-	flush_enqueue(ino, size, name, name_len);
+	/* wait=true marks the event as fsync-triggered so daemon skips
+	 * coalescing (E-03) — the caller is blocked, latency matters. */
+	flush_enqueue(ino, size, name, name_len,
+		      wait ? S3FS_FLUSH_FLAG_WAIT : 0);
 
 	if (p) {
 		long remaining = wait_for_completion_interruptible_timeout(
@@ -2002,8 +2008,10 @@ static int s3fs_ebpf_create(struct mnt_idmap *idmap, struct inode *dir,
 
 	/* Fire an empty flush so `touch newfile` becomes a 0-byte PUT
 	 * even without a subsequent write. The dentry name doubles as
-	 * the S3 key at PoC scope (flat bucket). */
-	flush_enqueue(ino, 0, le->name, nlen);
+	 * the S3 key at PoC scope (flat bucket). Coalescable — a
+	 * subsequent write's release/fsync would supersede this
+	 * placeholder without a network hit. */
+	flush_enqueue(ino, 0, le->name, nlen, 0);
 	return 0;
 }
 

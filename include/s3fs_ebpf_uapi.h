@@ -173,11 +173,18 @@ struct s3fs_sync_entries {
  * POP_FLUSH returns 0 with `event` populated on success, or -EAGAIN
  * when the queue is empty (non-blocking; daemon polls on a ticker).
  */
+/*
+ * flush flags (E-03):
+ *   FLUSH_FLAG_WAIT — fsync() caller is blocked on signal_flush.
+ *                     daemon must PUT immediately (no coalescing).
+ */
+#define S3FS_FLUSH_FLAG_WAIT 0x1U
+
 struct s3fs_flush_event {
 	__u64 ino;
 	__u64 size;      /* current buffer size at enqueue time */
 	__u32 name_len;
-	__u32 _pad;
+	__u32 flags;     /* S3FS_FLUSH_FLAG_* (E-03) */
 	char  name[S3FS_SYNC_NAME_MAX + 1];
 };
 

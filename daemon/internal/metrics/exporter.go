@@ -42,6 +42,10 @@ type Counters struct {
 	FlushBytes  atomic.Uint64 // counter, bytes PUT to S3
 	FlushErrors atomic.Uint64 // counter, PUT failures
 
+	// E-03 flush coalescer.
+	FlushCoalesced      atomic.Uint64 // counter, submitted to debounce
+	FlushCoalescedFired atomic.Uint64 // counter, PUTs issued (should be < Coalesced when bursts hit)
+
 	// admit table (arena content admission) — daemon-owned snapshot.
 	AdmitsCurrent atomic.Uint64 // gauge, len(admits) after last replace
 
@@ -138,6 +142,10 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_flush_events_total", "Flush events drained from the kmod queue.", "counter", Global.FlushEvents.Load()},
 		{"s3fs_ebpf_flush_bytes_total", "Bytes PUT to S3 by the flush loop.", "counter", Global.FlushBytes.Load()},
 		{"s3fs_ebpf_flush_errors_total", "PUT failures during flush.", "counter", Global.FlushErrors.Load()},
+
+		// E-03: coalescer counters.
+		{"s3fs_ebpf_flush_coalesced_total", "Flush events accepted by the debounce coalescer (excludes fsync FLUSH_WAIT bypass).", "counter", Global.FlushCoalesced.Load()},
+		{"s3fs_ebpf_flush_coalesced_fired_total", "Coalesced flush events that debounced through to a PUT. Coalesced - Fired = 'PUTs saved by coalescing'.", "counter", Global.FlushCoalescedFired.Load()},
 
 		// Admit table / arena.
 		{"s3fs_ebpf_admits_current", "Entries in the daemon-side admit snapshot.", "gauge", Global.AdmitsCurrent.Load()},

@@ -15,13 +15,18 @@ import (
 )
 
 // flushEvent mirrors `struct s3fs_flush_event`.
+// Flags carry S3FS_FLUSH_FLAG_* — currently only FLUSH_WAIT (fsync
+// path) which tells the coalescer to skip debounce.
 type flushEvent struct {
 	Ino     uint64
 	Size    uint64
 	NameLen uint32
-	_pad    uint32
+	Flags   uint32
 	Name    [syncNameMax + 1]byte
 }
+
+// flushFlagWait matches S3FS_FLUSH_FLAG_WAIT in the UAPI header.
+const flushFlagWait uint32 = 0x1
 
 // readDirtyArg mirrors `struct s3fs_read_dirty`.
 type readDirtyArg struct {
@@ -169,6 +174,12 @@ func readDirty(devFd int, ino uint64, buf []byte) (int, error) {
 //
 // s3c==nil disables PUTs but still drains the queue so kmod doesn't
 // grow unbounded when someone runs without --s3.
+//
+// E-03: events without FLUSH_FLAG_WAIT are debounced through the
+// coalescer so a rapid write+close storm collapses to one PUT per
+// ino per debounce window. fsync-triggered events (FLUSH_WAIT set)
+// bypass coalescing — the caller is blocked on signal_flush and
+// latency matters.
 func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 	s3c *s3.Client, interval time.Duration) {
 	if interval <= 0 {
@@ -181,6 +192,10 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 	}
 	defer f.Close()
 
+	coal := newCoalescer(int(f.Fd()), devPath, progs, s3c,
+		200*time.Millisecond)
+	defer coal.Shutdown()
+
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -188,13 +203,13 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			drainFlushQueue(ctx, int(f.Fd()), devPath, progs, s3c)
+			drainFlushQueue(ctx, int(f.Fd()), devPath, progs, s3c, coal)
 		}
 	}
 }
 
 func drainFlushQueue(ctx context.Context, devFd int, devPath string,
-	progs *fpebpf.Programs, s3c *s3.Client) {
+	progs *fpebpf.Programs, s3c *s3.Client, coal *coalescer) {
 	for {
 		var ev flushEvent
 		if err := popFlush(devFd, &ev); err != nil {
@@ -204,7 +219,20 @@ func drainFlushQueue(ctx context.Context, devFd int, devPath string,
 			fmt.Fprintf(os.Stderr, "[flush] pop: %v\n", err)
 			return
 		}
-		handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
+		// fsync-triggered (WAIT flag): fire straight through so the
+		// blocked caller returns as soon as PUT completes. All other
+		// events go through the debounce coalescer.
+		if ev.Flags&flushFlagWait != 0 || coal == nil {
+			// Drop any earlier debounced event for this ino so a
+			// stale close-event's PUT can't fire after ours and
+			// overwrite the fresh bytes.
+			if coal != nil {
+				coal.CancelIno(ev.Ino)
+			}
+			handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
+			continue
+		}
+		coal.submit(ctx, &ev)
 	}
 }
 
