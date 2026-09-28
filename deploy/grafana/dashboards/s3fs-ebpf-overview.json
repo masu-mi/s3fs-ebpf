@@ -203,6 +203,45 @@
         { "refId": "B", "expr": "rate(minio_s3_traffic_sent_bytes[30s])",     "legendFormat": "sent (downloaded)" }
       ],
       "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
+    },
+    {
+      "id": 13,
+      "title": "Policy hook rate (invocations / s)",
+      "type": "timeseries",
+      "description": "Rate of BPF policy on_admit hook invocations. Rises with sync + Path C activity. Zero when no --policy-bpf attached.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "rate(s3fs_ebpf_policy_hook_invocations_total[1m])", "legendFormat": "on_admit" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] }
+    },
+    {
+      "id": 14,
+      "title": "Policy evictions (total / rate)",
+      "type": "timeseries",
+      "description": "kmod side hash_del count driven by policy vote (struct_ops eval_evict return 1). Fires when admits exceed softcap (8). Cumulative counter + rate; a growing rate means the policy is actively pruning the admit table.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 38 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "s3fs_ebpf_policy_evictions_total",              "legendFormat": "cumulative" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_policy_evictions_total[1m])",    "legendFormat": "rate/s" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 15,
+      "title": "Policy state (last admit count)",
+      "type": "stat",
+      "description": "Snapshot count the policy BPF program last saw. Should track admits_current unless kmod eviction lags.",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "s3fs_ebpf_policy_last_admit_count", "legendFormat": "last admit_count" },
+        { "refId": "B", "expr": "s3fs_ebpf_admits_current",          "legendFormat": "daemon snapshot" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ],
   "refresh": "5s",
