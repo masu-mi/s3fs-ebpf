@@ -456,6 +456,7 @@ func runFastpath(args []string) int {
 	}()
 	go sampleCounters(ctx, progs, *sampleEvery)
 	go sampleKmodStats(ctx, *dev, 5*time.Second)
+	go drainEvictionsLoop(ctx, *dev, 2*time.Second)
 	// Periodic bucket sync: keep kmod's entry table + daemon mirror
 	// aligned with S3 without re-mounting. New keys become visible
 	// via `ls`, deleted keys stop resolving. When admit state is
@@ -682,6 +683,34 @@ func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Dura
 			return
 		case <-t.C:
 			printCounters(progs, "sample")
+		}
+	}
+}
+
+// drainEvictionsLoop polls S3FS_IOC_DRAIN_EVICTIONS and prunes the
+// daemon-side admit snapshot to match. Without this, daemon re-sends
+// evicted inos on the next admit_replace and kmod evicts them again
+// in a tight loop — visible in Grafana as admits_current staying
+// high while policy_evictions_total climbs monotonically.
+func drainEvictionsLoop(ctx context.Context, devPath string, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			evicted, overflow, err := drainEvictions(devPath)
+			if err != nil {
+				continue
+			}
+			if overflow > 0 {
+				fmt.Fprintf(os.Stderr, "[evict-drain] kmod queue overflow=%d (may need larger buffer)\n",
+					overflow)
+			}
+			if n := dropAdmits(evicted); n > 0 {
+				fmt.Printf("[evict-drain] dropped %d admits fed back from kmod\n", n)
+			}
 		}
 	}
 }

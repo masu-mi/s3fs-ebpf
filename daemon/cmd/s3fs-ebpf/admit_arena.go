@@ -68,6 +68,34 @@ func clearAdmits(devPath string) error {
 	return admitArena(devPath, nil)
 }
 
+// dropAdmits removes the listed inos from the daemon-side admit
+// snapshot without pushing to kmod (kmod already dropped them via
+// policy vote — pushing would re-add them). Called by the eviction
+// feedback goroutine after S3FS_IOC_DRAIN_EVICTIONS.
+func dropAdmits(evicted []uint64) int {
+	if len(evicted) == 0 {
+		return 0
+	}
+	skip := make(map[uint64]struct{}, len(evicted))
+	for _, ino := range evicted {
+		skip[ino] = struct{}{}
+	}
+	admitMu.Lock()
+	filtered := admits[:0]
+	dropped := 0
+	for _, e := range admits {
+		if _, ok := skip[e.Ino]; ok {
+			dropped++
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	admits = filtered
+	admitMu.Unlock()
+	metrics.Global.AdmitsCurrent.Store(uint64(len(filtered)))
+	return dropped
+}
+
 // pruneAdmitsTo drops any admit whose ino is not in `keepInos`. Called
 // after a bucket sync when a key disappeared from S3: kmod's dyn entry
 // is already gone (shrink_dcache flushed the dentry), but the admit
