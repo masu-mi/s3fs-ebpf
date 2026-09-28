@@ -1,0 +1,22 @@
+# default.cel — CEL policy spike (Week 4 (d) P-01)
+#
+# Format: one line per hook, `hook: <cel expression>`. Blank lines
+# and `#` comments allowed. Unknown hook names are ignored (forward
+# compat). See daemon/internal/policy/policy.go for the loader.
+#
+# Contract:
+#   entry.ino    (uint64)  daemon-assigned inode, stable within run
+#   entry.name   (string)  dentry basename
+#   entry.s3_key (string)  full S3 key (may contain '/')
+#   entry.size   (uint64)  S3 stat'd size in bytes
+#   entry.mode   (uint64)  Unix mode bits
+#
+# Hooks:
+#   prewarm: bool — should the daemon prewarm this entry at startup?
+#                    default (no policy loaded / eval err) = true
+
+# Prewarm everything ≤ 32 MiB except *.log files. Larger blobs and
+# rotating logs go through Path C (on-demand) instead — the write-back
+# for logs would fight the sync loop, and >32 MiB weights we'd rather
+# demand-load to keep arena churn low.
+prewarm: entry.size <= 33554432 && !entry.name.endsWith(".log")
