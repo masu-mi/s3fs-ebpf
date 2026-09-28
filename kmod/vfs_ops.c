@@ -450,20 +450,25 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		}
 	}
 
-	/* Policy hook fires after the admit snapshot lands. BPF programs
-	 * attach via fentry to observe / drive eviction. No-op in kmod;
-	 * see docs/policy-engine-design.md §4.5 Layer 2. */
+	/* Policy hook fires after the admit snapshot lands. Both attach
+	 * paths (fmod_ret + struct_ops) are consulted so either can be
+	 * active. See docs/policy-engine-design.md §4.5 Layer 2 and
+	 * docs/policy-attach-comparison.md for the trade-off. */
 	s3fs_policy_on_admit((u64)count, (u64)0);
+	(void)s3fs_policy_ops_eval_admit((u64)count, (u64)0);
 
 	/* Capacity pressure hook: fires when the new snapshot exceeds a
-	 * soft threshold (30 out of the hash's 64-bucket capacity at
+	 * soft threshold (half the hash's 64-bucket capacity at
 	 * S3FS_ADMIT_HASH_BITS=6). BPF programs use this as an advisory
 	 * signal to update ghost lists / freq sketches ahead of the
 	 * eviction round. Threshold is soft on purpose — daemon-side
 	 * pruneAdmitsTo is the actual enforcement path. */
-	if (count > (1u << S3FS_ADMIT_HASH_BITS) / 2)
+	if (count > (1u << S3FS_ADMIT_HASH_BITS) / 2) {
 		s3fs_policy_on_pressure((u64)count,
 					(u64)((1u << S3FS_ADMIT_HASH_BITS) / 2));
+		(void)s3fs_policy_ops_eval_pressure((u64)count,
+			(u64)((1u << S3FS_ADMIT_HASH_BITS) / 2));
+	}
 
 	/* Consult the policy on each entry in the new snapshot: 1 = evict
 	 * (skip re-add), 0 = keep. Return value now flows through fmod_ret
