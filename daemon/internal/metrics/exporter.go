@@ -53,6 +53,11 @@ type Counters struct {
 	// sample tick. Zero when no --policy-bpf is active.
 	PolicyHookInvocations atomic.Uint64 // counter
 	PolicyLastAdmitCount  atomic.Uint64 // gauge, last admit_replace snapshot count
+
+	// Cumulative admit-table evictions driven by the policy program
+	// (fmod_ret / struct_ops vote → kmod hash_del). Sourced from
+	// S3FS_IOC_STATS[0].
+	PolicyEvictionsTotal atomic.Uint64 // counter
 }
 
 // Global is a package-level sink so any component can bump counters
@@ -106,6 +111,7 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		// Layer 2/3 policy program hook counters.
 		{"s3fs_ebpf_policy_hook_invocations_total", "fentry invocations on s3fs_policy_on_admit (counted by the loaded policy BPF program).", "counter", Global.PolicyHookInvocations.Load()},
 		{"s3fs_ebpf_policy_last_admit_count", "Snapshot count from the last admit_replace, as recorded by the policy BPF program.", "gauge", Global.PolicyLastAdmitCount.Load()},
+		{"s3fs_ebpf_policy_evictions_total", "Admit-table entries removed by policy eviction votes (kmod-side hash_del).", "counter", Global.PolicyEvictionsTotal.Load()},
 	}
 	for _, m := range metrics {
 		fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)

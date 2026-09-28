@@ -36,11 +36,39 @@ type markDirtyArg struct {
 	Ino uint64
 }
 
+// statsArg mirrors `struct s3fs_stats`.
+const statsMax = 16
+type statsArg struct {
+	Count  uint32
+	Filled uint32
+	Values [statsMax]uint64
+}
+
 const (
 	s3fsIocPopFlush   = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x05
 	s3fsIocReadDirty  = (3 << 30) | (uint32(unsafe.Sizeof(readDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
 	s3fsIocMarkDirty  = (1 << 30) | (uint32(unsafe.Sizeof(markDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
+	s3fsIocStats      = (3 << 30) | (uint32(unsafe.Sizeof(statsArg{})) << 16) | (0xE3 << 8) | 0x08
 )
+
+// readStats issues S3FS_IOC_STATS and returns the value slots. Slot 0
+// is s3fs_evictions_total; slot layout is UAPI-defined additive-only.
+func readStats(devPath string) ([]uint64, error) {
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", devPath, err)
+	}
+	defer f.Close()
+	arg := statsArg{Count: statsMax}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
+		f.Fd(), uintptr(s3fsIocStats),
+		uintptr(unsafe.Pointer(&arg))); errno != 0 {
+		return nil, fmt.Errorf("ioctl STATS: %w", errno)
+	}
+	out := make([]uint64, arg.Filled)
+	copy(out, arg.Values[:arg.Filled])
+	return out, nil
+}
 
 // markDirty tells kmod to re-set fd->dirty for `ino` after a PUT
 // failure so the next .release/.fsync re-enqueues the flush event.

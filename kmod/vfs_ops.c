@@ -249,6 +249,11 @@ struct s3fs_admit {
 static DEFINE_HASHTABLE(s3fs_admits, S3FS_ADMIT_HASH_BITS);
 static DEFINE_SPINLOCK(s3fs_admits_lock);
 
+/* Cumulative count of admit entries removed by policy_ops eviction
+ * votes. Exposed via S3FS_IOC_STATS so the daemon can mirror it into
+ * the Prometheus endpoint. Monotonically increasing counter. */
+atomic_long_t s3fs_evictions_total = ATOMIC_LONG_INIT(0);
+
 /* Reference on the daemon's mm, held while the admit table is
  * non-empty. Dropped by shutdown or by replacing the admits with
  * count=0. All entries in the table share this single mm. */
@@ -421,14 +426,58 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 * see tree_traversal.c). Enforcement itself is still an advisory
 	 * count logged here — the daemon's prune loop consumes it via a
 	 * followup ioctl. */
+	/*
+	 * Policy vote consumption. For every ino in the freshly-admitted
+	 * snapshot, ask the loaded policy programs (fmod_ret and
+	 * struct_ops, whichever is attached) whether the entry should be
+	 * evicted. struct_ops wins when both are attached because it is
+	 * the primary path (see docs/policy-attach-comparison.md).
+	 *
+	 * Enforcement threshold: only apply eviction once the snapshot
+	 * exceeds a soft cap (S3FS_EVICT_SOFTCAP). This mirrors real
+	 * cache-management systems that let a warm-up phase happen
+	 * before applying pressure, and avoids gratuitous churn on tiny
+	 * working sets.
+	 */
 	{
-		u32 fmodret_votes = 0, structops_votes = 0;
+		u32 fmodret_votes = 0, structops_votes = 0, evicted = 0;
+		const u32 softcap = 8;
 
 		for (i = 0; i < count; i++) {
-			if (s3fs_policy_on_evict(entries[i].ino) != 0)
+			int fr_vote = s3fs_policy_on_evict(entries[i].ino);
+			int so_vote = s3fs_policy_ops_eval_evict(entries[i].ino);
+
+			if (fr_vote != 0)
 				fmodret_votes++;
-			if (s3fs_policy_ops_eval_evict(entries[i].ino) != 0)
+			if (so_vote != 0)
 				structops_votes++;
+
+			/* Enforcement: struct_ops has priority; fmod_ret is
+			 * advisory when both are attached. */
+			if (count <= softcap)
+				continue;
+			if (so_vote != 0 || fr_vote != 0) {
+				struct s3fs_admit *a;
+				struct hlist_node *tmp;
+				unsigned int bucket;
+				bool dropped = false;
+
+				spin_lock(&s3fs_admits_lock);
+				hash_for_each_possible_safe(s3fs_admits, a, tmp,
+							    node, entries[i].ino) {
+					if (a->ino != entries[i].ino)
+						continue;
+					hash_del(&a->node);
+					kfree(a);
+					dropped = true;
+					break;
+				}
+				spin_unlock(&s3fs_admits_lock);
+				if (dropped) {
+					evicted++;
+					(void)bucket; /* silence unused var on some kbuild variants */
+				}
+			}
 		}
 		if (fmodret_votes)
 			pr_info("s3fs_ebpf: fmod_ret voted evict on %u/%u entries\n",
@@ -436,6 +485,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		if (structops_votes)
 			pr_info("s3fs_ebpf: struct_ops voted evict on %u/%u entries\n",
 				structops_votes, count);
+		if (evicted) {
+			atomic_long_add(evicted, &s3fs_evictions_total);
+			pr_info("s3fs_ebpf: policy evicted %u entries (softcap=%u)\n",
+				evicted, softcap);
+		}
 	}
 	return 0;
 

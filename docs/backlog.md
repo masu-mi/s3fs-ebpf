@@ -126,7 +126,8 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [ ] **P-08** KFunc set の 1 次実装 (統計 accessor / primitive 操作 / signal detector) (`pe §4.5.1 Layer 0`)
 - [x] ✅ **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 完 (commit 6c29b2e)。`s3fs_policy_on_evict(ino)` / `s3fs_policy_on_pressure(count, threshold)` の 2 hook を追加、admit_replace が毎 entry / capacity 越えで発火。BPF 側は evict_vote map に vote 書込 (verifier が fentry return を 0 固定強制するため side channel)。daemon-side vote 消費は future work
 - [x] ✅ **P-10 fmod_ret 化** — 完 (次 commit)。register_btf_fmodret_id_set で hook を fmod_ret 対象に、`return 1` が kmod call site の retval に naturally 反映。side-channel map 削除、smoke で "policy voted evict on 11/12 entries" 観測
-- [x] ✅ **P-11 struct_ops 化** — 完 (次 commit)。`struct s3fs_policy_ops` を kmod に定義 + `register_bpf_struct_ops`、BPF は SEC(".struct_ops.link") vtable で書く。rcu_dereference で atomic hot swap。smoke で "struct_ops voted evict on 11/12 entries" 観測。fmod_ret と struct_ops の比較 doc は docs/policy-attach-comparison.md
+- [x] ✅ **P-11 struct_ops 化** — 完 (commit c62d8dc)。`struct s3fs_policy_ops` を kmod に定義 + `register_bpf_struct_ops`、BPF は SEC(".struct_ops.link") vtable で書く。rcu_dereference で atomic hot swap。smoke で "struct_ops voted evict on 11/12 entries" 観測。fmod_ret と struct_ops の比較 doc は docs/policy-attach-comparison.md
+- [x] ✅ **P-12 vote 消費 (actual eviction)** — 完 (次 commit)。admit_replace が struct_ops eval_evict の retval を消費し、softcap 超過時に admit hash から実 hash_del。s3fs_evictions_total atomic counter + S3FS_IOC_STATS ioctl で daemon に export、metrics.PolicyEvictionsTotal → Prometheus。smoke で 11 entries が softcap=8 で evicted、`s3fs_ebpf_policy_evictions_total 11` を実測
 
 ---
 

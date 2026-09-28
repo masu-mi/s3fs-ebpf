@@ -67,6 +67,11 @@ int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
 int  s3fs_ebpf_mark_dirty(u64 ino);
 
+/* Cumulative policy-driven evictions from the admit table. Exposed
+ * via a new stats ioctl for daemon-side Prometheus export. */
+#include <linux/atomic.h>
+extern atomic_long_t s3fs_evictions_total;
+
 /*
  * Policy hooks (Layer 2/3 fentry attach anchors). See
  * docs/policy-engine-design.md §4.5. Bodies are no-ops — BPF programs
