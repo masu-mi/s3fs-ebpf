@@ -1,0 +1,34 @@
+# SHA256 allowlist for user-supplied policy .bpf.o files (Layer 3).
+#
+# Format:  <sha256-hex>  <description>
+#
+# One entry per line. `#` starts a comment; blank lines allowed.
+# Descriptions are free-form and logged on match.
+#
+# builtin:<name> loads (e.g. builtin:policy_sieve_ops) SKIP this
+# check — those are engine-shipped and covered by the repo's CI.
+# The allowlist gates ONLY file:<path> and bare-path arguments to
+# --policy-bpf and POST /policy/reload.
+#
+# To compute a hash for a new user policy:
+#
+#   sha256sum path/to/user_policy.bpf.o
+#
+# Then append the (hash description) pair here and restart the
+# daemon (allowlist is loaded once at startup by design).
+#
+# ----------------------------------------------------------------
+# Example entries — replace with real hashes before enabling.
+# ----------------------------------------------------------------
+
+# Tenant-A tuned S3-FIFO variant (higher M-tier threshold)
+# 0000000000000000000000000000000000000000000000000000000000000000  tenant-a-s3fifo
+
+# Legacy LRU-K for the reporting pipeline
+# 1111111111111111111111111111111111111111111111111111111111111111  reporting-lrufixed
+
+# NOTE: an empty allowlist file (this file with all example lines
+# commented out) means "no user .bpf.o is approved" — every file:
+# load will be rejected. That is the strict-secure default. To
+# disable the allowlist entirely, omit --policy-allowlist on the
+# daemon command line.

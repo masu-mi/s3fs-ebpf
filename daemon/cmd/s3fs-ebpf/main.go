@@ -290,6 +290,11 @@ func runFastpath(args []string) int {
 		"path to a CEL policy file (see policies/default.cel). Empty disables the policy engine (default prewarm=all).")
 	policyBPF := fs.String("policy-bpf", "",
 		"policy program: 'builtin:<name>' (repo bpf/<name>.bpf.o) or 'file:<path>' (Layer 3 user .bpf.o). Empty disables policy hook.")
+	policyAllowlist := fs.String("policy-allowlist", "",
+		"path to SHA256 allowlist (see policies/allowlist.example.txt). "+
+			"When set, `file:` / bare-path policy loads and /policy/reload "+
+			"requests must hash to an allowlisted entry. builtin: bypasses. "+
+			"Empty disables verification (dev/demo default).")
 	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
 	fs.Parse(args)
 
@@ -332,11 +337,42 @@ func runFastpath(args []string) int {
 		}
 		policyBPFEffective = celName
 	}
+	// Optional allowlist for user eBPF (Layer 3). When --policy-allowlist
+	// is unset the daemon runs permissive — every `file:` load is
+	// accepted (dev default). When set, the file must exist and each
+	// non-builtin load is SHA256-checked. Missing allowlist file is a
+	// startup error to avoid silent-permissive-when-you-meant-strict.
+	var allowlist *policyprog.Allowlist
+	if *policyAllowlist != "" {
+		allowlist, err = policyprog.LoadAllowlist(*policyAllowlist)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "policy-allowlist: %v\n", err)
+			return 1
+		}
+		fmt.Printf("[allowlist] %s: %d approved user .bpf.o hashes (builtin bypasses)\n",
+			allowlist.Path(), allowlist.Size())
+	}
+
+	// verifyIfUser gates the SHA256 check to `file:`-style loads.
+	// builtin: is engine-shipped and skips verification. Kept as a
+	// closure so the reload handler and initial load share exactly
+	// one policy for what "user-supplied" means.
+	verifyIfUser := func(arg, path string) error {
+		if strings.HasPrefix(arg, "builtin:") {
+			return nil
+		}
+		return allowlist.Verify(path)
+	}
+
 	var polProg *policyprog.Program
 	if bpfPath, err := policyprog.Resolve(policyBPFEffective, repoRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "policy-bpf: %v\n", err)
 		return 1
 	} else if bpfPath != "" {
+		if err := verifyIfUser(policyBPFEffective, bpfPath); err != nil {
+			fmt.Fprintf(os.Stderr, "policy-bpf: %v\n", err)
+			return 1
+		}
 		polProg, err = policyprog.Load(bpfPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "policy-bpf load: %v\n", err)
@@ -372,6 +408,13 @@ func runFastpath(args []string) int {
 			newPath, err := policyprog.Resolve(target, repoRoot)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// Allowlist gate — same policy as the startup load path.
+			// Reject user-supplied hashes not in the list; builtin: is
+			// engine-shipped and bypasses.
+			if err := verifyIfUser(target, newPath); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
 			newProg, err := policyprog.Load(newPath)
