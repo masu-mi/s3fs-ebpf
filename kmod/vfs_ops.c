@@ -49,6 +49,7 @@
 #include <linux/wait.h>
 
 #include "vfs_ops.h"
+#include "policy_struct_ops.h"
 
 /* S3FS_EBPF_MAGIC lives in the shared header so the BPF fentry hook can
  * filter by super_block::s_magic without a second source of truth. */
@@ -297,22 +298,36 @@ static void admit_clear_locked(void)
  * fentry attachment. Bodies wrap args in asm volatile so -O2 doesn't
  * drop them. See docs/policy-engine-design.md §4.5.
  */
+/* fmod_ret trampolines override our return value at runtime, but the
+ * compiler doesn't know that — a plain `return 0;` gets constant-
+ * propagated into the caller and the whole check becomes dead code.
+ * `asm volatile("" : "+r"(ret) :: "memory")` marks the value opaque,
+ * so GCC keeps the load and honors whatever the trampoline stores. */
+/* Default returns are held in module-scope volatiles so GCC can't
+ * prove them constant across the call. Without this the caller's
+ * `if (s3fs_policy_on_evict(ino) != 0)` gets constant-folded to
+ * `if (false)` and the entire evict-count loop is removed — fmod_ret
+ * overrides the runtime return, but the compiler still sees zero. */
+static volatile int s3fs_policy_default_ret;
+
 noinline int s3fs_policy_on_admit(u64 count, u64 arena_used_hint)
 {
-	asm volatile("" :: "r"(count), "r"(arena_used_hint));
-	return 0;
+	(void)count;
+	(void)arena_used_hint;
+	return s3fs_policy_default_ret;
 }
 
 noinline int s3fs_policy_on_evict(u64 ino)
 {
-	asm volatile("" :: "r"(ino));
-	return 0; /* default: don't evict; BPF override returns 1 to evict */
+	(void)ino;
+	return s3fs_policy_default_ret;
 }
 
 noinline int s3fs_policy_on_pressure(u64 count, u64 threshold)
 {
-	asm volatile("" :: "r"(count), "r"(threshold));
-	return 0;
+	(void)count;
+	(void)threshold;
+	return s3fs_policy_default_ret;
 }
 
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
@@ -401,13 +416,27 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 					(u64)((1u << S3FS_ADMIT_HASH_BITS) / 2));
 
 	/* Consult the policy on each entry in the new snapshot: 1 = evict
-	 * (skip re-add to the daemon-visible snapshot next round), 0 =
-	 * keep. BPF uses its own state maps (LRU tail, freq bucket) to
-	 * decide. Result is currently advisory — the daemon's prune loop
-	 * is where the vote is enforced (§P-09 spike scope; wiring the
-	 * kmod-side enforcement is a follow-up). */
-	for (i = 0; i < count; i++)
-		(void)s3fs_policy_on_evict(entries[i].ino);
+	 * (skip re-add), 0 = keep. Return value now flows through fmod_ret
+	 * (kmod registered these hooks via register_btf_fmodret_id_set;
+	 * see tree_traversal.c). Enforcement itself is still an advisory
+	 * count logged here — the daemon's prune loop consumes it via a
+	 * followup ioctl. */
+	{
+		u32 fmodret_votes = 0, structops_votes = 0;
+
+		for (i = 0; i < count; i++) {
+			if (s3fs_policy_on_evict(entries[i].ino) != 0)
+				fmodret_votes++;
+			if (s3fs_policy_ops_eval_evict(entries[i].ino) != 0)
+				structops_votes++;
+		}
+		if (fmodret_votes)
+			pr_info("s3fs_ebpf: fmod_ret voted evict on %u/%u entries\n",
+				fmodret_votes, count);
+		if (structops_votes)
+			pr_info("s3fs_ebpf: struct_ops voted evict on %u/%u entries\n",
+				structops_votes, count);
+	}
 	return 0;
 
 out_free_staged:

@@ -31,7 +31,7 @@ struct {
 	__uint(max_entries, PSTAT_MAX);
 } policy_stats SEC(".maps");
 
-SEC("fentry/s3fs_policy_on_admit")
+SEC("fmod_ret/s3fs_policy_on_admit")
 int BPF_PROG(observe_on_admit, __u64 count, __u64 arena_used_hint)
 {
 	__u32 k;

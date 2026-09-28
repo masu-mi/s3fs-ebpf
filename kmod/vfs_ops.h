@@ -74,8 +74,8 @@ int  s3fs_ebpf_mark_dirty(u64 ino);
  * consumed by callers (kmod side) as advisory when the hook is
  * BPF-overridden.
  */
-noinline int s3fs_policy_on_admit(u64 count, u64 arena_used_hint);
-noinline int s3fs_policy_on_evict(u64 ino);
-noinline int s3fs_policy_on_pressure(u64 count, u64 threshold);
+int s3fs_policy_on_admit(u64 count, u64 arena_used_hint);
+int s3fs_policy_on_evict(u64 ino);
+int s3fs_policy_on_pressure(u64 count, u64 threshold);
 
 #endif /* _S3FS_EBPF_VFS_OPS_H */

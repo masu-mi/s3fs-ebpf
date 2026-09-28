@@ -12,6 +12,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 
+#include "policy_struct_ops.h"
 #include "s3fs_ebpf_dev.h"
 #include "tree_traversal.h"
 #include "vfs_ops.h"
@@ -61,6 +62,12 @@ static int __init s3fs_ebpf_init(void)
 		unregister_filesystem(&s3fs_ebpf_fs_type);
 		s3fs_kfunc_unregister();
 		return ret;
+	}
+
+	ret = s3fs_policy_struct_ops_register();
+	if (ret) {
+		pr_warn("s3fs_ebpf: struct_ops register failed: %d (fmod_ret path still works)\n", ret);
+		/* Non-fatal — fmod_ret path is available independently. */
 	}
 
 	pr_info("s3fs_ebpf: loaded (skeleton)\n");

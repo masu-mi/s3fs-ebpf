@@ -124,7 +124,9 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **P-06 (S3-FIFO 部分)** built-in policy として S3-FIFO を出荷 — 完 (次 commit)。`bpf/policy_s3fifo.bpf.c` に 3 hook + freq map + evict_vote map。verifier 通過、3 fentry attach、smoke で invocations 増加確認。LRU / W-TinyLFU は同 shape の template として続く
 - [ ] **P-07** hit-rate 比較 bench を Week 4 (e) に追加 (`pe §7 backlog`)
 - [ ] **P-08** KFunc set の 1 次実装 (統計 accessor / primitive 操作 / signal detector) (`pe §4.5.1 Layer 0`)
-- [x] ✅ **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 完 (次 commit)。`s3fs_policy_on_evict(ino)` / `s3fs_policy_on_pressure(count, threshold)` の 2 hook を追加、admit_replace が毎 entry / capacity 越えで発火。BPF 側は evict_vote map に vote 書込 (verifier が fentry return を 0 固定強制するため side channel)。daemon-side vote 消費は future work
+- [x] ✅ **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 完 (commit 6c29b2e)。`s3fs_policy_on_evict(ino)` / `s3fs_policy_on_pressure(count, threshold)` の 2 hook を追加、admit_replace が毎 entry / capacity 越えで発火。BPF 側は evict_vote map に vote 書込 (verifier が fentry return を 0 固定強制するため side channel)。daemon-side vote 消費は future work
+- [x] ✅ **P-10 fmod_ret 化** — 完 (次 commit)。register_btf_fmodret_id_set で hook を fmod_ret 対象に、`return 1` が kmod call site の retval に naturally 反映。side-channel map 削除、smoke で "policy voted evict on 11/12 entries" 観測
+- [x] ✅ **P-11 struct_ops 化** — 完 (次 commit)。`struct s3fs_policy_ops` を kmod に定義 + `register_bpf_struct_ops`、BPF は SEC(".struct_ops.link") vtable で書く。rcu_dereference で atomic hot swap。smoke で "struct_ops voted evict on 11/12 entries" 観測。fmod_ret と struct_ops の比較 doc は docs/policy-attach-comparison.md
 
 ---
 
