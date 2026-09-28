@@ -73,8 +73,7 @@
 
 - [x] ✅ **E-01** `.fsync` を blocking にする — 完 (次 commit)。read-miss と同 pattern (`struct s3fs_flush_pending` + `wait_for_completion_interruptible_timeout` + `S3FS_IOC_SIGNAL_FLUSH`) で fsync が daemon PUT 完了まで blocking 化。`.release` は fire-and-forget のまま (close(2) を hang させない)。daemon は PUT 各 return path で signal_flush ioctl、-ENOENT は fire-and-forget path として silent 扱い。smoke で 27B write → fsync=91ms (blocked)、no-op fsync=8μs (dirty=false 早期 return) の 10000× 差を実測。3 mode 化 (eager / sync-fsync / sync-write) は未実装、現在 sync-fsync のみ POSIX 相当
 - [x] ✅ **E-02** `.unlink` + `.rename` 対応 — 完 (次 commit)。unlink 側は kmod に delete queue + S3FS_IOC_POP_DELETE (0x0B)、`.unlink` op が local remove + admit drop + enqueue + drop_nlink、daemon runDeleteLoop が s3c.Delete。rename 側は同 pattern で rename queue + S3FS_IOC_POP_RENAME (0x0C) + `.rename` op (RENAME_NOREPLACE のみ、cross-dir EXDEV)、daemon runRenameLoop が s3c.Rename (server-side CopyObject + Delete)、ino → S3Key mapping 更新。smoke で unlink (touch+fsync → S3 に landed → rm → S3 から消失) + rename (before.txt → after.txt を S3 側で server-side 移動) の両 E2E path 検証
-- [ ] **E-03** flush の coalescing (`w4c §4-5`)  
-  現状 close ごとに 1 PUT。「N ms dirty のまま or M bytes 溜まったら fsync」相当の coalescer。close-driven でも実用上は問題ない (優先度 low)。
+- [x] ✅ **E-03** flush coalescing — 完 (次 commit)。daemon 側 per-ino debounce coalescer (default 200 ms) を追加、rapid open+write+close 連打を 1 PUT にまとめる。UAPI struct s3fs_flush_event の空き _pad を `flags` に流用、`S3FS_FLUSH_FLAG_WAIT` bit で fsync 経路 (blocking waiter) を marking、daemon はこの flag で coalescer bypass + `CancelIno` により pending の古い event を破棄 (stale event が fsync bytes を上書きするのを防ぐ)。coalesced/fired カウンタを /metrics に追加 (差 = "PUTs saved"). smoke で 5× write+close → 6 event coalesce → 1 PUT (`iter 4` = latest wins)、fsync + close → immediate PUT (`fsync data preserved` 保持) を両方実測
 
 ### F. dynamic sync 強化 (`w4b §4`)
 
