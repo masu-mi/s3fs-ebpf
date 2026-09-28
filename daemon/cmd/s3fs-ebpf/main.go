@@ -606,7 +606,10 @@ func runFastpath(args []string) int {
 	}()
 	go sampleCounters(ctx, progs, *sampleEvery)
 	go sampleKmodStats(ctx, *dev, 5*time.Second)
-	go drainEvictionsLoop(ctx, *dev, 2*time.Second)
+	go drainEvictionsLoop(ctx, *dev, progs, 2*time.Second)
+	// D-02 arena free-list gauge sampler — separate goroutine so
+	// /metrics stays fresh regardless of evict cadence.
+	go sampleArenaFree(ctx, progs, 5*time.Second)
 	// Periodic bucket sync: keep kmod's entry table + daemon mirror
 	// aligned with S3 without re-mounting. New keys become visible
 	// via `ls`, deleted keys stop resolving. When admit state is
@@ -847,7 +850,10 @@ func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Dura
 // evicted inos on the next admit_replace and kmod evicts them again
 // in a tight loop — visible in Grafana as admits_current staying
 // high while policy_evictions_total climbs monotonically.
-func drainEvictionsLoop(ctx context.Context, devPath string, every time.Duration) {
+//
+// D-02: `progs` is threaded so dropAdmits can return arena chunks
+// to the free-list (fpebpf.Programs.FreeArenaChunk).
+func drainEvictionsLoop(ctx context.Context, devPath string, progs *fpebpf.Programs, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -863,7 +869,7 @@ func drainEvictionsLoop(ctx context.Context, devPath string, every time.Duration
 				fmt.Fprintf(os.Stderr, "[evict-drain] kmod queue overflow=%d (may need larger buffer)\n",
 					overflow)
 			}
-			if n := dropAdmits(evicted); n > 0 {
+			if n := dropAdmits(evicted, progs); n > 0 {
 				fmt.Printf("[evict-drain] dropped %d admits fed back from kmod\n", n)
 			}
 		}
@@ -892,6 +898,28 @@ func sampleKmodStats(ctx context.Context, devPath string, every time.Duration) {
 			if len(vals) >= 2 {
 				metrics.Global.FolioHits.Store(vals[1])
 			}
+		}
+	}
+}
+
+// sampleArenaFree keeps arena_free_bytes / arena_free_chunks
+// gauges up to date. Runs on a separate goroutine because the
+// free-list update runs from drainEvictionsLoop (evict-triggered)
+// but /metrics needs a steady-state view.
+func sampleArenaFree(ctx context.Context, progs *fpebpf.Programs, every time.Duration) {
+	if progs == nil {
+		return
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			bytes, chunks := progs.ArenaFreeStats()
+			metrics.Global.ArenaFreeBytes.Store(bytes)
+			metrics.Global.ArenaFreeChunks.Store(uint64(chunks))
 		}
 	}
 }

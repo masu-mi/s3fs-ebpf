@@ -153,6 +153,30 @@ func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
 	return nil
 }
 
+// GetRange fetches `size` bytes starting at `offset` from `key`.
+// Uses S3 HTTP Range GET so only the requested chunk crosses the
+// wire — critical for D-01's partial-admit path where a 100 MiB
+// blob might only need a 4 MiB slice loaded into arena. Local disk
+// cache is skipped for range GETs (cache layer keys on whole
+// object; extending it to sub-object ranges is followup).
+func (c *Client) GetRange(ctx context.Context, key string, offset int64, size int64) ([]byte, error) {
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(offset, offset+size-1); err != nil {
+		return nil, fmt.Errorf("s3 range set: %w", err)
+	}
+	obj, err := c.mc.GetObject(ctx, c.cfg.Bucket, key, opts)
+	if err != nil {
+		return nil, fmt.Errorf("s3 range get %q [%d,%d): %w",
+			key, offset, offset+size, err)
+	}
+	defer obj.Close()
+	buf, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, fmt.Errorf("s3 range get %q read: %w", key, err)
+	}
+	return buf, nil
+}
+
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if c.cfg.CacheDir != "" {
 		if buf, ok := c.readCache(key); ok {
