@@ -31,7 +31,7 @@ ZIPF_ALPHA=${ZIPF_ALPHA:-0.9}   # skew — smaller = more uniform
 SETTLE=${SETTLE:-15}            # seconds between prewarm and workload
 SYNC_EVERY=${SYNC_EVERY:-3s}    # daemon --sync-every value
 POST=${POST:-8}                 # counter mirror lag after workload
-POLICIES=${POLICIES:-observe s3fifo_ops lru_ops sieve_ops}
+POLICIES=${POLICIES:-observe freq2bit_ops lru_ops sieve_ops s3fifo_ops}
 OUT=${OUT:-/tmp/bench-hitrate}
 
 mkdir -p "$OUT"
@@ -133,8 +133,8 @@ start_stack() {
 		sleep 0.2
 	done
 	log "$pol: prewarm done, forcing 4 policy eval rounds to converge below softcap"
-	# SIEVE needs 3 rounds (grace → clear → evict); LRU + S3-FIFO
-	# converge faster but do no harm here. Sleep between so the
+	# SIEVE needs 3 rounds (grace → clear → evict); LRU / freq2bit
+	# / S3-FIFO converge faster but do no harm here. Sleep between so the
 	# evict-drain feedback loop (2s interval) removes evicted inos
 	# from the daemon snapshot before the next round.
 	local i

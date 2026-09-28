@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // policy_sieve_ops — SIEVE (NSDI 2024, Zhang et al) as a Layer 2
-// struct_ops policy. Third built-in beside S3-FIFO and LRU so hit-rate
+// struct_ops policy. Sibling built-in with LRU / S3-FIFO / freq2bit so hit-rate
 // bench (P-07) has a modern low-overhead algorithm to compare against.
 //
 // Original SIEVE: a single FIFO of admitted items + a per-item visited

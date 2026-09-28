@@ -1,12 +1,14 @@
 # fmod_ret vs struct_ops — Layer 2 attach pattern の比較評価
 
-Week 4 (d) Layer 2 で policy BPF program の attach pattern を fmod_ret と struct_ops の 2 方式で実装し、同一 algorithm (S3-FIFO) を両方で動作させた。実測に基づく比較と recommendation。
+Week 4 (d) Layer 2 で policy BPF program の attach pattern を fmod_ret と struct_ops の 2 方式で実装し、同一 algorithm を両方で動作させた。実測に基づく比較と recommendation。
+
+**Naming note (Oct 2026)**: 本節で「S3-FIFO」と書かれた実装は当時のファイル名で、実際は single-tier 2-bit reference counter だった。honest naming の追加で `policy_freq2bit(_ops)` に rename 済 (`docs/hit-rate-bench.md` 参照)。attach pattern (fmod_ret vs struct_ops) の比較には algorithm 選択は影響しない — 「per-hook attach vs 1 vtable atomic swap」の構造比較としてそのまま読める。
 
 対応 commit: (次 commit) `fmod_ret 化 + struct_ops 化 + 両方併存で voted evict 経路検証`
 
 対応 ソース:
-- **fmod_ret**: `kmod/tree_traversal.c` の `BTF_SET8_START(s3fs_policy_fmodret_ids)` + `bpf/policy_s3fifo.bpf.c` の `SEC("fmod_ret/s3fs_policy_on_*")`
-- **struct_ops**: `kmod/policy_struct_ops.{c,h}` + `bpf/policy_s3fifo_ops.bpf.c` の `SEC(".struct_ops.link") struct s3fs_policy_ops`
+- **fmod_ret**: `kmod/tree_traversal.c` の `BTF_SET8_START(s3fs_policy_fmodret_ids)` + `bpf/policy_freq2bit.bpf.c` の `SEC("fmod_ret/s3fs_policy_on_*")` (旧 `policy_s3fifo.bpf.c`)
+- **struct_ops**: `kmod/policy_struct_ops.{c,h}` + `bpf/policy_freq2bit_ops.bpf.c` の `SEC(".struct_ops.link") struct s3fs_policy_ops` (旧 `policy_s3fifo_ops.bpf.c`)
 
 ---
 
@@ -18,7 +20,7 @@ Week 4 (d) Layer 2 で policy BPF program の attach pattern を fmod_ret と st
 |---|---:|---:|---:|
 | kmod 側 infrastructure | ~15 (BTF_SET8 + register 1 呼出) | **220** (policy_struct_ops.{c,h} = 183+37) | +205 |
 | kmod call site の追加 (直接呼び) | 3 hook × 1 呼出 = 3 行 | + rcu_dereference wrapper 呼び 3 行 | ± 0 |
-| BPF program 側 | 131 行 (policy_s3fifo.bpf.c) | 105 行 (policy_s3fifo_ops.bpf.c、side-channel map 不要でむしろ short) | -26 |
+| BPF program 側 | 131 行 (policy_freq2bit.bpf.c) | 105 行 (policy_freq2bit_ops.bpf.c、side-channel map 不要でむしろ short) | -26 |
 | daemon loader 側 | fentry attach + multi-link 対応 15 行 | + struct_ops attach path 20 行 | +5 |
 | **合計** | **~150 行** | **~350 行** | **+200 行 (+130%)** |
 
@@ -148,8 +150,8 @@ struct s3fs_policy_ops s3fifo_ops = { .on_evict = ..., ... };
 
 **s3fs-ebpf 期間中は struct_ops を primary に格上げ、fmod_ret は互換用に維持**:
 
-1. `--policy-bpf=builtin:policy_s3fifo_ops` を Meetup demo 用 default に
-2. `--policy-bpf=builtin:policy_s3fifo` (fmod_ret 版) は「fine-grained per-hook attach」の option として残す
+1. `--policy-bpf=builtin:policy_sieve_ops` を Meetup demo 用 default に (hit-rate bench で最高)
+2. `--policy-bpf=builtin:policy_freq2bit` (fmod_ret 版) は「fine-grained per-hook attach」の option として残す
 3. 新 algorithm (LRU / SIEVE / W-TinyLFU) は struct_ops 版 (`policy_lru_ops.bpf.c` 等) を先に書く
 4. kmod 側 call site から fmod_ret hook の呼出は残す (無害、性能影響も無視できる)。fmod_ret が attach されていなければ return 0、struct_ops が attach されていれば struct_ops vote を採用
 

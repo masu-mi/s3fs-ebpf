@@ -4,8 +4,8 @@
 //
 // Attaches to kmod's s3fs_policy_on_admit fentry anchor. Increments
 // a per-invocation counter and stamps the last-seen (count, hint)
-// tuple. Real algorithms (LRU / W-TinyLFU / S3-FIFO) will follow
-// the same shape: SEC("fentry/s3fs_policy_on_admit") + BPF_PROG(...)
+// tuple. Real algorithms (SIEVE / LRU / S3-FIFO / freq2bit) live in
+// their sibling files: SEC("fentry/s3fs_policy_on_admit") + BPF_PROG(...)
 // reading kernel args, writing decisions to a shared BPF map.
 //
 // This one intentionally does *no* eviction — it's the observability
@@ -58,7 +58,7 @@ int BPF_PROG(observe_on_admit, __u64 count, __u64 arena_used_hint)
 /* Baseline observer for the per-folio hit hook. Rebuys the invocations
  * counter so /metrics increments per hit — useful for smoke-checking
  * that on_hit fires at the expected rate before switching to a real
- * algorithm (SIEVE/LRU/S3-FIFO). No decision made. */
+ * algorithm (SIEVE/LRU/S3-FIFO/freq2bit). No decision made. */
 SEC("fmod_ret/s3fs_policy_on_hit")
 int BPF_PROG(observe_on_hit, __u64 ino)
 {
