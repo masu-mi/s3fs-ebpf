@@ -7,13 +7,14 @@
 /*
  * s3fs_policy_ops — the vtable BPF struct_ops programs implement.
  *
- * BPF side (see bpf/policy_s3fifo_ops.bpf.c):
+ * BPF side (see bpf/policy_sieve_ops.bpf.c for the simplest example):
  *
  *   SEC(".struct_ops.link")
- *   struct s3fs_policy_ops s3fifo_ops = {
+ *   struct s3fs_policy_ops <name>_ops = {
  *       .on_admit    = (void *)my_on_admit,
  *       .on_evict    = (void *)my_on_evict,
  *       .on_pressure = (void *)my_on_pressure,
+ *       .on_hit      = (void *)my_on_hit,
  *   };
  *
  * kmod side dispatches via rcu_dereference'd pointer; the whole

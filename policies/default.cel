@@ -26,6 +26,12 @@
 # demand-load to keep arena churn low.
 prewarm: entry.size <= 33554432 && !entry.name.endsWith(".log")
 
-# Global policy selection: struct_ops S3-FIFO for atomic hot swap +
-# fmod_ret return-value dispatch (see docs/policy-attach-comparison.md).
-policy: "builtin:policy_s3fifo_ops"
+# Global policy selection: struct_ops SIEVE — best-in-class hit rate
+# on the Zipf micro-bench (see docs/hit-rate-bench.md) and cheapest
+# per-op (1-bit visited state). Swap at runtime via POST
+# /policy/reload — no daemon restart. Alternative built-ins:
+#   builtin:policy_lru_ops       coarse-grained LRU by admit-epoch
+#   builtin:policy_s3fifo_ops    3-tier S3-FIFO (Yang et al 2023)
+#   builtin:policy_freq2bit_ops  single-tier 2-bit reference counter
+#   builtin:policy_observe       no eviction, baseline for measurement
+policy: "builtin:policy_sieve_ops"

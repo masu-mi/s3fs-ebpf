@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0
 //
 // policy_lru_ops — approximate LRU (admit-order FIFO) as a Layer 2
-// struct_ops policy. Second built-in beside policy_s3fifo_ops so
-// `--policy-bpf` / CEL selection has a real alternative to swap to.
+// struct_ops policy. Sibling built-in alongside policy_s3fifo_ops
+// (3-tier S3-FIFO) and policy_freq2bit_ops so `--policy-bpf` / CEL
+// selection has real alternatives to swap to.
 //
 // "Approximate" because we don't have an on_hit hook (that's the
 // super-hot, per-read path handled by the kernel's built-in
@@ -14,8 +15,8 @@
 //                        subsequent → if (epoch - seed) > cap_age, evict
 //
 // Effectively: entries admitted more than cap_age epochs ago are
-// candidates for eviction. Compared with S3-FIFO's 2-bit freq
-// counter, LRU here degrades linearly with age rather than reserving
+// candidates for eviction. Compared with freq2bit's 2-bit counter,
+// LRU here degrades linearly with age rather than reserving
 // "recently reheated" entries. Both algorithms are visible via the
 // same policy_stats map for daemon-side reads.
 
@@ -23,8 +24,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-/* Same shape as policy_s3fifo_ops so the daemon's policyprog reader
- * works unchanged (Stats, hook signatures, license). */
+/* Same shape as the other struct_ops policies so the daemon's
+ * policyprog reader works unchanged (Stats, hook signatures, license). */
 enum {
 	PSTAT_INVOCATIONS = 0,
 	PSTAT_LAST_COUNT  = 1,
@@ -64,7 +65,7 @@ struct {
  * the smoke tests. */
 #define LRU_CAP_AGE 3ULL
 
-/* Mirror kmod/policy_struct_ops.h. See policy_s3fifo_ops.bpf.c for
+/* Mirror kmod/policy_struct_ops.h. See policy_sieve_ops.bpf.c for
  * the shape rationale (BTF relocation binds by member name). */
 struct s3fs_policy_ops {
 	int (*on_admit)(__u64 count, __u64 arena_used_hint);

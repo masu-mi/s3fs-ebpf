@@ -109,7 +109,7 @@ func (p *Program) attachTracing() error {
 func (p *Program) attachStructOps() error {
 	// struct_ops maps carry the vtable. Find the one named after our
 	// kmod-registered type. Instance names come from the BPF source
-	// (`struct s3fs_policy_ops s3fifo_ops = { ... }`).
+	// (`struct s3fs_policy_ops <name>_ops = { ... }`, e.g. sieve_ops).
 	for name, m := range p.Coll.Maps {
 		if m.Type() != ebpf.StructOpsMap {
 			continue
@@ -153,7 +153,7 @@ func (p *Program) ReadStat(slot uint32) (uint64, error) {
 }
 
 // AttachedCount returns how many fentry links are live (useful for
-// smoke-verifying multi-hook programs like S3-FIFO).
+// smoke-verifying multi-hook programs like the freq2bit fmod_ret set).
 func (p *Program) AttachedCount() int { return len(p.Links) }
 
 // Resolve turns a --policy-bpf argument into a concrete .bpf.o path.

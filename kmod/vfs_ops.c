@@ -383,7 +383,7 @@ noinline int s3fs_policy_on_pressure(u64 count, u64 threshold)
 /*
  * on_hit: fires on every admit-hit in the read path. Policies use
  * this signal to refresh recency (LRU seed) / bump frequency
- * (S3-FIFO 2-bit counter) / set visited bit (SIEVE clock). Return
+ * (freq2bit / real S3-FIFO 3-tier) / set visited bit (SIEVE clock). Return
  * value is currently ignored — hit signals are advisory.
  */
 noinline int s3fs_policy_on_hit(u64 ino)
