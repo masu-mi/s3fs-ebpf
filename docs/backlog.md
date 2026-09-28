@@ -122,7 +122,8 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [ ] **P-03 (rest)** `pe Q6` metric API — policy 内 `metric("name", value)` の CEL 拡張関数、Prometheus export path (label 対応が要)
 - [ ] **P-04** `pe Q8` trace harness — event stream record 形式の設計
 - [ ] **P-05** `pe Q10` user eBPF 署名検証 — allowlist + SHA256 fingerprint + `load-bpf` API
-- [x] ✅ **P-06 (S3-FIFO 部分)** built-in policy として S3-FIFO を出荷 — 完 (次 commit)。`bpf/policy_s3fifo.bpf.c` に 3 hook + freq map + evict_vote map。verifier 通過、3 fentry attach、smoke で invocations 増加確認。LRU / W-TinyLFU は同 shape の template として続く
+- [x] ✅ **P-06 (S3-FIFO 部分)** built-in policy として S3-FIFO を出荷 — 完 (commit 6c29b2e / c62d8dc)。`bpf/policy_s3fifo.bpf.c` (fmod_ret) + `bpf/policy_s3fifo_ops.bpf.c` (struct_ops) の 2 版
+- [x] ✅ **P-06 (LRU 部分)** LRU-like (admit-order FIFO) を追加 — 完 (次 commit)。`bpf/policy_lru_ops.bpf.c` に struct_ops で。global epoch counter + per-ino seed で age-based eviction (LRU_CAP_AGE=3)。同 commit で kmod call site の bug fix (struct_ops on_admit/pressure が呼ばれていなかった)。smoke で "struct_ops voted evict on 11/14 entries" 実測。W-TinyLFU / SIEVE も同 template で追加可能
 - [ ] **P-07** hit-rate 比較 bench を Week 4 (e) に追加 (`pe §7 backlog`)
 - [ ] **P-08** KFunc set の 1 次実装 (統計 accessor / primitive 操作 / signal detector) (`pe §4.5.1 Layer 0`)
 - [x] ✅ **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 完 (commit 6c29b2e)。`s3fs_policy_on_evict(ino)` / `s3fs_policy_on_pressure(count, threshold)` の 2 hook を追加、admit_replace が毎 entry / capacity 越えで発火。BPF 側は evict_vote map に vote 書込 (verifier が fentry return を 0 固定強制するため side channel)。daemon-side vote 消費は future work
