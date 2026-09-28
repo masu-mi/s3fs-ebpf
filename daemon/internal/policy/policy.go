@@ -19,6 +19,9 @@ import (
 
 	"cel.dev/cel-go/cel"
 	"cel.dev/cel-go/common/types"
+	"cel.dev/cel-go/common/types/ref"
+
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 )
 
 // EntryInput is the shape the CEL expression sees as `entry`. Kept
@@ -162,7 +165,47 @@ func (e *Engine) EvalPolicyName() string {
 func buildEnv() (*cel.Env, error) {
 	return cel.NewEnv(
 		cel.Variable("entry", cel.MapType(cel.StringType, cel.DynType)),
+		// metric(name, value) — side-effect: publish `value` as a
+		// gauge under `s3fs_ebpf_policy_metric{name=<name>}`. Always
+		// returns true so it can chain in `&&` expressions:
+		//
+		//   prewarm: metric("eligible_bytes", entry.size) &&
+		//            entry.size <= 33554432
+		//
+		// dyn value → float64: accepts int, uint, or double from CEL.
+		// Names past metrics.CustomGaugeCap are silently dropped.
+		cel.Function("metric",
+			cel.Overload("metric_string_dyn",
+				[]*cel.Type{cel.StringType, cel.DynType},
+				cel.BoolType,
+				cel.BinaryBinding(metricFn),
+			),
+		),
 	)
+}
+
+// metricFn is the CEL bridge to metrics.RecordCustom. Extracts a
+// float64 from any numeric CEL value (int/uint/double) and drops the
+// rest with a stderr note. Returns True unconditionally so an
+// error-shaped drop still lets the surrounding expression proceed.
+func metricFn(nameVal, valueVal ref.Val) ref.Val {
+	name, ok := nameVal.(types.String)
+	if !ok {
+		return types.True
+	}
+	var f float64
+	switch v := valueVal.(type) {
+	case types.Int:
+		f = float64(v)
+	case types.Uint:
+		f = float64(v)
+	case types.Double:
+		f = float64(v)
+	default:
+		return types.True
+	}
+	metrics.RecordCustom(string(name), f)
+	return types.True
 }
 
 func compileHook(env *cel.Env, expr string) (cel.Program, error) {
