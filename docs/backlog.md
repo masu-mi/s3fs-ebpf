@@ -170,7 +170,7 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 ### L. narrative / docs
 
-- [ ] **L-01** Meetup 登壇 script の起草 (`motivation.md §7-9` の内容ベース)
+- [x] ✅ **L-01** Meetup 登壇 script の起草 — 完 (次 commit)。`docs/demo-scenario.md` に Demo 0-8 の完全 script (35 min 想定タイム配分 + 各節 run / expected / say + 質疑応答想定 + 会場で刺さらなかった時の fallback)。demo 手順を再現可能な shell command 列で書き起こしてある
 - [ ] **L-02** README.md 再生成 (B-05 と同項目)
 - [ ] **L-03** 各 doc の相互リンク整理 (現状ハイパーリンクが手書きで壊れやすい)
 
