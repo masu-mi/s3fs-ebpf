@@ -149,4 +149,5 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 	// after the flat counters/gauges so the text-format parser
 	// order matches Prometheus's expected grouping.
 	ReadMissLatency.writeTo(w)
+	FlushLatency.writeTo(w)
 }

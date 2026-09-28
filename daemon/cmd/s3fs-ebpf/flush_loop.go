@@ -192,6 +192,15 @@ func drainFlushQueue(ctx context.Context, devFd int, devPath string,
 func handleFlush(ctx context.Context, devFd int, devPath string,
 	progs *fpebpf.Programs, s3c *s3.Client, ev *flushEvent) {
 	metrics.Global.FlushEvents.Add(1)
+	// Time the full flush service path (readDirty + S3 Put +
+	// arena admit refresh). Defer covers every return branch so
+	// the histogram reflects Put-failure retries and no-backend
+	// drops, not just the success path — matches the symmetric
+	// handleReadMiss timing added in 1cd4d37.
+	flush_started := time.Now()
+	defer func() {
+		metrics.FlushLatency.Observe(time.Since(flush_started))
+	}()
 	name := string(ev.Name[:ev.NameLen])
 
 	// Resolve S3 key: prefer the sync-mirrored entry, fall back to
