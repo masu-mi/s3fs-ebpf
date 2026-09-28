@@ -18,19 +18,51 @@ Runs via `./scripts/bench-hitrate.sh`.
   `admit_snapshot()` miss → path-C upcall). Rate =
   `(N_ACCESS - Δmisses) / N_ACCESS`.
 
-## Result (2026-09-28, 全 9 policy 揃い)
+## Result (2026-09-28, 全 10 policy 揃い + full W-TinyLFU 追加)
 
 ```
-policy=observe         hits=  200  misses=    0  rate=100.00%  evictions=    0
-policy=freq2bit_ops    hits=   13  misses=  187  rate=  6.50%  evictions=11468
-policy=lru_ops         hits=   15  misses=  185  rate=  7.50%  evictions=11278
-policy=time_decay_ops  hits=   61  misses=  139  rate= 30.50%  evictions= 6488
-policy=s3fifo_ops      hits=   92  misses=  108  rate= 46.00%  evictions=  991
-policy=pressure_ops    hits=  108  misses=   92  rate= 54.00%  evictions= 1704
-policy=size_aware_ops  hits=  130  misses=   70  rate= 65.00%  evictions=  475
-policy=sieve_ops       hits=  132  misses=   68  rate= 66.00%  evictions=  447
-policy=wtinylfu_ops    hits=  177  misses=   23  rate= 88.50%  evictions=  161
+policy=observe            100.00%    0 evict
+policy=wtinylfu_ops        88.50%  161 evict   ← CMS + aging (scoped)
+policy=size_aware_ops      66.00%  475 evict
+policy=sieve_ops           65.00%  475 evict
+policy=s3fifo_ops          64.00%  862 evict
+policy=pressure_ops        52.00% 1836 evict
+policy=wtinylfu_full_ops   49.50% 4554 evict   ← Window + DK + CMS + aging (paper)
+policy=time_decay_ops      35.00% 5612 evict
+policy=lru_ops             13.00% 9884 evict
+policy=freq2bit_ops        10.50% 10320 evict
 ```
+
+### The W-TinyLFU paradox: paper-complete regresses vs scoped
+
+Two W-TinyLFU variants ship:
+- **`wtinylfu_ops`** — CMS + aging only (88.5 %). Ships as default.
+- **`wtinylfu_full_ops`** — paper-complete: Window LRU tier + Doorkeeper
+  Bloom filter + CMS + aging (49.5 %). Uses `bpf_loop()` for both
+  the CMS-halve and doorkeeper-clear iterations.
+
+**Full variant regresses ~40 pp on this bench** because the paper's
+{Window, Doorkeeper} components are tuned for workloads with many
+one-hit wonders and long-lived working sets. Ours has 30 files each
+accessed ~7 times average — no cold noise for the doorkeeper to
+filter, no bursty new admits for the window tier to buffer. The
+extra machinery just filters useful signal:
+
+- **Doorkeeper**: every ino's first hit per DK-reset cycle goes to
+  the Bloom filter, NOT to the CMS. On a 200-access workload with
+  30 files that's ~6-7 filtered hits per ino out of ~7 total → CMS
+  starves.
+- **Window tier**: new admits wait up to `WINDOW_MAX_ROUNDS=8`
+  rounds in W before promotion to Main. During the bench's 4 forced
+  eval rounds (before workload starts), items sit in W with CMS=0
+  and can be evicted before their first real hit.
+
+This is a genuine case where paper-complete ≠ best. Full W-TinyLFU
+shines on workloads with `capacity ≪ working_set` and heavy tail
+distributions (Caffeine's typical target); our micro-bench is the
+opposite shape. See `bpf/policy_wtinylfu_full_ops.bpf.c` header for
+the tuning knobs (`WINDOW_MAX_ROUNDS`, `PROMOTE_THRESHOLD`,
+`DK_RESET_INTERVAL`) that operators can shift for their workload.
 
 **W-TinyLFU リードが確立** (88.5 %、次位 SIEVE 66 % との差 22 pp)。
 CMS + aging の組合せが Zipf 型 workload で強い。以下 3 tier に
@@ -112,11 +144,11 @@ numbers.
   (DECAY_NS=5s). Access-pattern-agnostic → suffers on
   Zipf-shaped bursts. Meant as a proof-of-KFunc-time shape,
   not a production recommendation.
-- **W-TinyLFU** (`policy_wtinylfu_ops`, scoped-down variant):
-  80 %. See §"Reading W-TinyLFU" below — this is still a
-  stripped implementation (no Window-LRU tier, no doorkeeper)
-  but with CMS aging restored via `bpf_loop()` it now leads
-  the evicting policies.
+- **W-TinyLFU** (`policy_wtinylfu_ops`, scoped): 88.5 %. CMS +
+  bpf_loop aging only. Best-performing evicting policy on our
+  bench. Ships as the default `--policy-bpf=builtin:policy_
+  wtinylfu_ops`. See §"Reading W-TinyLFU" for why the scoped
+  variant beats the paper-complete `wtinylfu_full_ops`.
 - **LRU** (`policy_lru_ops`, approximate admit-order FIFO with
   `on_hit` refreshing the seed epoch): 12.5 %. Poor because our
   eval-forced rounds bump the global epoch on every `on_admit`,

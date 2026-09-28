@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// policy_wtinylfu_ops — W-TinyLFU-like eviction policy.
+// policy_wtinylfu_ops — W-TinyLFU-like eviction policy (scoped).
 //
 // Reference: Einziger & Friedman, "TinyLFU: A Highly Efficient Cache
 // Admission Policy", 2017. Deployed at scale in Caffeine (Java).
 //
-// **This is a scoped-down variant, not the full paper.** We keep the
-// centerpiece — a Count-Min Sketch (CMS) frequency estimator that
-// on_hit bumps and on_evict thresholds against — plus the paper's
-// aging step (halve every counter periodically). We still drop:
+// **Paper-complete impl lives in policy_wtinylfu_full_ops.bpf.c**
+// (Window LRU tier + Doorkeeper + Aging). This "scoped" variant
+// keeps only the centerpiece (CMS + aging) which turns out to be
+// the strongest choice on our hit-rate bench (docs/hit-rate-bench.md:
+// scoped 80-88 % vs full 49 %). The full variant honors the paper
+// but its Window tier + doorkeeper filter useful signal on
+// small-cache workloads with no one-hit wonders — see the bench
+// caveats section.
+//
+// We drop (all captured in the full variant):
 //
 //   - Window LRU tier: the paper puts new admits into a small W-LRU
 //     (~1 %) before they compete for admission to Main. We don't have
-//     a window tier here; new admits land in the same pool. Adding
-//     this needs per-ino tier state — see backlog P-06 future work.
+//     a window tier here; new admits land in the same pool.
 //   - Doorkeeper (Bloom filter for 1-hit wonders): omitted; aging
 //     picks up part of the same slack by preventing counter
 //     saturation on cold-item collisions.
