@@ -312,6 +312,13 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_pop_flush(uarg);
 	case S3FS_IOC_READ_DIRTY:
 		return s3fs_dev_read_dirty(uarg);
+	case S3FS_IOC_MARK_DIRTY: {
+		struct s3fs_mark_dirty req;
+
+		if (copy_from_user(&req, uarg, sizeof(req)))
+			return -EFAULT;
+		return s3fs_ebpf_mark_dirty(req.ino);
+	}
 	default:
 		return -ENOTTY;
 	}

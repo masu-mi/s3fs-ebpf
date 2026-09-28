@@ -31,10 +31,28 @@ type readDirtyArg struct {
 	OutBytes uint64
 }
 
+// markDirtyArg mirrors `struct s3fs_mark_dirty`.
+type markDirtyArg struct {
+	Ino uint64
+}
+
 const (
-	s3fsIocPopFlush  = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x05
-	s3fsIocReadDirty = (3 << 30) | (uint32(unsafe.Sizeof(readDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
+	s3fsIocPopFlush   = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x05
+	s3fsIocReadDirty  = (3 << 30) | (uint32(unsafe.Sizeof(readDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
+	s3fsIocMarkDirty  = (1 << 30) | (uint32(unsafe.Sizeof(markDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
 )
+
+// markDirty tells kmod to re-set fd->dirty for `ino` after a PUT
+// failure so the next .release/.fsync re-enqueues the flush event.
+func markDirty(devFd int, ino uint64) error {
+	arg := markDirtyArg{Ino: ino}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
+		uintptr(devFd), uintptr(s3fsIocMarkDirty),
+		uintptr(unsafe.Pointer(&arg))); errno != 0 {
+		return errno
+	}
+	return nil
+}
 
 // popFlush pulls one event or returns unix.EAGAIN when the queue is
 // empty. The dev fd must be R/W.
@@ -138,6 +156,11 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 			fmt.Fprintf(os.Stderr, "[flush] ino=%d read dirty: %v\n",
 				ev.Ino, err)
 			metrics.Global.FlushErrors.Add(1)
+			// Restore dirty flag so the next close/fsync will re-try.
+			if mderr := markDirty(devFd, ev.Ino); mderr != nil {
+				fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
+					ev.Ino, mderr)
+			}
 			return
 		}
 		buf = buf[:n]
@@ -148,6 +171,10 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d s3://%s put: %v\n",
 			ev.Ino, s3key, err)
 		metrics.Global.FlushErrors.Add(1)
+		if mderr := markDirty(devFd, ev.Ino); mderr != nil {
+			fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
+				ev.Ino, mderr)
+		}
 		return
 	}
 	registerIno(s3key, ev.Ino)

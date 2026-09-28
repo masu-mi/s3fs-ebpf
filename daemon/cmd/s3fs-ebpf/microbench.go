@@ -29,17 +29,32 @@ func runMicrobench(args []string) int {
 
 	// Warmup.
 	for i := 0; i < *warmup; i++ {
-		mustOp(*op, *path)
+		if err := doOp(*op, *path); err != nil {
+			fmt.Fprintf(os.Stderr, "microbench: warmup #%d: %v\n", i, err)
+			return 1
+		}
 	}
 
 	samples := make([]time.Duration, *iters)
 	start := time.Now()
 	for i := 0; i < *iters; i++ {
 		t0 := time.Now()
-		mustOp(*op, *path)
+		if err := doOp(*op, *path); err != nil {
+			// Bench abort (e.g. mount removed mid-run): print partial
+			// stats + non-zero exit instead of a Go panic that dumps a
+			// stack trace and confuses bench harness output.
+			fmt.Fprintf(os.Stderr, "microbench: iter %d/%d aborted: %v\n",
+				i, *iters, err)
+			samples = samples[:i]
+			break
+		}
 		samples[i] = time.Since(t0)
 	}
 	total := time.Since(start)
+	if len(samples) == 0 {
+		fmt.Fprintln(os.Stderr, "microbench: no samples collected")
+		return 1
+	}
 
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
 	pct := func(p float64) time.Duration {
@@ -58,24 +73,20 @@ func runMicrobench(args []string) int {
 	return 0
 }
 
-func mustOp(op, path string) {
+func doOp(op, path string) error {
 	switch op {
 	case "stat":
 		_, err := os.Stat(path)
-		if err != nil {
-			panic(err)
-		}
+		return err
 	case "read":
 		f, err := os.Open(path)
 		if err != nil {
-			panic(err)
+			return err
 		}
 		_, err = io.Copy(io.Discard, f)
 		f.Close()
-		if err != nil {
-			panic(err)
-		}
+		return err
 	default:
-		panic("unknown op: " + op)
+		return fmt.Errorf("unknown op: %s", op)
 	}
 }

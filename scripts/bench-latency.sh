@@ -20,7 +20,10 @@ FILE=${FILE:-hello.txt}
 BIG_FILE=${BIG_FILE:-big.bin}
 WARMUP=${WARMUP:-5}
 RUNS=${RUNS:-200}
-MICRO_ITERS=${MICRO_ITERS:-100000}
+# fuse read は ~5 ms/iter なので 100000 だと 8 分。開発サイクルに乗る
+# 5000 (~25s) を default に。ちゃんとした数字を取るときは
+# MICRO_ITERS=100000 make bench で override。
+MICRO_ITERS=${MICRO_ITERS:-5000}
 FIO_TIME=${FIO_TIME:-5}
 FIO_JOBS=${FIO_JOBS:-4}
 

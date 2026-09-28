@@ -349,6 +349,15 @@ func runFastpath(args []string) int {
 		fmt.Fprintf(os.Stderr, "[sync] initial: %v (using bootstrap)\n", err)
 	} else {
 		fmt.Printf("[sync] initial: %d entries\n", len(fresh))
+		// On daemon exit, revert kmod's dyn table to the compile-time
+		// bootstrap so a subsequent daemon restart (or an operator
+		// browsing the mount without daemon) doesn't see the stale
+		// snapshot from this session. Mirrors the clearAdmits defer.
+		defer func() {
+			if err := syncEntriesIoctl(*dev, nil); err != nil {
+				fmt.Fprintf(os.Stderr, "[sync clear] %v\n", err)
+			}
+		}()
 	}
 
 	// Pre-warm the arena from the entry mirror so the first stat on
@@ -390,6 +399,16 @@ func runFastpath(args []string) int {
 			fmt.Printf("[sync] delta: %d → %d entries\n",
 				lastSyncCount, len(fresh))
 			lastSyncCount = len(fresh)
+		}
+		// Drop admit entries whose ino no longer appears in the fresh
+		// entry set (S3 rm made the key disappear). Without this the
+		// admit hash and arena buffer leak. See A-02 in docs/backlog.md.
+		keep := make(map[uint64]struct{}, len(fresh))
+		for _, e := range fresh {
+			keep[e.Ino] = struct{}{}
+		}
+		if err := pruneAdmitsTo(*dev, keep); err != nil {
+			fmt.Fprintf(os.Stderr, "[admit prune] %v\n", err)
 		}
 	})
 	// Week 4 (c): drain the kmod write-back queue and PUT bytes to
@@ -503,13 +522,15 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client) []admi
 // warmFromS3 resolves a miss event through the S3 client and populates
 // the arena + inode index so the next matching stat hits Fast Path.
 //
-// Ino → S3 key mapping (Week 2 scope): only ino=1 (the s3fs_ebpf mount
-// root) is known — its "content" is the bucket-wide listing. Per-object
-// inos will land once kmod's inode_operations grows to materialise
-// bucket objects as VFS entries (Week 3).
+// Week 4 (a)+ per-object inos are handled by admit_arena / handleReadMiss.
+// This function now only covers the root ino (=1) case where the "content"
+// is the bucket-wide listing (a summary stub). Non-root inos are silently
+// no-op'd — the dyn entry table + admit path owns them.
 func warmFromS3(ctx context.Context, progs *fpebpf.Programs, c *s3.Client, ev fpebpf.MissEvent) {
 	if ev.Ino != 1 {
-		fmt.Printf("[warm] ino=%d skipped (no S3 key mapping yet — Week 3)\n", ev.Ino)
+		// Handled by handleReadMiss for per-object read misses; the
+		// fentry hook fires for stat too but the sync loop already
+		// pushed the entry, so nothing to do here.
 		return
 	}
 	// Drain-race: BPF can fire many misses before we admit the first;
