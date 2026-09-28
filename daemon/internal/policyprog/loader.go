@@ -26,23 +26,23 @@ const (
 	StatLastHint    = 2
 )
 
-// Program bundles a loaded policy program with the map it exports.
-// The link is kept alive on Attached; Close() destroys everything.
+// Program bundles a loaded policy program set (a .bpf.o may declare
+// multiple hooks — on_admit / on_evict / on_pressure). All fentry
+// programs are attached on Attach(); links stay alive until Close().
 type Program struct {
 	Coll  *ebpf.Collection
-	Prog  *ebpf.Program
-	Stats *ebpf.Map
-	Link  link.Link
-	Path  string // source path for logs
+	Progs map[string]*ebpf.Program // ebpf-section-name → program
+	Stats *ebpf.Map                // shared policy_stats map (may be nil)
+	Links []link.Link              // one per attached fentry
+	Path  string                   // source path for logs
 }
 
 // Load reads a .bpf.o and returns a ready-to-attach Program. The
-// object must have:
-//   - one program under SEC("fentry/s3fs_policy_on_admit")
-//   - one map named "policy_stats" of type ARRAY with 8-byte values
+// object may declare 1..N fentry programs (all attached on Attach())
+// and should expose a "policy_stats" ARRAY map for daemon-side
+// metric mirroring (optional but conventional).
 //
-// Missing pieces are surfaced as clear errors so authors of Layer 3
-// programs see them at load time (not at attach).
+// Missing map is a warning; missing programs is an error.
 func Load(path string) (*Program, error) {
 	spec, err := ebpf.LoadCollectionSpec(path)
 	if err != nil {
@@ -52,36 +52,37 @@ func Load(path string) (*Program, error) {
 	if err != nil {
 		return nil, fmt.Errorf("policyprog: load %s: %w", path, err)
 	}
-	// Look up by SEC name (bpf2go generates Go names; here we take
-	// the raw .bpf.o so program discovery is symbol-driven).
-	var prog *ebpf.Program
-	for _, p := range coll.Programs {
+	progs := make(map[string]*ebpf.Program)
+	for name, p := range coll.Programs {
 		if p.Type() == ebpf.Tracing {
-			prog = p
-			break
+			progs[name] = p
 		}
 	}
-	if prog == nil {
+	if len(progs) == 0 {
 		coll.Close()
-		return nil, fmt.Errorf("policyprog: %s has no fentry program", path)
+		return nil, fmt.Errorf("policyprog: %s has no fentry programs", path)
 	}
-	stats, ok := coll.Maps["policy_stats"]
-	if !ok {
-		coll.Close()
-		return nil, fmt.Errorf("policyprog: %s missing 'policy_stats' map", path)
-	}
-	return &Program{Coll: coll, Prog: prog, Stats: stats, Path: path}, nil
+	stats := coll.Maps["policy_stats"] // may be nil (Layer 3 programs may skip)
+	return &Program{Coll: coll, Progs: progs, Stats: stats, Path: path}, nil
 }
 
-// Attach hooks the program to its target (declared via SEC in the
-// .bpf.o). fentry programs bind by symbol at load time, so this is
-// essentially "start firing".
+// Attach hooks every fentry program to its target (declared via SEC in
+// the .bpf.o). Programs bind by symbol at load time; attach just
+// activates them.
 func (p *Program) Attach() error {
-	l, err := link.AttachTracing(link.TracingOptions{Program: p.Prog})
-	if err != nil {
-		return fmt.Errorf("policyprog: attach %s: %w", p.Path, err)
+	for name, prog := range p.Progs {
+		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
+		if err != nil {
+			// Partial attach: unwind the ones we already attached.
+			for _, done := range p.Links {
+				_ = done.Close()
+			}
+			p.Links = nil
+			return fmt.Errorf("policyprog: attach %s program %s: %w",
+				p.Path, name, err)
+		}
+		p.Links = append(p.Links, l)
 	}
-	p.Link = l
 	return nil
 }
 
@@ -90,22 +91,31 @@ func (p *Program) Close() {
 	if p == nil {
 		return
 	}
-	if p.Link != nil {
-		_ = p.Link.Close()
+	for _, l := range p.Links {
+		_ = l.Close()
 	}
+	p.Links = nil
 	if p.Coll != nil {
 		p.Coll.Close()
 	}
 }
 
 // ReadStat returns the current value of one policy_stats slot.
+// Returns (0, nil) when the program didn't declare the shared map.
 func (p *Program) ReadStat(slot uint32) (uint64, error) {
+	if p.Stats == nil {
+		return 0, nil
+	}
 	var v uint64
 	if err := p.Stats.Lookup(slot, &v); err != nil {
 		return 0, err
 	}
 	return v, nil
 }
+
+// AttachedCount returns how many fentry links are live (useful for
+// smoke-verifying multi-hook programs like S3-FIFO).
+func (p *Program) AttachedCount() int { return len(p.Links) }
 
 // Resolve turns a --policy-bpf argument into a concrete .bpf.o path.
 //

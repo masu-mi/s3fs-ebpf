@@ -121,10 +121,10 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [ ] **P-03** `pe Q6` metric API — policy 内 `metric("name", value)` の CEL 拡張関数、Prometheus export path
 - [ ] **P-04** `pe Q8` trace harness — event stream record 形式の設計
 - [ ] **P-05** `pe Q10` user eBPF 署名検証 — allowlist + SHA256 fingerprint + `load-bpf` API
-- [ ] **P-06** built-in policy として LRU / W-TinyLFU / S3-FIFO を出荷 (`pe §4.5.4`) — observe を baseline に、algorithm 実装を .bpf.c で追加
+- [x] ✅ **P-06 (S3-FIFO 部分)** built-in policy として S3-FIFO を出荷 — 完 (次 commit)。`bpf/policy_s3fifo.bpf.c` に 3 hook + freq map + evict_vote map。verifier 通過、3 fentry attach、smoke で invocations 増加確認。LRU / W-TinyLFU は同 shape の template として続く
 - [ ] **P-07** hit-rate 比較 bench を Week 4 (e) に追加 (`pe §7 backlog`)
 - [ ] **P-08** KFunc set の 1 次実装 (統計 accessor / primitive 操作 / signal detector) (`pe §4.5.1 Layer 0`)
-- [ ] **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 現状 on_admit のみ、eviction を BPF driven にするには hook 増設が必要
+- [x] ✅ **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 完 (次 commit)。`s3fs_policy_on_evict(ino)` / `s3fs_policy_on_pressure(count, threshold)` の 2 hook を追加、admit_replace が毎 entry / capacity 越えで発火。BPF 側は evict_vote map に vote 書込 (verifier が fentry return を 0 固定強制するため side channel)。daemon-side vote 消費は future work
 
 ---
 
