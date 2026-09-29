@@ -311,9 +311,11 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		ev.Ino, s3key, len(buf))
 
 	// Refresh admit so subsequent .read_folio serves the freshly
-	// written bytes instead of the stale prewarm content. addAdmit
-	// triggers invalidate_mapping_pages inside kmod, which drops
-	// any old folios that were populated from the prior admit.
+	// written bytes instead of the stale prewarm content.
+	// replaceAdmit drops the prior admit for this ino (returning
+	// its arena bytes to the D-02 free-list) before pushing, so a
+	// PUT-heavy workload doesn't leak arena or bloat kmod's admit
+	// hash with dead duplicates.
 	if progs == nil {
 		return
 	}
@@ -327,11 +329,11 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	if hi := uint64(off) + uint64(len(buf)); hi > metrics.Global.ArenaUsedBytes.Load() {
 		metrics.Global.ArenaUsedBytes.Store(hi)
 	}
-	if err := addAdmit(devPath, admitEntry{
+	if err := replaceAdmit(devPath, admitEntry{
 		Ino:   ev.Ino,
 		Uaddr: progs.Arena().BaseAddr() + uint64(off),
 		Size:  uint64(len(buf)),
-	}); err != nil {
+	}, progs); err != nil {
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d admit arena: %v\n",
 			ev.Ino, err)
 	}
