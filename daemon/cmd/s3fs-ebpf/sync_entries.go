@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -70,6 +73,14 @@ var (
 	inoByKey  = map[string]uint64{} // S3Key → ino, populated first-seen
 	nextIno   = uint64(inoRootReserved)
 	seededIno bool
+
+	// H-02: persistence for the S3Key → ino mapping. When
+	// inoStatePath is non-empty, assignIno / registerIno flush the
+	// full map atomically after every mutation so an application
+	// caching (pid, ino) across daemon restarts still resolves the
+	// same file. Empty path disables persistence (default — matches
+	// legacy behavior).
+	inoStatePath string
 )
 
 // seedInoAllocator maps bootstrap S3 keys to their well-known inos so
@@ -91,17 +102,20 @@ func seedInoAllocator() {
 }
 
 // assignIno returns the ino for `s3Key`, allocating a new one on
-// first sight. Deterministic within a daemon process; across
-// restarts the mapping resets.
+// first sight. Deterministic within a daemon process; when H-02
+// persistence is enabled (SetInoStatePath), also stable across
+// restarts.
 func assignIno(s3Key string) uint64 {
 	inoMu.Lock()
-	defer inoMu.Unlock()
 	if ino, ok := inoByKey[s3Key]; ok {
+		inoMu.Unlock()
 		return ino
 	}
 	ino := nextIno
 	nextIno++
 	inoByKey[s3Key] = ino
+	inoMu.Unlock()
+	saveInoState()
 	return ino
 }
 
@@ -111,10 +125,91 @@ func assignIno(s3Key string) uint64 {
 // round emits the same ino and iterate_shared unifies the two views.
 func registerIno(s3Key string, ino uint64) {
 	inoMu.Lock()
-	defer inoMu.Unlock()
+	prev, hadPrev := inoByKey[s3Key]
 	inoByKey[s3Key] = ino
 	if ino >= nextIno {
 		nextIno = ino + 1
+	}
+	inoMu.Unlock()
+	if !hadPrev || prev != ino {
+		saveInoState()
+	}
+}
+
+// SetInoStatePath enables H-02 persistence. If `p` names an existing
+// file it is loaded into the ino table (inoByKey merges, nextIno
+// advances past any observed ino) before the sync loop starts.
+// Subsequent mutations flush the whole table atomically via tmp+rename.
+// Called from main.go once during startup; passing "" is a no-op and
+// leaves the allocator in-memory only.
+func SetInoStatePath(p string) error {
+	inoStatePath = p
+	if p == "" {
+		return nil
+	}
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("ino state mkdir %s: %w", dir, err)
+	}
+	return loadInoState()
+}
+
+type inoStateFile struct {
+	InoByKey map[string]uint64 `json:"ino_by_key"`
+}
+
+// loadInoState reads inoStatePath (best-effort — missing file is not
+// an error, it's the first-run case) and merges its contents into the
+// live allocator. Advances nextIno past any observed ino.
+func loadInoState() error {
+	data, err := os.ReadFile(inoStatePath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("ino state read %s: %w", inoStatePath, err)
+	}
+	var st inoStateFile
+	if err := json.Unmarshal(data, &st); err != nil {
+		return fmt.Errorf("ino state parse %s: %w", inoStatePath, err)
+	}
+	inoMu.Lock()
+	defer inoMu.Unlock()
+	for k, v := range st.InoByKey {
+		inoByKey[k] = v
+		if v >= nextIno {
+			nextIno = v + 1
+		}
+	}
+	return nil
+}
+
+// saveInoState writes inoStatePath atomically (tmp + rename) after
+// every ino table mutation. No-op when persistence is disabled.
+// Failure is logged and swallowed — a lost persist round beats a
+// crashing daemon.
+func saveInoState() {
+	if inoStatePath == "" {
+		return
+	}
+	inoMu.Lock()
+	snap := inoStateFile{InoByKey: make(map[string]uint64, len(inoByKey))}
+	for k, v := range inoByKey {
+		snap.InoByKey[k] = v
+	}
+	inoMu.Unlock()
+	data, err := json.Marshal(&snap)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ino-state] marshal: %v\n", err)
+		return
+	}
+	tmp := inoStatePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "[ino-state] write %s: %v\n", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, inoStatePath); err != nil {
+		fmt.Fprintf(os.Stderr, "[ino-state] rename %s: %v\n", tmp, err)
 	}
 }
 

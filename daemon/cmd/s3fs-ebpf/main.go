@@ -345,8 +345,25 @@ func runFastpath(args []string) int {
 			"When set, `file:` / bare-path policy loads and /policy/reload "+
 			"requests must hash to an allowlisted entry. builtin: bypasses. "+
 			"Empty disables verification (dev/demo default).")
+	inoState := fs.String("ino-state", envOr("S3FS_INO_STATE", ""),
+		"[H-02] path to persist the S3Key → ino allocator table (JSON). "+
+			"When set, the map is loaded at startup and atomically re-written after every "+
+			"assignIno / registerIno so ino ↔ path pairs survive daemon restarts. "+
+			"Empty (default) keeps the allocator in-memory only.")
 	newClient := backendFlags(fs)
 	fs.Parse(args)
+
+	if err := SetInoStatePath(*inoState); err != nil {
+		fmt.Fprintf(os.Stderr, "ino-state: %v\n", err)
+		return 1
+	}
+	if *inoState != "" {
+		inoMu.Lock()
+		n := len(inoByKey)
+		inoMu.Unlock()
+		fmt.Printf("[ino-state] %s: %d mappings loaded (nextIno=%d)\n",
+			*inoState, n, nextIno)
+	}
 
 	// Load policy engine (Week 4 (d) P-01 spike: prewarm hook only).
 	// Missing or empty file returns an Engine that defaults every hook
