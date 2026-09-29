@@ -764,13 +764,25 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend, 
 	return admits
 }
 
-// prewarmEntry runs the per-entry prewarm work (policy eval → S3
-// stat/get → WarmCache → AdmitContent → build admitEntry). Split out
-// of `prewarm` so F-01's sync-time prewarm can call the same code
-// path for each newly-appeared entry without re-running the whole
-// startup pass. Returns (entry, true) when a content admission
-// completed; (zero, false) means the ino was warmed for stat but
-// carries no arena content (policy skip, S3 failure, empty body).
+// prewarmEntry runs the per-entry prewarm work. Split into two
+// distinct steps so F-03 can guarantee metadata warm even when
+// content admit is skipped:
+//
+//  1. **Metadata warm** (always): S3 Stat → progs.WarmCache. Populates
+//     the BPF inode_index so the fentry fast_hits stub recognizes
+//     the ino on the first getattr. Runs regardless of policy — a
+//     policy that suppresses content admit still wants stat to hit
+//     Path A rather than Path C.
+//
+//  2. **Content admit** (policy-gated): S3 Get → progs.AdmitContent.
+//     Only fires when `wantPrewarm` (Entry.Prewarm ∨ CEL override) is
+//     true. Skip returns (zero, false) — the ino stays warm for stat,
+//     the first cat takes Path C.
+//
+// Returns (entry, true) only when content admission completed. The
+// warm-only case is (zero, false) — same signal shape as before F-03,
+// so existing callers keep working; the meaningful visible change is
+// that fentry recognizes policy-skipped inos immediately.
 func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend,
 	pol *policy.Engine, entry fpebpf.Entry) (admitEntry, bool) {
 	// Entry.Prewarm is the static bootstrap default; the policy
@@ -784,11 +796,11 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 			Size: entry.Fallback, Mode: entry.Mode,
 		})
 	}
-	if !wantPrewarm {
-		fmt.Printf("[prewarm] ino=%d name=%s skipped (policy=false, waits for Path C)\n",
-			entry.Ino, entry.Name)
-		return admitEntry{}, false
-	}
+
+	// Step 1 — metadata warm (unconditional). Prefer S3-authoritative
+	// size/mtime when reachable; fall back to the bootstrap entry
+	// otherwise. Both branches populate the BPF inode_index so the
+	// fentry hook resolves getattr on Path A.
 	stub := fpebpf.InodeStub{
 		Ino:     entry.Ino,
 		Size:    entry.Fallback,
@@ -806,11 +818,13 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 			stub.Size = uint64(meta.Size)
 			stub.MtimeNs = uint64(meta.LastModified.UnixNano())
 			source = fmt.Sprintf("s3://%s", entry.S3Key)
-			body, err = s3c.Get(ctx, entry.S3Key)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[prewarm] ino=%d get: %v (skip admit)\n",
-					entry.Ino, err)
-				body = nil
+			if wantPrewarm {
+				body, err = s3c.Get(ctx, entry.S3Key)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[prewarm] ino=%d get: %v (skip admit)\n",
+						entry.Ino, err)
+					body = nil
+				}
 			}
 		}
 	}
@@ -822,6 +836,12 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 	fmt.Printf("[prewarm] ino=%d name=%s size=%d src=%s → stub=%d\n",
 		entry.Ino, entry.Name, stub.Size, source, off)
 
+	// Step 2 — content admit (policy-gated).
+	if !wantPrewarm {
+		fmt.Printf("[prewarm] ino=%d name=%s content-skip (policy=false, stat=warm, cat=PathC)\n",
+			entry.Ino, entry.Name)
+		return admitEntry{}, false
+	}
 	if body == nil {
 		return admitEntry{}, false
 	}
