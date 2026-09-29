@@ -140,11 +140,20 @@ struct s3fs_read_miss_event {
  * shutdown so the mount is still browsable if the daemon exits).
  */
 #define S3FS_SYNC_NAME_MAX 255
+/* G-01: struct s3fs_sync_entry v2 adds parent_ino for subdir support.
+ *
+ * ABI note: this is a size change vs the pre-G-01 layout. kmod and
+ * daemon must be rebuilt together (there is no version negotiation
+ * yet — see docs/g01-subdir-plan.md §4). parent_ino=0 is treated
+ * equivalently to root (S3FS_ROOT_INO=1) so any hand-crafted caller
+ * that forgets to set it still lands under root.
+ */
 struct s3fs_sync_entry {
 	__u64 ino;
+	__u64 parent_ino; /* G-01: 0 == root == ino 1. Directory entries must live at their intended parent. */
 	__u64 size;      /* authoritative size for i_size, from S3 stat */
-	__u32 mode;      /* S_IFREG | 0644 etc. */
-	__u32 name_len;  /* strlen(name), 0 < name_len <= S3FS_SYNC_NAME_MAX */
+	__u32 mode;      /* S_IFREG | 0644 or S_IFDIR | 0755 */
+	__u32 name_len;  /* strlen(name), 0 < name_len <= S3FS_SYNC_NAME_MAX. basename only, no `/`. */
 	char  name[S3FS_SYNC_NAME_MAX + 1]; /* NUL-terminated for safety */
 };
 
@@ -182,10 +191,11 @@ struct s3fs_sync_entries {
 
 struct s3fs_flush_event {
 	__u64 ino;
+	__u64 parent_ino; /* G-01: dir the file lives under. 0 == root. */
 	__u64 size;      /* current buffer size at enqueue time */
 	__u32 name_len;
 	__u32 flags;     /* S3FS_FLUSH_FLAG_* (E-03) */
-	char  name[S3FS_SYNC_NAME_MAX + 1];
+	char  name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
 };
 
 #define S3FS_IOC_POP_FLUSH \
@@ -304,9 +314,10 @@ struct s3fs_drain_evictions {
  */
 struct s3fs_delete_event {
 	__u64 ino;
+	__u64 parent_ino; /* G-01: dir the file lived under. 0 == root. */
 	__u32 name_len;
 	__u32 _pad;
-	char  name[S3FS_SYNC_NAME_MAX + 1];
+	char  name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
 };
 
 #define S3FS_IOC_POP_DELETE \
@@ -322,6 +333,8 @@ struct s3fs_delete_event {
  */
 struct s3fs_rename_event {
 	__u64 ino;
+	__u64 old_parent_ino; /* G-01: source dir. 0 == root. */
+	__u64 new_parent_ino; /* G-01: destination dir. Equal to old_parent for in-place rename. */
 	__u32 old_name_len;
 	__u32 new_name_len;
 	char  old_name[S3FS_SYNC_NAME_MAX + 1];

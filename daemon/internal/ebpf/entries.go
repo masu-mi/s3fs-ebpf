@@ -9,12 +9,13 @@ import "sync"
 // copies (Go + C) that had to be edited in lockstep; kmod still ships
 // a bootstrap table for the daemon-not-yet-connected case.
 type Entry struct {
-	Ino      uint64 // daemon-assigned, in-memory persistence only
-	Name     string // dentry name; must equal path.Base(S3Key)
-	S3Key    string // S3 object key backing this entry
-	Mode     uint32 // file mode as passed to inode->i_mode
-	Fallback uint64 // size in bytes when S3 stat is unavailable
-	Prewarm  bool   // if false, wait for a read-miss upcall before fetching
+	Ino       uint64 // daemon-assigned, in-memory persistence only
+	ParentIno uint64 // G-01: 0 == root == kmod S3FS_ROOT_INO(=1). Directories carry their own ino.
+	Name      string // basename only; parent path is reconstructed by walking ParentIno.
+	S3Key     string // full S3 object key (with any subdir prefix). Empty for synthetic directories.
+	Mode      uint32 // file mode as passed to inode->i_mode. S_IFDIR bit distinguishes subdirs.
+	Fallback  uint64 // size in bytes when S3 stat is unavailable
+	Prewarm   bool   // if false, wait for a read-miss upcall before fetching
 }
 
 // bootstrap mirrors kmod's compile-time s3fs_bootstrap_entries so the

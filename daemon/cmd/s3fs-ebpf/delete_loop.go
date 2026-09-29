@@ -13,14 +13,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// deleteEvent mirrors `struct s3fs_delete_event`. Layout identical
-// to flushEvent minus the Size field — kept as a separate type so
-// the ioctl size encoding matches kmod's expected sizeof.
+// deleteEvent mirrors `struct s3fs_delete_event` (G-01 layout).
+// Kept as a separate type from flushEvent so the ioctl size encoding
+// matches kmod's expected sizeof exactly.
 type deleteEvent struct {
-	Ino     uint64
-	NameLen uint32
-	_pad    uint32
-	Name    [syncNameMax + 1]byte
+	Ino       uint64
+	ParentIno uint64 // G-01
+	NameLen   uint32
+	_pad      uint32
+	Name      [syncNameMax + 1]byte
 }
 
 const s3fsIocPopDelete = (2 << 30) | (uint32(unsafe.Sizeof(deleteEvent{})) << 16) | (0xE3 << 8) | 0x0B
@@ -80,10 +81,10 @@ func drainDeletes(ctx context.Context, devFd int, s3c objstore.Backend) {
 
 func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	name := string(ev.Name[:ev.NameLen])
-	// Resolve S3 key from the sync mirror; fall back to name (flat
-	// bucket at PoC scope). Same shape as handleFlush.
-	s3key := name
-	if e := fpebpf.LookupByIno(ev.Ino); e != nil {
+	// G-01: sync-mirrored entry has the full S3Key; otherwise
+	// rebuild from parent_ino + basename. Same shape as handleFlush.
+	s3key := resolveKeyPath(ev.ParentIno, name)
+	if e := fpebpf.LookupByIno(ev.Ino); e != nil && e.S3Key != "" {
 		s3key = e.S3Key
 	}
 	if s3c == nil {
@@ -101,14 +102,17 @@ func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	fmt.Printf("[delete] ino=%d s3://%s deleted\n", ev.Ino, s3key)
 }
 
-// renameEvent mirrors `struct s3fs_rename_event`. Carries both
-// names in one payload for CopyObject + Delete.
+// renameEvent mirrors `struct s3fs_rename_event` (G-01 layout).
+// Carries both names + their parent inos in one payload so daemon
+// resolves full S3 keys for a cross-dir CopyObject + Delete.
 type renameEvent struct {
-	Ino        uint64
-	OldNameLen uint32
-	NewNameLen uint32
-	OldName    [syncNameMax + 1]byte
-	NewName    [syncNameMax + 1]byte
+	Ino           uint64
+	OldParentIno  uint64 // G-01
+	NewParentIno  uint64 // G-01
+	OldNameLen    uint32
+	NewNameLen    uint32
+	OldName       [syncNameMax + 1]byte
+	NewName       [syncNameMax + 1]byte
 }
 
 const s3fsIocPopRename = (2 << 30) | (uint32(unsafe.Sizeof(renameEvent{})) << 16) | (0xE3 << 8) | 0x0C
@@ -166,14 +170,18 @@ func drainRenames(ctx context.Context, devFd int, s3c objstore.Backend) {
 func handleRename(ctx context.Context, s3c objstore.Backend, ev *renameEvent) {
 	oldName := string(ev.OldName[:ev.OldNameLen])
 	newName := string(ev.NewName[:ev.NewNameLen])
-	oldKey := oldName
-	if e := fpebpf.LookupByIno(ev.Ino); e != nil {
+	// G-01: derive both keys from their respective parent inos so
+	// cross-dir renames (moving foo.txt from sub1/ into sub2/)
+	// produce distinct old/new keys instead of colliding on
+	// basename.
+	oldKey := resolveKeyPath(ev.OldParentIno, oldName)
+	newKey := resolveKeyPath(ev.NewParentIno, newName)
+	if e := fpebpf.LookupByIno(ev.Ino); e != nil && e.S3Key != "" {
 		oldKey = e.S3Key
 	}
-	newKey := newName
 	if s3c == nil {
 		fmt.Printf("[rename] drop ino=%d %s→%s (no S3 backend)\n",
-			ev.Ino, oldName, newName)
+			ev.Ino, oldKey, newKey)
 		return
 	}
 	putCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
