@@ -13,7 +13,7 @@ import (
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -251,7 +251,7 @@ func signalAdmit(devPath string, ino uint64, errCode int32) error {
 // blocked kmod .read. Terminates when the device read returns EOF or
 // ctx is done.
 func runReadMissLoop(ctx context.Context, devPath string,
-	progs *fpebpf.Programs, s3c *s3.Client) {
+	progs *fpebpf.Programs, s3c objstore.Backend) {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] open %s: %v\n", devPath, err)
@@ -300,7 +300,7 @@ const (
 )
 
 func handleReadMiss(ctx context.Context, devPath string,
-	progs *fpebpf.Programs, s3c *s3.Client, ev readMissEvent) {
+	progs *fpebpf.Programs, s3c objstore.Backend, ev readMissEvent) {
 	metrics.Global.ReadMissUpcalls.Add(1)
 	// Time the full miss-service path (S3 Get + arena write +
 	// admit_replace) and observe on every return path — including

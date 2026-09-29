@@ -9,7 +9,7 @@ import (
 	"unsafe"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -41,7 +41,7 @@ func popDelete(devFd int, out *deleteEvent) error {
 // a failed DELETE logs to stderr; the entry stays on S3 until the
 // next .unlink (which the user has to reissue). Persistent
 // delete-retry queue is backlog H-01 territory.
-func runDeleteLoop(ctx context.Context, devPath string, s3c *s3.Client,
+func runDeleteLoop(ctx context.Context, devPath string, s3c objstore.Backend,
 	interval time.Duration) {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
@@ -64,7 +64,7 @@ func runDeleteLoop(ctx context.Context, devPath string, s3c *s3.Client,
 	}
 }
 
-func drainDeletes(ctx context.Context, devFd int, s3c *s3.Client) {
+func drainDeletes(ctx context.Context, devFd int, s3c objstore.Backend) {
 	for {
 		var ev deleteEvent
 		if err := popDelete(devFd, &ev); err != nil {
@@ -78,7 +78,7 @@ func drainDeletes(ctx context.Context, devFd int, s3c *s3.Client) {
 	}
 }
 
-func handleDelete(ctx context.Context, s3c *s3.Client, ev *deleteEvent) {
+func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	name := string(ev.Name[:ev.NameLen])
 	// Resolve S3 key from the sync mirror; fall back to name (flat
 	// bucket at PoC scope). Same shape as handleFlush.
@@ -126,7 +126,7 @@ func popRename(devFd int, out *renameEvent) error {
 // runRenameLoop drains kmod's rename queue and issues
 // s3c.Rename (server-side CopyObject + Delete). Same ticker cadence
 // as delete/flush.
-func runRenameLoop(ctx context.Context, devPath string, s3c *s3.Client,
+func runRenameLoop(ctx context.Context, devPath string, s3c objstore.Backend,
 	interval time.Duration) {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
@@ -149,7 +149,7 @@ func runRenameLoop(ctx context.Context, devPath string, s3c *s3.Client,
 	}
 }
 
-func drainRenames(ctx context.Context, devFd int, s3c *s3.Client) {
+func drainRenames(ctx context.Context, devFd int, s3c objstore.Backend) {
 	for {
 		var ev renameEvent
 		if err := popRename(devFd, &ev); err != nil {
@@ -163,7 +163,7 @@ func drainRenames(ctx context.Context, devFd int, s3c *s3.Client) {
 	}
 }
 
-func handleRename(ctx context.Context, s3c *s3.Client, ev *renameEvent) {
+func handleRename(ctx context.Context, s3c objstore.Backend, ev *renameEvent) {
 	oldName := string(ev.OldName[:ev.OldNameLen])
 	newName := string(ev.NewName[:ev.NewNameLen])
 	oldKey := oldName
