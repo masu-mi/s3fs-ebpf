@@ -105,11 +105,18 @@ func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
 		minio.RemoveObjectOptions{}); err != nil {
 		return fmt.Errorf("s3 delete src %q after copy: %w", oldKey, err)
 	}
-	// Invalidate both keys: oldKey is gone, and newKey's content
-	// just changed (this rename overwrites any prior newKey object).
+	c.invalidateAfterRename(oldKey, newKey)
+	return nil
+}
+
+// invalidateAfterRename drops both keys from the local disk cache
+// after a successful CopyObject+Delete. oldKey is gone from the
+// backend; newKey's content just changed (rename can overwrite an
+// existing object). Extracted so the "both keys" contract can be
+// unit-tested without a live S3 endpoint.
+func (c *Client) invalidateAfterRename(oldKey, newKey string) {
 	c.cache.Invalidate(oldKey)
 	c.cache.Invalidate(newKey)
-	return nil
 }
 
 // GetRange fetches a byte slice via S3 HTTP Range GET so only the
