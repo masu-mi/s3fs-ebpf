@@ -1,57 +1,42 @@
-// Package s3 is the S3-flavor object-store client. Week 2 (d) wires
-// it to a real minio-go v7 backend so the Fast Path miss handler can
-// eventually round-trip S3 metadata into the arena. Compatible with
-// MinIO, AWS S3, or any S3-compatible endpoint.
-//
-// This is one of two backends behind [objstore.Backend]; the other
-// is native Google Cloud Storage (see internal/gcs). Callers should
-// depend on the interface, not this concrete type.
+// Package s3 is the S3-flavor object-store client behind
+// [objstore.Backend]. Compatible with MinIO, AWS S3, or any
+// S3-compatible endpoint via minio-go v7. Callers should depend on
+// the interface, not this concrete type.
 package s3
 
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
-// Config holds connection settings for the object store. Endpoint is a
-// host:port with no scheme; UseSSL toggles https vs http.
+// Config holds connection settings. Endpoint is a host:port with no
+// scheme; UseSSL toggles https vs http.
 type Config struct {
 	Endpoint  string
 	Bucket    string
 	AccessKey string
 	SecretKey string
 	UseSSL    bool
-	// CacheDir enables local disk staging for Get(). If set, Get looks
-	// for <CacheDir>/<sha256(bucket/key)> first and returns its content
-	// without touching S3; on miss it fetches from S3 and populates the
-	// cache. Empty string disables caching. Analogous to s3fs-fuse's
-	// -o use_cache=<dir> option (bench §0.5 caveat).
+	// CacheDir enables local disk staging for Get(). Empty disables
+	// caching. Analogous to s3fs-fuse's -o use_cache=<dir> (bench
+	// §0.5 caveat).
 	CacheDir string
 }
 
-// Client is the daemon-side object-store handle.
 type Client struct {
-	cfg Config
-	mc  *minio.Client
+	cfg   Config
+	mc    *minio.Client
+	cache objstore.DiskCache
 }
 
-// ObjectMeta re-exports [objstore.ObjectMeta] so existing s3-package
-// callers keep the short name. New code should reach for the
-// interface-side type directly.
-type ObjectMeta = objstore.ObjectMeta
-
-// New constructs a Client bound to the given config. Does not validate
-// connectivity — callers touch the network on the first call.
+// New constructs a Client bound to `cfg`. Does not validate
+// connectivity — the first Stat/Get touches the network.
 func New(cfg Config) (*Client, error) {
 	if cfg.Endpoint == "" {
 		return nil, fmt.Errorf("s3: endpoint must not be empty")
@@ -66,15 +51,15 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3: init minio client: %w", err)
 	}
-	return &Client{cfg: cfg, mc: mc}, nil
+	cache, err := objstore.NewDiskCache(cfg.CacheDir, objstore.KindS3, cfg.Bucket)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{cfg: cfg, mc: mc, cache: cache}, nil
 }
 
-// Bucket returns the bound bucket name.
 func (c *Client) Bucket() string { return c.cfg.Bucket }
 
-// Stat returns metadata for a single object. Returns a wrapped error
-// (containing the underlying minio.ErrorResponse) when the object does
-// not exist or the endpoint refuses the request.
 func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, error) {
 	info, err := c.mc.StatObject(ctx, c.cfg.Bucket, key, minio.StatObjectOptions{})
 	if err != nil {
@@ -83,22 +68,9 @@ func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, err
 	return toMeta(info), nil
 }
 
-// Get reads the entire object body into memory. Intended for the
-// Week 4 (a) arena admission path where the daemon writes the bytes
-// into arena pages that kmod's .read then serves. Not suitable for
-// large objects — callers should switch to a streaming variant once
-// tiered storage lands.
-//
-// If Config.CacheDir is set, Get short-circuits through the local
-// staging file when present. Freshness check is timestamp-of-file
-// only (no ETag/If-None-Match); good enough to prove the fair-bench
-// scenario against s3fs-fuse's -o use_cache. Cache poisoning is not
-// a concern for the PoC — same trust boundary as arena admits.
-// Put uploads `data` as a single-shot PUT under `key`. Week 4 (c)
-// wires kmod's .release/.fsync flush events into this path so writes
-// through the mount become durable in the backing bucket. Any local
-// disk cache stays out of the loop — a PUT invalidates rather than
-// updates it, so a subsequent Get re-fetches the fresh body.
+// Put uploads `data` as a single-shot PUT. Wired to kmod's
+// .release/.fsync flush events so writes through the mount become
+// durable in the backing bucket.
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 	r := bytes.NewReader(data)
 	_, err := c.mc.PutObject(ctx, c.cfg.Bucket, key, r,
@@ -108,33 +80,21 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("s3 put %q: %w", key, err)
 	}
-	if c.cfg.CacheDir != "" {
-		_ = os.Remove(c.cachePath(key))
-	}
+	c.cache.Invalidate(key)
 	return nil
 }
 
-// Delete removes `key` from the backing bucket. Local cache entry
-// (if configured) is dropped too so a subsequent Get re-fetches
-// authoritative state (which will surface 404 or the newer key).
-// Called by the delete-drain loop after kmod's .unlink enqueues an
-// event (E-02).
 func (c *Client) Delete(ctx context.Context, key string) error {
 	err := c.mc.RemoveObject(ctx, c.cfg.Bucket, key, minio.RemoveObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("s3 delete %q: %w", key, err)
 	}
-	if c.cfg.CacheDir != "" {
-		_ = os.Remove(c.cachePath(key))
-	}
+	c.cache.Invalidate(key)
 	return nil
 }
 
-// Rename implements S3-side rename as CopyObject (server-side) plus
-// Delete of the source. S3 has no atomic rename; a partial failure
-// leaves both keys, which the daemon logs. Two-step server-side —
-// no bytes flow through the daemon. Called from the rename-drain
-// loop after kmod's .rename enqueues an event (E-02).
+// Rename is CopyObject + Delete-of-source. S3 has no atomic rename;
+// a partial failure leaves both keys, which the caller logs.
 func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
 	src := minio.CopySrcOptions{Bucket: c.cfg.Bucket, Object: oldKey}
 	dst := minio.CopyDestOptions{Bucket: c.cfg.Bucket, Object: newKey}
@@ -143,22 +103,16 @@ func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
 	}
 	if err := c.mc.RemoveObject(ctx, c.cfg.Bucket, oldKey,
 		minio.RemoveObjectOptions{}); err != nil {
-		// New key already exists; report but don't roll back (we
-		// don't have a way to safely un-copy).
 		return fmt.Errorf("s3 delete src %q after copy: %w", oldKey, err)
 	}
-	if c.cfg.CacheDir != "" {
-		_ = os.Remove(c.cachePath(oldKey))
-	}
+	c.cache.Invalidate(oldKey)
 	return nil
 }
 
-// GetRange fetches `size` bytes starting at `offset` from `key`.
-// Uses S3 HTTP Range GET so only the requested chunk crosses the
-// wire — critical for D-01's partial-admit path where a 100 MiB
-// blob might only need a 4 MiB slice loaded into arena. Local disk
-// cache is skipped for range GETs (cache layer keys on whole
-// object; extending it to sub-object ranges is followup).
+// GetRange fetches a byte slice via S3 HTTP Range GET so only the
+// requested chunk crosses the wire — critical for D-01's
+// partial-admit path. Local disk cache is skipped for range GETs
+// (cache is keyed on whole object).
 func (c *Client) GetRange(ctx context.Context, key string, offset int64, size int64) ([]byte, error) {
 	opts := minio.GetObjectOptions{}
 	if err := opts.SetRange(offset, offset+size-1); err != nil {
@@ -178,12 +132,9 @@ func (c *Client) GetRange(ctx context.Context, key string, offset int64, size in
 }
 
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
-	if c.cfg.CacheDir != "" {
-		if buf, ok := c.readCache(key); ok {
-			return buf, nil
-		}
+	if buf, ok := c.cache.Read(key); ok {
+		return buf, nil
 	}
-
 	obj, err := c.mc.GetObject(ctx, c.cfg.Bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("s3 get %q: %w", key, err)
@@ -193,53 +144,18 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3 get %q read: %w", key, err)
 	}
-
-	if c.cfg.CacheDir != "" {
-		c.writeCache(key, buf) // best-effort; log-only on failure
-	}
+	c.cache.Write(key, buf)
 	return buf, nil
 }
 
-// cachePath maps <bucket, key> to a flat filename under CacheDir. Uses
-// sha256 to avoid nested directory creation and to sidestep encoding
-// issues with keys containing slashes.
-func (c *Client) cachePath(key string) string {
-	h := sha256.Sum256([]byte(c.cfg.Bucket + "/" + key))
-	return filepath.Join(c.cfg.CacheDir, hex.EncodeToString(h[:]))
-}
-
-func (c *Client) readCache(key string) ([]byte, bool) {
-	buf, err := os.ReadFile(c.cachePath(key))
-	if err != nil {
-		return nil, false
-	}
-	return buf, true
-}
-
-func (c *Client) writeCache(key string, buf []byte) {
-	if err := os.MkdirAll(c.cfg.CacheDir, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "s3 cache mkdir %s: %v\n", c.cfg.CacheDir, err)
-		return
-	}
-	tmp := c.cachePath(key) + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "s3 cache write %s: %v\n", tmp, err)
-		return
-	}
-	if err := os.Rename(tmp, c.cachePath(key)); err != nil {
-		fmt.Fprintf(os.Stderr, "s3 cache rename %s: %v\n", tmp, err)
-	}
-}
-
-// List enumerates objects under `prefix`. Empty prefix means the whole
-// bucket. Recursive listing (across CommonPrefixes) is enabled to keep
-// the demo output honest about deep hierarchies.
+// List enumerates objects under `prefix`. Recursive (across
+// CommonPrefixes) so deep hierarchies show up in demos.
 func (c *Client) List(ctx context.Context, prefix string) ([]objstore.ObjectMeta, error) {
 	ch := c.mc.ListObjects(ctx, c.cfg.Bucket, minio.ListObjectsOptions{
 		Prefix:    prefix,
 		Recursive: true,
 	})
-	var out []objstore.ObjectMeta
+	out := make([]objstore.ObjectMeta, 0, 256)
 	for obj := range ch {
 		if obj.Err != nil {
 			return nil, fmt.Errorf("s3 list %q: %w", prefix, obj.Err)
@@ -249,9 +165,6 @@ func (c *Client) List(ctx context.Context, prefix string) ([]objstore.ObjectMeta
 	return out, nil
 }
 
-// Compile-time proof s3.Client implements the shared backend
-// interface. Prevents drift if a Backend method is added upstream
-// without updating this file.
 var _ objstore.Backend = (*Client)(nil)
 
 func toMeta(o minio.ObjectInfo) objstore.ObjectMeta {

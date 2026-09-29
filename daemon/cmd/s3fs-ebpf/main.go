@@ -345,7 +345,7 @@ func runFastpath(args []string) int {
 			"When set, `file:` / bare-path policy loads and /policy/reload "+
 			"requests must hash to an allowlisted entry. builtin: bypasses. "+
 			"Empty disables verification (dev/demo default).")
-	newClient := s3Flags(fs) // --endpoint / --bucket / --access-key / --secret-key / --ssl
+	newClient := backendFlags(fs)
 	fs.Parse(args)
 
 	// Load policy engine (Week 4 (d) P-01 spike: prewarm hook only).
@@ -561,7 +561,7 @@ func runFastpath(args []string) int {
 		fmt.Printf("[fastpath] object backend: bucket=%s%s (will warm arena on miss)\n",
 			s3c.Bucket(), prefixStr)
 	} else {
-		fmt.Printf("[fastpath] object backend disabled — misses are reported but not cached\n")
+		fmt.Println("[fastpath] object backend disabled — misses are reported but not cached")
 	}
 
 	// Week 4 (b): before the first prewarm, ask S3 what actually
@@ -999,28 +999,27 @@ func runVerifierDemo(args []string) int {
 	return 0
 }
 
-// -- Week 2: MinIO Slow Path skeleton -----------------------------------------
-
-// s3Flags — kept as the name several subcommands import; despite the
-// name it now dispatches to either the S3-flavor backend (MinIO / AWS
-// / any S3-compatible endpoint) or native GCS based on --backend.
-// Returns a callback that constructs an [objstore.Backend].
-//
-// GCS-specific flags are ignored when --backend=s3, and vice versa,
-// so the same envvars work for both without conflict.
-func s3Flags(fs *flag.FlagSet) func() (objstore.Backend, error) {
-	backend := fs.String("backend", envOr("S3FS_BACKEND", "s3"),
+// backendFlags registers the shared flags for backend selection
+// (S3-compat via internal/s3 or native GCS) and returns a callback
+// that constructs the concrete [objstore.Backend]. Backend-specific
+// flags are ignored under the other --backend so envvars can stay
+// set for both without conflict.
+func backendFlags(fs *flag.FlagSet) func() (objstore.Backend, error) {
+	backend := fs.String("backend", envOr("S3FS_BACKEND", objstore.KindS3),
 		"object-store backend: s3 (MinIO / AWS / any S3-compatible endpoint) or gcs (Google Cloud Storage)")
-	endpoint := fs.String("endpoint", "localhost:9000",
+	endpoint := fs.String("endpoint", envOr("S3FS_ENDPOINT", "localhost:9000"),
 		"[s3] S3-compatible endpoint (host:port, no scheme — use --ssl for https)")
-	bucket := fs.String("bucket", "s3fs-test", "Bucket name (both backends)")
+	bucket := fs.String("bucket", envOr("S3FS_BUCKET", "s3fs-test"), "Bucket name (both backends)")
 	access := fs.String("access-key", envOr("S3FS_ACCESS_KEY", "minioadmin"), "[s3] Access key")
 	secret := fs.String("secret-key", envOr("S3FS_SECRET_KEY", "minioadmin"), "[s3] Secret key")
 	ssl := fs.Bool("ssl", false, "[s3] Use HTTPS")
 	cacheDir := fs.String("cache-dir", envOr("S3FS_CACHE_DIR", ""),
 		"local staging directory (enables use_cache-equivalent short-circuit; both backends)")
-	gcsCreds := fs.String("gcs-credentials", envOr("GOOGLE_APPLICATION_CREDENTIALS", ""),
-		"[gcs] path to a service-account JSON key file. Empty uses Application Default Credentials.")
+	// GOOGLE_APPLICATION_CREDENTIALS is honored by the GCS SDK's ADC
+	// chain — don't pre-read it here or an unset flag with a set env
+	// would bypass metadata-server / gcloud login fallbacks.
+	gcsCreds := fs.String("gcs-credentials", "",
+		"[gcs] path to a service-account JSON key file. Empty falls back to Application Default Credentials (GOOGLE_APPLICATION_CREDENTIALS, gcloud login, GCE metadata).")
 	keyPrefix := fs.String("key-prefix", envOr("S3FS_KEY_PREFIX", ""),
 		"map the mount root to this bucket key prefix (e.g. 'sub/dir/'). Empty exposes the whole bucket.")
 	return func() (objstore.Backend, error) {
@@ -1029,7 +1028,7 @@ func s3Flags(fs *flag.FlagSet) func() (objstore.Backend, error) {
 			err error
 		)
 		switch *backend {
-		case "s3", "":
+		case objstore.KindS3:
 			b, err = s3.New(s3.Config{
 				Endpoint:  *endpoint,
 				Bucket:    *bucket,
@@ -1038,14 +1037,15 @@ func s3Flags(fs *flag.FlagSet) func() (objstore.Backend, error) {
 				UseSSL:    *ssl,
 				CacheDir:  *cacheDir,
 			})
-		case "gcs":
+		case objstore.KindGCS:
 			b, err = gcs.New(context.Background(), gcs.Config{
 				Bucket:          *bucket,
 				CredentialsFile: *gcsCreds,
 				CacheDir:        *cacheDir,
 			})
 		default:
-			return nil, fmt.Errorf("unknown --backend %q (want s3 or gcs)", *backend)
+			return nil, fmt.Errorf("unknown --backend %q (want %s or %s)",
+				*backend, objstore.KindS3, objstore.KindGCS)
 		}
 		if err != nil {
 			return nil, err
@@ -1065,7 +1065,7 @@ func envOr(key, fallback string) string {
 // prefix) and prints them. Exit 1 on connection or listing failure.
 func runS3List(args []string) int {
 	fs := flag.NewFlagSet("s3-list", flag.ExitOnError)
-	newClient := s3Flags(fs)
+	newClient := backendFlags(fs)
 	prefix := fs.String("prefix", "", "Object key prefix to enumerate")
 	fs.Parse(args)
 
@@ -1093,7 +1093,7 @@ func runS3List(args []string) int {
 // runS3Stat fetches a single object's HEAD metadata and prints it.
 func runS3Stat(args []string) int {
 	fs := flag.NewFlagSet("s3-stat", flag.ExitOnError)
-	newClient := s3Flags(fs)
+	newClient := backendFlags(fs)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "s3-stat: exactly one KEY argument required")
