@@ -105,7 +105,10 @@ func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
 		minio.RemoveObjectOptions{}); err != nil {
 		return fmt.Errorf("s3 delete src %q after copy: %w", oldKey, err)
 	}
+	// Invalidate both keys: oldKey is gone, and newKey's content
+	// just changed (this rename overwrites any prior newKey object).
 	c.cache.Invalidate(oldKey)
+	c.cache.Invalidate(newKey)
 	return nil
 }
 

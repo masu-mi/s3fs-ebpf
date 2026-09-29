@@ -146,7 +146,10 @@ func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
 	if err := src.Delete(ctx); err != nil {
 		return fmt.Errorf("gcs delete src %q after copy: %w", oldKey, err)
 	}
+	// Invalidate both keys: oldKey is gone, and newKey's content
+	// just changed (this rename overwrites any prior newKey object).
 	c.cache.Invalidate(oldKey)
+	c.cache.Invalidate(newKey)
 	return nil
 }
 
