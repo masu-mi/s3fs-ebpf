@@ -55,7 +55,6 @@
  * filter by super_block::s_magic without a second source of truth. */
 #include "s3fs_shared_types.h"
 
-#define S3FS_ROOT_INO 1
 
 struct s3fs_entry {
 	const char *name;
@@ -127,6 +126,7 @@ static size_t s3fs_dyn_nr;
 struct s3fs_local_entry {
 	struct list_head link;
 	unsigned long ino;
+	unsigned long parent_ino; /* G-01: dir the file was .create'd under */
 	umode_t mode;
 	u32 name_len;
 	char name[S3FS_SYNC_NAME_MAX + 1];
@@ -151,6 +151,7 @@ static u64 s3fs_local_next_ino = 1000000;
  */
 struct s3fs_entry_snap {
 	unsigned long ino;
+	unsigned long parent_ino;  /* G-01: 0 == root == S3FS_ROOT_INO */
 	u64 size;                  /* 0 = no authoritative size (bootstrap) */
 	umode_t mode;
 	char name[S3FS_SYNC_NAME_MAX + 1];
@@ -159,21 +160,33 @@ struct s3fs_entry_snap {
 	size_t initial_content_size;
 };
 
-static bool resolve_entry_by_name(const char *name, size_t name_len,
+/* G-01: parent_ino=0 means "root". Bootstrap entries live at root,
+ * dyn entries carry their own parent_ino, local additions were
+ * recorded with the dir ino they were .create'd under. */
+static inline unsigned long norm_parent(unsigned long p)
+{
+	return p ? p : (unsigned long)S3FS_ROOT_INO;
+}
+
+static bool resolve_entry_by_name(unsigned long parent_ino,
+				  const char *name, size_t name_len,
 				  struct s3fs_entry_snap *out)
 {
 	struct s3fs_local_entry *le;
 	size_t i;
+	unsigned long want_parent = norm_parent(parent_ino);
 
 	mutex_lock(&s3fs_entries_mtx);
 
 	/* Local additions win: freshly created files that haven't been
 	 * promoted into the dyn table yet must still be found here. */
 	list_for_each_entry(le, &s3fs_local_entries, link) {
-		if (le->name_len != name_len ||
+		if (norm_parent(le->parent_ino) != want_parent ||
+		    le->name_len != name_len ||
 		    memcmp(le->name, name, name_len) != 0)
 			continue;
 		out->ino = le->ino;
+		out->parent_ino = want_parent;
 		out->size = 0; /* .create starts empty; fd->size covers subsequent writes */
 		out->mode = le->mode;
 		out->name_len = le->name_len;
@@ -189,10 +202,12 @@ static bool resolve_entry_by_name(const char *name, size_t name_len,
 		for (i = 0; i < s3fs_dyn_nr; i++) {
 			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[i];
 
-			if (e->name_len != name_len ||
+			if (norm_parent(e->parent_ino) != want_parent ||
+			    e->name_len != name_len ||
 			    memcmp(e->name, name, name_len) != 0)
 				continue;
 			out->ino = e->ino;
+			out->parent_ino = norm_parent(e->parent_ino);
 			out->size = e->size;
 			out->mode = e->mode;
 			out->name_len = e->name_len;
@@ -206,6 +221,12 @@ static bool resolve_entry_by_name(const char *name, size_t name_len,
 		mutex_unlock(&s3fs_entries_mtx);
 		return false;
 	}
+	/* Bootstrap entries all live at root — only match when the
+	 * caller is looking up under root. */
+	if (want_parent != (unsigned long)S3FS_ROOT_INO) {
+		mutex_unlock(&s3fs_entries_mtx);
+		return false;
+	}
 	for (i = 0; i < S3FS_NR_BOOTSTRAP; i++) {
 		const struct s3fs_entry *e = &s3fs_bootstrap_entries[i];
 		size_t elen = strlen(e->name);
@@ -213,6 +234,7 @@ static bool resolve_entry_by_name(const char *name, size_t name_len,
 		if (elen != name_len || memcmp(e->name, name, name_len) != 0)
 			continue;
 		out->ino = e->ino;
+		out->parent_ino = (unsigned long)S3FS_ROOT_INO;
 		out->size = 0; /* bootstrap: no authoritative size — fall back to fd->size */
 		out->mode = e->mode;
 		out->name_len = elen;
@@ -900,12 +922,15 @@ static void s3fs_ebpf_upcall_shutdown(void)
 }
 
 /* Backward-compatible wrapper used by lookup: fills `out` from
- * whichever table is live. Returns true on hit. */
-static bool find_entry(const struct qstr *qname, struct s3fs_entry_snap *out)
+ * whichever table is live. `parent_ino` is the directory we're
+ * looking under — G-01 filters entries so a subdir lookup doesn't
+ * see root-level names. */
+static bool find_entry(unsigned long parent_ino, const struct qstr *qname,
+		       struct s3fs_entry_snap *out)
 {
 	if (qname->len > S3FS_SYNC_NAME_MAX)
 		return false;
-	return resolve_entry_by_name(qname->name, qname->len, out);
+	return resolve_entry_by_name(parent_ino, qname->name, qname->len, out);
 }
 
 /*
@@ -937,6 +962,12 @@ static void local_prune_promoted_locked(const struct s3fs_entry_dyn *entries,
 	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
 		for (i = 0; i < count; i++) {
 			if (entries[i].ino != le->ino)
+				continue;
+			/* G-01: name equality alone is not enough — two files
+			 * with basename "foo.txt" under different parents must
+			 * not cross-promote. Match parent_ino too. */
+			if (norm_parent(entries[i].parent_ino) !=
+			    norm_parent(le->parent_ino))
 				continue;
 			if (entries[i].name_len != le->name_len)
 				continue;
@@ -1132,6 +1163,7 @@ struct s3fs_file_data {
 struct s3fs_flush_item {
 	struct list_head link;
 	u64 ino;
+	u64 parent_ino; /* G-01: dir the file lives under, for daemon full-path resolution */
 	u64 size;
 	u32 name_len;
 	u32 flags;  /* S3FS_FLUSH_FLAG_* (E-03) */
@@ -1248,7 +1280,7 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 	return 0;
 }
 
-static void flush_enqueue(u64 ino, u64 size,
+static void flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 			  const char *name, size_t name_len, u32 flags)
 {
 	struct s3fs_flush_item *f;
@@ -1259,6 +1291,7 @@ static void flush_enqueue(u64 ino, u64 size,
 	if (!f)
 		return;
 	f->ino = ino;
+	f->parent_ino = parent_ino;
 	f->size = size;
 	f->name_len = name_len;
 	f->flags = flags;
@@ -1309,10 +1342,11 @@ int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
 	if (!flush_dequeue(&item))
 		return -EAGAIN;
 	memset(out, 0, sizeof(*out));
-	out->ino      = item.ino;
-	out->size     = item.size;
-	out->name_len = item.name_len;
-	out->flags    = item.flags;
+	out->ino        = item.ino;
+	out->parent_ino = item.parent_ino;
+	out->size       = item.size;
+	out->name_len   = item.name_len;
+	out->flags      = item.flags;
 	memcpy(out->name, item.name, item.name_len);
 	out->name[item.name_len] = '\0';
 	return 0;
@@ -1334,6 +1368,7 @@ int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
 struct s3fs_delete_item {
 	struct list_head link;
 	u64 ino;
+	u64 parent_ino; /* G-01 */
 	u32 name_len;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 };
@@ -1341,7 +1376,7 @@ struct s3fs_delete_item {
 static LIST_HEAD(s3fs_delete_queue);
 static DEFINE_SPINLOCK(s3fs_delete_lock);
 
-static void delete_enqueue(u64 ino, const char *name, size_t name_len)
+static void delete_enqueue(u64 ino, u64 parent_ino, const char *name, size_t name_len)
 {
 	struct s3fs_delete_item *d;
 
@@ -1351,6 +1386,7 @@ static void delete_enqueue(u64 ino, const char *name, size_t name_len)
 	if (!d)
 		return;
 	d->ino = ino;
+	d->parent_ino = parent_ino;
 	d->name_len = name_len;
 	memcpy(d->name, name, name_len);
 	spin_lock(&s3fs_delete_lock);
@@ -1395,8 +1431,9 @@ int s3fs_ebpf_delete_pop(struct s3fs_delete_event *out)
 	if (!delete_dequeue(&item))
 		return -EAGAIN;
 	memset(out, 0, sizeof(*out));
-	out->ino      = item.ino;
-	out->name_len = item.name_len;
+	out->ino        = item.ino;
+	out->parent_ino = item.parent_ino;
+	out->name_len   = item.name_len;
 	memcpy(out->name, item.name, item.name_len);
 	out->name[item.name_len] = '\0';
 	return 0;
@@ -1410,6 +1447,8 @@ int s3fs_ebpf_delete_pop(struct s3fs_delete_event *out)
 struct s3fs_rename_item {
 	struct list_head link;
 	u64 ino;
+	u64 old_parent_ino; /* G-01 */
+	u64 new_parent_ino; /* G-01 */
 	u32 old_name_len;
 	u32 new_name_len;
 	char old_name[S3FS_SYNC_NAME_MAX + 1];
@@ -1420,6 +1459,7 @@ static LIST_HEAD(s3fs_rename_queue);
 static DEFINE_SPINLOCK(s3fs_rename_lock);
 
 static void rename_enqueue(u64 ino,
+			   u64 old_parent_ino, u64 new_parent_ino,
 			   const char *old_name, size_t old_len,
 			   const char *new_name, size_t new_len)
 {
@@ -1432,6 +1472,8 @@ static void rename_enqueue(u64 ino,
 	if (!r)
 		return;
 	r->ino = ino;
+	r->old_parent_ino = old_parent_ino;
+	r->new_parent_ino = new_parent_ino;
 	r->old_name_len = old_len;
 	r->new_name_len = new_len;
 	memcpy(r->old_name, old_name, old_len);
@@ -1478,9 +1520,11 @@ int s3fs_ebpf_rename_pop(struct s3fs_rename_event *out)
 	if (!rename_dequeue(&item))
 		return -EAGAIN;
 	memset(out, 0, sizeof(*out));
-	out->ino = item.ino;
-	out->old_name_len = item.old_name_len;
-	out->new_name_len = item.new_name_len;
+	out->ino            = item.ino;
+	out->old_parent_ino = item.old_parent_ino;
+	out->new_parent_ino = item.new_parent_ino;
+	out->old_name_len   = item.old_name_len;
+	out->new_name_len   = item.new_name_len;
 	memcpy(out->old_name, item.old_name, item.old_name_len);
 	out->old_name[item.old_name_len] = '\0';
 	memcpy(out->new_name, item.new_name, item.new_name_len);
@@ -1921,8 +1965,9 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 	struct inode *inode = file_inode(file);
 	struct s3fs_file_data *fd = inode->i_private;
 	struct dentry *dentry = file->f_path.dentry;
+	struct dentry *parent_dentry;
 	struct s3fs_flush_pending *p = NULL;
-	u64 size, ino;
+	u64 size, ino, parent_ino;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 	size_t name_len;
 	int err = 0;
@@ -1934,6 +1979,14 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
 		return 0;
 	memcpy(name, dentry->d_name.name, name_len);
+
+	/* G-01: pick parent ino from the dentry parent so daemon can
+	 * rebuild the full S3 key. Falls back to root when the file was
+	 * opened via a bare fd path (rare — file_inode's parent link
+	 * is present for regular open(2) / creat(2)). */
+	parent_dentry = dentry->d_parent;
+	parent_ino = parent_dentry ? d_inode(parent_dentry)->i_ino
+				   : (u64)S3FS_ROOT_INO;
 
 	mutex_lock(&fd->lock);
 	if (!fd->dirty) {
@@ -1952,14 +2005,14 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 		if (!p) {
 			/* Fall back to non-blocking on OOM — better a stale
 			 * dirty than a lost write. */
-			flush_enqueue(ino, size, name, name_len, 0);
+			flush_enqueue(ino, parent_ino, size, name, name_len, 0);
 			return -ENOMEM;
 		}
 	}
 
 	/* wait=true marks the event as fsync-triggered so daemon skips
 	 * coalescing (E-03) — the caller is blocked, latency matters. */
-	flush_enqueue(ino, size, name, name_len,
+	flush_enqueue(ino, parent_ino, size, name, name_len,
 		      wait ? S3FS_FLUSH_FLAG_WAIT : 0);
 
 	if (p) {
@@ -2007,6 +2060,12 @@ static const struct inode_operations s3fs_ebpf_file_iops = {
 };
 
 /* -- Directory / super ops ------------------------------------------------ */
+
+/* Forward declarations for the dir iops/fops that s3fs_ebpf_make_inode
+ * attaches to synthetic subdir inodes (G-01). Definitions live below,
+ * next to the .lookup / .iterate_shared implementations. */
+static const struct inode_operations s3fs_ebpf_dir_iops;
+static const struct file_operations s3fs_ebpf_dir_fops;
 
 static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 					  const struct s3fs_entry_snap *e)
@@ -2066,8 +2125,19 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		 * from VFS's view) or in the kmalloc scratch buffer that
 		 * .write mutates directly, bypassing the page cache. */
 		mapping_set_gfp_mask(inode->i_mapping, GFP_KERNEL);
+	} else if (S_ISDIR(e->mode)) {
+		/* G-01: synthetic subdirectory inode. Same iops/fops as
+		 * root — lookup + iterate_shared filter by dir->i_ino via
+		 * norm_parent, so this dir sees only entries whose
+		 * parent_ino == e->ino. nlink=2 keeps `find` happy; real
+		 * subdir count would require walking the entry table on
+		 * every stat, which the PoC doesn't need. */
+		inode->i_op  = &s3fs_ebpf_dir_iops;
+		inode->i_fop = &s3fs_ebpf_dir_fops;
+		set_nlink(inode, 2);
+		inode->i_size = 0;
 	} else {
-		/* Only regular files in the entry table for now. */
+		/* Only regular files and directories are supported. */
 		iget_failed(inode);
 		return NULL;
 	}
@@ -2085,7 +2155,7 @@ static struct dentry *s3fs_ebpf_lookup(struct inode *dir,
 	if (dentry->d_name.len > NAME_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
 
-	if (!find_entry(&dentry->d_name, &snap)) {
+	if (!find_entry(dir->i_ino, &dentry->d_name, &snap)) {
 		/* Cache the negative dentry so repeated ENOENT lookups
 		 * don't come back to us. Small win but honest. */
 		d_add(dentry, NULL);
@@ -2128,18 +2198,20 @@ static int s3fs_ebpf_create(struct mnt_idmap *idmap, struct inode *dir,
 
 	mutex_lock(&s3fs_entries_mtx);
 	ino = s3fs_local_next_ino++;
-	le->ino      = ino;
-	le->mode     = S_IFREG | (mode & 0777);
-	le->name_len = nlen;
+	le->ino         = ino;
+	le->parent_ino  = dir->i_ino; /* G-01: remember which dir this was created in */
+	le->mode        = S_IFREG | (mode & 0777);
+	le->name_len    = nlen;
 	memcpy(le->name, dentry->d_name.name, nlen);
 	list_add_tail(&le->link, &s3fs_local_entries);
 	s3fs_local_nr++;
 	mutex_unlock(&s3fs_entries_mtx);
 
-	snap.ino      = ino;
-	snap.size     = 0;
-	snap.mode     = le->mode;
-	snap.name_len = nlen;
+	snap.ino        = ino;
+	snap.parent_ino = dir->i_ino;
+	snap.size       = 0;
+	snap.mode       = le->mode;
+	snap.name_len   = nlen;
 	memcpy(snap.name, le->name, nlen);
 	inode = s3fs_ebpf_make_inode(dir->i_sb, &snap);
 	if (!inode) {
@@ -2153,11 +2225,12 @@ static int s3fs_ebpf_create(struct mnt_idmap *idmap, struct inode *dir,
 	d_instantiate(dentry, inode);
 
 	/* Fire an empty flush so `touch newfile` becomes a 0-byte PUT
-	 * even without a subsequent write. The dentry name doubles as
-	 * the S3 key at PoC scope (flat bucket). Coalescable — a
+	 * even without a subsequent write. G-01: parent_ino from dir so
+	 * the daemon builds "<dir_path>/newfile" as the S3 key when the
+	 * file was created under a subdirectory. Coalescable — a
 	 * subsequent write's release/fsync would supersede this
 	 * placeholder without a network hit. */
-	flush_enqueue(ino, 0, le->name, nlen, 0);
+	flush_enqueue(ino, dir->i_ino, 0, le->name, nlen, 0);
 	return 0;
 }
 
@@ -2169,51 +2242,70 @@ static int s3fs_ebpf_create(struct mnt_idmap *idmap, struct inode *dir,
  * past the end or dir_emit signaled the buffer is full.
  */
 /*
- * Emit ordering: dyn entries (or bootstrap when no dyn) first,
- * then local additions. `idx` walks the concatenation. This means
- * a `ls` after `touch newfile` shows newfile at the end — good
- * enough for PoC; sorted layout can come with the wider readdir
- * cleanup.
+ * G-01: pick the idx-th entry whose parent_ino matches `want_parent`
+ * across the {dyn|bootstrap} + local additions concatenation. dyn /
+ * bootstrap are visited first, then locals — same as the pre-G-01
+ * order for root-level entries, so a `ls` after `touch newfile`
+ * still shows newfile at the end.
+ *
+ * Bootstrap entries are all root-level; they only contribute when
+ * want_parent == root. dyn / local entries carry parent_ino
+ * themselves and the norm_parent() fixup handles the 0-means-root
+ * back-compat case.
  */
-static bool emit_one_entry(struct dir_context *ctx, size_t idx)
+static bool emit_one_entry(struct dir_context *ctx, unsigned long want_parent,
+			   size_t idx)
 {
-	unsigned long ino;
-	unsigned char dt;
+	unsigned long ino = 0;
+	unsigned char dt = DT_UNKNOWN;
 	char name[S3FS_SYNC_NAME_MAX + 1];
-	u32 name_len;
-	size_t base_nr;
+	u32 name_len = 0;
+	size_t matched = 0;
+	struct s3fs_local_entry *le;
 	bool ok = false;
 
 	mutex_lock(&s3fs_entries_mtx);
-	base_nr = s3fs_dyn_entries ? s3fs_dyn_nr : S3FS_NR_BOOTSTRAP;
-	if (idx < base_nr) {
-		if (s3fs_dyn_entries) {
-			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[idx];
+	if (s3fs_dyn_entries) {
+		size_t i;
 
+		for (i = 0; i < s3fs_dyn_nr; i++) {
+			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[i];
+
+			if (norm_parent(e->parent_ino) != want_parent)
+				continue;
+			if (matched++ != idx)
+				continue;
 			ino      = e->ino;
 			dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
 			name_len = e->name_len;
 			memcpy(name, e->name, name_len);
-		} else {
-			const struct s3fs_entry *e =
-				&s3fs_bootstrap_entries[idx];
+			ok = true;
+			break;
+		}
+	} else if (want_parent == (unsigned long)S3FS_ROOT_INO) {
+		size_t i;
+
+		for (i = 0; i < S3FS_NR_BOOTSTRAP; i++) {
+			const struct s3fs_entry *e = &s3fs_bootstrap_entries[i];
 			size_t elen = strlen(e->name);
 
 			if (elen > S3FS_SYNC_NAME_MAX)
 				elen = S3FS_SYNC_NAME_MAX;
+			if (matched++ != idx)
+				continue;
 			ino      = e->ino;
 			dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
 			name_len = elen;
 			memcpy(name, e->name, elen);
+			ok = true;
+			break;
 		}
-		ok = true;
-	} else if (idx < base_nr + s3fs_local_nr) {
-		size_t local_idx = idx - base_nr;
-		struct s3fs_local_entry *le;
-		size_t i = 0;
-
+	}
+	if (!ok) {
 		list_for_each_entry(le, &s3fs_local_entries, link) {
-			if (i++ != local_idx)
+			if (norm_parent(le->parent_ino) != want_parent)
+				continue;
+			if (matched++ != idx)
 				continue;
 			ino      = le->ino;
 			dt       = S_ISDIR(le->mode) ? DT_DIR : DT_REG;
@@ -2234,11 +2326,15 @@ static bool emit_one_entry(struct dir_context *ctx, size_t idx)
 
 static int s3fs_ebpf_iterate_shared(struct file *file, struct dir_context *ctx)
 {
+	struct inode *dir = file_inode(file);
+	unsigned long want_parent = norm_parent(dir->i_ino);
+
 	if (!dir_emit_dots(file, ctx))
 		return 0;
 
-	/* ctx->pos: 0=".", 1="..", 2..N+1 = table entries. */
-	while (emit_one_entry(ctx, ctx->pos - 2))
+	/* ctx->pos: 0=".", 1="..", 2..N+1 = table entries filtered by
+	 * parent_ino == this directory's ino. */
+	while (emit_one_entry(ctx, want_parent, ctx->pos - 2))
 		ctx->pos++;
 	return 0;
 }
@@ -2278,14 +2374,17 @@ static const struct super_operations s3fs_ebpf_super_ops = {
  * a local entry was actually removed. Caller must hold no locks —
  * this acquires s3fs_entries_mtx internally.
  */
-static bool local_entry_remove(const char *name, size_t name_len)
+static bool local_entry_remove(unsigned long parent_ino,
+			       const char *name, size_t name_len)
 {
 	struct s3fs_local_entry *le, *tmp;
+	unsigned long want_parent = norm_parent(parent_ino);
 	bool removed = false;
 
 	mutex_lock(&s3fs_entries_mtx);
 	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
-		if (le->name_len != name_len ||
+		if (norm_parent(le->parent_ino) != want_parent ||
+		    le->name_len != name_len ||
 		    memcmp(le->name, name, name_len) != 0)
 			continue;
 		list_del(&le->link);
@@ -2342,11 +2441,14 @@ static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
 	/* Enqueue delete for the daemon regardless of local vs dyn — the
 	 * daemon is responsible for the S3 side. Failure to enqueue
 	 * (OOM) still lets us drop the local FS view; the file stays
-	 * on S3 until user retries or next daemon delete-drain. */
-	delete_enqueue(inode->i_ino, name, name_len);
+	 * on S3 until user retries or next daemon delete-drain.
+	 * G-01: pass dir->i_ino so daemon rebuilds "<dir>/<name>". */
+	delete_enqueue(inode->i_ino, dir->i_ino, name, name_len);
 
-	/* Local-side cleanup. */
-	local_entry_remove(name, name_len);
+	/* Local-side cleanup. Local entry lookup is now parent-aware
+	 * (G-01) so a sibling with the same basename under a different
+	 * parent isn't accidentally scrubbed. */
+	local_entry_remove(dir->i_ino, name, name_len);
 	admit_drop_ino_locked(inode->i_ino);
 
 	/* Drop link count so drop_inode fires evict_inode. */
@@ -2358,21 +2460,28 @@ static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
 
 /*
  * Rename a local entry's name in place. Returns true on success.
- * The old_name/new_name buffers must fit S3FS_SYNC_NAME_MAX.
+ * old/new parent inos scope the match so a sibling with the same
+ * basename under a different parent doesn't accidentally get renamed
+ * (F-02). new_parent may differ from old_parent for cross-dir rename.
  */
-static bool local_entry_rename(const char *old_name, size_t old_len,
+static bool local_entry_rename(unsigned long old_parent,
+			       const char *old_name, size_t old_len,
+			       unsigned long new_parent,
 			       const char *new_name, size_t new_len)
 {
 	struct s3fs_local_entry *le;
+	unsigned long want_old = norm_parent(old_parent);
 	bool renamed = false;
 
 	mutex_lock(&s3fs_entries_mtx);
 	list_for_each_entry(le, &s3fs_local_entries, link) {
-		if (le->name_len != old_len ||
+		if (norm_parent(le->parent_ino) != want_old ||
+		    le->name_len != old_len ||
 		    memcmp(le->name, old_name, old_len) != 0)
 			continue;
 		memcpy(le->name, new_name, new_len);
-		le->name_len = new_len;
+		le->name_len   = new_len;
+		le->parent_ino = norm_parent(new_parent);
 		renamed = true;
 		break;
 	}
@@ -2400,8 +2509,6 @@ static int s3fs_ebpf_rename(struct mnt_idmap *idmap,
 
 	if (flags & ~RENAME_NOREPLACE)
 		return -EINVAL; /* no RENAME_EXCHANGE / RENAME_WHITEOUT */
-	if (old_dir != new_dir)
-		return -EXDEV; /* flat namespace at PoC scope */
 	if (!inode)
 		return -ENOENT;
 	if (old_len == 0 || old_len > S3FS_SYNC_NAME_MAX ||
@@ -2410,14 +2517,18 @@ static int s3fs_ebpf_rename(struct mnt_idmap *idmap,
 	memcpy(old_name, old_dentry->d_name.name, old_len);
 	memcpy(new_name, new_dentry->d_name.name, new_len);
 
-	/* Enqueue rename for daemon side (CopyObject + Delete). */
-	rename_enqueue(inode->i_ino, old_name, old_len, new_name, new_len);
+	/* G-01: cross-dir rename now works. Daemon translates each
+	 * parent_ino to a full path prefix and issues a single
+	 * CopyObject(<old_dir>/old_name → <new_dir>/new_name) + Delete. */
+	rename_enqueue(inode->i_ino, old_dir->i_ino, new_dir->i_ino,
+		       old_name, old_len, new_name, new_len);
 
 	/* Local-side: if the file lives in the local list, update its
-	 * name field. Dyn entries wait for the next sync to refresh —
-	 * VFS-side rename below still makes the new name lookupable
-	 * via dcache immediately. */
-	local_entry_rename(old_name, old_len, new_name, new_len);
+	 * name + parent so lookups under new_dir succeed immediately.
+	 * Dyn entries wait for the next sync to refresh — VFS-side
+	 * rename below still makes the new name lookupable via dcache. */
+	local_entry_rename(old_dir->i_ino, old_name, old_len,
+			   new_dir->i_ino, new_name, new_len);
 
 	inode_set_ctime_current(inode);
 	return 0;

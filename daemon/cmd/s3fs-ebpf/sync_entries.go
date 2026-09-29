@@ -22,13 +22,14 @@ import (
 // syncNameMax mirrors S3FS_SYNC_NAME_MAX in include/s3fs_ebpf_uapi.h.
 const syncNameMax = 255
 
-// syncEntry mirrors `struct s3fs_sync_entry`.
+// syncEntry mirrors `struct s3fs_sync_entry` (G-01 layout: parent_ino added).
 type syncEntry struct {
-	Ino     uint64
-	Size    uint64
-	Mode    uint32
-	NameLen uint32
-	Name    [syncNameMax + 1]byte
+	Ino       uint64
+	ParentIno uint64 // G-01: 0 == root == S3FS_ROOT_INO
+	Size      uint64
+	Mode      uint32
+	NameLen   uint32
+	Name      [syncNameMax + 1]byte
 }
 
 // syncEntriesArg mirrors `struct s3fs_sync_entries`.
@@ -74,6 +75,16 @@ var (
 	nextIno   = uint64(inoRootReserved)
 	seededIno bool
 
+	// G-01: reverse map so write-path handlers can reconstruct the
+	// full S3 key from a flush/delete/rename event's parent_ino +
+	// basename. Populated alongside assignIno / registerIno.
+	// Convention: pathByIno[dirIno] = "sub1/nested" (no trailing '/'),
+	// pathByIno[fileIno] = "sub1/nested/foo.txt". Root is not stored
+	// (empty prefix). Synthetic dir keys use the "dir:" allocator
+	// prefix in inoByKey; pathByIno drops the "dir:" so callers get
+	// the actual S3 path.
+	pathByIno = map[uint64]string{}
+
 	// H-02: persistence for the S3Key → ino mapping. When
 	// inoStatePath is non-empty, assignIno / registerIno flush the
 	// full map atomically after every mutation so an application
@@ -104,7 +115,9 @@ func seedInoAllocator() {
 // assignIno returns the ino for `s3Key`, allocating a new one on
 // first sight. Deterministic within a daemon process; when H-02
 // persistence is enabled (SetInoStatePath), also stable across
-// restarts.
+// restarts. G-01: pathByIno picks up the reverse mapping, stripping
+// the "dir:" prefix so synthetic dir entries surface their real
+// S3-side path.
 func assignIno(s3Key string) uint64 {
 	inoMu.Lock()
 	if ino, ok := inoByKey[s3Key]; ok {
@@ -114,6 +127,7 @@ func assignIno(s3Key string) uint64 {
 	ino := nextIno
 	nextIno++
 	inoByKey[s3Key] = ino
+	pathByIno[ino] = trimDirPrefix(s3Key)
 	inoMu.Unlock()
 	saveInoState()
 	return ino
@@ -127,6 +141,7 @@ func registerIno(s3Key string, ino uint64) {
 	inoMu.Lock()
 	prev, hadPrev := inoByKey[s3Key]
 	inoByKey[s3Key] = ino
+	pathByIno[ino] = trimDirPrefix(s3Key)
 	if ino >= nextIno {
 		nextIno = ino + 1
 	}
@@ -134,6 +149,33 @@ func registerIno(s3Key string, ino uint64) {
 	if !hadPrev || prev != ino {
 		saveInoState()
 	}
+}
+
+// trimDirPrefix strips the "dir:" tag assignIno applies to
+// synthetic directory keys so callers of pathByIno see the real
+// S3-side path.
+func trimDirPrefix(s3Key string) string {
+	if len(s3Key) > 4 && s3Key[:4] == "dir:" {
+		return s3Key[4:]
+	}
+	return s3Key
+}
+
+// resolveKeyPath rebuilds a full S3 key from a parent ino + basename.
+// Returns basename alone when parentIno resolves to root (or is 0).
+// Used by flush / delete / rename handlers to translate kmod-side
+// events into S3 keys.
+func resolveKeyPath(parentIno uint64, name string) string {
+	if parentIno == 0 || parentIno == kmodRootIno {
+		return name
+	}
+	inoMu.Lock()
+	prefix, ok := pathByIno[parentIno]
+	inoMu.Unlock()
+	if !ok || prefix == "" {
+		return name
+	}
+	return prefix + "/" + name
 }
 
 // SetInoStatePath enables H-02 persistence. If `p` names an existing
@@ -177,6 +219,7 @@ func loadInoState() error {
 	defer inoMu.Unlock()
 	for k, v := range st.InoByKey {
 		inoByKey[k] = v
+		pathByIno[v] = trimDirPrefix(k) // G-01: rehydrate reverse map too
 		if v >= nextIno {
 			nextIno = v + 1
 		}
@@ -216,30 +259,80 @@ func saveInoState() {
 // -- sync loop --------------------------------------------------------
 
 // buildEntriesFromS3 lists the bucket and turns each object into an
-// Entry, filtering out "directory" placeholder keys (0-byte and
-// trailing '/'). name is derived from the S3 key's basename.
+// Entry. G-01: S3 keys with "/" separators are split into a chain of
+// synthetic directory entries plus the leaf file, so `ls
+// /mnt/s3demo/sub1` walks only into the sub1/ prefix. F-02 also
+// falls out: two S3 keys with the same basename but different
+// prefixes get distinct (parent_ino, name) tuples and can coexist.
+//
+// Placeholder keys (trailing '/') are still filtered — they only
+// serve as directory markers on the S3 side and their names collide
+// with our synthesized dir entries.
 func buildEntriesFromS3(ctx context.Context, s3c objstore.Backend) ([]fpebpf.Entry, error) {
 	objs, err := s3c.List(ctx, "")
 	if err != nil {
 		return nil, err
 	}
 	out := make([]fpebpf.Entry, 0, len(objs))
+	// dirInoByPath: prefix ("sub1/", "sub1/nested/") → assigned ino
+	// for the synthetic dir entry. Populated on first sighting so
+	// two files under the same dir share the same parent ino.
+	dirInoByPath := map[string]uint64{"": kmodRootIno}
 	for _, o := range objs {
 		if len(o.Key) == 0 || o.Key[len(o.Key)-1] == '/' {
 			continue
 		}
-		name := path.Base(o.Key)
-		if len(name) == 0 || len(name) > syncNameMax {
-			fmt.Fprintf(os.Stderr, "[sync] skip %q: invalid name\n", o.Key)
+		leafName := path.Base(o.Key)
+		if len(leafName) == 0 || len(leafName) > syncNameMax {
+			fmt.Fprintf(os.Stderr, "[sync] skip %q: invalid basename\n", o.Key)
 			continue
 		}
+		// Walk the path prefix, minting a dir entry per component.
+		parent := kmodRootIno
+		prefix := ""
+		dir := path.Dir(o.Key)
+		if dir != "." && dir != "/" && dir != "" {
+			components := splitPath(dir)
+			for _, comp := range components {
+				if len(comp) == 0 || len(comp) > syncNameMax {
+					fmt.Fprintf(os.Stderr, "[sync] skip %q: bad component %q\n",
+						o.Key, comp)
+					parent = 0
+					break
+				}
+				if prefix == "" {
+					prefix = comp
+				} else {
+					prefix = prefix + "/" + comp
+				}
+				dino, seen := dirInoByPath[prefix]
+				if !seen {
+					dino = assignIno("dir:" + prefix)
+					dirInoByPath[prefix] = dino
+					out = append(out, fpebpf.Entry{
+						Ino:       dino,
+						ParentIno: parent,
+						Name:      comp,
+						S3Key:     "", // synthetic — no backing object
+						Mode:      0o040755, // S_IFDIR | 0755
+						Fallback:  0,
+						Prewarm:   false, // dirs have no content to admit
+					})
+				}
+				parent = dino
+			}
+			if parent == 0 {
+				continue // skipped due to bad component
+			}
+		}
 		out = append(out, fpebpf.Entry{
-			Ino:      assignIno(o.Key),
-			Name:     name,
-			S3Key:    o.Key,
-			Mode:     0o100644, // S_IFREG | 0644 (kmod fills S_IFREG bit)
-			Fallback: uint64(o.Size),
-			Prewarm:  true, // Option 1: prewarm-all, policy engine overrides later
+			Ino:       assignIno(o.Key),
+			ParentIno: parent,
+			Name:      leafName,
+			S3Key:     o.Key,
+			Mode:      0o100644, // S_IFREG | 0644 (kmod fills S_IFREG bit)
+			Fallback:  uint64(o.Size),
+			Prewarm:   true, // Option 1: prewarm-all, policy engine overrides later
 		})
 	}
 	// Sort by ino so ioctl output is stable across List() runs.
@@ -247,8 +340,34 @@ func buildEntriesFromS3(ctx context.Context, s3c objstore.Backend) ([]fpebpf.Ent
 	return out, nil
 }
 
+// kmodRootIno mirrors S3FS_ROOT_INO in kmod/vfs_ops.h. Kept private
+// to this file so the daemon writes it explicitly rather than
+// relying on the "parent_ino==0 → root" fallback (which stays as a
+// safety net in kmod but is a code smell if the daemon depends on it).
+const kmodRootIno = uint64(1)
+
+// splitPath breaks a POSIX-style path into non-empty components.
+// path.Split only peels off the last element; we want every segment.
+// A leading '/' or repeated separators are silently absorbed.
+func splitPath(p string) []string {
+	out := make([]string, 0, 4)
+	start := 0
+	for i := 0; i <= len(p); i++ {
+		if i == len(p) || p[i] == '/' {
+			if i > start {
+				out = append(out, p[start:i])
+			}
+			start = i + 1
+		}
+	}
+	return out
+}
+
 // entriesToSyncPayload marshals Go-side Entries into the UAPI struct
-// array kmod expects.
+// array kmod expects. G-01: directory entries are passed through with
+// their S_IFDIR mode bit intact; file entries have S_IFREG (0100000)
+// stamped on to defend against a caller that only supplied the perm
+// bits.
 func entriesToSyncPayload(es []fpebpf.Entry) []syncEntry {
 	out := make([]syncEntry, 0, len(es))
 	for _, e := range es {
@@ -258,17 +377,26 @@ func entriesToSyncPayload(es []fpebpf.Entry) []syncEntry {
 				e.Ino, e.Name)
 			continue
 		}
+		mode := e.Mode
+		if mode&fileTypeMask == 0 {
+			mode |= 0o100000 // default to S_IFREG when caller left type bits blank
+		}
 		se := syncEntry{
-			Ino:     e.Ino,
-			Size:    e.Fallback, // Fallback holds the S3-stat size in Week 4(b)
-			Mode:    e.Mode | 0o100000, // ensure S_IFREG bit
-			NameLen: uint32(nlen),
+			Ino:       e.Ino,
+			ParentIno: e.ParentIno,
+			Size:      e.Fallback, // Fallback holds the S3-stat size in Week 4(b)
+			Mode:      mode,
+			NameLen:   uint32(nlen),
 		}
 		copy(se.Name[:], e.Name)
 		out = append(out, se)
 	}
 	return out
 }
+
+// fileTypeMask is the S_IFMT bits (0170000) — file-type portion of a
+// POSIX mode. Distinguishes S_IFDIR (0040000) from S_IFREG (0100000).
+const fileTypeMask uint32 = 0o170000
 
 // syncEntriesOnce runs one sync round: List → assign inos → push to
 // kmod → update daemon mirror. Returns the fresh entry set on

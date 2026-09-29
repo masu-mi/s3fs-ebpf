@@ -785,6 +785,12 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend, 
 // that fentry recognizes policy-skipped inos immediately.
 func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend,
 	pol *policy.Engine, entry fpebpf.Entry) (admitEntry, bool) {
+	// G-01: synthetic directory entries have no arena content and
+	// no S3 backing key. WarmCache would try to stat "", which S3
+	// answers with a nonsense error. Short-circuit here.
+	if entry.Mode&fileTypeMask == 0o040000 {
+		return admitEntry{}, false
+	}
 	// Entry.Prewarm is the static bootstrap default; the policy
 	// engine, when loaded, overrides per-entry (P-01 spike). Both
 	// paths default to prewarm=true if the policy is broken /

@@ -242,10 +242,13 @@ static long s3fs_dev_sync_entries(void __user *uarg)
 			err = -EINVAL;
 			goto out_free_kbuf;
 		}
-		kbuf[i].ino      = ubuf[i].ino;
-		kbuf[i].size     = ubuf[i].size;
-		kbuf[i].mode     = ubuf[i].mode;
-		kbuf[i].name_len = nlen;
+		kbuf[i].ino        = ubuf[i].ino;
+		/* G-01: parent_ino=0 (unset / pre-G01 daemon) means root. */
+		kbuf[i].parent_ino = ubuf[i].parent_ino ? ubuf[i].parent_ino
+						       : (unsigned long)S3FS_ROOT_INO;
+		kbuf[i].size       = ubuf[i].size;
+		kbuf[i].mode       = ubuf[i].mode;
+		kbuf[i].name_len   = nlen;
 		memcpy(kbuf[i].name, ubuf[i].name, nlen);
 		kbuf[i].name[nlen] = '\0';
 	}

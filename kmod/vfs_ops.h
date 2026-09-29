@@ -8,6 +8,11 @@
 
 #include "s3fs_ebpf_uapi.h"
 
+/* Root inode number — the mount point directory. G-01 uses this as
+ * the "parent is root" sentinel value when daemon sends parent_ino=0
+ * (or omits it in a pre-G-01 build). */
+#define S3FS_ROOT_INO 1
+
 int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc);
 
 /*
@@ -32,10 +37,11 @@ void s3fs_ebpf_admit_shutdown(void);
  */
 struct s3fs_entry_dyn {
 	unsigned long ino;
+	unsigned long parent_ino; /* G-01: 0 == root. Compare inode->i_ino to filter iterate_shared. */
 	__u64 size;
-	umode_t mode;
+	umode_t mode;             /* S_IFDIR bit distinguishes subdirs from regular files */
 	__u32 name_len;
-	char name[S3FS_SYNC_NAME_MAX + 1];
+	char name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
 };
 int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count);
 void s3fs_ebpf_entries_shutdown(void);

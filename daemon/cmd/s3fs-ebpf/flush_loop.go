@@ -14,15 +14,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// flushEvent mirrors `struct s3fs_flush_event`.
+// flushEvent mirrors `struct s3fs_flush_event` (G-01 layout).
 // Flags carry S3FS_FLUSH_FLAG_* — currently only FLUSH_WAIT (fsync
 // path) which tells the coalescer to skip debounce.
 type flushEvent struct {
-	Ino     uint64
-	Size    uint64
-	NameLen uint32
-	Flags   uint32
-	Name    [syncNameMax + 1]byte
+	Ino       uint64
+	ParentIno uint64 // G-01: dir the file lives under, for full-key reconstruction
+	Size      uint64
+	NameLen   uint32
+	Flags     uint32
+	Name      [syncNameMax + 1]byte
 }
 
 // flushFlagWait matches S3FS_FLUSH_FLAG_WAIT in the UAPI header.
@@ -314,11 +315,15 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	}()
 	name := string(ev.Name[:ev.NameLen])
 
-	// Resolve S3 key: prefer the sync-mirrored entry, fall back to
-	// the dentry name (the flat-bucket assumption at PoC scope, so
-	// touch creates key=name).
-	s3key := name
-	if e := fpebpf.LookupByIno(ev.Ino); e != nil {
+	// G-01 key resolution:
+	//   1. sync-mirrored entry (dyn table) already carries the full
+	//      S3Key with any subdir prefix — use it verbatim.
+	//   2. local file that hasn't been sync-promoted yet — rebuild
+	//      the key by joining resolveKeyPath(parent_ino) + basename.
+	//      For root-level touches this collapses to just basename,
+	//      preserving the flat-bucket behavior benches rely on.
+	s3key := resolveKeyPath(ev.ParentIno, name)
+	if e := fpebpf.LookupByIno(ev.Ino); e != nil && e.S3Key != "" {
 		s3key = e.S3Key
 	}
 

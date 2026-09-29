@@ -13,6 +13,7 @@ func resetInoStateForTest(t *testing.T) {
 	t.Helper()
 	inoMu.Lock()
 	inoByKey = map[string]uint64{}
+	pathByIno = map[uint64]string{}
 	nextIno = uint64(inoRootReserved)
 	inoStatePath = ""
 	seededIno = false
