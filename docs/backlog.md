@@ -75,14 +75,14 @@
 ### F. dynamic sync 強化 (`w4b §4`)
 
 - [x] ✅ **F-01** prewarm を sync 時にも回す (`w4b §4-3`) — 完 (次 commit)。`prewarm()` の per-entry ロジックを `prewarmEntry()` として切り出し、runSyncLoop callback から未 prewarmed な新 ino に対して呼ぶ。`prewarmed` map で idempotent 化、消えた ino は delete。`--prewarm-on-sync` (default true) で無効化可能。startup で warm 済み ino は seed 済のため sync 1 巡目は差分だけ処理。sync 時 replaceAdmit は H-04 fix で serialized push を継承
-- [ ] **F-02** basename 衝突対応 (`w4b §4-4`)  
+- [ ] **F-02** basename 衝突対応 (`w4b §4-4`) — **設計 doc のみ (`docs/g01-subdir-plan.md`)**、G-01 と一括で解決予定
   `a/foo.txt` と `b/foo.txt` が同 name で衝突。dir 対応 (下記 G-01) と一括で。
 - [x] ✅ **F-03** BPF `inode_index` と sync の連携 (`w4b §4-5`) — 完 (次 commit)。`prewarmEntry` を "metadata warm (無条件 WarmCache)" と "content admit (policy-gated AdmitContent)" の 2 step に分割。policy=false でも stat が Path A で解決するようになった。sync 経由 F-01 の新 ino も同じ split を通るので、policy-suppressed entry の getattr も fast_hits に加算される
 
 ### G. VFS 拡張
 
-- [ ] **G-01** ディレクトリ (subdir) 対応 (`w4b §4-4`)  
-  現在 root 直下のみ。entry table に mode で `S_IFDIR` を持たせ、`s3fs_ebpf_make_inode` を dir 分岐、`s3fs_ebpf_dir_iops` を各 dir inode に付ける。sync entry の shape に `parent_ino` 追加。
+- [ ] **G-01** ディレクトリ (subdir) 対応 (`w4b §4-4`) — **設計 doc 完成 (`docs/g01-subdir-plan.md`)**、実装は別セッションで
+  現在 root 直下のみ。entry table に mode で `S_IFDIR` を持たせ、`s3fs_ebpf_make_inode` を dir 分岐、`s3fs_ebpf_dir_iops` を各 dir inode に付ける。sync entry の shape に `parent_ino` 追加。UAPI/kmod/daemon 3 段変更 (~300 行) で bench 既存 flow の regression リスク大、docs/g01-subdir-plan.md §6 の推奨順序 (UAPI → kmod → daemon → write path) に沿って別立てで landing。
 - [x] ✅ **G-02** `.setattr` に mode / uid / gid 対応 — 完 (次 commit)。kmod-side に per-ino `s3fs_attr_overrides` (64-bucket hash + spinlock) を追加、`s3fs_ebpf_file_setattr` は ATTR_MODE/UID/GID のいずれかがセットされたら upsert、`s3fs_ebpf_make_inode` が override を再適用するので icache eviction 後の再 lookup で保持される。実機で chmod 0755 + chown 1000:1000 → `drop_caches=2` → stat が保持後の値を返すことを確認 (fix 前は 644/0/0 に revert)。file-type bit は entry 由来を保護、S3 tag への永続化は future work
 
 ### H. 環境 lifecycle / 信頼性
