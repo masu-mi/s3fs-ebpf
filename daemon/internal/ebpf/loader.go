@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
@@ -352,12 +353,15 @@ func (p *Programs) AdmitContent(data []byte) (uint32, error) {
 				return 0, fmt.Errorf("arena write reuse: %w", err)
 			}
 		}
-		// Return leftover to the free-list.
+		// Return leftover to the free-list. Split tail may abut an
+		// existing chunk (unlikely but not disallowed by the allocator
+		// order); H-03 coalesce catches it.
 		if chunk.size > need {
 			p.arenaFree = append(p.arenaFree, arenaChunk{
 				offset: chunk.offset + need,
 				size:   chunk.size - need,
 			})
+			p.arenaFree, p.cacheNextOff = coalesceArenaFree(p.arenaFree, p.cacheNextOff)
 		}
 		return chunk.offset, nil
 	}
@@ -382,9 +386,11 @@ func (p *Programs) AdmitContent(data []byte) (uint32, error) {
 // D-02: called by the daemon's drain loop when kmod-side eviction
 // removes an admit whose arena range is no longer referenced.
 //
-// Adjacent chunks aren't merged today — the free-list is a flat set
-// with best-fit selection. Fragmentation is bounded by the number of
-// live evictions; a periodic compaction sweep is a followup.
+// H-03: after append, coalesceArenaFreeLocked merges adjacent
+// chunks and returns any trailing run that abuts the bump allocator
+// back to cacheNextOff. This keeps long-running daemons from
+// fragmenting into hundreds of tiny chunks even under sustained
+// evict/admit churn.
 func (p *Programs) FreeArenaChunk(offset, size uint32) {
 	if size == 0 {
 		return
@@ -392,6 +398,40 @@ func (p *Programs) FreeArenaChunk(offset, size uint32) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	p.arenaFree = append(p.arenaFree, arenaChunk{offset: offset, size: size})
+	p.arenaFree, p.cacheNextOff = coalesceArenaFree(p.arenaFree, p.cacheNextOff)
+}
+
+// coalesceArenaFree sorts `free` by offset, merges adjacent chunks,
+// and — if the trailing run abuts `nextOff` — folds it back into the
+// bump allocator (returning the reduced list and the new nextOff).
+// Pure function so the merge invariant can be unit-tested without a
+// live arena. Called under Programs.cacheMu.
+func coalesceArenaFree(free []arenaChunk, nextOff uint32) ([]arenaChunk, uint32) {
+	if len(free) == 0 {
+		return free, nextOff
+	}
+	sort.Slice(free, func(i, j int) bool {
+		return free[i].offset < free[j].offset
+	})
+	merged := free[:0]
+	for _, c := range free {
+		if len(merged) > 0 {
+			last := &merged[len(merged)-1]
+			if last.offset+last.size == c.offset {
+				last.size += c.size
+				continue
+			}
+		}
+		merged = append(merged, c)
+	}
+	if len(merged) > 0 {
+		tail := merged[len(merged)-1]
+		if tail.offset+tail.size == nextOff {
+			nextOff = tail.offset
+			merged = merged[:len(merged)-1]
+		}
+	}
+	return merged, nextOff
 }
 
 // ArenaFreeStats reports the current free-list state — total bytes
