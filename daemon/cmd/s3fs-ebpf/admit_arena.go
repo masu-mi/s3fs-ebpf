@@ -49,16 +49,46 @@ func setAdmits(devPath string, initial []admitEntry) error {
 	return admitArena(devPath, snap)
 }
 
-// addAdmit appends `entry` and pushes the whole snapshot to kmod.
-// Callers should ensure the ino is not already admitted (kmod's
-// hash keeps the first hit, so a duplicate is silently ignored on
-// the kmod side but wastes hash bucket capacity).
-func addAdmit(devPath string, entry admitEntry) error {
+// replaceAdmit inserts `entry` and pushes the whole snapshot to
+// kmod, dropping any prior admit for the same ino and returning that
+// prior admit's arena bytes to the D-02 free-list. Serves both the
+// first-admission path (no prior entry) and the refresh path (flush
+// / re-admit after eviction) with the same code path.
+//
+// Without dedup, a flush after prewarm would push [old, new] for the
+// same ino: kmod's hash accepts both, the older one becomes dead
+// weight in the bucket, and its arena bytes leak because no
+// eviction feedback removes them. `progs` may be nil in offline mode
+// (no arena wired) — the free-list update is then skipped.
+func replaceAdmit(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
 	admitMu.Lock()
-	admits = append(admits, entry)
+	var oldChunk arenaChunkPair
+	var oldChunkValid bool
+	var arenaBase uint64
+	if progs != nil {
+		arenaBase = progs.Arena().BaseAddr()
+	}
+	filtered := admits[:0]
+	for _, e := range admits {
+		if e.Ino == entry.Ino {
+			if progs != nil && arenaBase != 0 && e.Uaddr >= arenaBase {
+				oldChunk = arenaChunkPair{
+					offset: uint32(e.Uaddr - arenaBase),
+					size:   uint32(e.Size),
+				}
+				oldChunkValid = true
+			}
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	admits = append(filtered, entry)
 	snap := append([]admitEntry(nil), admits...)
 	admitMu.Unlock()
 	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
+	if oldChunkValid {
+		progs.FreeArenaChunk(oldChunk.offset, oldChunk.size)
+	}
 	return admitArena(devPath, snap)
 }
 
@@ -367,12 +397,12 @@ func handleReadMiss(ctx context.Context, devPath string,
 		metrics.Global.ArenaUsedBytes.Store(hi)
 	}
 
-	if err := addAdmit(devPath, admitEntry{
+	if err := replaceAdmit(devPath, admitEntry{
 		Ino:    ev.Ino,
 		Uaddr:  uaddr,
 		Size:   uint64(len(body)),
 		Offset: uint64(chunkOffset),
-	}); err != nil {
+	}, progs); err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit arena: %v\n", ev.Ino, err)
 		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
