@@ -13,6 +13,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=lib/umount.sh
+source "$TOPDIR/scripts/lib/umount.sh"
 OUT_DIR=${OUT_DIR:-/tmp/bench}
 MP_EBPF=/mnt/s3demo
 MP_FUSE=/mnt/s3fuse
@@ -86,12 +88,12 @@ stop_ebpf() {
 	log "stopping ebpf stack"
 	sudo pkill -INT -f 's3fs-ebpf fastpath' 2>/dev/null || true
 	sleep 1
-	sudo umount "$MP_EBPF" 2>/dev/null || true
+	umount_hard "$MP_EBPF"
 	sudo rmmod s3fs_kfunc 2>/dev/null || true
 	# Only unmount fuse if we brought it up (avoid stealing an
 	# operator-owned pre-existing mount).
 	if [ "$FUSE_STARTED" -eq 1 ]; then
-		sudo umount "$MP_FUSE" 2>/dev/null || true
+		umount_hard "$MP_FUSE"
 	fi
 }
 trap stop_ebpf EXIT

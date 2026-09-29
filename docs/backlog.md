@@ -42,8 +42,7 @@
 
 - [x] ✅ **B-01** microbench 100k iters が s3fs-fuse で 8 分 (`be §4-1`) — 完 (次 commit)、default 100000 → 5000
 - [x] ✅ **B-02** bench 中 SIGINT で microbench が panic (`be §4-1`) — 完 (次 commit)、`mustOp` → `doOp` (error return)
-- [ ] **B-03** fuse mount が busy で umount 失敗する対策 (`be §4-2`)  
-  bench script の trap で `umount -l` を fallback に。子 process が fuse fd を握っているケースで発生。
+- [x] ✅ **B-03** fuse mount が busy で umount 失敗する対策 (`be §4-2`) — 完 (次 commit)。`scripts/lib/umount.sh` に `umount_hard` を導入 (normal umount → EBUSY 時 `umount -l` fallback + stderr log)。bench-latency / bench-write / bench-3way / bench-scale / bench-hitrate の trap 内 umount を全て helper 経由に統一。tmpfs で busy 状態を再現し fallback → detach、非 mount パスの silent return、通常 umount の silent success を smoke で確認
 - [x] ✅ **B-04** `bench/runner.sh` + `bench/fio/*` + `bench/bcc/*` を削除 (`be §4-5`) — 完 (次 commit)、Makefile bench-dry も同時削除
 - [x] ✅ **B-05** README.md 再生成 (`be §4-5`) — 完 (次 commit)
 
