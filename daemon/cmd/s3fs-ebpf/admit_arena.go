@@ -33,6 +33,15 @@ type admitEntry struct {
 // currently has admitted. The kmod ioctl semantics are "replace the
 // whole table"; every mutation therefore has to send the full
 // snapshot. Guarded by admitMu.
+//
+// H-04 invariant: admitMu is held from the moment the slice is
+// mutated through the ioctl call. Two concurrent mutators used to
+// race by taking snapshots under the lock, releasing, then issuing
+// ioctls in an arbitrary order — kmod would end up with whichever
+// snapshot won the syscall race, silently losing the loser's
+// mutation. Holding the lock across the ioctl serializes the
+// push order and guarantees kmod's admit table always reflects the
+// latest committed daemon-side state.
 var (
 	admitMu sync.Mutex
 	admits  []admitEntry
@@ -42,11 +51,10 @@ var (
 // kmod. Any prior state is dropped.
 func setAdmits(devPath string, initial []admitEntry) error {
 	admitMu.Lock()
+	defer admitMu.Unlock()
 	admits = append(admits[:0], initial...)
-	snap := append([]admitEntry(nil), admits...)
-	admitMu.Unlock()
-	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
-	return admitArena(devPath, snap)
+	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
+	return admitArena(devPath, admits)
 }
 
 // replaceAdmit inserts `entry` and pushes the whole snapshot to
@@ -62,19 +70,18 @@ func setAdmits(devPath string, initial []admitEntry) error {
 // (no arena wired) — the free-list update is then skipped.
 func replaceAdmit(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
 	admitMu.Lock()
+	defer admitMu.Unlock()
 	var arenaBase uint64
 	if progs != nil {
 		arenaBase = progs.Arena().BaseAddr()
 	}
 	next, oldChunk, hasOldChunk := planReplaceAdmit(admits, entry, arenaBase)
 	admits = next
-	snap := append([]admitEntry(nil), admits...)
-	admitMu.Unlock()
-	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
+	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
 	if hasOldChunk && progs != nil {
 		progs.FreeArenaChunk(oldChunk.offset, oldChunk.size)
 	}
-	return admitArena(devPath, snap)
+	return admitArena(devPath, admits)
 }
 
 // planReplaceAdmit is the pure-function core of replaceAdmit: it
@@ -116,20 +123,19 @@ func planReplaceAdmit(admits []admitEntry, entry admitEntry, arenaBase uint64) (
 // the single prewarm-time eviction round.
 func refreshAdmits(devPath string) (int, error) {
 	admitMu.Lock()
-	snap := append([]admitEntry(nil), admits...)
-	admitMu.Unlock()
-	if err := admitArena(devPath, snap); err != nil {
+	defer admitMu.Unlock()
+	if err := admitArena(devPath, admits); err != nil {
 		return 0, err
 	}
-	return len(snap), nil
+	return len(admits), nil
 }
 
 // clearAdmits empties the daemon-side snapshot and tells kmod to
 // drop the admit table. Called on daemon shutdown.
 func clearAdmits(devPath string) error {
 	admitMu.Lock()
+	defer admitMu.Unlock()
 	admits = admits[:0]
-	admitMu.Unlock()
 	metrics.Global.AdmitsCurrent.Store(0)
 	return admitArena(devPath, nil)
 }
@@ -153,6 +159,7 @@ func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
 		skip[ino] = struct{}{}
 	}
 	admitMu.Lock()
+	defer admitMu.Unlock()
 	filtered := admits[:0]
 	var freedRanges []arenaChunkPair
 	arenaBase := uint64(0)
@@ -172,7 +179,6 @@ func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
 		filtered = append(filtered, e)
 	}
 	admits = filtered
-	admitMu.Unlock()
 	metrics.Global.AdmitsCurrent.Store(uint64(len(filtered)))
 	if progs != nil {
 		for _, r := range freedRanges {
@@ -198,6 +204,7 @@ type arenaChunkPair struct {
 // §4-2.
 func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
 	admitMu.Lock()
+	defer admitMu.Unlock()
 	pruned := admits[:0]
 	dropped := 0
 	for _, e := range admits {
@@ -208,13 +215,11 @@ func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
 		}
 	}
 	admits = pruned
-	snap := append([]admitEntry(nil), admits...)
-	admitMu.Unlock()
-	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
+	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
 	if dropped == 0 {
 		return nil // no delta, skip the ioctl
 	}
-	return admitArena(devPath, snap)
+	return admitArena(devPath, admits)
 }
 
 // admitArenaArg mirrors `struct s3fs_admit_arena`.
@@ -228,11 +233,17 @@ type admitArenaArg struct {
 // _IOW direction = 1; size = sizeof(admitArenaArg) = 16 bytes.
 const s3fsIocAdmitArena = (1 << 30) | (uint32(unsafe.Sizeof(admitArenaArg{})) << 16) | (0xE3 << 8) | 0x02
 
-// admitArena issues S3FS_IOC_ADMIT_ARENA against /dev/s3fs_ebpf.
+// admitArena is a package var (rather than a plain func) so the
+// concurrent-push stress test can swap in a snapshot-capturing fake
+// without wiring a real /dev/s3fs_ebpf. Production callers get the
+// ioctl-backed implementation below.
+var admitArena = admitArenaIoctl
+
+// admitArenaIoctl issues S3FS_IOC_ADMIT_ARENA against /dev/s3fs_ebpf.
 // Passing an empty `entries` slice clears the kmod-side admit table.
 // The ioctl must be issued from a process whose mm holds the uaddr
 // mappings (kmod calls get_task_mm(current) internally).
-func admitArena(devPath string, entries []admitEntry) error {
+func admitArenaIoctl(devPath string, entries []admitEntry) error {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", devPath, err)

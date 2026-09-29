@@ -96,8 +96,7 @@
   daemon 再起動で S3Key ↔ ino がリセット。application が pid + ino で lock を識別するとその瞬間に壊れる。`/var/lib/s3fs-ebpf/inos.json` に atomic write + lock。
 - [ ] **H-03** arena gc (`w4c §4-6`, `ll §5.4`, `be §4-1`)  
   AdmitContent の high-water offset が monotonic 増加。「差し替えられた古い arena offset」を daemon 側で free list に戻す、または arena reset の periodic 実行。
-- [ ] **H-04** admit の snapshot re-push が atomic でない (`w4ac §5-3`)  
-  ioctl 中に別 goroutine が addAdmit すると古い snapshot に append する race window。upcall goroutine 単一で走る現状は safe だが、複数並行時に壊れる。single-writer 制約を作る。
+- [x] ✅ **H-04** admit の snapshot re-push が atomic でない (`w4ac §5-3`) — 完 (次 commit)。`admitMu` を ioctl 完了まで保持する single-writer 制約に、`setAdmits` / `replaceAdmit` / `refreshAdmits` / `clearAdmits` / `dropAdmits` / `pruneAdmitsTo` の全 6 mutator を refactor。snapshot copy も撤去 (lock を持っている間は直接 admits slice を ioctl に渡せる)。`admitArena` を package var 化してテストで capturing fake に差し替え、`TestReplaceAdmit_ConcurrentPushIsSerialized` (N=64 goroutine × replaceAdmit を 5 count 実行、`-race`) で "全 push が admitMu 保持下" + "snapshot サイズ単調増加" + "最終 admits に N ino 全部揃う" を pin
 - [ ] **H-05** daemon miss reader の SIGINT clean shutdown (`w4ac §5-4`)  
   `os.File.Read` が blocking 中に fd close されると Go は EPIPE / EBADF を返すはずだが、シナリオによっては hangup 可能。長時間稼働 test で挙動確認。
 - [ ] **H-06** pending の shutdown race (`w4ac §5-5`)  
