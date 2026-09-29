@@ -103,9 +103,9 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(s3fs_ebpf_fast_path_hits_total[30s])",    "legendFormat": "fast" },
-        { "refId": "B", "expr": "rate(s3fs_ebpf_slow_path_misses_total[30s])",  "legendFormat": "slow" },
-        { "refId": "C", "expr": "rate(s3fs_ebpf_unknown_fs_total[30s])",        "legendFormat": "unknown_fs" }
+        { "refId": "A", "expr": "rate(s3fs_ebpf_fast_path_hits_total[1m])",    "legendFormat": "fast" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_slow_path_misses_total[1m])",  "legendFormat": "slow" },
+        { "refId": "C", "expr": "rate(s3fs_ebpf_unknown_fs_total[1m])",        "legendFormat": "unknown_fs" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
@@ -118,7 +118,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_bytes_total[30s])", "legendFormat": "PUT bytes/s" }
+        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_bytes_total[1m])", "legendFormat": "PUT bytes/s" }
       ],
       "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
@@ -131,25 +131,55 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(s3fs_ebpf_read_miss_upcalls_total[30s])", "legendFormat": "upcalls" },
-        { "refId": "B", "expr": "rate(s3fs_ebpf_read_miss_errors_total[30s])",  "legendFormat": "errors" }
+        { "refId": "A", "expr": "rate(s3fs_ebpf_read_miss_upcalls_total[1m])", "legendFormat": "upcalls" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_read_miss_errors_total[1m])",  "legendFormat": "errors" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
     },
     {
       "id": 8,
-      "title": "Flush events / errors",
+      "title": "Flush events",
       "type": "timeseries",
-      "description": "Rate of flush events drained + PUT failures. errors line がずっと > 0 なら S3 側の問題を疑う。",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "description": "Rate of flush events drained by the daemon (post-coalescer). エラー分は右の stat panel を参照。",
+      "gridPos": { "h": 8, "w": 8, "x": 12, "y": 14 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_events_total[30s])", "legendFormat": "events" },
-        { "refId": "B", "expr": "rate(s3fs_ebpf_flush_errors_total[30s])", "legendFormat": "errors" }
+        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_events_total[1m])", "legendFormat": "events" }
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "id": 23,
+      "title": "Flush errors (last 5m)",
+      "type": "stat",
+      "description": "Number of failed PUTs in the last 5 min. Green = 0 (normal), Red = 1+ (S3 側 or 権限問題を疑う)。単純な rate だと 0 が地味に見えるので、閾値で色を切り替える stat 型にしている。",
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "sum(increase(s3fs_ebpf_flush_errors_total[5m]))", "legendFormat": "errors" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      }
     },
     {
       "id": 9,
@@ -172,7 +202,7 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(node_context_switches_total[30s])", "legendFormat": "context switches" }
+        { "refId": "A", "expr": "rate(node_context_switches_total[1m])", "legendFormat": "context switches" }
       ],
       "fieldConfig": { "defaults": { "unit": "cps" }, "overrides": [] }
     },
@@ -184,9 +214,9 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[30s])) * 100",   "legendFormat": "user" },
-        { "refId": "B", "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[30s])) * 100", "legendFormat": "sys"  },
-        { "refId": "C", "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[30s])) * 100", "legendFormat": "iowait" }
+        { "refId": "A", "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[1m])) * 100",   "legendFormat": "user" },
+        { "refId": "B", "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[1m])) * 100", "legendFormat": "sys"  },
+        { "refId": "C", "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[1m])) * 100", "legendFormat": "iowait" }
       ],
       "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
@@ -199,8 +229,8 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(minio_s3_traffic_received_bytes[30s])", "legendFormat": "received (uploaded)" },
-        { "refId": "B", "expr": "rate(minio_s3_traffic_sent_bytes[30s])",     "legendFormat": "sent (downloaded)" }
+        { "refId": "A", "expr": "rate(minio_s3_traffic_received_bytes[1m])", "legendFormat": "received (uploaded)" },
+        { "refId": "B", "expr": "rate(minio_s3_traffic_sent_bytes[1m])",     "legendFormat": "sent (downloaded)" }
       ],
       "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] }
     },
