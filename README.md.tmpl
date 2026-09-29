@@ -16,6 +16,7 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 > - **自作 policy を書く** → [`docs/writing-policies.md`](docs/writing-policies.md)
 > - **FS 拡張 (POSIX 準拠 + 実用性)** → [`docs/posix-and-practical-notes.md`](docs/posix-and-practical-notes.md)
 > - **フックポイントとオブジェクト図** → [`docs/hook-timings-diagrams.md`](docs/hook-timings-diagrams.md)
+> - **Partial admit の内部構造とシーケンス** → [`docs/partial-admit-internals.md`](docs/partial-admit-internals.md)
 > - policy engine の詳細 → [`docs/policy-engine-design.md`](docs/policy-engine-design.md)
 > - hit-rate bench 数値と caveats → [`docs/hit-rate-bench.md`](docs/hit-rate-bench.md)
 > - 実装ハマりポイント → [`docs/lessons-learned.md`](docs/lessons-learned.md)

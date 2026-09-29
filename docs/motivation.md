@@ -81,6 +81,9 @@ policy=freq2bit_ops      6.50% 11468 evict  ← 2-bit ref counter
 - `docs/hook-timings-diagrams.md` — **フックポイント + 8 タイミング
   のオブジェクト図** (read hit/miss、write+close、fsync、eviction、
   unlink、rename)
+- `docs/partial-admit-internals.md` — **partial admit の内部構造 +
+  型と参照関係 + 4 シーケンス** (chunk admit / range lookup /
+  eviction 返却 / multi-range per ino の状態遷移)
 - `docs/lessons-learned.md` — 実装ハマりポイント (arena mm/gup /
   bpf_loop / struct_ops hot reload / iget_locked / etc.)
 - `docs/backlog.md` — 完了/残タスク一元管理
