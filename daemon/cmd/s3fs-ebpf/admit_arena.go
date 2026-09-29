@@ -62,34 +62,51 @@ func setAdmits(devPath string, initial []admitEntry) error {
 // (no arena wired) — the free-list update is then skipped.
 func replaceAdmit(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
 	admitMu.Lock()
-	var oldChunk arenaChunkPair
-	var oldChunkValid bool
 	var arenaBase uint64
 	if progs != nil {
 		arenaBase = progs.Arena().BaseAddr()
 	}
+	next, oldChunk, hasOldChunk := planReplaceAdmit(admits, entry, arenaBase)
+	admits = next
+	snap := append([]admitEntry(nil), admits...)
+	admitMu.Unlock()
+	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
+	if hasOldChunk && progs != nil {
+		progs.FreeArenaChunk(oldChunk.offset, oldChunk.size)
+	}
+	return admitArena(devPath, snap)
+}
+
+// planReplaceAdmit is the pure-function core of replaceAdmit: it
+// filters any prior entry sharing entry.Ino out of `admits`, appends
+// the fresh entry, and reports the evicted entry's arena range so
+// the caller can return it to the free-list. Split out so the dedup
+// invariant can be unit-tested without an eBPF loader or the
+// /dev/s3fs_ebpf ioctl.
+//
+// arenaBase==0 or e.Uaddr < arenaBase suppresses the chunk report —
+// used in offline mode and as a defensive guard against garbage
+// uaddrs. The returned slice shares backing storage with `admits`
+// (in-place filter), matching the previous implementation.
+func planReplaceAdmit(admits []admitEntry, entry admitEntry, arenaBase uint64) (
+	next []admitEntry, oldChunk arenaChunkPair, hasOldChunk bool,
+) {
 	filtered := admits[:0]
 	for _, e := range admits {
 		if e.Ino == entry.Ino {
-			if progs != nil && arenaBase != 0 && e.Uaddr >= arenaBase {
+			if arenaBase != 0 && e.Uaddr >= arenaBase {
 				oldChunk = arenaChunkPair{
 					offset: uint32(e.Uaddr - arenaBase),
 					size:   uint32(e.Size),
 				}
-				oldChunkValid = true
+				hasOldChunk = true
 			}
 			continue
 		}
 		filtered = append(filtered, e)
 	}
-	admits = append(filtered, entry)
-	snap := append([]admitEntry(nil), admits...)
-	admitMu.Unlock()
-	metrics.Global.AdmitsCurrent.Store(uint64(len(snap)))
-	if oldChunkValid {
-		progs.FreeArenaChunk(oldChunk.offset, oldChunk.size)
-	}
-	return admitArena(devPath, snap)
+	next = append(filtered, entry)
+	return next, oldChunk, hasOldChunk
 }
 
 // refreshAdmits re-pushes the current snapshot to kmod without any
