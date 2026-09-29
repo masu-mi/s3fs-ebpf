@@ -28,7 +28,9 @@ import (
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/gcs"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policy"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policyprog"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
@@ -48,8 +50,9 @@ Commands:
                events and hit/miss counters until interrupted
   verifier-demo Week 2 probe: try to load an intentionally-rejected pure eBPF
                arena walker and print the verifier's rejection log
-  s3-list      Connect to an S3-compatible endpoint and list a bucket
-  s3-stat      Connect to an S3-compatible endpoint and stat a single object
+  s3-list      List a bucket. Backend selected by --backend s3|gcs
+               (S3-compatible endpoint or Google Cloud Storage).
+  s3-stat      Stat a single object. Backend selected by --backend s3|gcs.
   probe-kvbase Week 4 (a) spike: create an arena, ioctl(/dev/s3fs_ebpf,
                S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, print
                it alongside the user-VM base for comparison
@@ -532,11 +535,11 @@ func runFastpath(args []string) int {
 	}
 	defer reader.Close()
 
-	var s3c *s3.Client
+	var s3c objstore.Backend
 	if *enableS3 {
 		s3c, err = newClient()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "fastpath: s3: %v\n", err)
+			fmt.Fprintf(os.Stderr, "fastpath: backend: %v\n", err)
 			return 1
 		}
 	}
@@ -551,9 +554,14 @@ func runFastpath(args []string) int {
 	// once so the dashboard's usage% panel has a denominator.
 	metrics.Global.ArenaCapacityBytes.Store(uint64(progs.Arena().Size()))
 	if s3c != nil {
-		fmt.Printf("[fastpath] s3 backend: bucket=%s (will warm arena on miss)\n", s3c.Bucket())
+		prefixStr := ""
+		if p, ok := s3c.(*objstore.Prefixed); ok {
+			prefixStr = " key-prefix=" + p.Prefix()
+		}
+		fmt.Printf("[fastpath] object backend: bucket=%s%s (will warm arena on miss)\n",
+			s3c.Bucket(), prefixStr)
 	} else {
-		fmt.Printf("[fastpath] s3 backend disabled — misses are reported but not cached\n")
+		fmt.Printf("[fastpath] object backend disabled — misses are reported but not cached\n")
 	}
 
 	// Week 4 (b): before the first prewarm, ask S3 what actually
@@ -686,7 +694,7 @@ func runFastpath(args []string) int {
 //
 // Without S3 we still warm the stat cache but skip content admission —
 // kmod's kmalloc scratch buffer covers `cat` at reduced fidelity.
-func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client, pol *policy.Engine) []admitEntry {
+func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend, pol *policy.Engine) []admitEntry {
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
@@ -771,7 +779,7 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c *s3.Client, pol *p
 // This function now only covers the root ino (=1) case where the "content"
 // is the bucket-wide listing (a summary stub). Non-root inos are silently
 // no-op'd — the dyn entry table + admit path owns them.
-func warmFromS3(ctx context.Context, progs *fpebpf.Programs, c *s3.Client, ev fpebpf.MissEvent) {
+func warmFromS3(ctx context.Context, progs *fpebpf.Programs, c objstore.Backend, ev fpebpf.MissEvent) {
 	if ev.Ino != 1 {
 		// Handled by handleReadMiss for per-object read misses; the
 		// fentry hook fires for stat too but the sync loop already
@@ -993,27 +1001,56 @@ func runVerifierDemo(args []string) int {
 
 // -- Week 2: MinIO Slow Path skeleton -----------------------------------------
 
-// s3Flags registers the shared endpoint/bucket/credentials flags for
-// s3-list and s3-stat and returns a callback that constructs a Client
-// from the parsed values.
-func s3Flags(fs *flag.FlagSet) func() (*s3.Client, error) {
+// s3Flags — kept as the name several subcommands import; despite the
+// name it now dispatches to either the S3-flavor backend (MinIO / AWS
+// / any S3-compatible endpoint) or native GCS based on --backend.
+// Returns a callback that constructs an [objstore.Backend].
+//
+// GCS-specific flags are ignored when --backend=s3, and vice versa,
+// so the same envvars work for both without conflict.
+func s3Flags(fs *flag.FlagSet) func() (objstore.Backend, error) {
+	backend := fs.String("backend", envOr("S3FS_BACKEND", "s3"),
+		"object-store backend: s3 (MinIO / AWS / any S3-compatible endpoint) or gcs (Google Cloud Storage)")
 	endpoint := fs.String("endpoint", "localhost:9000",
-		"S3-compatible endpoint (host:port, no scheme — use --ssl for https)")
-	bucket := fs.String("bucket", "s3fs-test", "Bucket name")
-	access := fs.String("access-key", envOr("S3FS_ACCESS_KEY", "minioadmin"), "Access key")
-	secret := fs.String("secret-key", envOr("S3FS_SECRET_KEY", "minioadmin"), "Secret key")
-	ssl := fs.Bool("ssl", false, "Use HTTPS")
+		"[s3] S3-compatible endpoint (host:port, no scheme — use --ssl for https)")
+	bucket := fs.String("bucket", "s3fs-test", "Bucket name (both backends)")
+	access := fs.String("access-key", envOr("S3FS_ACCESS_KEY", "minioadmin"), "[s3] Access key")
+	secret := fs.String("secret-key", envOr("S3FS_SECRET_KEY", "minioadmin"), "[s3] Secret key")
+	ssl := fs.Bool("ssl", false, "[s3] Use HTTPS")
 	cacheDir := fs.String("cache-dir", envOr("S3FS_CACHE_DIR", ""),
-		"local staging directory for S3 objects (enables use_cache-equivalent short-circuit)")
-	return func() (*s3.Client, error) {
-		return s3.New(s3.Config{
-			Endpoint:  *endpoint,
-			Bucket:    *bucket,
-			AccessKey: *access,
-			SecretKey: *secret,
-			UseSSL:    *ssl,
-			CacheDir:  *cacheDir,
-		})
+		"local staging directory (enables use_cache-equivalent short-circuit; both backends)")
+	gcsCreds := fs.String("gcs-credentials", envOr("GOOGLE_APPLICATION_CREDENTIALS", ""),
+		"[gcs] path to a service-account JSON key file. Empty uses Application Default Credentials.")
+	keyPrefix := fs.String("key-prefix", envOr("S3FS_KEY_PREFIX", ""),
+		"map the mount root to this bucket key prefix (e.g. 'sub/dir/'). Empty exposes the whole bucket.")
+	return func() (objstore.Backend, error) {
+		var (
+			b   objstore.Backend
+			err error
+		)
+		switch *backend {
+		case "s3", "":
+			b, err = s3.New(s3.Config{
+				Endpoint:  *endpoint,
+				Bucket:    *bucket,
+				AccessKey: *access,
+				SecretKey: *secret,
+				UseSSL:    *ssl,
+				CacheDir:  *cacheDir,
+			})
+		case "gcs":
+			b, err = gcs.New(context.Background(), gcs.Config{
+				Bucket:          *bucket,
+				CredentialsFile: *gcsCreds,
+				CacheDir:        *cacheDir,
+			})
+		default:
+			return nil, fmt.Errorf("unknown --backend %q (want s3 or gcs)", *backend)
+		}
+		if err != nil {
+			return nil, err
+		}
+		return objstore.NewPrefixed(b, *keyPrefix), nil
 	}
 }
 

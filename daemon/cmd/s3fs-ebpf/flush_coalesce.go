@@ -7,7 +7,7 @@ import (
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 )
 
 // coalescer batches close/release-triggered flush events per ino so
@@ -25,7 +25,7 @@ type coalescer struct {
 	devFd    int
 	devPath  string
 	progs    *fpebpf.Programs
-	s3c      *s3.Client
+	s3c      objstore.Backend
 	window   time.Duration
 
 	mu      sync.Mutex
@@ -43,7 +43,7 @@ type pendingCoalesce struct {
 }
 
 func newCoalescer(devFd int, devPath string,
-	progs *fpebpf.Programs, s3c *s3.Client, window time.Duration) *coalescer {
+	progs *fpebpf.Programs, s3c objstore.Backend, window time.Duration) *coalescer {
 	return &coalescer{
 		devFd:   devFd,
 		devPath: devPath,

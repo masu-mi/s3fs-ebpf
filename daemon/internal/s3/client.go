@@ -1,7 +1,11 @@
-// Package s3 is the daemon-side object-store client. Week 2 (d) wires
+// Package s3 is the S3-flavor object-store client. Week 2 (d) wires
 // it to a real minio-go v7 backend so the Fast Path miss handler can
 // eventually round-trip S3 metadata into the arena. Compatible with
 // MinIO, AWS S3, or any S3-compatible endpoint.
+//
+// This is one of two backends behind [objstore.Backend]; the other
+// is native Google Cloud Storage (see internal/gcs). Callers should
+// depend on the interface, not this concrete type.
 package s3
 
 import (
@@ -13,8 +17,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -41,14 +45,10 @@ type Client struct {
 	mc  *minio.Client
 }
 
-// ObjectMeta is the subset of S3 metadata the arena caches.
-type ObjectMeta struct {
-	Key          string
-	Size         int64
-	ETag         string
-	LastModified time.Time
-	ContentType  string
-}
+// ObjectMeta re-exports [objstore.ObjectMeta] so existing s3-package
+// callers keep the short name. New code should reach for the
+// interface-side type directly.
+type ObjectMeta = objstore.ObjectMeta
 
 // New constructs a Client bound to the given config. Does not validate
 // connectivity — callers touch the network on the first call.
@@ -75,10 +75,10 @@ func (c *Client) Bucket() string { return c.cfg.Bucket }
 // Stat returns metadata for a single object. Returns a wrapped error
 // (containing the underlying minio.ErrorResponse) when the object does
 // not exist or the endpoint refuses the request.
-func (c *Client) Stat(ctx context.Context, key string) (ObjectMeta, error) {
+func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, error) {
 	info, err := c.mc.StatObject(ctx, c.cfg.Bucket, key, minio.StatObjectOptions{})
 	if err != nil {
-		return ObjectMeta{}, fmt.Errorf("s3 stat %q: %w", key, err)
+		return objstore.ObjectMeta{}, fmt.Errorf("s3 stat %q: %w", key, err)
 	}
 	return toMeta(info), nil
 }
@@ -234,12 +234,12 @@ func (c *Client) writeCache(key string, buf []byte) {
 // List enumerates objects under `prefix`. Empty prefix means the whole
 // bucket. Recursive listing (across CommonPrefixes) is enabled to keep
 // the demo output honest about deep hierarchies.
-func (c *Client) List(ctx context.Context, prefix string) ([]ObjectMeta, error) {
+func (c *Client) List(ctx context.Context, prefix string) ([]objstore.ObjectMeta, error) {
 	ch := c.mc.ListObjects(ctx, c.cfg.Bucket, minio.ListObjectsOptions{
 		Prefix:    prefix,
 		Recursive: true,
 	})
-	var out []ObjectMeta
+	var out []objstore.ObjectMeta
 	for obj := range ch {
 		if obj.Err != nil {
 			return nil, fmt.Errorf("s3 list %q: %w", prefix, obj.Err)
@@ -249,8 +249,13 @@ func (c *Client) List(ctx context.Context, prefix string) ([]ObjectMeta, error) 
 	return out, nil
 }
 
-func toMeta(o minio.ObjectInfo) ObjectMeta {
-	return ObjectMeta{
+// Compile-time proof s3.Client implements the shared backend
+// interface. Prevents drift if a Backend method is added upstream
+// without updating this file.
+var _ objstore.Backend = (*Client)(nil)
+
+func toMeta(o minio.ObjectInfo) objstore.ObjectMeta {
+	return objstore.ObjectMeta{
 		Key:          o.Key,
 		Size:         o.Size,
 		ETag:         o.ETag,

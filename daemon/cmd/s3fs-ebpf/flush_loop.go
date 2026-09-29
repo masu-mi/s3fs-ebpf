@@ -10,7 +10,7 @@ import (
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -181,7 +181,7 @@ func readDirty(devFd int, ino uint64, buf []byte) (int, error) {
 // bypass coalescing — the caller is blocked on signal_flush and
 // latency matters.
 func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
-	s3c *s3.Client, interval time.Duration) {
+	s3c objstore.Backend, interval time.Duration) {
 	if interval <= 0 {
 		interval = 100 * time.Millisecond
 	}
@@ -209,7 +209,7 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 }
 
 func drainFlushQueue(ctx context.Context, devFd int, devPath string,
-	progs *fpebpf.Programs, s3c *s3.Client, coal *coalescer) {
+	progs *fpebpf.Programs, s3c objstore.Backend, coal *coalescer) {
 	for {
 		var ev flushEvent
 		if err := popFlush(devFd, &ev); err != nil {
@@ -237,7 +237,7 @@ func drainFlushQueue(ctx context.Context, devFd int, devPath string,
 }
 
 func handleFlush(ctx context.Context, devFd int, devPath string,
-	progs *fpebpf.Programs, s3c *s3.Client, ev *flushEvent) {
+	progs *fpebpf.Programs, s3c objstore.Backend, ev *flushEvent) {
 	metrics.Global.FlushEvents.Add(1)
 	// Time the full flush service path (readDirty + S3 Put +
 	// arena admit refresh). Defer covers every return branch so

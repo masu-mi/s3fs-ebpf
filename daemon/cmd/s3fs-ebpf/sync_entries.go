@@ -12,7 +12,7 @@ import (
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/s3"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"golang.org/x/sys/unix"
 )
 
@@ -123,7 +123,7 @@ func registerIno(s3Key string, ino uint64) {
 // buildEntriesFromS3 lists the bucket and turns each object into an
 // Entry, filtering out "directory" placeholder keys (0-byte and
 // trailing '/'). name is derived from the S3 key's basename.
-func buildEntriesFromS3(ctx context.Context, s3c *s3.Client) ([]fpebpf.Entry, error) {
+func buildEntriesFromS3(ctx context.Context, s3c objstore.Backend) ([]fpebpf.Entry, error) {
 	objs, err := s3c.List(ctx, "")
 	if err != nil {
 		return nil, err
@@ -179,7 +179,7 @@ func entriesToSyncPayload(es []fpebpf.Entry) []syncEntry {
 // kmod → update daemon mirror. Returns the fresh entry set on
 // success. syncEntries is a no-op when s3c is nil (offline mode uses
 // the bootstrap mirror kmod already has).
-func syncEntriesOnce(ctx context.Context, devPath string, s3c *s3.Client) ([]fpebpf.Entry, error) {
+func syncEntriesOnce(ctx context.Context, devPath string, s3c objstore.Backend) ([]fpebpf.Entry, error) {
 	if s3c == nil {
 		return fpebpf.Snapshot(), nil
 	}
@@ -204,7 +204,7 @@ func syncEntriesOnce(ctx context.Context, devPath string, s3c *s3.Client) ([]fpe
 
 // runSyncLoop invokes syncEntriesOnce on `interval` until ctx is
 // done. A zero interval disables periodic sync (startup-only mode).
-func runSyncLoop(ctx context.Context, devPath string, s3c *s3.Client,
+func runSyncLoop(ctx context.Context, devPath string, s3c objstore.Backend,
 	interval time.Duration, onSync func([]fpebpf.Entry)) {
 	if interval <= 0 {
 		return
