@@ -18,6 +18,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=lib/umount.sh
+source "$TOPDIR/scripts/lib/umount.sh"
 MOUNT=${MOUNT:-/mnt/s3demo}
 METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
 BUCKET=${BUCKET:-s3fs-test}
@@ -109,7 +111,7 @@ cleanup() {
 		pgrep -f 's3fs-ebpf fastpath' >/dev/null || break
 		sleep 0.5
 	done
-	mountpoint -q "$MOUNT" && sudo umount "$MOUNT" 2>/dev/null || true
+	umount_hard "$MOUNT"
 	lsmod | grep -q '^s3fs_kfunc' && sudo rmmod s3fs_kfunc 2>/dev/null || true
 }
 trap cleanup EXIT

@@ -12,6 +12,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=lib/umount.sh
+source "$TOPDIR/scripts/lib/umount.sh"
 OUT_DIR=${OUT_DIR:-/tmp/bench-3way}
 MP_EBPF=/mnt/s3demo
 MP_FUSE_RAW=/mnt/s3fuse            # raw、キャッシュ無効
@@ -44,7 +46,7 @@ check_prereq() {
 start_fuse_raw() {
 	log "mount fuse-raw at $MP_FUSE_RAW"
 	sudo mkdir -p "$MP_FUSE_RAW"
-	mountpoint -q "$MP_FUSE_RAW" && sudo umount "$MP_FUSE_RAW" || true
+	umount_hard "$MP_FUSE_RAW"
 	sudo s3fs s3fs-test "$MP_FUSE_RAW" \
 		-o url=http://127.0.0.1:9000 -o use_path_request_style \
 		-o passwd_file=/etc/passwd-s3fs -o allow_other \
@@ -54,7 +56,7 @@ start_fuse_raw() {
 start_fuse_cache() {
 	log "mount fuse-cache at $MP_FUSE_CACHE (use_cache + kernel_cache)"
 	sudo mkdir -p "$MP_FUSE_CACHE"
-	mountpoint -q "$MP_FUSE_CACHE" && sudo umount "$MP_FUSE_CACHE" || true
+	umount_hard "$MP_FUSE_CACHE"
 	rm -rf "$FUSE_CACHE_DIR" && mkdir -p "$FUSE_CACHE_DIR"
 	sudo s3fs s3fs-test "$MP_FUSE_CACHE" \
 		-o url=http://127.0.0.1:9000 -o use_path_request_style \
@@ -84,9 +86,9 @@ stop_all() {
 	log "stopping"
 	sudo pkill -INT -f 's3fs-ebpf fastpath' 2>/dev/null || true
 	sleep 1
-	sudo umount "$MP_EBPF"        2>/dev/null || true
-	sudo rmmod s3fs_kfunc         2>/dev/null || true
-	sudo umount "$MP_FUSE_CACHE"  2>/dev/null || true
+	umount_hard "$MP_EBPF"
+	sudo rmmod s3fs_kfunc 2>/dev/null || true
+	umount_hard "$MP_FUSE_CACHE"
 	# leave MP_FUSE_RAW mounted for the next bench-latency run
 }
 trap stop_all EXIT
