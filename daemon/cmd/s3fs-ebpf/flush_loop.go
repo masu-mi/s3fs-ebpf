@@ -201,10 +201,64 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 	for {
 		select {
 		case <-ctx.Done():
+			// H-01 drain-on-shutdown: any flush events already
+			// enqueued by kmod .release / .fsync (before the daemon
+			// was signaled) are still there. Drain them so a graceful
+			// SIGINT durably PUTs the last write instead of dropping
+			// it on the floor. Bounded so a stuck S3 doesn't hang
+			// shutdown forever.
+			drainFlushOnShutdown(int(f.Fd()), devPath, progs, s3c, coal,
+				shutdownDrainBudget)
 			return
 		case <-t.C:
 			drainFlushQueue(ctx, int(f.Fd()), devPath, progs, s3c, coal)
 		}
+	}
+}
+
+// shutdownDrainBudget bounds how long runFlushLoop keeps draining
+// after ctx.Done. 10s handles the "last write PUT still in flight"
+// case without deadlocking the whole daemon on an unreachable S3.
+var shutdownDrainBudget = 10 * time.Second
+
+// drainFlushOnShutdown reads any events still on the kmod flush
+// queue and pushes them through the coalescer, bounded by `budget`.
+// Uses a background ctx so a canceled parent doesn't short-circuit
+// the PUTs we are actively trying to complete.
+func drainFlushOnShutdown(devFd int, devPath string, progs *fpebpf.Programs,
+	s3c objstore.Backend, coal *coalescer, budget time.Duration) {
+	deadline := time.Now().Add(budget)
+	ctx := context.Background()
+	drained := 0
+	for {
+		var ev flushEvent
+		if err := popFlush(devFd, &ev); err != nil {
+			if errors.Is(err, unix.EAGAIN) {
+				break // queue empty
+			}
+			fmt.Fprintf(os.Stderr, "[flush] shutdown pop: %v\n", err)
+			return
+		}
+		// Drive events synchronously on the shutdown path so we
+		// don't just re-enqueue into the coalescer's debounce timer
+		// and then exit before it fires. handleFlush issues the PUT
+		// (and signal_flush for WAIT events) in-line.
+		handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
+		drained++
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr,
+				"[flush] shutdown drain hit %s budget with events remaining — some writes may not be durable\n",
+				budget)
+			return
+		}
+	}
+	// coal.Shutdown() (deferred by runFlushLoop) fires any debounced
+	// events queued before ctx.Done. Our synchronous drain above
+	// covered everything sitting on the kmod side; coalescer flush
+	// covers the last debounce-window items.
+	_ = coal
+	if drained > 0 {
+		fmt.Fprintf(os.Stderr, "[flush] shutdown drained %d event(s) from kmod queue\n", drained)
 	}
 }
 
