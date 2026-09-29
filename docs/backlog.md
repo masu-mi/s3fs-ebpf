@@ -77,8 +77,7 @@
 - [x] ✅ **F-01** prewarm を sync 時にも回す (`w4b §4-3`) — 完 (次 commit)。`prewarm()` の per-entry ロジックを `prewarmEntry()` として切り出し、runSyncLoop callback から未 prewarmed な新 ino に対して呼ぶ。`prewarmed` map で idempotent 化、消えた ino は delete。`--prewarm-on-sync` (default true) で無効化可能。startup で warm 済み ino は seed 済のため sync 1 巡目は差分だけ処理。sync 時 replaceAdmit は H-04 fix で serialized push を継承
 - [ ] **F-02** basename 衝突対応 (`w4b §4-4`)  
   `a/foo.txt` と `b/foo.txt` が同 name で衝突。dir 対応 (下記 G-01) と一括で。
-- [ ] **F-03** BPF `inode_index` と sync の連携 (`w4b §4-5`)  
-  fentry の fast_hits stub が prewarm 済 entry しか書かれない。sync round で `progs.WarmCache` を呼ぶ。tag を「metadata warm」と「content admit」で分離。
+- [x] ✅ **F-03** BPF `inode_index` と sync の連携 (`w4b §4-5`) — 完 (次 commit)。`prewarmEntry` を "metadata warm (無条件 WarmCache)" と "content admit (policy-gated AdmitContent)" の 2 step に分割。policy=false でも stat が Path A で解決するようになった。sync 経由 F-01 の新 ino も同じ split を通るので、policy-suppressed entry の getattr も fast_hits に加算される
 
 ### G. VFS 拡張
 
