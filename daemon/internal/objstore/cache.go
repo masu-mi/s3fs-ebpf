@@ -84,3 +84,12 @@ func (c *DiskCache) Invalidate(key string) {
 	}
 	_ = os.Remove(c.path(key))
 }
+
+// InvalidateRename drops both keys after a successful backend
+// CopyObject+Delete. oldKey is gone from the backend; newKey's
+// content just changed (rename can overwrite an existing object),
+// so its cached body — if any — is stale.
+func (c *DiskCache) InvalidateRename(oldKey, newKey string) {
+	c.Invalidate(oldKey)
+	c.Invalidate(newKey)
+}
