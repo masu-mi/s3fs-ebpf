@@ -97,8 +97,7 @@
 - [ ] **H-03** arena gc (`w4c §4-6`, `ll §5.4`, `be §4-1`)  
   AdmitContent の high-water offset が monotonic 増加。「差し替えられた古い arena offset」を daemon 側で free list に戻す、または arena reset の periodic 実行。
 - [x] ✅ **H-04** admit の snapshot re-push が atomic でない (`w4ac §5-3`) — 完 (次 commit)。`admitMu` を ioctl 完了まで保持する single-writer 制約に、`setAdmits` / `replaceAdmit` / `refreshAdmits` / `clearAdmits` / `dropAdmits` / `pruneAdmitsTo` の全 6 mutator を refactor。snapshot copy も撤去 (lock を持っている間は直接 admits slice を ioctl に渡せる)。`admitArena` を package var 化してテストで capturing fake に差し替え、`TestReplaceAdmit_ConcurrentPushIsSerialized` (N=64 goroutine × replaceAdmit を 5 count 実行、`-race`) で "全 push が admitMu 保持下" + "snapshot サイズ単調増加" + "最終 admits に N ino 全部揃う" を pin
-- [ ] **H-05** daemon miss reader の SIGINT clean shutdown (`w4ac §5-4`)  
-  `os.File.Read` が blocking 中に fd close されると Go は EPIPE / EBADF を返すはずだが、シナリオによっては hangup 可能。長時間稼働 test で挙動確認。
+- [x] ✅ **H-05** daemon miss reader の SIGINT clean shutdown (`w4ac §5-4`) — 完 (次 commit)。`runReadMissLoop` の shutdown goroutine に `readMissShutdownWarn=5s` watchdog を追加、`f.Close()` 後に main loop が 5s 以内に return しない場合 stderr に SHUTDOWN WARN を吐く (kmod .release 側のバグを observable に)。`TestOSFileCloseWakesBlockedRead` (os.Pipe pair) で "blocked Read が Close 500ms 以内に io.EOF/os.ErrClosed で wake" を回帰テストで pin
 - [ ] **H-06** pending の shutdown race (`w4ac §5-5`)  
   refcount 設計はテスト範囲で問題ないが、極限並行下で `hash_del` と complete のタイミング race。stress test で verify。
 

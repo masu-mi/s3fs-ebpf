@@ -317,11 +317,25 @@ func runReadMissLoop(ctx context.Context, devPath string,
 	}
 	defer f.Close()
 
-	// Cancel-triggered close so blocked .read wakes with EOF.
+	// Cancel-triggered close so the blocked kmod-side .read wakes
+	// with EOF. The 5s deadline is an H-05 observability net: on any
+	// modern kernel .release drops the wait queue, but a stuck kmod
+	// (buggy hook, stale mm ref) could leave Read hanging forever.
+	// Emit an audible warning so bench harnesses and operators can
+	// tell whether shutdown actually completed.
+	loopExit := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		f.Close()
+		select {
+		case <-loopExit:
+		case <-time.After(readMissShutdownWarn):
+			fmt.Fprintf(os.Stderr,
+				"[upcall] SHUTDOWN WARN: read loop still blocked %s after close — check kmod .release path\n",
+				readMissShutdownWarn)
+		}
 	}()
+	defer close(loopExit)
 
 	var buf [24]byte // sizeof(readMissEvent)
 	for {
@@ -356,6 +370,11 @@ const (
 	partialAdmitThreshold = 4 * 1024 * 1024
 	partialAdmitChunk     = 4 * 1024 * 1024
 )
+
+// readMissShutdownWarn bounds how long the shutdown watchdog waits
+// for the blocking Read to wake after Close before logging. Tuned
+// pessimistic — real kmod releases finish in μs.
+var readMissShutdownWarn = 5 * time.Second
 
 func handleReadMiss(ctx context.Context, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, ev readMissEvent) {
