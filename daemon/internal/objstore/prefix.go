@@ -44,7 +44,9 @@ func (p *Prefixed) Stat(ctx context.Context, key string) (ObjectMeta, error) {
 	if err != nil {
 		return m, err
 	}
-	m.Key = strings.TrimPrefix(m.Key, p.prefix)
+	if rel, ok := strings.CutPrefix(m.Key, p.prefix); ok {
+		m.Key = rel
+	}
 	return m, nil
 }
 
@@ -70,9 +72,8 @@ func (p *Prefixed) Rename(ctx context.Context, oldKey, newKey string) error {
 
 // List forwards subprefix through the wrapper prefix so callers can
 // still narrow the enumeration ("list under mount-root/subdir/").
-// The returned metadata carries relative keys — the "<prefix>"
-// placeholder object itself (a directory marker) is dropped so it
-// doesn't clutter the mount-root listing.
+// Returned keys are prefix-relative; the "<prefix>" directory-marker
+// object itself is dropped.
 func (p *Prefixed) List(ctx context.Context, subprefix string) ([]ObjectMeta, error) {
 	metas, err := p.inner.List(ctx, p.prefix+subprefix)
 	if err != nil {
@@ -80,16 +81,11 @@ func (p *Prefixed) List(ctx context.Context, subprefix string) ([]ObjectMeta, er
 	}
 	out := make([]ObjectMeta, 0, len(metas))
 	for _, m := range metas {
-		// Backends only return keys matching the prefix we asked for,
-		// so HasPrefix should always be true. Defensive skip guards
-		// against a hypothetical backend that ignores the filter.
-		if !strings.HasPrefix(m.Key, p.prefix) {
+		rel, ok := strings.CutPrefix(m.Key, p.prefix)
+		if !ok || rel == "" {
 			continue
 		}
-		m.Key = strings.TrimPrefix(m.Key, p.prefix)
-		if m.Key == "" {
-			continue
-		}
+		m.Key = rel
 		out = append(out, m)
 	}
 	return out, nil

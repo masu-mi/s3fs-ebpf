@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+// Backend kind constants — the value the operator passes to
+// --backend. Exposed here so callers switch on the constant rather
+// than a bare string literal.
+const (
+	KindS3  = "s3"
+	KindGCS = "gcs"
+)
+
 // ObjectMeta is the subset of backend metadata the daemon caches.
 // Fields mirror what both S3 (HEAD Object) and GCS (Object.Attrs)
 // surface; anything backend-specific stays inside the implementing
