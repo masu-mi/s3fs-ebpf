@@ -83,8 +83,7 @@
 
 - [ ] **G-01** ディレクトリ (subdir) 対応 (`w4b §4-4`)  
   現在 root 直下のみ。entry table に mode で `S_IFDIR` を持たせ、`s3fs_ebpf_make_inode` を dir 分岐、`s3fs_ebpf_dir_iops` を各 dir inode に付ける。sync entry の shape に `parent_ino` 追加。
-- [ ] **G-02** `.setattr` に mode / uid / gid 対応  
-  現状 ATTR_SIZE のみ。chmod / chown を通したい。POSIX 志向でなくても metadata 保持は S3 tag に載せる余地あり。
+- [x] ✅ **G-02** `.setattr` に mode / uid / gid 対応 — 完 (次 commit)。kmod-side に per-ino `s3fs_attr_overrides` (64-bucket hash + spinlock) を追加、`s3fs_ebpf_file_setattr` は ATTR_MODE/UID/GID のいずれかがセットされたら upsert、`s3fs_ebpf_make_inode` が override を再適用するので icache eviction 後の再 lookup で保持される。実機で chmod 0755 + chown 1000:1000 → `drop_caches=2` → stat が保持後の値を返すことを確認 (fix 前は 644/0/0 に revert)。file-type bit は entry 由来を保護、S3 tag への永続化は future work
 
 ### H. 環境 lifecycle / 信頼性
 
