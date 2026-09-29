@@ -74,8 +74,7 @@
 
 ### F. dynamic sync 強化 (`w4b §4`)
 
-- [ ] **F-01** prewarm を sync 時にも回す (`w4b §4-3`)  
-  現在 startup のみ。新 entry の初回 cat が 30ms Path C になる。runSyncLoop に `--prewarm-new-entries` オプション。
+- [x] ✅ **F-01** prewarm を sync 時にも回す (`w4b §4-3`) — 完 (次 commit)。`prewarm()` の per-entry ロジックを `prewarmEntry()` として切り出し、runSyncLoop callback から未 prewarmed な新 ino に対して呼ぶ。`prewarmed` map で idempotent 化、消えた ino は delete。`--prewarm-on-sync` (default true) で無効化可能。startup で warm 済み ino は seed 済のため sync 1 巡目は差分だけ処理。sync 時 replaceAdmit は H-04 fix で serialized push を継承
 - [ ] **F-02** basename 衝突対応 (`w4b §4-4`)  
   `a/foo.txt` と `b/foo.txt` が同 name で衝突。dir 対応 (下記 G-01) と一括で。
 - [ ] **F-03** BPF `inode_index` と sync の連携 (`w4b §4-5`)  

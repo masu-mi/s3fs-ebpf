@@ -350,6 +350,10 @@ func runFastpath(args []string) int {
 			"When set, the map is loaded at startup and atomically re-written after every "+
 			"assignIno / registerIno so ino ↔ path pairs survive daemon restarts. "+
 			"Empty (default) keeps the allocator in-memory only.")
+	prewarmOnSync := fs.Bool("prewarm-on-sync", true,
+		"[F-01] when true (default), each sync round runs the prewarm hook on any entry "+
+			"that appeared since the previous round so the first cat hits Path B/A "+
+			"instead of the ~30ms Path C upcall. Off to keep sync rounds purely metadata.")
 	newClient := backendFlags(fs)
 	fs.Parse(args)
 
@@ -640,6 +644,14 @@ func runFastpath(args []string) int {
 	// via `ls`, deleted keys stop resolving. When admit state is
 	// impacted (e.g. a size change) the next .read_folio re-fetches.
 	var lastSyncCount = len(fpebpf.Snapshot())
+	// F-01: track inos we've already prewarmed so each sync round
+	// only warms newly-appeared entries. Seeded from the startup
+	// prewarm output so the first sync round doesn't re-fetch things
+	// we just admitted.
+	prewarmed := make(map[uint64]struct{}, len(initialAdmits))
+	for _, a := range initialAdmits {
+		prewarmed[a.Ino] = struct{}{}
+	}
 	go runSyncLoop(ctx, *dev, s3c, *syncEvery, func(fresh []fpebpf.Entry) {
 		if len(fresh) != lastSyncCount {
 			fmt.Printf("[sync] delta: %d → %d entries\n",
@@ -655,6 +667,32 @@ func runFastpath(args []string) int {
 		}
 		if err := pruneAdmitsTo(*dev, keep); err != nil {
 			fmt.Fprintf(os.Stderr, "[admit prune] %v\n", err)
+		}
+		// F-01: prewarm any entry we haven't seen before so the
+		// first cat hits Path A/B. Skips inos gone from the fresh
+		// set (they no longer exist to warm) and inos we already
+		// warmed in a prior round (idempotent).
+		if !*prewarmOnSync {
+			return
+		}
+		for ino := range prewarmed {
+			if _, alive := keep[ino]; !alive {
+				delete(prewarmed, ino)
+			}
+		}
+		for _, entry := range fresh {
+			if _, done := prewarmed[entry.Ino]; done {
+				continue
+			}
+			ad, ok := prewarmEntry(ctx, progs, s3c, pol, entry)
+			prewarmed[entry.Ino] = struct{}{}
+			if !ok {
+				continue
+			}
+			if err := replaceAdmit(*dev, ad, progs); err != nil {
+				fmt.Fprintf(os.Stderr, "[sync prewarm] admit ino=%d: %v\n",
+					entry.Ino, err)
+			}
 		}
 	})
 	// Week 4 (c): drain the kmod write-back queue and PUT bytes to
@@ -718,75 +756,91 @@ func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend, 
 	live := fpebpf.Snapshot()
 	admits := make([]admitEntry, 0, len(live))
 	for _, entry := range live {
-		// Entry.Prewarm is the static bootstrap default; the policy
-		// engine, when loaded, overrides per-entry (P-01 spike). Both
-		// paths default to prewarm=true if the policy is broken /
-		// missing, so a misconfigured file doesn't strand the mount.
-		wantPrewarm := entry.Prewarm
-		if pol != nil {
-			wantPrewarm = pol.EvalPrewarm(policy.EntryInput{
-				Ino: entry.Ino, Name: entry.Name, S3Key: entry.S3Key,
-				Size: entry.Fallback, Mode: entry.Mode,
-			})
-		}
-		if !wantPrewarm {
-			fmt.Printf("[prewarm] ino=%d name=%s skipped (policy=false, waits for Path C)\n",
-				entry.Ino, entry.Name)
-			continue
-		}
-		stub := fpebpf.InodeStub{
-			Ino:     entry.Ino,
-			Size:    entry.Fallback,
-			MtimeNs: uint64(time.Now().UnixNano()),
-			Mode:    entry.Mode,
-		}
-		source := "fallback"
-		var body []byte
-		if s3c != nil {
-			meta, err := s3c.Stat(timedCtx, entry.S3Key)
-			if err != nil {
-				fmt.Printf("[prewarm] ino=%d s3://%s stat: %v (using fallback)\n",
-					entry.Ino, entry.S3Key, err)
-			} else {
-				stub.Size = uint64(meta.Size)
-				stub.MtimeNs = uint64(meta.LastModified.UnixNano())
-				source = fmt.Sprintf("s3://%s", entry.S3Key)
-				body, err = s3c.Get(timedCtx, entry.S3Key)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[prewarm] ino=%d get: %v (skip admit)\n",
-						entry.Ino, err)
-					body = nil
-				}
-			}
-		}
-		off, err := progs.WarmCache(stub)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[prewarm] ino=%d warm: %v\n", entry.Ino, err)
-			continue
-		}
-		fmt.Printf("[prewarm] ino=%d name=%s size=%d src=%s → stub=%d\n",
-			entry.Ino, entry.Name, stub.Size, source, off)
-
-		if body != nil {
-			cOff, err := progs.AdmitContent(body)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[prewarm] ino=%d content: %v (skip admit)\n",
-					entry.Ino, err)
-				continue
-			}
-			admits = append(admits, admitEntry{
-				Ino:   entry.Ino,
-				Uaddr: progs.Arena().BaseAddr() + uint64(cOff),
-				Size:  uint64(len(body)),
-			})
-			if hi := uint64(cOff) + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
-				metrics.Global.ArenaUsedBytes.Store(hi)
-			}
-			fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d uaddr=0x%x\n",
-				entry.Ino, len(body), cOff, progs.Arena().BaseAddr()+uint64(cOff))
+		ad, ok := prewarmEntry(timedCtx, progs, s3c, pol, entry)
+		if ok {
+			admits = append(admits, ad)
 		}
 	}
 	return admits
+}
+
+// prewarmEntry runs the per-entry prewarm work (policy eval → S3
+// stat/get → WarmCache → AdmitContent → build admitEntry). Split out
+// of `prewarm` so F-01's sync-time prewarm can call the same code
+// path for each newly-appeared entry without re-running the whole
+// startup pass. Returns (entry, true) when a content admission
+// completed; (zero, false) means the ino was warmed for stat but
+// carries no arena content (policy skip, S3 failure, empty body).
+func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend,
+	pol *policy.Engine, entry fpebpf.Entry) (admitEntry, bool) {
+	// Entry.Prewarm is the static bootstrap default; the policy
+	// engine, when loaded, overrides per-entry (P-01 spike). Both
+	// paths default to prewarm=true if the policy is broken /
+	// missing, so a misconfigured file doesn't strand the mount.
+	wantPrewarm := entry.Prewarm
+	if pol != nil {
+		wantPrewarm = pol.EvalPrewarm(policy.EntryInput{
+			Ino: entry.Ino, Name: entry.Name, S3Key: entry.S3Key,
+			Size: entry.Fallback, Mode: entry.Mode,
+		})
+	}
+	if !wantPrewarm {
+		fmt.Printf("[prewarm] ino=%d name=%s skipped (policy=false, waits for Path C)\n",
+			entry.Ino, entry.Name)
+		return admitEntry{}, false
+	}
+	stub := fpebpf.InodeStub{
+		Ino:     entry.Ino,
+		Size:    entry.Fallback,
+		MtimeNs: uint64(time.Now().UnixNano()),
+		Mode:    entry.Mode,
+	}
+	source := "fallback"
+	var body []byte
+	if s3c != nil {
+		meta, err := s3c.Stat(ctx, entry.S3Key)
+		if err != nil {
+			fmt.Printf("[prewarm] ino=%d s3://%s stat: %v (using fallback)\n",
+				entry.Ino, entry.S3Key, err)
+		} else {
+			stub.Size = uint64(meta.Size)
+			stub.MtimeNs = uint64(meta.LastModified.UnixNano())
+			source = fmt.Sprintf("s3://%s", entry.S3Key)
+			body, err = s3c.Get(ctx, entry.S3Key)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[prewarm] ino=%d get: %v (skip admit)\n",
+					entry.Ino, err)
+				body = nil
+			}
+		}
+	}
+	off, err := progs.WarmCache(stub)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[prewarm] ino=%d warm: %v\n", entry.Ino, err)
+		return admitEntry{}, false
+	}
+	fmt.Printf("[prewarm] ino=%d name=%s size=%d src=%s → stub=%d\n",
+		entry.Ino, entry.Name, stub.Size, source, off)
+
+	if body == nil {
+		return admitEntry{}, false
+	}
+	cOff, err := progs.AdmitContent(body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[prewarm] ino=%d content: %v (skip admit)\n",
+			entry.Ino, err)
+		return admitEntry{}, false
+	}
+	if hi := uint64(cOff) + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
+		metrics.Global.ArenaUsedBytes.Store(hi)
+	}
+	fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d uaddr=0x%x\n",
+		entry.Ino, len(body), cOff, progs.Arena().BaseAddr()+uint64(cOff))
+	return admitEntry{
+		Ino:   entry.Ino,
+		Uaddr: progs.Arena().BaseAddr() + uint64(cOff),
+		Size:  uint64(len(body)),
+	}, true
 }
 
 // warmFromS3 resolves a miss event through the S3 client and populates
