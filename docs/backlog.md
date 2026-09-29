@@ -98,8 +98,7 @@
   AdmitContent の high-water offset が monotonic 増加。「差し替えられた古い arena offset」を daemon 側で free list に戻す、または arena reset の periodic 実行。
 - [x] ✅ **H-04** admit の snapshot re-push が atomic でない (`w4ac §5-3`) — 完 (次 commit)。`admitMu` を ioctl 完了まで保持する single-writer 制約に、`setAdmits` / `replaceAdmit` / `refreshAdmits` / `clearAdmits` / `dropAdmits` / `pruneAdmitsTo` の全 6 mutator を refactor。snapshot copy も撤去 (lock を持っている間は直接 admits slice を ioctl に渡せる)。`admitArena` を package var 化してテストで capturing fake に差し替え、`TestReplaceAdmit_ConcurrentPushIsSerialized` (N=64 goroutine × replaceAdmit を 5 count 実行、`-race`) で "全 push が admitMu 保持下" + "snapshot サイズ単調増加" + "最終 admits に N ino 全部揃う" を pin
 - [x] ✅ **H-05** daemon miss reader の SIGINT clean shutdown (`w4ac §5-4`) — 完 (次 commit)。`runReadMissLoop` の shutdown goroutine に `readMissShutdownWarn=5s` watchdog を追加、`f.Close()` 後に main loop が 5s 以内に return しない場合 stderr に SHUTDOWN WARN を吐く (kmod .release 側のバグを observable に)。`TestOSFileCloseWakesBlockedRead` (os.Pipe pair) で "blocked Read が Close 500ms 以内に io.EOF/os.ErrClosed で wake" を回帰テストで pin
-- [ ] **H-06** pending の shutdown race (`w4ac §5-5`)  
-  refcount 設計はテスト範囲で問題ないが、極限並行下で `hash_del` と complete のタイミング race。stress test で verify。
+- [x] ✅ **H-06** pending の shutdown race (`w4ac §5-5`) — 完 (次 commit)。`s3fs_ebpf_upcall_shutdown` に refcount 不変条件のコメント (caller 側 ref が生きているので shutdown が hash ref を落としても waiter の p->err load は safe) を追加。`scripts/stress-shutdown.sh` で 200×16=3200 concurrent cat + 途中 SIGINT + dmesg BUG/KASAN/WARN 監視 + rmmod (5s retry) の smoke を実装、実機で PASS。将来 kmod-side 変更後の回帰検知に使う
 
 ---
 

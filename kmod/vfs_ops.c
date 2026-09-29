@@ -861,7 +861,18 @@ int s3fs_ebpf_signal_admit(u64 ino, int err)
 	return 0;
 }
 
-/* Drain state on module unload. */
+/* Drain state on module unload.
+ *
+ * H-06 invariant: pending_get_or_create hands the caller its own
+ * refcount on p (refs=2 on create, refcount_inc on re-use). Shutdown
+ * below only drops the HASH's ref (via pending_put after hash_del) —
+ * the caller's ref keeps p alive until the waiter wakes from
+ * complete_all, reads p->err, and drops its own ref via pending_put.
+ * Two-ref protocol makes the classic "waker frees before waiter
+ * wakes" UAF impossible: even if CPU A (shutdown) beats CPU B
+ * (waiter) to pending_put, refs=caller-ref=1, so p stays live for
+ * B's p->err load.
+ */
 static void s3fs_ebpf_upcall_shutdown(void)
 {
 	struct s3fs_pending *p;
