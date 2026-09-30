@@ -16,6 +16,57 @@ s3fs-ebpf は「S3 を FS として見せる特定用途 PoC」だが、**FUSE �
 
 ---
 
+## 0. Q&A サマリ (この doc が答えたい 4 質問)
+
+Meetup 準備 / 設計レビューでこの doc を素早く読むための entry point。長い答えは §1-§7 に展開している。
+
+### Q1. S3 機能 (protocol / HTTP / bucket-key 解決) で eBPF を利用しているところは?
+
+**答え**: **なし**。`grep -rn 's3://\|minio\|s3.Client' kmod/ bpf/` は 0 hit。algorithm 名としての "S3-FIFO" 文字列 (BPF policy 内) のみ、実際の S3 プロトコル知識は 100% daemon 側。
+→ 詳細 [§1.1](#11-実測-grep-で確認)
+
+### Q2. どの機能を kmod に倒しているか?
+
+**答え**: backend-agnostic な "FS のトランスポート層" だけ:
+- VFS fop dispatch (`.lookup` / `.read_folio` / `.write` / ...)
+- admit table (ino → uaddr map)
+- pending waiter (`wait_for_completion_interruptible_timeout` 抱え込み)
+- flush / delete / rename queue
+- entry table (dir listing の source)
+- attr overrides (chmod/chown 記憶、G-02)
+- KFunc set (policy への contract) と struct_ops vtable の register
+- arena kern_vm mapping (BTF hack)
+
+**"どの backend か" の判断は kmod に 1 行もない**。
+→ 詳細 [§1.3](#13-kmod-に-倒している-機能)
+
+### Q3. FUSE のような汎用 eBPF FS framework を作る時、hook はどう分離すべきか?
+
+**答え**: 4 軸で切る:
+
+| 軸 | 内容 | 現行の実例 |
+|---|---|---|
+| **A. adapter kind** | VFS-adapt (kmod, generic) / Backend-adapt (daemon, per-backend) / Cache-policy (BPF struct_ops) / Metadata (session=kmod, durable=backend) | s3fs-ebpf の 3 layer 分離 |
+| **B. plane** | data-plane hot = BPF struct_ops / data-plane cold miss = 3 段 upcall / control-plane = ioctl / event stream = USER_RINGBUF (future) | Path A/B/C の分離 |
+| **C. trust boundary** | end user → backend daemon → framework kmod → cache-policy BPF、それぞれ独立 kill switch | policy allowlist (P-05)、mount 権限分離 |
+| **D. per-mount isolation** | 現状 single-mount PoC、struct_ops 複数 attach + KFunc に mount context が必要 | 未実装 (§4.4 で議論) |
+
+**設計 principle: 1 hook = 1 layer / 1 role が触るだけ**。layer をまたぐ hook は避ける。
+→ 詳細 [§4](#4-hook-分離の-4-軸)
+
+### Q4. 開発者・利用者・キャッシュポリシー開発者が別々の時、適切な security を保てるか?
+
+**答え**: **3 invariant を kernel-side enforcement で保証** すれば OK:
+
+1. **backend developer は BPF に触れない** — cache decisions を hijack できない (BPF load は sysadmin 権限が必要 + backend daemon は unprivileged 相当)
+2. **policy developer は backend credential に触れない** — S3 秘密鍵を policy から読めない (KFunc set に credential access helper を入れない設計)
+3. **end user は allowlist から選ぶだけ** — kernel/BPF/daemon の実装詳細を知らなくてよい (SHA256 policy signing + kernel-side check)
+
+**現行 P-05 は userspace loader での check** (bypass 可能)。framework 完成には `bpf_prog_load` hook + LSM 経由の **kernel-side enforcement** が必要 — これが最大の open question ([§7](#7-open-questions) Q3)。
+→ 詳細 [§5](#5-security-model)
+
+---
+
 ## 1. 現在の s3fs-ebpf: S3 機能はどこにあるか
 
 **結論**: **S3 プロトコル / HTTP / bucket-key の知識は 100 % daemon (userspace Go) 側**。kmod と eBPF は完全に backend-agnostic。
