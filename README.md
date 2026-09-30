@@ -154,8 +154,9 @@ Commands:
                events and hit/miss counters until interrupted
   verifier-demo Week 2 probe: try to load an intentionally-rejected pure eBPF
                arena walker and print the verifier's rejection log
-  s3-list      Connect to an S3-compatible endpoint and list a bucket
-  s3-stat      Connect to an S3-compatible endpoint and stat a single object
+  s3-list      List a bucket. Backend selected by --backend s3|gcs
+               (S3-compatible endpoint or Google Cloud Storage).
+  s3-stat      Stat a single object. Backend selected by --backend s3|gcs.
   probe-kvbase Week 4 (a) spike: create an arena, ioctl(/dev/s3fs_ebpf,
                S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, print
                it alongside the user-VM base for comparison
@@ -605,7 +606,8 @@ make readme        # daemon をビルドしてから README.md を再生成
 
 **プロジェクト内**
 
-- [`docs/deisign.md`](docs/deisign.md) — 統合設計書
+- [`docs/design.md`](docs/design.md) — 統合設計書
+- [`docs/INDEX.md`](docs/INDEX.md) — 全 docs のトピック別索引 (L-03)
 - [`docs/motivation.md`](docs/motivation.md) — 背景、Meetup 発表構成、スプリント計画
 - [`docs/related-works.md`](docs/related-works.md) — ExtFUSE / RFUSE との比較
 

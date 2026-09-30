@@ -158,8 +158,8 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 ### L. narrative / docs
 
 - [x] ✅ **L-01** Meetup 登壇 script の起草 — 完 (次 commit)。`docs/demo-scenario.md` に Demo 0-8 の完全 script (35 min 想定タイム配分 + 各節 run / expected / say + 質疑応答想定 + 会場で刺さらなかった時の fallback)。demo 手順を再現可能な shell command 列で書き起こしてある
-- [ ] **L-02** README.md 再生成 (B-05 と同項目)
-- [ ] **L-03** 各 doc の相互リンク整理 (現状ハイパーリンクが手書きで壊れやすい)
+- [x] ✅ **L-02** README.md 再生成 (B-05 と同項目) — 完 (次 commit)。`make readme` で envsubst 再走、`s3-list` / `s3-stat` help に "--backend s3\|gcs (S3-compatible endpoint or Google Cloud Storage)" が反映される 3 行差分だけ吸収
+- [x] ✅ **L-03** 各 doc の相互リンク整理 (現状ハイパーリンクが手書きで壊れやすい) — 完 (次 commit)。docs/ を broken-link audit、`docs/deisign.md` の typo を `docs/design.md` に rename して 3 サイト (README.md / policy-engine-design.md / week4a-implementation-notes.md) の参照を全て更新、`docs/INDEX.md` (トピック別索引) を新設して README から link、"追加/リネーム時に何をすればいいか" の運用手順も同 doc に書き起こし
 
 ---
 
