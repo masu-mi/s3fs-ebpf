@@ -8,6 +8,7 @@
 |---|---|---|
 | [`motivation.md`](motivation.md) | 全員 | プロジェクトの前提と Meetup narrative |
 | [`design.md`](design.md) | 設計に興味 | 統合設計書 (initial pitch) |
+| [`component-communication.md`](component-communication.md) | 新入 dev + 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
 | [`../README.md`](../README.md) | 新入 dev | Quick start / demo path |
 | [`demo-scenario.md`](demo-scenario.md) | Meetup 発表担当 | 35 min の発表 script |
 | [`related-works.md`](related-works.md) | 比較資料が要る人 | ExtFUSE / RFUSE / mount-s3 との位置付け |
