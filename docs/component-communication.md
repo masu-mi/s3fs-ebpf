@@ -192,6 +192,8 @@ sequenceDiagram
 
 `docs/read-path-design.md §3` の当初見積 210 LOC が実測 480 LOC になった理由の 1 つがこの 3-段 upcall pattern の実装コスト (`docs/lessons-learned.md §2.3`)。
 
+**§3 の T8 (miscdev read) と T9 (ringbuf) が並走する理由**: 同じ「miss 通知」に見えるが producer が違う。T9 は fentry BPF (`bpf/s3fs_fastpath.bpf.c:183` `bpf_ringbuf_submit`) から stat/lookup 側 miss を出すもので、`bpf_ringbuf_reserve/submit` は BPF prog 用 helper なので transport も BPF map (ringbuf) 一択。T8 は kmod C context の `.read_folio` (`kmod/vfs_ops.c:728`) から read syscall 側 miss を出すもので、`{ino, offset, count}` の range 情報を持つ。両者は現状「stat 経路の warm 起動」と「data 経路の range fetch」で用途分担している。統一の是非は §4 末尾の transport 対応表を参照。
+
 ---
 
 ## 4. Write flush (close → PUT → sync 促進)
@@ -245,6 +247,24 @@ sequenceDiagram
 ```
 
 WAIT flag と coalescer の分岐は E-03 実装 (`docs/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/backlog.md J-05` 参照)。
+
+**§4 の `s3fs_flush_event` が §3 の ringbuf と別 transport になっている理由**: kmod C context (`.release` / `.fsync` → `s3fs_ebpf_flush_pop` = `kmod/vfs_ops.c:1338`) の producer なので、BPF prog 専用の `bpf_ringbuf_reserve/submit` は使えない (`bpf_ringbuf_output` は kmod 側から呼べるが、以下 2 要件が満たせない):
+
+1. **PUT 失敗時の再登録** — daemon が `ioctl MARK_DIRTY` を送ると kmod は自 queue に再 enqueue できる (`kmod/s3fs_ebpf_dev.c` MARK_DIRTY handler)。ringbuf は fire-and-forget なので再登録経路が daemon 側自前になり複雑化する
+2. **fsync waiter の対称 wake path** — `SIGNAL_FLUSH` ioctl で kmod の `pending->done` を `complete()` する。BPF ringbuf は消費側 (daemon) の read 完了を kmod 側から観測する API がない
+
+### 4.1 event transport 対応表 (T7/T8/T9 の使い分け)
+
+| producer | consumer | transport | 対応 event | 選定理由 |
+|---|---|---|---|---|
+| fentry BPF (stat) | daemon | ringbuf (T9) | `s3fs_miss_event` | BPF prog から書ける helper が公式に存在 |
+| kmod `.read_folio` | daemon | miscdev `read(2)` blocking (T8) | `s3fs_read_miss_event` | 単発 event の blocking read で自然に back-pressure |
+| kmod `.release` / `.fsync` | daemon | miscdev `ioctl POP_FLUSH` (T7) | `s3fs_flush_event` | 再登録 (MARK_DIRTY) と waiter wake (SIGNAL_FLUSH) の対称 API が必要 |
+| kmod `.unlink` | daemon | miscdev `ioctl POP_DELETE` (T7) | delete event | flush と同じ理由 (再登録は不要だが対称性優先) |
+| kmod `.rename` | daemon | miscdev `ioctl POP_RENAME` (T7) | rename event | 同上 |
+| policy BPF vote | daemon | `evict_log` + `ioctl DRAIN_EVICTIONS` (T7) | evicted ino[] | admit_replace 内 synchronous vote 結果の batch drain (§6-b) |
+
+**統一の余地**: fentry ringbuf を廃止して T8 の miscdev read に相乗り (root ino=1 の warm 起動を kmod 側 hook に移動) するか、逆に flush/delete/rename queue を BPF ringbuf に寄せて MARK_DIRTY / SIGNAL_* 用の別 miscdev を細く残す、が候補。前者は BPF prog `s3fs_fastpath.bpf.c` の `s3fs_events` map を消せて map 数が減る利点、後者は syscall 数が減る利点。優先度は現状低 (Path C 全体で S3 Get 5-30ms 支配、transport overhead は 0.02% 未満 — §7 の議論と同じ trade-off)。
 
 ---
 
@@ -303,7 +323,7 @@ fmod_ret と struct_ops の trade-off は `docs/policy-attach-comparison.md`。�
 
 ## 6. Sync + eviction feedback (30s 巡回)
 
-periodic 系の 2 loop はそれぞれ独立 ticker で回り、通信路も並列。
+periodic 系は独立 ticker で回るが、**メインの feedback は (b) の admit → policy vote → evict_log → drain** — daemon が再送する admit と kmod policy の evict の oscillation を止めるための因果ループがここに閉じている (`docs/backlog.md P-13` の解決点)。
 
 ```mermaid
 sequenceDiagram
@@ -311,33 +331,38 @@ sequenceDiagram
     participant Daemon as daemon
     participant S3 as S3 backend
     participant Kmod as s3fs_kfunc
-    participant IdxMap as s3fs_inode_index
+    participant Pol as Policy BPF
+    participant Log as evict_log (kmod)
 
-    loop 30s sync-every
-      Daemon->>S3: HTTP LIST bucket
-      S3-->>Daemon: object list
-      Daemon->>Daemon: buildEntriesFromS3<br/>(subdir 分解 + synthetic dir entry)
-      Daemon->>Kmod: ioctl SYNC_ENTRIES<br/>(replace-all)
-      Kmod->>Kmod: entries_replace +<br/>local_prune_promoted_locked +<br/>shrink_dcache_sb
-      Daemon->>Daemon: F-01: 新 ino を prewarm
-      Daemon->>IdxMap: WarmCache(stub)<br/>→ fentry が hit するように
-    end
+    Note over Daemon,Log: (a) 30s sync loop — LIST → entry replace → prewarm
+    Daemon->>S3: HTTP LIST bucket
+    S3-->>Daemon: object list
+    Note over Daemon: buildEntriesFromS3 (subdir 分解 + synthetic dir)
+    Daemon->>Kmod: ioctl SYNC_ENTRIES (replace-all)
+    Note over Kmod: entries_replace + local_prune_promoted_locked + shrink_dcache_sb
+    Note over Daemon: F-01 新 ino のみ prewarm (evicted set は除外)
+    Daemon->>Kmod: bpf(MAP_UPDATE_ELEM) s3fs_inode_index
 
-    loop 2s drain-every
-      Daemon->>Kmod: ioctl DRAIN_EVICTIONS
-      Kmod-->>Daemon: 直近の evicted ino list
-      Daemon->>Daemon: dropAdmits + FreeArenaChunk
-      Daemon->>Kmod: ioctl ADMIT_ARENA<br/>(evicted を除いた snapshot)
-    end
+    Note over Daemon,Log: (b) admit → policy vote → evict feedback (メイン feedback path)
+    Daemon->>Kmod: ioctl ADMIT_ARENA (snapshot replace)
+    Kmod->>Pol: s3fs_policy_on_evict(ino) per entry — fmod_ret + struct_ops
+    Pol-->>Kmod: vote (0=keep, else evict)
+    Note over Kmod: count > softcap かつ vote!=0 → hash_del + kfree
+    Kmod->>Log: evict_log_push(ino)
+    Note over Daemon: 2s ticker
+    Daemon->>Kmod: ioctl DRAIN_EVICTIONS
+    Log-->>Daemon: evicted ino list + overflow
+    Note over Daemon: dropAdmits + FreeArenaChunk / 次 ADMIT/prewarm から除外 = oscillation 停止
 
-    loop 5s stats-every
-      Daemon->>Kmod: ioctl STATS
-      Kmod-->>Daemon: [evictions_total, folio_hits]
-      Daemon->>Daemon: /metrics 用 gauge に mirror
-    end
+    Note over Daemon,Log: (c) 5s stats loop
+    Daemon->>Kmod: ioctl STATS
+    Kmod-->>Daemon: evictions_total, folio_hits
+    Note over Daemon: /metrics gauge に mirror (Grafana panel 20/21)
 ```
 
-evict feedback (drain) を持たないと、daemon が再送する admit と kmod policy の evict が oscillation で永久ループする (`docs/backlog.md P-13` の解決点)。5s stats は Grafana panel 20/21 の folio_hits gauge を駆動。
+**旧版からの変更点**: 旧図は 3 本の `loop` を並置しただけで、evict の発生源 (`Pol` = fmod_ret / struct_ops vote) と kmod 側の `evict_log` を出さず、feedback の因果関係が読めなかった。加えて `Actor->>Actor: text<br/>text` の self-arrow を多用しており一部 renderer (GitHub / Kibela の mermaid 版) で描画が崩れる報告があったため、self-arrow を `Note over` に置換して安全側に倒している。
+
+evict feedback を持たないと oscillation が起きる根拠と実装は `kmod/vfs_ops.c:620` (`s3fs_policy_on_evict` 呼び出し) と `kmod/vfs_ops.c:655` (`evict_log_push`)、drain 側は `daemon/cmd/s3fs-ebpf/main.go:961` (`drainEvictionsLoop`)。5s stats は Grafana panel 20/21 の folio_hits gauge を駆動。
 
 ---
 
