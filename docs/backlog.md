@@ -150,9 +150,11 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 ### K. upstream 貢献 (`w4a §9`)
 
-- [ ] **K-01** `bpf_arena_get_kern_vm_start` の EXPORT_SYMBOL_GPL 提案  
+根拠 doc: [`ebpf-ecosystem-gaps.md`](ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
+
+- [ ] **K-01** `bpf_arena_get_kern_vm_start` の EXPORT_SYMBOL_GPL 提案 — 詳細 [`ebpf-ecosystem-gaps.md §1.2`](ebpf-ecosystem-gaps.md#12-改善案)
   当てれば kmod 側で BTF-derived struct redefine 不要になる。
-- [ ] **K-02** arena kern_vm range 用の generic-context fault handler 追加提案  
+- [ ] **K-02** arena kern_vm range 用の generic-context fault handler 追加提案 — 詳細 [`ebpf-ecosystem-gaps.md §1.2`](ebpf-ecosystem-gaps.md#12-改善案)
   当てれば A′ (kern_vm 直 deref) 経路が復活、B の GUP overhead が消える (数百ns オーダー改善見込み)。
 
 ### L. narrative / docs
