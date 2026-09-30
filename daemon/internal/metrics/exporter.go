@@ -177,4 +177,8 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 	// calls. Bounded to CustomGaugeCap distinct names; ordered by
 	// name for stable scrape output. See metrics/custom.go.
 	writeCustom(w)
+
+	// J-02: Go runtime health — goroutines, heap, GC. Named to match
+	// client_golang's go_* series so stock Grafana dashboards apply.
+	writeRuntime(w)
 }

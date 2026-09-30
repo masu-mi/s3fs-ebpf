@@ -143,10 +143,10 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 - [x] ✅ **J-01 (part)** hand-rolled histogram で read-miss latency を計測 — 完 (I-05 と同 commit)。`s3fs_ebpf_read_miss_latency_seconds` histogram (13 bucket、[1ms..10s +Inf]) を Grafana dashboard に描画。client_golang 全面移行は残り (label 対応 / exemplar 使用時に着手予定)
 - [x] ✅ **J-01 (flush)** 対称に flush latency も histogram 化 — 完 (次 commit)。`FlushLatency` を追加して `handleFlush` を defer で計測 (readDirty + S3 Put + arena admit refresh の合計)。Grafana に p50/p95/p99 timeseries + heatmap の 2 panel 追加。smoke で 10 flush events (touch + write × 5) の分布 (2 in ≤5ms, 8 in 5-25ms) を実測
-- [ ] **J-02** `runtime/metrics` を expose (Go GC pause、goroutine 数)
-- [ ] **J-03** CPU% panel に nice / softirq / irq / steal を追加 (BPF fentry が softirq に載っているか観察)
-- [ ] **J-04** write throughput panel に req/s + bytes/req を legend で分解
-- [ ] **J-05** fuse-bench と ebpf-bench を同時実行して 1 グラフで比較 (bench harness の並列化)
+- [x] ✅ **J-02** `runtime/metrics` を expose (Go GC pause、goroutine 数) — 完 (次 commit)。`daemon/internal/metrics/runtime.go` に `writeRuntime` を追加、`go_goroutines` / `go_threads` / `go_memstats_{alloc,sys,heap_objects,next_gc}_bytes` / `go_gc_runs_total` / `go_gc_pause_{seconds_total,last_seconds}` を Prometheus text 出力 (client_golang 名前互換)。Grafana panel 24/25/26 追加、`{job="s3fs_ebpf_daemon"}` filter で prometheus/node_exporter 自身の runtime を除外。`TestWriteRuntime_EmitsExpectedSeries` で 8 系列の HELP/TYPE/sample 出力を pin。実機で `go_goroutines 17`, `go_gc_pause_last_seconds 0.000122` を実測
+- [x] ✅ **J-03** CPU% panel に nice / softirq / irq / steal を追加 — 完 (次 commit)。既存 panel 11 (Host CPU%) に 4 mode 追加、legend 7 系列に。BPF fentry が softirq に載っているかや、共有 VM の steal を bench 時に観察できる
+- [x] ✅ **J-04** write throughput panel に req/s + bytes/req を legend で分解 — 完 (次 commit)。panel 6 の単一 legend "PUT bytes/s" を 3 系列 (bytes/s、req/s、mean bytes/req) に分解。events が上がって bytes が上がらなければ小 file 連発、逆なら大 blob と切り分けられる。fieldConfig の byName override で req/s と bytes/req に別 unit
+- [x] ✅ **J-05** fuse-bench と ebpf-bench を同時実行して 1 グラフで比較 — 完 (次 commit)。`scripts/bench-parallel.sh` に 3 backend (ebpf / fuse-cache / fuse-raw) 並列 read/write 実行を実装、`timeout` + watchdog + jobs -p ポーリングで hang をブロック、metric snapshot t0/t1 で差分を出力。10s smoke で ebpf-read 1159 ops/worker vs fuse-cache 798 vs fuse-raw 442、ebpf-write 1141 ops/writer (E-03 coalescer で PUT は 1 event, 64B のみ) を実測。Grafana 上で MinIO ingress/egress + Go runtime + ebpf 側 counter が同 timeline で overlay 観測可
 
 ### K. upstream 貢献 (`w4a §9`)
 

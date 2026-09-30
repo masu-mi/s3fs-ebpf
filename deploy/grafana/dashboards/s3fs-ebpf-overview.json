@@ -112,15 +112,23 @@
     },
     {
       "id": 6,
-      "title": "Write-back throughput (bytes PUT to S3)",
+      "title": "Write-back throughput",
       "type": "timeseries",
-      "description": "Bytes/s that the flush loop wrote back. bench-write を回すと 100 MiB 単位のスパイクが見える。",
+      "description": "J-04: bytes/s (left) と events/s + mean bytes/req (右 override) を同 panel に。events が上がっても bytes が上がらなければ小 file の連発、逆なら大 blob の吐き出しと切り分けられる。",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_bytes_total[1m])", "legendFormat": "PUT bytes/s" }
+        { "refId": "A", "expr": "rate(s3fs_ebpf_flush_bytes_total[1m])", "legendFormat": "PUT bytes/s" },
+        { "refId": "B", "expr": "rate(s3fs_ebpf_flush_events_total[1m])", "legendFormat": "PUT req/s" },
+        { "refId": "C", "expr": "rate(s3fs_ebpf_flush_bytes_total[1m]) / clamp_min(rate(s3fs_ebpf_flush_events_total[1m]), 1)", "legendFormat": "mean bytes/req" }
       ],
-      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "fieldConfig": {
+        "defaults": { "unit": "Bps" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "PUT req/s" },       "properties": [{ "id": "unit", "value": "reqps" }] },
+          { "matcher": { "id": "byName", "options": "mean bytes/req" }, "properties": [{ "id": "unit", "value": "bytes" }] }
+        ]
+      },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
     },
     {
@@ -208,15 +216,19 @@
     },
     {
       "id": 11,
-      "title": "Host CPU% (user / sys / iowait)",
+      "title": "Host CPU% (user / sys / iowait / softirq / irq / nice / steal)",
       "type": "timeseries",
-      "description": "全 CPU 平均。bench 実行時の CPU 消費源を分解して見る。iowait が高いと S3 backend が bottleneck。",
+      "description": "J-03: 全 CPU 平均。BPF fentry が softirq 側に載っていれば softirq/irq が bench 時に跳ねる。steal は共有 VM/ゲストで cloud 側 CPU 枯渇の signal。iowait が高いと S3 backend が bottleneck。",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [
-        { "refId": "A", "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[1m])) * 100",   "legendFormat": "user" },
-        { "refId": "B", "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[1m])) * 100", "legendFormat": "sys"  },
-        { "refId": "C", "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[1m])) * 100", "legendFormat": "iowait" }
+        { "refId": "A", "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[1m])) * 100",    "legendFormat": "user" },
+        { "refId": "B", "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[1m])) * 100",  "legendFormat": "sys"  },
+        { "refId": "C", "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[1m])) * 100",  "legendFormat": "iowait" },
+        { "refId": "D", "expr": "avg(rate(node_cpu_seconds_total{mode=\"softirq\"}[1m])) * 100", "legendFormat": "softirq" },
+        { "refId": "E", "expr": "avg(rate(node_cpu_seconds_total{mode=\"irq\"}[1m])) * 100",     "legendFormat": "irq" },
+        { "refId": "F", "expr": "avg(rate(node_cpu_seconds_total{mode=\"nice\"}[1m])) * 100",    "legendFormat": "nice" },
+        { "refId": "G", "expr": "avg(rate(node_cpu_seconds_total{mode=\"steal\"}[1m])) * 100",   "legendFormat": "steal" }
       ],
       "fieldConfig": { "defaults": { "unit": "percent", "min": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
@@ -383,6 +395,55 @@
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "mean", "max"] } }
+    },
+    {
+      "id": 24,
+      "title": "Go runtime — goroutines + threads",
+      "type": "timeseries",
+      "description": "J-02: goroutine count と OS thread の伸び。bench 中に単調増加していれば goroutine leak (context cancel の失敗など) を疑う。thread は syscall parallelism の上限。job フィルタで prometheus / node_exporter 自身の runtime を除外して daemon のみを見る。",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 84 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "go_goroutines{job=\"s3fs_ebpf_daemon\"}", "legendFormat": "goroutines" },
+        { "refId": "B", "expr": "go_threads{job=\"s3fs_ebpf_daemon\"}",    "legendFormat": "OS threads" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] } }
+    },
+    {
+      "id": 25,
+      "title": "Go heap — alloc / sys / next GC",
+      "type": "timeseries",
+      "description": "J-02: 生きている heap object のバイト数 + Go runtime が OS から取ってきた総メモリ + 次 GC 発火閾値。next_gc 直下で alloc が横ばいなら GC 走行中、超えたら次 GC まで直線的に伸びる。",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 84 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "go_memstats_alloc_bytes{job=\"s3fs_ebpf_daemon\"}",   "legendFormat": "alloc" },
+        { "refId": "B", "expr": "go_memstats_sys_bytes{job=\"s3fs_ebpf_daemon\"}",     "legendFormat": "sys" },
+        { "refId": "C", "expr": "go_memstats_next_gc_bytes{job=\"s3fs_ebpf_daemon\"}", "legendFormat": "next GC" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] } }
+    },
+    {
+      "id": 26,
+      "title": "Go GC — pause & rate",
+      "type": "timeseries",
+      "description": "J-02: 直近 GC の stop-the-world 時間と GC 発火 rate。100ms level が続くなら heap tuning (GOGC / GOMEMLIMIT) を検討。",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 84 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "refId": "A", "expr": "go_gc_pause_last_seconds{job=\"s3fs_ebpf_daemon\"}",         "legendFormat": "last pause" },
+        { "refId": "B", "expr": "rate(go_gc_runs_total{job=\"s3fs_ebpf_daemon\"}[1m])",       "legendFormat": "GC/s" },
+        { "refId": "C", "expr": "rate(go_gc_pause_seconds_total{job=\"s3fs_ebpf_daemon\"}[1m])", "legendFormat": "pause/s (throughput cost)" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s" },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "GC/s" }, "properties": [{ "id": "unit", "value": "reqps" }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] } }
     }
   ],
   "refresh": "5s",
