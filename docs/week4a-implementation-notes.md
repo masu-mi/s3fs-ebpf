@@ -176,7 +176,7 @@ s3fs_ebpf: probe ino=101 off=134 -> r=-14 byte=0xee
 - 汎用 kernel access (copy_to_user 等) は JIT 経路を通らないので install trigger 未発生
 - 結果、`bpf_arena_alloc_pages` の返り値は user_vm view の address であり、kern_vm 側の PTE には触っていない
 
-**教訓:** arena の kern_vm 側 memory は「BPF 実行時 context 専用の shadow mapping」であり、外部の kernel code から汎用的にアクセスする API は現状 (6.12) 提供されていない。docs/deisign.md §2 の Option 1 は kernel patch 前提でしか成立しない。
+**教訓:** arena の kern_vm 側 memory は「BPF 実行時 context 専用の shadow mapping」であり、外部の kernel code から汎用的にアクセスする API は現状 (6.12) 提供されていない。docs/design.md §2 の Option 1 は kernel patch 前提でしか成立しない。
 
 ---
 

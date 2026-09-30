@@ -542,7 +542,7 @@ doc を書き終えたら以下を self-check、埋め残しがあれば戻る:
   - `kmod/vfs_ops.c:1163,1169,1292` — release / fsync / create の kmod 側 hook 点
 - **既存 docs**:
   - `docs/motivation.md §4` — 初期 Lua スケッチ (この doc の出発点)
-  - `docs/deisign.md §4-§6` — CLI `policy load` 想定
+  - `docs/design.md §4-§6` — CLI `policy load` 想定
   - `docs/lessons-learned.md §2.3` — upcall 3 段パターン (policy engine もこの pattern に乗る)
   - `docs/read-path-design.md §3` — Path C upcall (on_read_miss の decision point)
 - **参照文献**:
