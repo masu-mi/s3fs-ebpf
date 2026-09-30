@@ -54,6 +54,7 @@
 | [`gcs-backend.md`](gcs-backend.md) | GCS 対応の使い方と backend abstraction |
 | [`lessons-learned.md`](lessons-learned.md) | 実装で刺さった罠の 1 次情報 |
 | [`ebpf-ecosystem-gaps.md`](ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠) |
+| [`ebpf-fs-framework-design.md`](ebpf-fs-framework-design.md) | S3 機能がどの layer にあるかの検証 + 汎用 eBPF FS framework 化の hook 分離設計 (4 role × 4 軸) + security model |
 | [`cilium-ebpf-addr-space-cast-marshal.patch`](cilium-ebpf-addr-space-cast-marshal.patch) | cilium/ebpf に投げる予定の marshal patch |
 
 ## 運用 (backlog)
