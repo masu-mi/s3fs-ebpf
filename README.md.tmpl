@@ -85,6 +85,28 @@ make setup-toolchain
 make vmlinux
 ```
 
+> **mainline カーネル特有の落とし穴 (Ubuntu 24.04)** — `bpf_arena` の要件で
+> mainline カーネル (`kernel.ubuntu.com/mainline`) を使う前提のため、Ubuntu
+> archive にある stock 向けパッケージ (`linux-tools-$(uname -r)` /
+> `linux-headers-$(uname -r)`) は解決できません。`setup-toolchain` は以下で
+> 回避します:
+>
+> - **bpftool**: Ubuntu の `bpftool` は virtual package で、実体は
+>   `linux-tools-<kernel>` 側。`linux-tools-generic` (stock 6.8 系) を入れ、
+>   `/usr/lib/linux-tools/*/bpftool` を `/usr/local/bin/bpftool` に symlink して
+>   `/usr/bin/bpftool` wrapper (uname -r で dispatch して失敗) を上書きします。
+>   bpftool は BTF/map/prog 操作については kernel version に非依存です。
+> - **kernel headers**: `kernel.ubuntu.com/mainline/v<ver>/amd64/` から
+>   `linux-headers-<ver>_<build>_all.deb` と
+>   `linux-headers-<ver>-generic_<build>_amd64.deb` を取得して `dpkg -i` します。
+>   セキュリティ上、実行するコマンドを事前に echo して y/N プロンプトで
+>   確認します。TTY が無い環境で自動化したい場合は
+>   `S3FS_INSTALL_MAINLINE_HEADERS=1` を付けて `make setup-toolchain` を叩いて
+>   ください。URL が 404 の場合は build timestamp が別リビジョンの可能性が
+>   あるので、ブラウザで一覧を確認してください。
+> - **perf**: mainline 用は archive に無いのでスキップします。必要な場合は
+>   mainline カーネルソースから手動 build してください。
+
 ---
 
 ## ビルド
