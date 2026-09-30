@@ -1,20 +1,47 @@
 #!/usr/bin/env bash
-# setup-toolchain.sh — install build/observability tooling on Ubuntu 24.04.
+# setup-toolchain.sh — install build/observability tooling on Ubuntu 24.04 / Debian bookworm.
 set -euo pipefail
 
-echo "==> apt packages"
+. /etc/os-release
+
+COMMON_PKGS=(
+    build-essential
+    clang llvm
+    libbpf-dev
+    pkg-config
+    fio
+    bpfcc-tools python3-bpfcc
+    curl jq
+    docker.io
+)
+
+case "${ID:-}" in
+    ubuntu)
+        EXTRA_PKGS=(
+            linux-tools-common linux-tools-generic
+            "linux-tools-$(uname -r)"
+            docker-compose-v2
+        )
+        ;;
+    debian)
+        # bpftool is a standalone package on Debian.
+        # perf is tied to the Debian kernel image; skip it when running a
+        # non-Debian kernel (e.g. Ubuntu mainline). docker-compose-plugin
+        # comes from Docker's official apt repo.
+        EXTRA_PKGS=(
+            bpftool
+            docker-compose-plugin
+        )
+        ;;
+    *)
+        echo "unsupported distro: ${ID:-unknown}" >&2
+        exit 1
+        ;;
+esac
+
+echo "==> apt packages (${ID})"
 sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    clang llvm \
-    libbpf-dev \
-    linux-tools-common linux-tools-generic \
-    "linux-tools-$(uname -r)" \
-    pkg-config \
-    fio \
-    bpfcc-tools python3-bpfcc \
-    curl jq \
-    docker.io docker-compose-v2
+sudo apt-get install -y "${COMMON_PKGS[@]}" "${EXTRA_PKGS[@]}"
 
 echo "==> Go"
 if ! command -v go >/dev/null; then
