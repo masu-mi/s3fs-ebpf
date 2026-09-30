@@ -4,6 +4,15 @@ set -euo pipefail
 
 . /etc/os-release
 
+# apt-cache show returns 0 for names merely referenced by other packages
+# (e.g. linux-image-<ver>-generic's Depends line), even when there is no
+# installable candidate. Check the actual candidate version instead.
+apt_has_candidate() {
+    local cand
+    cand=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ { print $2; exit }')
+    [ -n "${cand}" ] && [ "${cand}" != "(none)" ]
+}
+
 COMMON_PKGS=(
     build-essential
     clang llvm
@@ -28,7 +37,7 @@ case "${ID:-}" in
             linux-tools-generic
             docker-compose-v2
         )
-        if apt-cache show "linux-tools-$(uname -r)" >/dev/null 2>&1; then
+        if apt_has_candidate "linux-tools-$(uname -r)"; then
             EXTRA_PKGS+=("linux-tools-$(uname -r)")
         else
             echo "note: linux-tools-$(uname -r) not in archive (mainline kernel?); using stock linux-tools-generic for bpftool." >&2
@@ -62,6 +71,56 @@ if [ "${ID:-}" = "ubuntu" ] && ! bpftool version >/dev/null 2>&1; then
     if [ -n "${real_bpftool}" ]; then
         sudo ln -sf "${real_bpftool}" /usr/local/bin/bpftool
         echo "==> symlinked ${real_bpftool} -> /usr/local/bin/bpftool"
+    fi
+fi
+
+echo "==> kernel headers"
+# On Ubuntu mainline kernels there is no matching linux-headers-<ver> in the
+# archive, so /lib/modules/$(uname -r)/build is missing and out-of-tree builds
+# (kmod/) fail. Fetch the matching headers from kernel.ubuntu.com/mainline.
+# The commands are printed for review first; user must confirm before running.
+if [ "${ID:-}" = "ubuntu" ] && [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+    if apt_has_candidate "linux-headers-$(uname -r)"; then
+        echo "The archive has linux-headers-$(uname -r); installing via apt."
+        sudo apt-get install -y "linux-headers-$(uname -r)"
+    else
+        KREL=$(uname -r | sed 's/-generic$//')
+        KBUILD=$(uname -v | awk '{print $1}' | tr -d '#')
+        VVER="v$(echo "${KREL}" | sed 's/\.0$//')"
+        BASE="https://kernel.ubuntu.com/mainline/${VVER}/amd64"
+        ALL_DEB="linux-headers-${KREL}_${KREL}.${KBUILD}_all.deb"
+        GEN_DEB="linux-headers-${KREL}-generic_${KREL}.${KBUILD}_amd64.deb"
+        cat <<EOF
+Mainline kernel detected; matching headers are not in the Ubuntu archive.
+The following commands will download and install them from kernel.ubuntu.com:
+
+  curl -fLO ${BASE}/${ALL_DEB}
+  curl -fLO ${BASE}/${GEN_DEB}
+  sudo dpkg -i ${ALL_DEB} ${GEN_DEB}
+
+If the URLs 404, open ${BASE}/ in a browser to find the matching filenames
+(build timestamp may differ) and install manually.
+EOF
+        REPLY=""
+        if [ -t 0 ]; then
+            read -r -p "Proceed with the above commands? [y/N] " REPLY
+        else
+            echo "stdin is not a tty; skipping (set S3FS_INSTALL_MAINLINE_HEADERS=1 to force)." >&2
+            REPLY="${S3FS_INSTALL_MAINLINE_HEADERS:+y}"
+        fi
+        case "${REPLY}" in
+            y|Y|yes|YES)
+                TMP=$(mktemp -d)
+                trap 'rm -rf "${TMP}"' EXIT
+                ( cd "${TMP}" \
+                    && curl -fLO "${BASE}/${ALL_DEB}" \
+                    && curl -fLO "${BASE}/${GEN_DEB}" \
+                    && sudo dpkg -i "${ALL_DEB}" "${GEN_DEB}" )
+                ;;
+            *)
+                echo "skipped mainline header install; kmod build will fail until /lib/modules/$(uname -r)/build exists." >&2
+                ;;
+        esac
     fi
 fi
 
