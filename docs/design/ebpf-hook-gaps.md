@@ -204,9 +204,19 @@ int BPF_PROG(s3fs_fp_read_iter,
 - `main.go`: `runFastpath` で `AttachFentryReadIter()` を呼ぶ、`printCounters` に read iter カウンタを追加
 - Prometheus metrics に `s3fs_ebpf_read_iter_hits_total` / `_misses_total` を追加
 
-### 3.4 将来の拡張: `on_read_miss` pre-filter
+### 3.4 pattern-aware admit (`--pattern-aware-admit`)
 
-`s3fs_read_pattern_map` が十分なデータを持ったら struct_ops に `on_read_miss` hook を追加し、`rand_count / (seq_count + rand_count) > 0.8` のような条件で refuse を返すことで daemon wake を削減できる。
+R-01 フックのデータを即座にキャッシュ判断に活用する最適化 (実装済み)。
+
+**動作原理**: `fentry/generic_file_read_iter` は kmod の `.read_folio` が block する**前**に発火するため、`handleReadMiss` goroutine が起動した時点で `seq_count ≥ 1` が保証される。`SeqRatio() = 1.0 > 0.70` → 最初の miss で `s3c.Get()` (全体) を発行し、以降の chunk miss を消去。
+
+**効果の理論値**: 10 MiB ファイルの初回 cold read は D-01 chunk では 3 × S3 GetRange、R-01 pattern-aware では 1 × S3 Get。MinIO ローカルで ~30 ms/RPC なら **90 ms → 30 ms** (3×) の cold-read tail 削減。
+
+**評価スクリプト**:
+- `scripts/bench-read-iter.sh` — fentry hook の read latency オーバーヘッド測定 (with / without `--no-read-iter-hook`)
+- `scripts/bench-read-pattern-policy.sh` — pattern-aware admit シナリオ (upcall count と初回 cold-read 時間の比較)
+
+**将来の拡張 (`on_read_miss` pre-filter)**: `rand_count / (seq_count + rand_count) > 0.8` のような条件で `struct_ops.on_read_miss` が refuse を返すことで daemon wake そのものを削減できる (R-02)。
 
 ---
 
@@ -214,7 +224,7 @@ int BPF_PROG(s3fs_fp_read_iter,
 
 | ID | 内容 | 依存 |
 |---|---|---|
-| R-01 | `fentry/generic_file_read_iter` 追加 | **本 commit で実装** |
+| R-01 | `fentry/generic_file_read_iter` 追加 + `--pattern-aware-admit` sequential 大ファイル最適化 | **実装済 + bench スクリプト追加** |
 | R-02 | `struct_ops` に `on_read_miss(ino, size, rand_ratio)` hook 追加 | R-01 データ蓄積後 |
 | R-03 | `fentry/d_lookup` で lookup 観測 + ネガティブキャッシュ frequency | — |
 | R-04 | `lsm/inode_permission` per-cgroup policy (→ Q-04 との合流) | — |

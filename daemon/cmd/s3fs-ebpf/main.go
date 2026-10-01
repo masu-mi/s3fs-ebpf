@@ -382,6 +382,14 @@ func runFastpath(args []string) int {
 			"When set, `file:` / bare-path policy loads and /policy/reload "+
 			"requests must hash to an allowlisted entry. builtin: bypasses. "+
 			"Empty disables verification (dev/demo default).")
+	noReadIterHook := fs.Bool("no-read-iter-hook", false,
+		"[R-01] disable fentry/generic_file_read_iter hook. "+
+			"Use for overhead measurement only; disables read pattern tracking and "+
+			"is incompatible with --pattern-aware-admit.")
+	patternAdmit := fs.Bool("pattern-aware-admit", false,
+		"[R-01] use s3fs_read_pattern_map sequential signal to promote large-file "+
+			"read-miss upcalls to full-file GETs, reducing S3 round-trips. "+
+			"Requires fentry/generic_file_read_iter (incompatible with --no-read-iter-hook).")
 	inoState := fs.String("ino-state", envOr("S3FS_INO_STATE", ""),
 		"[H-02] path to persist the S3Key → ino allocator table (JSON). "+
 			"When set, the map is loaded at startup and atomically re-written after every "+
@@ -393,6 +401,12 @@ func runFastpath(args []string) int {
 			"instead of the ~30ms Path C upcall. Off to keep sync rounds purely metadata.")
 	newClient := backendFlags(fs)
 	fs.Parse(args)
+
+	if *patternAdmit && *noReadIterHook {
+		fmt.Fprintln(os.Stderr, "--pattern-aware-admit requires the read-iter hook; cannot combine with --no-read-iter-hook")
+		return 1
+	}
+	patternAwareAdmitEnabled = *patternAdmit
 
 	if err := SetInoStatePath(*inoState); err != nil {
 		fmt.Fprintf(os.Stderr, "ino-state: %v\n", err)
@@ -586,14 +600,17 @@ func runFastpath(args []string) int {
 	}
 	defer fentry.Close()
 
-	readIter, err := progs.AttachFentryReadIter()
-	if err != nil {
-		// Non-fatal: some kernels inline generic_file_read_iter and it
-		// becomes invisible to fentry. Log and continue without it.
-		fmt.Fprintf(os.Stderr, "[warn] attach fentry/generic_file_read_iter: %v (read pattern tracking disabled)\n", err)
+	if *noReadIterHook {
+		fmt.Println("[fastpath] fentry/generic_file_read_iter disabled (--no-read-iter-hook); read pattern tracking off")
 	} else {
-		defer readIter.Close()
-		fmt.Println("[fastpath] attached fentry/generic_file_read_iter; read pattern tracking enabled")
+		readIter, err := progs.AttachFentryReadIter()
+		if err != nil {
+			// Non-fatal: some kernels inline generic_file_read_iter.
+			fmt.Fprintf(os.Stderr, "[warn] attach fentry/generic_file_read_iter: %v (read pattern tracking disabled)\n", err)
+		} else {
+			defer readIter.Close()
+			fmt.Println("[fastpath] attached fentry/generic_file_read_iter; read pattern tracking enabled")
+		}
 	}
 
 	reader, err := ringbuf.NewReader(progs.EventsMap())
