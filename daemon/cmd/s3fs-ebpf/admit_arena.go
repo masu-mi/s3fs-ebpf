@@ -369,7 +369,18 @@ func runReadMissLoop(ctx context.Context, devPath string,
 const (
 	partialAdmitThreshold = 4 * 1024 * 1024
 	partialAdmitChunk     = 4 * 1024 * 1024
+
+	// seqAdmitRatioThreshold — minimum SeqRatio (from s3fs_read_pattern_map)
+	// above which a large-file miss is promoted to a full-file GET.
+	// R-01: fentry/generic_file_read_iter populates the map before kmod's
+	// .read_folio blocks, so by the time the goroutine runs the ratio often
+	// already reflects the sequential access character.
+	seqAdmitRatioThreshold = 0.70
 )
+
+// patternAwareAdmitEnabled gates the R-01 sequential-pattern logic in
+// handleReadMiss. Set once by main before any goroutine reads it.
+var patternAwareAdmitEnabled bool
 
 // readMissShutdownWarn bounds how long the shutdown watchdog waits
 // for the blocking Read to wake after Close before logging. Tuned
@@ -408,11 +419,29 @@ func handleReadMiss(ctx context.Context, devPath string,
 	// chunk covering ev.Offset via S3 range GET, admit with the
 	// range's file offset so subsequent .read_folio reads at
 	// nearby offsets hit the same chunk.
+	//
+	// R-01 pattern-aware override: when --pattern-aware-admit is set
+	// and s3fs_read_pattern_map shows a strong sequential signal, promote
+	// large-file chunk admits to a full-file GET. The fentry hook fires
+	// before kmod's .read_folio blocks, so by the time this goroutine runs
+	// seq_count is often already ≥ 1, making SeqRatio() = 1.0 on the first
+	// miss and saving the remaining chunk round-trips.
 	var body []byte
 	var chunkOffset int64 = 0
 	fullSize := int64(entry.Fallback)
 	var err error
-	if fullSize > 0 && fullSize > partialAdmitThreshold {
+	isLarge := fullSize > 0 && fullSize > partialAdmitThreshold
+	useFullAdmit := !isLarge // small files always use full admit
+	if !useFullAdmit && patternAwareAdmitEnabled && progs != nil {
+		if pat, ok := progs.ReadAccessPattern(ev.Ino); ok && pat.SeqRatio() >= seqAdmitRatioThreshold {
+			useFullAdmit = true
+			fmt.Printf("[upcall] ino=%d %s seq_ratio=%.2f → pattern-aware full admit (%d bytes)\n",
+				ev.Ino, entry.Name, pat.SeqRatio(), fullSize)
+		}
+	}
+	if useFullAdmit {
+		body, err = s3c.Get(ctx, entry.S3Key)
+	} else {
 		// Align to chunk boundary containing the miss.
 		chunkOffset = (ev.Offset / partialAdmitChunk) * partialAdmitChunk
 		chunkSize := int64(partialAdmitChunk)
@@ -420,8 +449,6 @@ func handleReadMiss(ctx context.Context, devPath string,
 			chunkSize = fullSize - chunkOffset
 		}
 		body, err = s3c.GetRange(ctx, entry.S3Key, chunkOffset, chunkSize)
-	} else {
-		body, err = s3c.Get(ctx, entry.S3Key)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s get: %v\n",

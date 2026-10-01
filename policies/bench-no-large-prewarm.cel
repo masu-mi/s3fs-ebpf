@@ -1,0 +1,12 @@
+# bench-no-large-prewarm.cel — bench harness policy for bench-read-pattern-policy.sh
+#
+# Skips content prewarm for files > 4 MiB so that a sequential read of a
+# large file (e.g. 10m.bin) triggers read-miss upcalls. This lets the bench
+# compare WITHOUT vs WITH --pattern-aware-admit: the former issues one
+# 4 MiB chunk upcall per miss offset, the latter promotes to a single
+# full-file GET after the R-01 sequential pattern is established.
+#
+# Small files (≤ 4 MiB) are still prewarmed so directory listing / stat
+# bench paths stay unaffected.
+
+prewarm: entry.size <= 4194304

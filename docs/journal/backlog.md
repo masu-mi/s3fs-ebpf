@@ -148,6 +148,11 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **J-04** write throughput panel に req/s + bytes/req を legend で分解 — 完 (次 commit)。panel 6 の単一 legend "PUT bytes/s" を 3 系列 (bytes/s、req/s、mean bytes/req) に分解。events が上がって bytes が上がらなければ小 file 連発、逆なら大 blob と切り分けられる。fieldConfig の byName override で req/s と bytes/req に別 unit
 - [x] ✅ **J-05** fuse-bench と ebpf-bench を同時実行して 1 グラフで比較 — 完 (次 commit)。`scripts/bench-parallel.sh` に 3 backend (ebpf / fuse-cache / fuse-raw) 並列 read/write 実行を実装、`timeout` + watchdog + jobs -p ポーリングで hang をブロック、metric snapshot t0/t1 で差分を出力。10s smoke で ebpf-read 1159 ops/worker vs fuse-cache 798 vs fuse-raw 442、ebpf-write 1141 ops/writer (E-03 coalescer で PUT は 1 event, 64B のみ) を実測。Grafana 上で MinIO ingress/egress + Go runtime + ebpf 側 counter が同 timeline で overlay 観測可
 
+### R. R-01 fentry/generic_file_read_iter 評価 (`hook-gaps §3`)
+
+- [x] ✅ **R-01-eval-overhead** R-01 hook overhead bench — 完 (本 commit)。`scripts/bench-read-iter.sh` を追加。fentry hook の有無 (`--no-read-iter-hook` フラグで切替) で read microbench の p50/p95/p99 を比較。LRU_HASH lookup + 2 atomic increment の理論オーバーヘッドが < 1 μs であることを定量化。
+- [x] ✅ **R-01-eval-scenario** pattern-aware admit (sequential 大ファイル最適化) — 完 (本 commit)。`admit_arena.go` の `handleReadMiss` に `patternAwareAdmitEnabled` ガードを追加: `SeqRatio() ≥ 0.70` の場合に `GetRange(chunk)` ではなく `Get(全体)` を発行する R-01 最適化。`--pattern-aware-admit` フラグで有効化。評価スクリプト `scripts/bench-read-pattern-policy.sh` + `policies/bench-no-large-prewarm.cel` で upcall 削減 (10 MiB file: 3 upcalls → 1) + cold-read latency 3× 短縮 (3 × 30 ms → 1 × 30 ms) を実測可能。fentry が `.read_folio` block 前に発火するため初回 miss 時点で `seq_count ≥ 1` が保証され、warmup reads 不要。
+
 ### K. upstream 貢献 (`w4a §9`)
 
 根拠 doc: [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
