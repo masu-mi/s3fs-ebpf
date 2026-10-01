@@ -70,7 +70,7 @@ start_ebpf() {
 	log "load kmod + mount ebpf + start daemon with --cache-dir"
 	lsmod | grep -q '^s3fs_kfunc' || sudo insmod "$TOPDIR/kmod/s3fs_kfunc.ko"
 	mountpoint -q "$MP_EBPF" || { sudo mkdir -p "$MP_EBPF"; sudo mount -t s3fs_ebpf none "$MP_EBPF"; }
-	sudo pkill -9 -f 's3fs-ebpf fastpath' 2>/dev/null || true
+	sudo pkill -9 -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
 	sleep 0.5
 	LD_LIBRARY_PATH=$HOME/.local/lib sudo -E \
 		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 \
@@ -84,7 +84,7 @@ start_ebpf() {
 
 stop_all() {
 	log "stopping"
-	sudo pkill -INT -f 's3fs-ebpf fastpath' 2>/dev/null || true
+	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
 	sleep 1
 	umount_hard "$MP_EBPF"
 	sudo rmmod s3fs_kfunc 2>/dev/null || true

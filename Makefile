@@ -215,7 +215,7 @@ daemon-run: daemon
 daemon-stop:
 	@if pgrep -f 's3fs-ebpf fastpath' >/dev/null; then \
 		echo "==> SIGINT s3fs-ebpf fastpath"; \
-		sudo pkill -INT -f 's3fs-ebpf fastpath' || true; \
+		sudo pkill -INT -f 's3fs-ebpf fast[p]ath' || true; \
 		sleep 1; \
 	fi
 
