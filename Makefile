@@ -34,6 +34,11 @@ KMOD_PAHOLE ?= $(shell test -x $(HOME)/.local/bin/pahole && echo $(HOME)/.local/
 # Locally-built pahole needs its libdwarves; prepend if present.
 KMOD_LDLIB := $(HOME)/.local/lib
 
+YELLOW := \033[33m
+GREEN  := \033[32m
+CYAN   := \033[36m
+RESET  := \033[0m
+
 .DEFAULT_GOAL := help
 
 README_TMPL := $(TOPDIR)/README.md.tmpl
@@ -46,61 +51,21 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench bench-write bench-scale bench-3way setup-bench-env \
         setup-kernel setup-toolchain readme test-arena clean
 
-## help: Show this help (default target)
-help:
-	@echo "s3fs-ebpf — targets"
-	@echo ""
-	@echo "Build (individual components):"
-	@echo "  make kmod           Build kernel module   -> kmod/s3fs_kfunc.ko"
-	@echo "  make bpf            Build eBPF program    -> bpf/s3fs_fastpath.bpf.o"
-	@echo "  make daemon         Build Go user process -> bin/s3fs-ebpf"
-	@echo ""
-	@echo "Build (combined / codegen):"
-	@echo "  make all            kmod + bpf + daemon"
-	@echo "  make build          alias of 'all'"
-	@echo "  make daemon-gen     bpf2go codegen then daemon (needs network)"
-	@echo ""
-	@echo "Housekeeping:"
-	@echo "  make vmlinux        Regenerate bpf/vmlinux.h from running kernel BTF"
-	@echo "  make vmlinux-clean  Drop bpf/vmlinux.h"
-	@echo "  make kmod-clean     Clean kernel module build artefacts"
-	@echo "  make bpf-clean      Clean eBPF build artefacts"
-	@echo "  make daemon-clean   Clean Go build cache and bin/s3fs-ebpf"
-	@echo "  make clean          Clean everything"
-	@echo ""
-	@echo "Observability stack (docker compose):"
-	@echo "  make compose-up     Start MinIO + Prometheus + Grafana + node_exporter"
-	@echo "  make compose-down   Stop the stack"
-	@echo "  make compose-logs   Tail compose logs"
-	@echo ""
-	@echo "Runtime lifecycle (kmod + mount + daemon):"
-	@echo "  make mount          insmod kmod + mount -t s3fs_ebpf on $(MOUNT_POINT)"
-	@echo "  make unmount        umount + rmmod (also stops any running daemon)"
-	@echo "  make daemon-run     Foreground: run bin/s3fs-ebpf fastpath (needs mount + compose-up)"
-	@echo "  make daemon-stop    SIGINT any running daemon"
-	@echo ""
-	@echo "Benchmarks (all auto-start compose-up requirement + kmod/mount/daemon in-script):"
-	@echo "  make bench           Latency bench (hyperfine + microbench + fio) vs s3fs-fuse"
-	@echo "  make bench-write     Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)"
-	@echo "  make bench-scale     Parallel scaling (numjobs=1..64) stat + read"
-	@echo "  make bench-3way      ebpf vs fuse-raw vs fuse-cache 3-way comparison"
-	@echo "  make setup-bench-env install some pkgs"
-	@echo ""
-	@echo "Week 1 verification (requires 6.12+ kernel):"
-	@echo "  make test-arena     insmod + run bpf_arena/KFunc round-trip probe + rmmod"
-	@echo ""
-	@echo "Environment bootstrap (run once on a fresh host):"
-	@echo "  make setup-kernel     Install mainline Linux 6.12 LTS kernel (reboot after)"
-	@echo "  make setup-toolchain  Install clang, bpftool, go, docker, fio, bcc"
-	@echo ""
-	@echo "Documentation:"
-	@echo "  make readme         Regenerate README.md from README.md.tmpl (envsubst)"
-	@echo ""
-	@echo "Tip: 'make <target> -n' shows the recipe without executing it."
+## Help:
+help: ## Show this help
+	@printf '\n'
+	@printf 'Usage:\n'
+	@printf '  ${YELLOW}make${RESET} ${GREEN}<target>${RESET}\n'
+	@printf '\n'
+	@printf 'Targets:\n'
+	@awk 'BEGIN {FS = ":.*?## "} { \
+		if (/^[a-zA-Z0-9_-]+:.*?##.*$$/) {printf "    ${YELLOW}%-20s${GREEN}%s${RESET}\n", $$1, $$2} \
+		else if (/^## .*$$/) {printf "  ${CYAN}%s${RESET}\n", substr($$1,4)} \
+		}' $(MAKEFILE_LIST)
 
-## all / build: build every component
-all: kmod bpf daemon
-build: all
+## Build:
+all: kmod bpf daemon ## Build all components (kmod + bpf + daemon)
+build: all ## Alias of 'all'
 
 # -----------------------------------------------------------------------------
 # Kernel module
@@ -109,23 +74,23 @@ build: all
 # CC / HOSTCC / PAHOLE override the kernel Kbuild defaults that assume
 # gcc-15 / distro pahole. All three are computed at the top of this
 # Makefile and can be overridden per-invocation.
-kmod:
+kmod: ## Build kernel module -> kmod/s3fs_kfunc.ko
 	LD_LIBRARY_PATH=$(KMOD_LDLIB):$$LD_LIBRARY_PATH \
 	$(MAKE) -C $(KMOD_DIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) PAHOLE=$(KMOD_PAHOLE)
 
-kmod-clean:
+kmod-clean: ## Clean kernel module build artefacts
 	$(MAKE) -C $(KMOD_DIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) clean
 
 # -----------------------------------------------------------------------------
 # eBPF
 # -----------------------------------------------------------------------------
-bpf: vmlinux
+bpf: vmlinux ## Build eBPF program -> bpf/s3fs_fastpath.bpf.o
 	$(MAKE) -C $(BPF_DIR)
 
-bpf-clean:
+bpf-clean: ## Clean eBPF build artefacts
 	$(MAKE) -C $(BPF_DIR) clean
 
-vmlinux: $(BPF_DIR)/vmlinux.h
+vmlinux: $(BPF_DIR)/vmlinux.h ## Regenerate bpf/vmlinux.h from running kernel BTF
 
 # Generate to a tmp file and only rename on success. Without the
 # intermediate, a partial gen-vmlinux.sh run (missing bpftool, no BTF,
@@ -136,20 +101,20 @@ $(BPF_DIR)/vmlinux.h:
 	  ( $(SCRIPTS_DIR)/gen-vmlinux.sh > $$tmp && mv $$tmp $@ ) || \
 	  { rm -f $$tmp; exit 1; }
 
-vmlinux-clean:
+vmlinux-clean: ## Drop bpf/vmlinux.h
 	rm -f $(BPF_DIR)/vmlinux.h
 
 # -----------------------------------------------------------------------------
 # Go user process (daemon)
 # -----------------------------------------------------------------------------
-daemon: | $(BIN_DIR)
+daemon: | $(BIN_DIR) ## Build Go user process -> bin/s3fs-ebpf
 	cd $(DAEMON_DIR) && go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
-daemon-gen: | $(BIN_DIR)
+daemon-gen: | $(BIN_DIR) ## Run bpf2go codegen then build daemon (needs network)
 	cd $(DAEMON_DIR) && BPF_CLANG=$(CLANG) go generate ./... && \
 		go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
-daemon-clean:
+daemon-clean: ## Clean Go build cache and bin/s3fs-ebpf
 	# Note: intentionally NOT running `go clean ./...` — it removes *.o
 	# including bpf2go's embedded s3fsfp_bpf{el,eb}.o (checked in). Use
 	# `make daemon-gen` to regenerate those from bpf/**.
@@ -158,27 +123,23 @@ daemon-clean:
 $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
-# -----------------------------------------------------------------------------
-# docker-compose (observability stack)
-# -----------------------------------------------------------------------------
-compose-up:
+## Observability stack (docker compose):
+compose-up: ## Start MinIO + Prometheus + Grafana + node_exporter
 	docker compose -f $(COMPOSE_FILE) up -d
 
-compose-down:
+compose-down: ## Stop the observability stack
 	docker compose -f $(COMPOSE_FILE) down
 
-compose-logs:
+compose-logs: ## Tail compose logs
 	docker compose -f $(COMPOSE_FILE) logs -f
 
-# -----------------------------------------------------------------------------
-# Runtime lifecycle (kmod + mount + daemon)
-# -----------------------------------------------------------------------------
+## Runtime lifecycle:
 # Convenience targets so operators can bring the stack up manually and
 # leave it running while they watch Grafana. bench targets do the same
 # lifecycle internally (see scripts/bench-*.sh) so `make bench` from a
 # clean host works end-to-end.
 
-mount: kmod
+mount: kmod ## insmod kmod + mount s3fs_ebpf on $(MOUNT_POINT)
 	@if ! lsmod | grep -q '^s3fs_kfunc'; then \
 		echo "==> insmod $(KMOD_DIR)/s3fs_kfunc.ko"; \
 		sudo insmod $(KMOD_DIR)/s3fs_kfunc.ko; \
@@ -190,7 +151,7 @@ mount: kmod
 	fi
 	@echo "==> ready: $(MOUNT_POINT) (start daemon with 'make daemon-run')"
 
-unmount:
+unmount: ## umount + rmmod (also stops any running daemon)
 	@$(MAKE) --no-print-directory daemon-stop
 	@if mountpoint -q $(MOUNT_POINT); then \
 		echo "==> umount $(MOUNT_POINT)"; \
@@ -201,7 +162,7 @@ unmount:
 		sudo rmmod s3fs_kfunc; \
 	fi
 
-daemon-run: daemon
+daemon-run: daemon ## Run daemon in foreground (needs mount + compose-up)
 	@if pgrep -f 's3fs-ebpf fastpath' >/dev/null; then \
 		echo "==> daemon already running; 'make daemon-stop' first"; exit 1; \
 	fi
@@ -212,52 +173,45 @@ daemon-run: daemon
 	LD_LIBRARY_PATH=$(KMOD_LDLIB):$$LD_LIBRARY_PATH sudo -E \
 		$(DAEMON_BIN) fastpath --s3 --metrics-addr=$(METRICS_ADDR) --sample-every=5s --sync-every=30s
 
-daemon-stop:
+daemon-stop: ## Send SIGINT to any running daemon
 	@if pgrep -f 's3fs-ebpf fastpath' >/dev/null; then \
 		echo "==> SIGINT s3fs-ebpf fastpath"; \
 		sudo pkill -INT -f 's3fs-ebpf fast[p]ath' || true; \
 		sleep 1; \
 	fi
 
-# -----------------------------------------------------------------------------
-# Benchmarks (all invoke scripts/ which handle insmod + mount + daemon
+## Benchmarks:
+# All bench targets invoke scripts/ which handle insmod + mount + daemon
 # lifecycle internally with trap-based cleanup; make bench from a
-# clean host after 'make compose-up; make all' should just work).
-# -----------------------------------------------------------------------------
-bench: all
+# clean host after 'make compose-up; make all' should just work.
+bench: all ## Latency bench (hyperfine + microbench + fio) vs s3fs-fuse
 	@echo "==> latency bench (hyperfine + microbench + fio) — results in /tmp/bench/"
 	$(SCRIPTS_DIR)/bench-latency.sh
 
-bench-write: all
+bench-write: all ## Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)
 	@echo "==> write-back throughput bench — results in /tmp/bench-write/"
 	$(SCRIPTS_DIR)/bench-write.sh
 
-bench-scale: all
+bench-scale: all ## Parallel scaling bench (numjobs=1..64, stat + read)
 	@echo "==> parallel scaling bench — results in /tmp/bench-scale/"
 	$(SCRIPTS_DIR)/bench-scale.sh
 
-bench-3way: all
+bench-3way: all ## ebpf vs fuse-raw vs fuse-cache 3-way comparison
 	@echo "==> 3-way (ebpf vs fuse-raw vs fuse-cache) bench — results in /tmp/bench-3way/"
 	$(SCRIPTS_DIR)/bench-3way.sh
 
-# -----------------------------------------------------------------------------
-# Host bootstrap
-# -----------------------------------------------------------------------------
-setup-kernel:
-	$(SCRIPTS_DIR)/setup-kernel-6.12.sh
-
-setup-toolchain:
-	$(SCRIPTS_DIR)/setup-toolchain.sh
-setup-bench-env:
+setup-bench-env: ## Install bench dependencies (hyperfine, s3fs)
 	apt install hyperfine s3fs
 
-# -----------------------------------------------------------------------------
-# Documentation (envsubst-driven)
-# -----------------------------------------------------------------------------
-# Regenerates README.md from README.md.tmpl by injecting live CLI/help output.
-# Only the placeholders listed after envsubst are substituted; other `$VAR`
-# tokens in the template (should any appear) are left verbatim.
-readme: $(README)
+## Host bootstrap:
+setup-kernel: ## Install mainline Linux 6.12 LTS kernel (reboot after)
+	$(SCRIPTS_DIR)/setup-kernel-6.12.sh
+
+setup-toolchain: ## Install clang, bpftool, go, docker, fio, bcc
+	$(SCRIPTS_DIR)/setup-toolchain.sh
+
+## Documentation:
+readme: $(README) ## Regenerate README.md from README.md.tmpl
 
 $(README): $(README_TMPL) $(DAEMON_BIN) Makefile
 	@command -v envsubst >/dev/null || { echo "envsubst not found (apt install gettext-base)"; exit 1; }
@@ -268,13 +222,8 @@ $(README): $(README_TMPL) $(DAEMON_BIN) Makefile
 	 envsubst '$$CLI_HELP $$CLI_MOUNT_HELP $$MAKE_HELP' \
 	   < $(README_TMPL) > $(README)
 
-# -----------------------------------------------------------------------------
-# Week 1: arena / KFunc round-trip probe
-# -----------------------------------------------------------------------------
-# Loads the kmod, runs the daemon's `test-arena` subcommand, then unloads.
-# Requires a 6.12+ kernel; on older kernels arena.New() will fail with
-# a clear message and the target exits non-zero.
-test-arena: kmod daemon
+## Week 1 verification:
+test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	@echo "==> insmod kmod/s3fs_kfunc.ko"
 	@if ! lsmod | grep -q '^s3fs_kfunc'; then sudo insmod $(KMOD_DIR)/s3fs_kfunc.ko; fi
 	@echo "==> running $(DAEMON_BIN) test-arena"
@@ -283,8 +232,6 @@ test-arena: kmod daemon
 	 sudo rmmod s3fs_kfunc || true; \
 	 exit $$rc
 
-# -----------------------------------------------------------------------------
-# Cleanup
-# -----------------------------------------------------------------------------
-clean: kmod-clean bpf-clean daemon-clean vmlinux-clean
+## Cleanup:
+clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts
 	rm -rf $(BIN_DIR)
