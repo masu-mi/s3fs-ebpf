@@ -84,9 +84,12 @@ if [ "${ID:-}" = "ubuntu" ] && [ ! -d "/lib/modules/$(uname -r)/build" ]; then
         echo "The archive has linux-headers-$(uname -r); installing via apt."
         sudo apt-get install -y "linux-headers-$(uname -r)"
     else
-        KREL=$(uname -r | sed 's/-generic$//')
-        KBUILD=$(uname -v | awk '{print $1}' | tr -d '#')
-        VVER="v$(echo "${KREL}" | sed 's/\.0$//')"
+        KREL=$(uname -r | sed 's/-generic$//')          # e.g. 6.12.0-061200
+        KBUILD=$(uname -v | awk '{print $1}' | tr -d '#') # e.g. 202411220723
+        # Mainline URL uses upstream version only, with trailing .0 stripped:
+        # 6.12.0-061200 -> v6.12 ; 6.12.5-061205 -> v6.12.5
+        UPSTREAM=$(echo "${KREL}" | cut -d- -f1)
+        VVER="v$(echo "${UPSTREAM}" | sed 's/\.0$//')"
         BASE="https://kernel.ubuntu.com/mainline/${VVER}/amd64"
         ALL_DEB="linux-headers-${KREL}_${KREL}.${KBUILD}_all.deb"
         GEN_DEB="linux-headers-${KREL}-generic_${KREL}.${KBUILD}_amd64.deb"
