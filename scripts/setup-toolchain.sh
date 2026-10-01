@@ -36,6 +36,9 @@ case "${ID:-}" in
             linux-tools-common
             linux-tools-generic
             docker-compose-v2
+            # Mainline 6.12 kernel headers hard-code -fmin-function-alignment=16
+            # (gcc-14+). noble's default gcc is 13, so install gcc-14 explicitly.
+            gcc-14
         )
         if apt_has_candidate "linux-tools-$(uname -r)"; then
             EXTRA_PKGS+=("linux-tools-$(uname -r)")
