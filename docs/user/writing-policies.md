@@ -2,8 +2,8 @@
 
 s3fs-ebpf のキャッシュポリシーを書く人向けの実装ガイド。**Meetup
 発表資料ではなく、実際に手を動かして policy を試す人**が対象。
-概念的な architecture は `docs/policy-engine-design.md`、Meetup
-narrative は `docs/motivation.md §0` を見てほしい。
+概念的な architecture は `docs/design/policy-engine-design.md`、Meetup
+narrative は `docs/user/motivation.md §0` を見てほしい。
 
 ## 目次
 
@@ -118,7 +118,7 @@ CEL policy を書き換えても daemon は再起動が要る (CEL は startup 1
 | `freq2bit_ops` | `policy_freq2bit_ops.bpf.c` | 2-bit reference counter | 10.5 % |
 
 ※ Full W-TinyLFU が scoped 版より下なのは workload sensitivity — 詳細は
-`docs/hit-rate-bench.md` の "The W-TinyLFU paradox" 参照。
+`docs/journal/hit-rate-bench.md` の "The W-TinyLFU paradox" 参照。
 
 ### tuning できるパラメタの例
 
@@ -412,7 +412,7 @@ kmod / mount 起動なしに、workload trace を Go 側 policy simulator
 
 **制約**: simulator は Go reimpl なので **BPF policy と挙動が一致しない**
 (strict LRU vs 近似 LRU 等)。数値は algorithm 直感、実 bench 数値は
-`scripts/bench-hitrate.sh` で。詳細 `docs/trace-harness.md`。
+`scripts/bench-hitrate.sh` で。詳細 `docs/design/trace-harness.md`。
 
 ## Debugging / trouble shooting
 
@@ -444,12 +444,12 @@ curl -s http://localhost:9600/metrics | grep policy_hook_invocations
 ./bin/s3fs-ebpf trace-replay --policies=lru,sieve --zipf=<α>,<N>,<accesses>
 ```
 
-- `docs/hit-rate-bench.md` の caveats 節で "workload sensitivity"、
+- `docs/journal/hit-rate-bench.md` の caveats 節で "workload sensitivity"、
   "s3fifo variance" 等の既知の挙動を確認
 
 ### 実装ハマりポイント
 
-過去の実装で踏んだ地雷は `docs/lessons-learned.md` に:
+過去の実装で踏んだ地雷は `docs/dev-notes/lessons-learned.md` に:
 - arena mm/gup の 3 段 upcall
 - iget_locked vs new_inode
 - struct_ops hot reload の guard
@@ -459,9 +459,9 @@ curl -s http://localhost:9600/metrics | grep policy_hook_invocations
 
 ## 参照
 
-- 設計: `docs/policy-engine-design.md` (4 layer 詳細)
-- attach 方式比較: `docs/policy-attach-comparison.md` (fmod_ret vs struct_ops)
-- bench 数値: `docs/hit-rate-bench.md`
-- Meetup demo: `docs/demo-scenario.md`
-- trace harness: `docs/trace-harness.md`
-- 教訓集: `docs/lessons-learned.md`
+- 設計: `docs/design/policy-engine-design.md` (4 layer 詳細)
+- attach 方式比較: `docs/design/policy-attach-comparison.md` (fmod_ret vs struct_ops)
+- bench 数値: `docs/journal/hit-rate-bench.md`
+- Meetup demo: `docs/user/demo-scenario.md`
+- trace harness: `docs/design/trace-harness.md`
+- 教訓集: `docs/dev-notes/lessons-learned.md`

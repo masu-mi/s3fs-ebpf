@@ -1,6 +1,6 @@
 # Benchmark Results — s3fs-ebpf vs s3fs-fuse
 
-Week 4 (e) の初回計測記録。Meetup スライドの原資料として、また将来「改善が実測できているか」の baseline として残す。詳細な機能設計は `docs/read-path-design.md`、Path B/C の実装記録は `docs/week4a-implementation-notes.md`。
+Week 4 (e) の初回計測記録。Meetup スライドの原資料として、また将来「改善が実測できているか」の baseline として残す。詳細な機能設計は `docs/design/read-path-design.md`、Path B/C の実装記録は `docs/journal/week4a-implementation-notes.md`。
 
 対応 script: `scripts/bench-latency.sh` (hyperfine + microbench + fio filestat の 3 段)。
 
@@ -68,7 +68,7 @@ Meetup narrative は「read latency の絶対値」ではなく **「diskless / 
 
 - Ubuntu 24.04.5 LTS (noble)
 - Linux 6.12.90-061290-generic (Ubuntu mainline PPA)
-- gcc-14 / clang-20 (詳細は `docs/week1-build-runtime-notes.md`)
+- gcc-14 / clang-20 (詳細は `docs/journal/week1-build-runtime-notes.md`)
 
 ### 1.2 対象 FS
 

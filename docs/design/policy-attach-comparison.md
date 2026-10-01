@@ -2,7 +2,7 @@
 
 Week 4 (d) Layer 2 で policy BPF program の attach pattern を fmod_ret と struct_ops の 2 方式で実装し、同一 algorithm を両方で動作させた。実測に基づく比較と recommendation。
 
-**Naming note (Oct 2026)**: 本節で「S3-FIFO」と書かれた実装は当時のファイル名で、実際は single-tier 2-bit reference counter だった。honest naming の追加で `policy_freq2bit(_ops)` に rename 済 (`docs/hit-rate-bench.md` 参照)。attach pattern (fmod_ret vs struct_ops) の比較には algorithm 選択は影響しない — 「per-hook attach vs 1 vtable atomic swap」の構造比較としてそのまま読める。
+**Naming note (Oct 2026)**: 本節で「S3-FIFO」と書かれた実装は当時のファイル名で、実際は single-tier 2-bit reference counter だった。honest naming の追加で `policy_freq2bit(_ops)` に rename 済 (`docs/journal/hit-rate-bench.md` 参照)。attach pattern (fmod_ret vs struct_ops) の比較には algorithm 選択は影響しない — 「per-hook attach vs 1 vtable atomic swap」の構造比較としてそのまま読める。
 
 対応 commit: (次 commit) `fmod_ret 化 + struct_ops 化 + 両方併存で voted evict 経路検証`
 

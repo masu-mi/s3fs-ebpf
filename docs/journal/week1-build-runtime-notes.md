@@ -2,7 +2,7 @@
 
 Ubuntu 24.04 (noble) + Ubuntu mainline カーネル `6.12.90-061290-generic` の組合せで `make test-arena` を通すまでに 5 つの環境課題を踏んだ。再現できるよう課題・原因・対策・副作用を並べる。
 
-対応スクリプト: [`scripts/setup-week1-runtime.sh`](../scripts/setup-week1-runtime.sh)
+対応スクリプト: [`scripts/setup-week1-runtime.sh`](../../scripts/setup-week1-runtime.sh)
 
 ---
 

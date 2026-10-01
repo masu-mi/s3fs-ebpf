@@ -7,7 +7,7 @@
 - 新規 follow-up は該当週次 note に書いてからここに 1 行反映
 - 優先度は **P0 = 次スプリントで着手 / P1 = Week 5 で着手 / P2 = Meetup 後の polish** の 3 段
 
-出典表記: `w4a` = `docs/week4a-implementation-notes.md`、`w4b` = `docs/week4b-implementation-notes.md`、`w4c` = `docs/week4c-implementation-notes.md`、`w4ac` = `docs/week4a-c-session-notes.md`、`ll` = `docs/lessons-learned.md`、`br` = `docs/benchmark-results.md`、`be` = `docs/bench-env-notes.md`、`pe` = `docs/policy-engine-design.md`。
+出典表記: `w4a` = `docs/journal/week4a-implementation-notes.md`、`w4b` = `docs/journal/week4b-implementation-notes.md`、`w4c` = `docs/journal/week4c-implementation-notes.md`、`w4ac` = `docs/journal/week4a-c-session-notes.md`、`ll` = `docs/dev-notes/lessons-learned.md`、`br` = `docs/journal/benchmark-results.md`、`be` = `docs/journal/bench-env-notes.md`、`pe` = `docs/design/policy-engine-design.md`。
 
 ---
 
@@ -22,7 +22,7 @@
 | M5 | 性能可視化 (Grafana + Prometheus) | ✅ 完成 | — |
 | M6 | Week 4 (d) policy engine 設計 | ✅ doc 完成 | `pe §6 Q1-Q10` を spike で決定 → 実装 |
 | M7 | Week 4 (d) policy engine 実装 | ⏳ 未着手 | M6 の Q 回答後、CEL + built-in eBPF policy の spike |
-| M8 | Meetup 登壇 | ⏳ 準備中 | narrative は `motivation.md` + `benchmark-results.md` で揃っている、demo 台本のみ |
+| M8 | Meetup 登壇 | ⏳ 準備中 | narrative は `../user/motivation.md` + `benchmark-results.md` で揃っている、demo 台本のみ |
 | M9 | Week 5+ 分散 / multi-tenant / ML | ⏸ scope 外 | 現行 architecture の限界を洗い出してから (§B/C の項目参照) |
 
 ---
@@ -111,7 +111,7 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **P-06 (LRU 部分)** LRU-like (admit-order FIFO) を追加 — 完 (次 commit)。`bpf/policy_lru_ops.bpf.c` に struct_ops で。global epoch counter + per-ino seed で age-based eviction (LRU_CAP_AGE=3)。同 commit で kmod call site の bug fix (struct_ops on_admit/pressure が呼ばれていなかった)。smoke で "struct_ops voted evict on 11/14 entries" 実測。W-TinyLFU / SIEVE も同 template で追加可能
 - [x] ✅ **P-06 (SIEVE 部分)** SIEVE (NSDI 2024) を追加 — 完 (次 commit)。`bpf/policy_sieve_ops.bpf.c` に struct_ops で。per-ino 1-bit visited + second-chance clock semantics: first sight → seed=1 (grace)、on_evict で visited=1 → clear to 0 (second chance)、visited=0 → EVICT。smoke で round-by-round 挙動を実測 (round 1: 11 admit → 0 vote, round 2: 12 admit → 0 silent vote, round 3: 13 admit → 12/13 evict)。W-TinyLFU は P-07 の hit-rate 比較後に追加
 - [x] ✅ **P-14 on_hit hook** — 完 (次 commit)。vtable に 4 番目のメソッド `on_hit(ino)` 追加、`read_folio` の admit-hit 分岐から fmod_ret + struct_ops 両 path で dispatch。SIEVE: visited=1 復活、LRU: seed=current_epoch (age reset)、S3-FIFO: freq++ (up to 3)、observe: PSTAT_INVOCATIONS 加算。smoke で SIEVE の on_hit → 次 evict round で visited=1 → clear+keep、その後の cat 無ければ visited=0 → EVICT を alternating pattern (13→2→13→2→3→14→2→5) で観測。cat 継続の hello.txt は 4 round evict 生存、cat 停止した他 ino は round 3 で evict 実測
-- [x] ✅ **P-07** hit-rate 比較 bench — 完 (次 commit)。`scripts/bench-hitrate.sh` + `POST /policy/eval` endpoint + kmod-side mm ref fix + `docs/hit-rate-bench.md`。Zipf α=0.7 over 30 files で SIEVE 62.5% / LRU 12% / S3-FIFO 9.5% (observe baseline 100%) 実測、SIEVE が最も working set を守れる証拠。P-14 on_hit で算法差が数値に反映されたことを確認
+- [x] ✅ **P-07** hit-rate 比較 bench — 完 (次 commit)。`scripts/bench-hitrate.sh` + `POST /policy/eval` endpoint + kmod-side mm ref fix + `docs/journal/hit-rate-bench.md`。Zipf α=0.7 over 30 files で SIEVE 62.5% / LRU 12% / S3-FIFO 9.5% (observe baseline 100%) 実測、SIEVE が最も working set を守れる証拠。P-14 on_hit で算法差が数値に反映されたことを確認
 - [x] ✅ **P-15 rename freq2bit + full 3-tier S3-FIFO** — 完 (次 commit)。旧 policy_s3fifo は tier 分離のない 2-bit counter で S3-FIFO 論文と別物だったため `policy_freq2bit(_ops)` に honest rename。新規 `policy_s3fifo_ops.bpf.c` を Small/Main/Ghost 3-tier + freq counter + ghost promotion で論文準拠に実装。同 workload で S3-FIFO 61.5% (旧 freq2bit の 8.5% から 7× 改善)、SIEVE 68.5% と ±10% 内に収まり論文と整合
 - [x] ✅ **P-06 (W-TinyLFU 部分)** W-TinyLFU の scoped-down 実装 — 完 (次 commit)。`bpf/policy_wtinylfu_ops.bpf.c` に CMS (4 hash × 256 slot、4-bit counter) + threshold admission。paper の {Window LRU tier, Doorkeeper, Aging} は omit — aging は BPF verifier が 1024-slot loop を reject するため (bpf_loop 未使用)。同 bench で 25%、freq2bit/LRU (~12%) と SIEVE/S3-FIFO (~62%) の中間に位置、full impl なら 60% tier 到達見込み。bench harness に `INTERLEAVE=25` (workload 中の POST /policy/eval) を追加 — on_hit で state populate する policy が eviction round を見られるようにした
 - [x] ✅ **P-06 (W-TinyLFU aging)** bpf_loop() で CMS aging を復活 — 完 (次 commit)。`age_slot_cb` callback + `bpf_loop(CMS_W*CMS_D, cb, NULL, 0)` で verifier の 1M insn budget を回避 (kernel 5.17+ 依存)。AGE_INTERVAL=4 admit round ごとに全 counter を >>=1。同 bench で **25% → 80%** に跳ね上がり、SIEVE (62%) / S3-FIFO (65.5%) を上回って evicting policy 中の best に到達。paper 準拠の TinyLFU に一気に近付いた。W-LRU tier と Doorkeeper は残るが CMS+aging が主役の証明が取れた
@@ -150,18 +150,18 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 ### K. upstream 貢献 (`w4a §9`)
 
-根拠 doc: [`ebpf-ecosystem-gaps.md`](ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
+根拠 doc: [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
 
-- [ ] **K-01** `bpf_arena_get_kern_vm_start` の EXPORT_SYMBOL_GPL 提案 — 詳細 [`ebpf-ecosystem-gaps.md §1.2`](ebpf-ecosystem-gaps.md#12-改善案)
+- [ ] **K-01** `bpf_arena_get_kern_vm_start` の EXPORT_SYMBOL_GPL 提案 — 詳細 [`../dev-notes/ebpf-ecosystem-gaps.md §1.2`](../dev-notes/ebpf-ecosystem-gaps.md#12-改善案)
   当てれば kmod 側で BTF-derived struct redefine 不要になる。
-- [ ] **K-02** arena kern_vm range 用の generic-context fault handler 追加提案 — 詳細 [`ebpf-ecosystem-gaps.md §1.2`](ebpf-ecosystem-gaps.md#12-改善案)
+- [ ] **K-02** arena kern_vm range 用の generic-context fault handler 追加提案 — 詳細 [`../dev-notes/ebpf-ecosystem-gaps.md §1.2`](../dev-notes/ebpf-ecosystem-gaps.md#12-改善案)
   当てれば A′ (kern_vm 直 deref) 経路が復活、B の GUP overhead が消える (数百ns オーダー改善見込み)。
 
 ### L. narrative / docs
 
-- [x] ✅ **L-01** Meetup 登壇 script の起草 — 完 (次 commit)。`docs/demo-scenario.md` に Demo 0-8 の完全 script (35 min 想定タイム配分 + 各節 run / expected / say + 質疑応答想定 + 会場で刺さらなかった時の fallback)。demo 手順を再現可能な shell command 列で書き起こしてある
+- [x] ✅ **L-01** Meetup 登壇 script の起草 — 完 (次 commit)。`docs/user/demo-scenario.md` に Demo 0-8 の完全 script (35 min 想定タイム配分 + 各節 run / expected / say + 質疑応答想定 + 会場で刺さらなかった時の fallback)。demo 手順を再現可能な shell command 列で書き起こしてある
 - [x] ✅ **L-02** README.md 再生成 (B-05 と同項目) — 完 (次 commit)。`make readme` で envsubst 再走、`s3-list` / `s3-stat` help に "--backend s3\|gcs (S3-compatible endpoint or Google Cloud Storage)" が反映される 3 行差分だけ吸収
-- [x] ✅ **L-03** 各 doc の相互リンク整理 (現状ハイパーリンクが手書きで壊れやすい) — 完 (次 commit)。docs/ を broken-link audit、`docs/deisign.md` の typo を `docs/design.md` に rename して 3 サイト (README.md / policy-engine-design.md / week4a-implementation-notes.md) の参照を全て更新、`docs/INDEX.md` (トピック別索引) を新設して README から link、"追加/リネーム時に何をすればいいか" の運用手順も同 doc に書き起こし
+- [x] ✅ **L-03** 各 doc の相互リンク整理 (現状ハイパーリンクが手書きで壊れやすい) — 完 (次 commit)。docs/ を broken-link audit、`docs/design/deisign.md` の typo を `docs/design/design.md` に rename して 3 サイト (README.md / policy-engine-design.md / week4a-implementation-notes.md) の参照を全て更新、`docs/INDEX.md` (トピック別索引) を新設して README から link、"追加/リネーム時に何をすればいいか" の運用手順も同 doc に書き起こし
 
 ---
 
@@ -200,11 +200,11 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 ## 8. 参照
 
-- `docs/week4a-implementation-notes.md §9` / `§10`
-- `docs/week4a-c-session-notes.md §5`
-- `docs/week4b-implementation-notes.md §4`
-- `docs/week4c-implementation-notes.md §4`
-- `docs/lessons-learned.md §5`
-- `docs/benchmark-results.md §6`
-- `docs/bench-env-notes.md §4`
-- `docs/policy-engine-design.md §6` / `§7` / `§9`
+- `docs/journal/week4a-implementation-notes.md §9` / `§10`
+- `docs/journal/week4a-c-session-notes.md §5`
+- `docs/journal/week4b-implementation-notes.md §4`
+- `docs/journal/week4c-implementation-notes.md §4`
+- `docs/dev-notes/lessons-learned.md §5`
+- `docs/journal/benchmark-results.md §6`
+- `docs/journal/bench-env-notes.md §4`
+- `docs/design/policy-engine-design.md §6` / `§7` / `§9`

@@ -577,9 +577,9 @@ prewarm 対象外にして、複数 offset を dd で読むと dmesg + /metrics
 
 ## 参照
 
-- `docs/backlog.md` D-01 / D-02 の commit ref (`b0a62c7` / `c419541`)
-- `docs/hook-timings-diagrams.md` タイミング 3 (read miss + partial admit)、6 (eviction + arena free)
-- `docs/posix-and-practical-notes.md` §D-01 / §D-02 の POSIX 準拠論点
+- `docs/journal/backlog.md` D-01 / D-02 の commit ref (`b0a62c7` / `c419541`)
+- `docs/design/hook-timings-diagrams.md` タイミング 3 (read miss + partial admit)、6 (eviction + arena free)
+- `docs/user/posix-and-practical-notes.md` §D-01 / §D-02 の POSIX 準拠論点
 - `kmod/vfs_ops.c`: `s3fs_admit` / `admit_lookup_at_locked` / `admit_snapshot`
 - `daemon/internal/ebpf/loader.go`: `AdmitContent` / `FreeArenaChunk` / `ArenaFreeStats`
 - `daemon/cmd/s3fs-ebpf/admit_arena.go`: `handleReadMiss` / `dropAdmits`

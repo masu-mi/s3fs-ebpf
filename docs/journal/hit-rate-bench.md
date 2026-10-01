@@ -225,7 +225,7 @@ S3-FIFO name. The bench above measures both. See:
    = 8;`). At a larger softcap all policies trend toward
    `observe`'s 100 %. To move it you also need to raise the
    admit hash's `S3FS_ADMIT_HASH_BITS` (currently 6 → 64
-   buckets). See `docs/backlog.md` D-01 for the range-list
+   buckets). See `docs/journal/backlog.md` D-01 for the range-list
    redesign that would remove the fixed cap entirely.
 
 2. `POST /policy/eval` is a bench-only knob. Production

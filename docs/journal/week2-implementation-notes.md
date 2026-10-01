@@ -40,7 +40,7 @@ Week 1 (`week1-build-runtime-notes.md`) が「ビルド環境の整備」の記�
 +		}
 ```
 
-パッチファイルとして `docs/cilium-ebpf-addr-space-cast-marshal.patch` に置いてある。cilium/ebpf の tree から `patch -p1` あるいは `git am` で適用でき、v0.22.0 と `main` (2026-09-11 時点) の両方に clean で当たる。上流 PR / fork の commit にはこのファイルをそのまま使う想定。
+パッチファイルとして `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` に置いてある。cilium/ebpf の tree から `patch -p1` あるいは `git am` で適用でき、v0.22.0 と `main` (2026-09-11 時点) の両方に clean で当たる。上流 PR / fork の commit にはこのファイルをそのまま使う想定。
 
 **回避策:** cilium/ebpf を `daemon/third_party/ebpf/` に vendor し、`daemon/go.mod` に
 

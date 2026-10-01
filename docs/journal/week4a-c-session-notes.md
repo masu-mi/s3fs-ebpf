@@ -1,6 +1,6 @@
 # Week 4 (a) C 実装セッション記録
 
-Path B (GUP prewarm) が動いた状態から Path C (read-miss upcall) を積み上げた 1 セッションの記録。何を作り、何を発見し、どう判断したかを短くまとめる。**踏んだ地雷の一次情報**は `docs/week4a-implementation-notes.md §10`、**設計比較**は `docs/read-path-design.md §3` を参照。
+Path B (GUP prewarm) が動いた状態から Path C (read-miss upcall) を積み上げた 1 セッションの記録。何を作り、何を発見し、どう判断したかを短くまとめる。**踏んだ地雷の一次情報**は `docs/journal/week4a-implementation-notes.md §10`、**設計比較**は `docs/design/read-path-design.md §3` を参照。
 
 対応 commit: master ブランチの Week 4 (a) C サブトラック (session end 時点で未 commit、9 files modified)。
 
@@ -43,7 +43,7 @@ Path B (GUP prewarm) が動いた状態から Path C (read-miss upcall) を積�
  docs/week4a-implementation-notes.md +127 (§10 に C 実装時の地雷 6 subsection)
 ```
 
-見積 (`read-path-design.md §3` の当初見積) は ~210 行、実測は ~480 行 (+ docs ~270 行)。2 倍強の要因は §3 で整理。
+見積 (`../design/read-path-design.md §3` の当初見積) は ~210 行、実測は ~480 行 (+ docs ~270 行)。2 倍強の要因は §3 で整理。
 
 ---
 
@@ -146,7 +146,7 @@ C 実装中に見つかった、上流 doc に書いてない or 分かりにく
 
 ### コード規模
 
-| 分類 | 見積 (`read-path-design.md §3` 当初) | 実測 |
+| 分類 | 見積 (`../design/read-path-design.md §3` 当初) | 実測 |
 |---|---|---|
 | UAPI | +15 | +35 |
 | kmod side | +105 (pending + ioctl + ringbuf) | +391 (pending + FIFO + ioctl + shutdown) |

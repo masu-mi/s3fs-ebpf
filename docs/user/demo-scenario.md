@@ -86,7 +86,7 @@ demo file 00
 
 ## Demo 2 — 3 レイヤーアーキテクチャの構造
 
-`docs/policy-engine-design.md` の図を持参スライドで、コード側で確認する。
+`docs/design/policy-engine-design.md` の図を持参スライドで、コード側で確認する。
 
 ### run
 
@@ -212,7 +212,7 @@ policy=wtinylfu_ops    rate= 80.00%  evictions=  270
 - 「W-TinyLFU は最初 25% だった。bpf_loop() で aging を復活させただけで
   55pp 跳ねた。**algorithm の勝ちだけじゃなく、BPF verifier との
   戦い方の勝ち**」
-- (時間があれば) `docs/hit-rate-bench.md` の caveats section を紹介
+- (時間があれば) `docs/journal/hit-rate-bench.md` の caveats section を紹介
 
 ---
 
@@ -339,7 +339,7 @@ http://localhost:3000 → S3FS-eBPF Overview
 8. **Policy evictions** — 累計 / rate/s
 9. **Policy custom metric ($policy_metric_name)** — CEL の
    metric(name, value) で emit された gauge を dropdown で切替表示。
-   `docs/hit-rate-bench.md` の bench で pubulish される
+   `docs/journal/hit-rate-bench.md` の bench で pubulish される
    `last_entry_size` が見える
 
 ### say
@@ -384,7 +384,7 @@ make compose-down  # optional
 ## 想定される質問と回答
 
 - **Q: FUSE と比べて何 μs 早い?**
-- **A**: `docs/benchmark-results.md` にある通り、warm stat が
+- **A**: `docs/journal/benchmark-results.md` にある通り、warm stat が
   s3fs-fuse で ~50 μs、s3fs-ebpf で ~5 μs。10 倍。cold read は
   S3 側の latency 支配なので差が縮む。
 
@@ -394,13 +394,13 @@ make compose-down  # optional
   (backlog D-01) が要る。
 
 - **Q: 分散環境は?**
-- **A**: `docs/policy-engine-design.md §7` の non-goal。Week 5+
+- **A**: `docs/design/policy-engine-design.md §7` の non-goal。Week 5+
   で複数 daemon 間の共有 policy state を検討予定。
 
 - **Q: なぜ Lua じゃないの?**
 - **A**: hot path が μs 台、Lua の call overhead (10 μs) が予算を
   食う。CEL は「eval 時間 < 1 μs」の場合だけに使い、実際の判定は
-  eBPF に寄せている。`docs/policy-engine-design.md §5-§6`。
+  eBPF に寄せている。`docs/design/policy-engine-design.md §5-§6`。
 
 - **Q: user が eBPF 書くの現実的?**
 - **A**: 現状は unlikely。built-in の 7 policy で 99% の要求は
@@ -414,7 +414,7 @@ make compose-down  # optional
 - **数値の代わりに動画**: Grafana panel の 30 秒 recording を
   用意しておく (hit ratio が hot swap で切替わる瞬間)
 - **時間圧迫**: Demo 6 (allowlist) を最後にして、時間切れなら省略
-- **技術詳細に食いつかれた**: `docs/lessons-learned.md` の各節に
+- **技術詳細に食いつかれた**: `docs/dev-notes/lessons-learned.md` の各節に
   戻って個別に答える (arena mm/gup / bpf_loop / struct_ops
   hot reload / etc.)
 
@@ -422,8 +422,8 @@ make compose-down  # optional
 
 ## 参照
 
-- `docs/motivation.md` — 全体設計・比較 (発表スライドの土台)
-- `docs/policy-engine-design.md` — Layer 別詳細
-- `docs/hit-rate-bench.md` — Demo 4 の数値の出典と caveats
-- `docs/policy-attach-comparison.md` — struct_ops vs fmod_ret
-- `docs/lessons-learned.md` — 実装ハマりポイント
+- `docs/user/motivation.md` — 全体設計・比較 (発表スライドの土台)
+- `docs/design/policy-engine-design.md` — Layer 別詳細
+- `docs/journal/hit-rate-bench.md` — Demo 4 の数値の出典と caveats
+- `docs/design/policy-attach-comparison.md` — struct_ops vs fmod_ret
+- `docs/dev-notes/lessons-learned.md` — 実装ハマりポイント
