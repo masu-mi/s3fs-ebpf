@@ -1,0 +1,11 @@
+# prewarm-all.cel — 全ファイルを無条件に prewarm する最小ポリシー
+#
+# ユースケース: arena サイズが working set より大きい場合、または
+# まず全部 warm してから絞り込む方針を試す出発点として使う。
+#
+# 注意: prewarm: true はデフォルト挙動なので、policy ファイル自体を
+# 省略しても同じ。このファイルは "policy: だけ指定したいが prewarm は全部"
+# という用途 (Layer 2 program を固定したい場合) に使う。
+
+prewarm: true
+policy: "builtin:policy_wtinylfu_ops"
