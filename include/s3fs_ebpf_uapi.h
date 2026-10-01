@@ -144,7 +144,7 @@ struct s3fs_read_miss_event {
  *
  * ABI note: this is a size change vs the pre-G-01 layout. kmod and
  * daemon must be rebuilt together (there is no version negotiation
- * yet — see docs/g01-subdir-plan.md §4). parent_ino=0 is treated
+ * yet — see docs/design/g01-subdir-plan.md §4). parent_ino=0 is treated
  * equivalently to root (S3FS_ROOT_INO=1) so any hand-crafted caller
  * that forgets to set it still lands under root.
  */

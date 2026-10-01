@@ -146,7 +146,7 @@ BTF_KFUNCS_END(s3fs_kfunc_ids_struct_ops)
  * lets the BPF program override the return value directly, so
  * eviction votes / admission decisions flow through as function
  * return values rather than side-channel maps. See
- * docs/policy-engine-design.md §4.5 and P-10 in docs/backlog.md.
+ * docs/design/policy-engine-design.md §4.5 and P-10 in docs/journal/backlog.md.
  */
 BTF_SET8_START(s3fs_policy_fmodret_ids)
 BTF_ID_FLAGS(func, s3fs_policy_on_admit)

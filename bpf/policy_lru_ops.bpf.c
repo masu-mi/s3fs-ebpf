@@ -7,7 +7,7 @@
 //
 // "Approximate" because we don't have an on_hit hook (that's the
 // super-hot, per-read path handled by the kernel's built-in
-// LRU_HASH map — see docs/policy-engine-design.md §2.2, §5.6).
+// LRU_HASH map — see docs/design/policy-engine-design.md §2.2, §5.6).
 // Without on_hit we can't distinguish frequently-vs-rarely-accessed
 // entries, so this reduces to FIFO by admission order:
 //   - on_admit: bump a global epoch counter

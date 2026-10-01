@@ -23,7 +23,7 @@ CLANG ?= $(shell command -v clang-20 2>/dev/null || command -v clang-19 2>/dev/n
 
 # Ubuntu mainline 6.12 kernel headers hard-code CC=gcc-15 but noble only
 # ships up to gcc-14. Detect the highest available and pass it through
-# to the kmod sub-make. See docs/week1-build-runtime-notes.md #2.
+# to the kmod sub-make. See docs/journal/week1-build-runtime-notes.md #2.
 KMOD_CC ?= $(shell command -v gcc-15 2>/dev/null || command -v gcc-14 2>/dev/null || command -v gcc 2>/dev/null || echo gcc)
 
 # Distro pahole 1.25 silently emits empty BTF against kernels built with

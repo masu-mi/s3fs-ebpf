@@ -3,7 +3,7 @@
 # Ubuntu mainline kernel (tested on 6.12.90-061290-generic).
 #
 # Reproduces the 5 workarounds documented in
-# docs/week1-build-runtime-notes.md. Idempotent: each step no-ops when the
+# docs/journal/week1-build-runtime-notes.md. Idempotent: each step no-ops when the
 # fix is already in place. Review before running — several steps mutate
 # system state (see the doc's "副作用の永続性まとめ" section).
 #
@@ -173,7 +173,7 @@ main() {
     export LD_LIBRARY_PATH=${PAHOLE_PREFIX}/lib
     make CC=gcc-14 HOSTCC=gcc-14 PAHOLE=${PAHOLE_PREFIX}/bin/pahole test-arena
 
-See docs/week1-build-runtime-notes.md for background and alternatives.
+See docs/journal/week1-build-runtime-notes.md for background and alternatives.
 EOF
 }
 

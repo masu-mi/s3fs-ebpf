@@ -15,7 +15,7 @@
  *   fmod_ret: fentry-style, retval override
  *   struct_ops: function-pointer dispatch, retval is natural
  *
- * See docs/policy-engine-design.md §4.5 for the design context.
+ * See docs/design/policy-engine-design.md §4.5 for the design context.
  */
 
 #include <linux/bpf.h>

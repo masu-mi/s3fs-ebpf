@@ -73,7 +73,7 @@ const (
 // -ENOENT (no waiter) is a normal outcome for the .release path; we
 // call this after every PUT so both fire-and-forget and blocking
 // fsync go through the same completion signal. See E-01 in
-// docs/backlog.md and struct s3fs_flush_pending in kmod/vfs_ops.c.
+// docs/journal/backlog.md and struct s3fs_flush_pending in kmod/vfs_ops.c.
 func signalFlush(devFd int, ino uint64, errCode int32) error {
 	arg := signalAdmitArg{Ino: ino, Err: errCode}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,

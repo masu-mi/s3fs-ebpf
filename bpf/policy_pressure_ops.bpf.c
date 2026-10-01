@@ -21,7 +21,7 @@
 // The KFunc calls are the interesting bit — they're the first
 // piece of kmod-side state a Layer 2/3 program can read that
 // isn't plumbed through hook arguments. See P-08 in
-// docs/backlog.md.
+// docs/journal/backlog.md.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>

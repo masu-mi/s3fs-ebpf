@@ -34,7 +34,7 @@ const (
 //   - struct_ops program: single vtable map, 1 Link object,
 //     hot swap = 1 link.Update on the vtable
 //
-// See docs/policy-engine-design.md §4.5 for the trade-off analysis.
+// See docs/design/policy-engine-design.md §4.5 for the trade-off analysis.
 type Program struct {
 	Coll     *ebpf.Collection
 	Progs    map[string]*ebpf.Program // ebpf-section-name → program

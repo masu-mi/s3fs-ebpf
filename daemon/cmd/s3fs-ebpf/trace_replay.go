@@ -22,7 +22,7 @@ import (
 func runTraceReplay(args []string) int {
 	fs := flag.NewFlagSet("trace-replay", flag.ExitOnError)
 	tracePath := fs.String("trace", "",
-		"Path to JSON Lines trace (see docs/trace-harness.md format). "+
+		"Path to JSON Lines trace (see docs/design/trace-harness.md format). "+
 			"Overrides --zipf when set.")
 	zipf := fs.String("zipf", "",
 		"Generate a synthetic Zipf trace: alpha,files,accesses. "+
