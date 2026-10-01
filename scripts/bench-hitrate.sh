@@ -104,7 +104,7 @@ PY
 # --- lifecycle -----------------------------------------------------------
 
 cleanup() {
-	sudo pkill -INT -f 's3fs-ebpf fastpath' 2>/dev/null || true
+	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
 	# give SIGINT time to drain; then umount + rmmod
 	local i
 	for i in 1 2 3 4 5; do
