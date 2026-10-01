@@ -32,3 +32,4 @@ bench/results/
 .idea/
 .vscode/
 .claude
+daemon/s3fs-ebpf
