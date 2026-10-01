@@ -89,6 +89,25 @@ struct {
 } s3fs_counters SEC(".maps");
 
 /*
+ * Per-inode read access pattern map (R-01).
+ *
+ * Key: inode number (u64).
+ * Value: struct s3fs_read_pattern — updated by fentry/generic_file_read_iter
+ *        on every read call that passes the s_magic filter.
+ *
+ * LRU_HASH evicts the coldest entry automatically when full, so policy
+ * programs and the daemon always see recent-ish data without GC overhead.
+ * Max entries matches S3FS_INDEX_MAX_ENTRIES so both maps age at the same
+ * rate; bump together when the working set grows.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, __u64);
+	__type(value, struct s3fs_read_pattern);
+	__uint(max_entries, S3FS_INDEX_MAX_ENTRIES);
+} s3fs_read_pattern_map SEC(".maps");
+
+/*
  * KFunc provided by kmod/tree_traversal.c, registered against
  * BPF_PROG_TYPE_SYSCALL so this SEC("syscall") program may call it.
  */
@@ -185,6 +204,113 @@ int BPF_PROG(s3fs_fp_getattr, const struct path *path, struct kstat *stat,
 		return 0;
 	ev->ino  = ino;
 	ev->op   = S3FS_OP_GETATTR;
+	ev->_pad = 0;
+	bpf_ringbuf_submit(ev, 0);
+	return 0;
+}
+
+/*
+ * Slack (bytes) within which two consecutive reads are considered sequential.
+ * Covers readahead-rounded requests: a 4 KiB read at pos N that the kernel
+ * rounds to an 8 KiB prefetch ends at pos N+8192, so the next "sequential"
+ * read may start up to one page past our last_end_pos.
+ */
+#define S3FS_SEQ_SLACK 4096ULL
+
+/*
+ * fentry/generic_file_read_iter — read access pattern observer (R-01).
+ *
+ * Fires on every read(2) / pread(2) / io_uring read that goes through
+ * generic_file_read_iter. Responsibilities:
+ *
+ *   1. Filter by s_magic so we only track our own filesystem.
+ *   2. Update s3fs_read_pattern_map[ino] with sequential/random signal.
+ *   3. Count read_iter_hits (ino already in inode_index) and
+ *      read_iter_misses (ino unknown) separately from stat counters so
+ *      the daemon can compute a true page-cache hit rate.
+ *   4. Emit a miss event for ino-not-in-index reads so the daemon can
+ *      prewarm the right range proactively (reuses op=S3FS_OP_READ).
+ *
+ * Why NOT return data here: fentry cannot modify the return value or
+ * intercept page-cache fills — that stays in kmod's .read_folio.
+ * This program is an observer only; it supplies signal to policy.
+ */
+SEC("fentry/generic_file_read_iter")
+int BPF_PROG(s3fs_fp_read_iter,
+	     struct kiocb *iocb, struct iov_iter *to)
+{
+	struct file *filp;
+	struct inode *inode;
+	struct super_block *sb;
+	unsigned long magic;
+	__u64 ino, pos, len;
+	__u32 *offp;
+	struct s3fs_read_pattern *pat, zero_pat = {};
+	struct s3fs_miss_event *ev;
+
+	if (!iocb)
+		return 0;
+
+	filp = BPF_CORE_READ(iocb, ki_filp);
+	if (!filp)
+		return 0;
+
+	inode = BPF_CORE_READ(filp, f_inode);
+	if (!inode)
+		return 0;
+
+	sb = BPF_CORE_READ(inode, i_sb);
+	if (!sb)
+		return 0;
+
+	magic = BPF_CORE_READ(sb, s_magic);
+	if (magic != S3FS_EBPF_MAGIC)
+		return 0;
+
+	ino = BPF_CORE_READ(inode, i_ino);
+	pos = (__u64)BPF_CORE_READ(iocb, ki_pos);
+	len = (__u64)BPF_CORE_READ(to, count);
+
+	/* Update access pattern: sequential if pos is within slack of
+	 * the previous read's end offset, random otherwise.
+	 * BPF_NOEXIST insert races are harmless — both sides start from
+	 * a zero-value entry and only do atomic increments thereafter. */
+	pat = bpf_map_lookup_elem(&s3fs_read_pattern_map, &ino);
+	if (!pat) {
+		bpf_map_update_elem(&s3fs_read_pattern_map, &ino, &zero_pat, BPF_NOEXIST);
+		pat = bpf_map_lookup_elem(&s3fs_read_pattern_map, &ino);
+	}
+	if (pat) {
+		__u64 expected_pos = pat->last_end_pos;
+		if (pos <= expected_pos + S3FS_SEQ_SLACK &&
+		    pos + len > expected_pos)
+			__sync_fetch_and_add(&pat->seq_count, 1);
+		else
+			__sync_fetch_and_add(&pat->rand_count, 1);
+		__sync_fetch_and_add(&pat->total_bytes, len);
+		/* Relaxed store: last_end_pos is best-effort; a torn write
+		 * under concurrent readers is acceptable — the pattern
+		 * counters above are the authoritative signal. */
+		pat->last_end_pos = pos + len;
+	}
+
+	/* Count hit vs miss against inode_index and optionally emit an
+	 * event so the daemon can prewarm the read range. */
+	offp = bpf_map_lookup_elem(&s3fs_inode_index, &ino);
+	if (offp) {
+		bump_counter(S3FS_STAT_READ_ITER_HITS);
+		return 0;
+	}
+
+	bump_counter(S3FS_STAT_READ_ITER_MISSES);
+
+	/* Emit a read miss so the daemon can warm the arena for this ino.
+	 * Re-uses the existing s3fs_miss_event shape with op=S3FS_OP_READ. */
+	ev = bpf_ringbuf_reserve(&s3fs_events, sizeof(*ev), 0);
+	if (!ev)
+		return 0;
+	ev->ino  = ino;
+	ev->op   = S3FS_OP_READ;
 	ev->_pad = 0;
 	bpf_ringbuf_submit(ev, 0);
 	return 0;

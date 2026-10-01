@@ -586,6 +586,16 @@ func runFastpath(args []string) int {
 	}
 	defer fentry.Close()
 
+	readIter, err := progs.AttachFentryReadIter()
+	if err != nil {
+		// Non-fatal: some kernels inline generic_file_read_iter and it
+		// becomes invisible to fentry. Log and continue without it.
+		fmt.Fprintf(os.Stderr, "[warn] attach fentry/generic_file_read_iter: %v (read pattern tracking disabled)\n", err)
+	} else {
+		defer readIter.Close()
+		fmt.Println("[fastpath] attached fentry/generic_file_read_iter; read pattern tracking enabled")
+	}
+
 	reader, err := ringbuf.NewReader(progs.EventsMap())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ringbuf reader: %v\n", err)
@@ -1078,8 +1088,12 @@ func printCounters(progs *fpebpf.Programs, label string) {
 	metrics.Global.FastPathHits.Store(c[fpebpf.StatFastHits])
 	metrics.Global.SlowPathMisses.Store(c[fpebpf.StatSlowMisses])
 	metrics.Global.UnknownFS.Store(c[fpebpf.StatUnknownFS])
-	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d\n",
-		label, c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS])
+	metrics.Global.ReadIterHits.Store(c[fpebpf.StatReadIterHits])
+	metrics.Global.ReadIterMisses.Store(c[fpebpf.StatReadIterMisses])
+	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d read_iter_hits=%d read_iter_misses=%d\n",
+		label,
+		c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS],
+		c[fpebpf.StatReadIterHits], c[fpebpf.StatReadIterMisses])
 }
 
 func opName(op uint32) string {

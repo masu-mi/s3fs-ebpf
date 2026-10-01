@@ -72,6 +72,13 @@ type Counters struct {
 	// S3FS_IOC_STATS[1]. Divide by (this + ReadMissUpcalls) for the
 	// real kmod cache hit ratio.
 	FolioHits atomic.Uint64 // counter
+
+	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
+	// reads where the ino was already in inode_index (prewarm hit);
+	// ReadIterMisses counts reads where the ino was unknown (triggers
+	// a daemon upcall via the events ringbuf, op=S3FS_OP_READ).
+	ReadIterHits   atomic.Uint64 // counter
+	ReadIterMisses atomic.Uint64 // counter
 }
 
 // Global is a package-level sink so any component can bump counters
@@ -161,6 +168,10 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 
 		// True kmod-side cache hit — read_folio served from arena.
 		{"s3fs_ebpf_folio_hits_total", "kmod-side .read_folio calls served from arena (true cache hit). Divide by (this + read_miss_upcalls_total) for hit ratio.", "counter", Global.FolioHits.Load()},
+
+		// R-01: fentry/generic_file_read_iter access-pattern observer.
+		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (read prewarm hit).", "counter", Global.ReadIterHits.Load()},
+		{"s3fs_ebpf_read_iter_misses_total", "generic_file_read_iter calls where ino was unknown; triggers daemon prewarm upcall.", "counter", Global.ReadIterMisses.Load()},
 	}
 	for _, m := range metrics {
 		fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)
