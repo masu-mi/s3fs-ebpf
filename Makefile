@@ -43,7 +43,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 .PHONY: help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
-        bench bench-write bench-scale bench-3way \
+        bench bench-write bench-scale bench-3way setup-bench-env \
         setup-kernel setup-toolchain readme test-arena clean
 
 ## help: Show this help (default target)
@@ -80,10 +80,11 @@ help:
 	@echo "  make daemon-stop    SIGINT any running daemon"
 	@echo ""
 	@echo "Benchmarks (all auto-start compose-up requirement + kmod/mount/daemon in-script):"
-	@echo "  make bench          Latency bench (hyperfine + microbench + fio) vs s3fs-fuse"
-	@echo "  make bench-write    Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)"
-	@echo "  make bench-scale    Parallel scaling (numjobs=1..64) stat + read"
-	@echo "  make bench-3way     ebpf vs fuse-raw vs fuse-cache 3-way comparison"
+	@echo "  make bench           Latency bench (hyperfine + microbench + fio) vs s3fs-fuse"
+	@echo "  make bench-write     Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)"
+	@echo "  make bench-scale     Parallel scaling (numjobs=1..64) stat + read"
+	@echo "  make bench-3way      ebpf vs fuse-raw vs fuse-cache 3-way comparison"
+	@echo "  make setup-bench-env install some pkgs"
 	@echo ""
 	@echo "Week 1 verification (requires 6.12+ kernel):"
 	@echo "  make test-arena     insmod + run bpf_arena/KFunc round-trip probe + rmmod"
@@ -247,6 +248,8 @@ setup-kernel:
 
 setup-toolchain:
 	$(SCRIPTS_DIR)/setup-toolchain.sh
+setup-bench-env:
+	apt install hyperfine s3fs
 
 # -----------------------------------------------------------------------------
 # Documentation (envsubst-driven)
