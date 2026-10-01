@@ -1,0 +1,19 @@
+# prewarm-meta-only.cel — metadata だけ warm、content は on-demand
+#
+# ユースケース: --pattern-aware-admit (R-01) との組み合わせ。
+#
+# 起動時に content を arena に入れないため prewarm が高速に終わる。
+# stat は metadata warm (prewarmEntry step 1) によって常に Path A (arena hit)。
+# cat / read が来たとき fentry/generic_file_read_iter が sequential 判定
+# (SeqRatio ≥ 0.70) したら full-file GET で一発 admit。
+# random read は 4 MiB chunk 単位の partial admit (D-01 既存挙動) にフォールバック。
+#
+# 使い方:
+#   sudo bin/s3fs-ebpf fastpath --s3 \
+#       --policy=policies/prewarm-meta-only.cel \
+#       --pattern-aware-admit \
+#       --metrics-addr=:9600
+#
+# 詳細: docs/design/ebpf-hook-gaps.md §3.4
+
+prewarm: false

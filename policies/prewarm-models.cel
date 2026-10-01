@@ -1,0 +1,26 @@
+# prewarm-models.cel — ML serving 用 prewarm ポリシー
+#
+# ユースケース: S3 の models/ 配下にモデルウェイト (.pt / .bin / .pkl) を
+# 置き、s3fs-ebpf で serve する ML inference 環境。daemon 起動時に
+# モデルファイルを arena に preload しておくことで、最初の推論リクエストが
+# cold start なしで arena Hit (Path A) になる。
+#
+# 制御指針:
+#   1. models/ 配下かつ既知の重みフォーマットのみ prewarm する。
+#      ログ・config・その他は on-demand (Path C) で十分。
+#   2. サイズ上限 (2 GiB) を設けて arena 溢れを防ぐ。本番では
+#      arena サイズ (--arena-pages) に合わせて調整する。
+#   3. metric() で prewarm 判定の入力分布を Prometheus に出力しておくと
+#      「なぜこのファイルが warm/cold なのか」のデバッグに役立つ。
+
+prewarm: metric("last_model_size_bytes", entry.size)
+      && entry.s3_key.startsWith("models/")
+      && (entry.name.endsWith(".pt")
+          || entry.name.endsWith(".bin")
+          || entry.name.endsWith(".pkl")
+          || entry.name.endsWith(".onnx"))
+      && entry.size <= 2147483648
+
+# W-TinyLFU は inference workload のように "hot model が繰り返し読まれる"
+# パターンで最も hit rate が高い (docs/journal/hit-rate-bench.md §3)。
+policy: "builtin:policy_wtinylfu_ops"

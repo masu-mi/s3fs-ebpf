@@ -97,6 +97,170 @@ sudo bin/s3fs-ebpf fastpath --s3 \
 
 CEL policy を書き換えても daemon は再起動が要る (CEL は startup 1 回読み)。
 
+### よくある prewarm レシピ
+
+下の例はすべてコピペして `policies/*.cel` に置いてそのまま使える。
+`metric()` を付けると Prometheus で warm/skip の判定理由が可視化できる。
+
+#### レシピ 1: 全ファイルを warm する (最小構成)
+
+arena サイズが十分大きく、まずは全部 preload したい場合の出発点。
+
+```cel
+# policies/prewarm-all.cel
+prewarm: true
+policy: "builtin:policy_wtinylfu_ops"
+```
+
+```bash
+# kmod ロード + マウント
+sudo insmod kmod/s3fs_kfunc.ko
+sudo mount -t s3fs_ebpf none /mnt/s3demo
+
+# daemon 起動 — 全ファイルを prewarm
+sudo bin/s3fs-ebpf fastpath --s3 \
+    --policy=policies/prewarm-all.cel \
+    --metrics-addr=:9600
+
+# 確認: prewarm ログに全 ino が "[prewarm] ino=... body=..." で出る
+# 確認: stat 後に fast_hits が上がる
+curl -s http://localhost:9600/metrics | grep s3fs_ebpf_fast_path_hits_total
+```
+
+> **注**: `prewarm: true` (宣言なし) がデフォルト動作なので、
+> 最終的に「全 warm」にしたいなら policy ファイル自体を省略できる。
+> ただし `policy:` 行だけを書きたいとき (Layer 2 program を固定したい
+> が prewarm は全部) は `prewarm: true` を明示する。
+
+---
+
+#### レシピ 2: S3 key prefix で warm 対象を絞る
+
+`models/` 以下のモデルウェイトだけを startup 時に preload し、
+ログ・設定・その他は on-demand (Path C) にする ML serving 向け例。
+
+```cel
+# policies/prewarm-models.cel
+prewarm: metric("last_model_size_bytes", entry.size)
+      && entry.s3_key.startsWith("models/")
+      && (entry.name.endsWith(".pt")
+          || entry.name.endsWith(".bin")
+          || entry.name.endsWith(".pkl")
+          || entry.name.endsWith(".onnx"))
+      && entry.size <= 2147483648   # 2 GiB 上限
+
+policy: "builtin:policy_wtinylfu_ops"
+```
+
+`entry.s3_key` はバケット root からのフルパスなので、`"hot-data/"` や
+`"datasets/train/"` のような深い prefix にも使える。
+
+`policies/prewarm-models.cel` として既に用意してある。
+
+```bash
+# daemon 起動
+sudo bin/s3fs-ebpf fastpath --s3 \
+    --policy=policies/prewarm-models.cel \
+    --metrics-addr=:9600
+
+# 確認1: models/ 配下のみ "[prewarm] ino=... body=..." が出る
+#        models/ 以外は "[prewarm] ino=... content-skip (policy=false ...)" になる
+
+# 確認2: prewarm 判定サイズを Prometheus で観察
+curl -s http://localhost:9600/metrics \
+    | grep 'policy_metric{name="last_model_size_bytes"}'
+
+# 確認3: models/weights.bin を cat → fast_hits が増える (arena hit)
+#        other/config.json  を cat → slow_misses → upcall → arena admit
+stat /mnt/s3demo/models/weights.bin   # Fast Path Hit
+stat /mnt/s3demo/other/config.json    # Slow Path Miss (first access)
+curl -s http://localhost:9600/metrics \
+    | grep -E 'fast_path_hits|slow_path_misses'
+```
+
+---
+
+#### レシピ 3: ファイル拡張子 + サイズで 3 段階に分ける
+
+小ファイルは全数 warm、分析フォーマット (parquet / arrow 等) は中サイズまで
+warm、大ファイル・ログは on-demand にするバランス型。
+
+```cel
+# policies/prewarm-tiered.cel
+prewarm: (entry.size <= 65536)          # Tier 1: 64 KiB 以下は全部
+      || (entry.size <= 134217728       # Tier 2: ~128 MiB かつ分析フォーマット
+          && (entry.name.endsWith(".parquet")
+              || entry.name.endsWith(".arrow")
+              || entry.name.endsWith(".csv")
+              || entry.name.endsWith(".bin")
+              || entry.name.endsWith(".pt"))
+          && !entry.name.endsWith(".log")
+          && !entry.name.endsWith(".tmp"))
+# Tier 3: 128 MiB 超 or .log は prewarm しない
+# → --pattern-aware-admit で sequential と判定された時だけ full admit
+
+policy: "builtin:policy_wtinylfu_ops"
+```
+
+`policies/prewarm-tiered.cel` として既に用意してある。
+
+```bash
+# daemon 起動
+sudo bin/s3fs-ebpf fastpath --s3 \
+    --policy=policies/prewarm-tiered.cel \
+    --metrics-addr=:9600
+
+# 確認: admits_current がどのファイルを warm したか
+#   Tier 1 (≤64 KiB)  → prewarm ログに body= あり
+#   Tier 2 (.parquet 等) → 同上
+#   Tier 3 (.log / 大) → "content-skip (policy=false ...)" ログ
+grep "\[prewarm\]" /tmp/bench/fastpath.log | grep -E "body=|content-skip"
+
+# 確認: arena 使用量がどれだけ増えたか
+curl -s http://localhost:9600/metrics \
+    | grep -E 'arena_used_bytes|arena_capacity_bytes|admits_current'
+```
+
+---
+
+#### レシピ 4: pattern-aware admit と組み合わせる
+
+CEL `prewarm: false` で content は warm しないが、
+`--pattern-aware-admit` を有効にすると初回の sequential read-miss で
+自動的に full admit に昇格できる。「起動時はメタデータだけ warm、
+実際に読まれたら全体を arena に入れる」という二段構え。
+
+```cel
+# policies/prewarm-meta-only.cel
+# stat は warm (metadata always warm、docs/design/read-path-design.md §F-03)
+# content は読まれるまで admit しない
+prewarm: false
+```
+
+```bash
+# daemon 起動 — content は on-demand、sequential 判定で full admit に昇格
+sudo bin/s3fs-ebpf fastpath --s3 \
+    --policy=policies/prewarm-meta-only.cel \
+    --pattern-aware-admit \
+    --metrics-addr=:9600
+
+# 確認1: 起動直後は content-skip が全 ino 分出る
+grep "content-skip" /tmp/bench/fastpath.log
+
+# 確認2: 大ファイルを cat → upcall + "pattern-aware full admit" ログ
+cat /mnt/s3demo/big.bin > /dev/null
+grep "pattern-aware full admit" /tmp/bench/fastpath.log
+
+# 確認3: stat は最初から Fast Path (metadata warm 済み)
+stat /mnt/s3demo/big.bin
+curl -s http://localhost:9600/metrics | grep fast_path_hits_total
+```
+
+> **仕組み**: `prewarm=false` でも `prewarmEntry` の step 1 (metadata warm)
+> は必ず走り、BPF `inode_index` に登録される。stat は Path A のまま高速。
+> content は first read-miss → `handleReadMiss` → `SeqRatio() ≥ 0.70` で
+> full-file GET という流れ。詳細は `docs/design/ebpf-hook-gaps.md §3.4`。
+
 ## Layer 2 — built-in eBPF policy を tuning する
 
 10 種の built-in が `bpf/policy_*_ops.bpf.c` にある。それぞれの

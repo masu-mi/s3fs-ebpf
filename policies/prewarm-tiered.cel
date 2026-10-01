@@ -1,0 +1,34 @@
+# prewarm-tiered.cel — サイズ階層 + 拡張子フィルタによる prewarm ポリシー
+#
+# ユースケース: バケットに小〜中〜大のファイルが混在する環境。
+# arena 容量を無駄にしないよう、ファイルの重要度と大きさで 3 段に分ける:
+#
+#   Tier 1 (必ず warm): 64 KiB 以下の小ファイル全て。
+#       インデックス・メタデータ・設定ファイルは stat + read が頻発するため
+#       全数 warm が正しい。arena へのコストも小さい。
+#
+#   Tier 2 (条件 warm): 64 KiB 超〜128 MiB 以下 かつ分析用フォーマット。
+#       .parquet / .arrow / .csv は analytics クエリのホットパスになりやすい。
+#       128 MiB を超えたら D-01 partial admit (on-demand chunk) で対応する。
+#
+#   Tier 3 (warm しない): 128 MiB 超 または .log / .tmp。
+#       ログは書き込み側の Pattern が多く arena を無駄に使う。巨大ファイルは
+#       --pattern-aware-admit で sequential と判定されたときだけ full admit する。
+#
+# 閾値チューニング:
+#   - TIER1_MAX: 64 * 1024 (= 65536)
+#   - TIER2_MAX: 128 * 1024 * 1024 (= 134217728)
+#   どちらも arena サイズと working set に合わせて変える。
+
+prewarm: (entry.size <= 65536)
+      || (entry.size <= 134217728
+          && (entry.name.endsWith(".parquet")
+              || entry.name.endsWith(".arrow")
+              || entry.name.endsWith(".csv")
+              || entry.name.endsWith(".json")
+              || entry.name.endsWith(".pt")
+              || entry.name.endsWith(".bin"))
+          && !entry.name.endsWith(".log")
+          && !entry.name.endsWith(".tmp"))
+
+policy: "builtin:policy_wtinylfu_ops"
