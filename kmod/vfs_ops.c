@@ -444,7 +444,7 @@ u64 s3fs_admit_size(u64 ino)
  *
  * noinline + non-static so kallsyms / BTF picks up the symbols for
  * fentry attachment. Bodies wrap args in asm volatile so -O2 doesn't
- * drop them. See docs/policy-engine-design.md §4.5.
+ * drop them. See docs/design/policy-engine-design.md §4.5.
  */
 /* fmod_ret trampolines override our return value at runtime, but the
  * compiler doesn't know that — a plain `return 0;` gets constant-
@@ -576,8 +576,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 
 	/* Policy hook fires after the admit snapshot lands. Both attach
 	 * paths (fmod_ret + struct_ops) are consulted so either can be
-	 * active. See docs/policy-engine-design.md §4.5 Layer 2 and
-	 * docs/policy-attach-comparison.md for the trade-off. */
+	 * active. See docs/design/policy-engine-design.md §4.5 Layer 2 and
+	 * docs/design/policy-attach-comparison.md for the trade-off. */
 	s3fs_policy_on_admit((u64)count, (u64)0);
 	(void)s3fs_policy_ops_eval_admit((u64)count, (u64)0);
 
@@ -605,7 +605,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 * snapshot, ask the loaded policy programs (fmod_ret and
 	 * struct_ops, whichever is attached) whether the entry should be
 	 * evicted. struct_ops wins when both are attached because it is
-	 * the primary path (see docs/policy-attach-comparison.md).
+	 * the primary path (see docs/design/policy-attach-comparison.md).
 	 *
 	 * Enforcement threshold: only apply eviction once the snapshot
 	 * exceeds a soft cap (S3FS_EVICT_SOFTCAP). This mirrors real
@@ -1956,7 +1956,7 @@ static const struct address_space_operations s3fs_ebpf_aops = {
  *   signal_flush from the daemon can find us. Wait up to
  *   S3FS_FSYNC_WAIT_JIFFIES for the completion, propagate PUT result
  *   as fsync() return value. This gives POSIX-conforming fsync
- *   semantics (E-01, `docs/backlog.md`).
+ *   semantics (E-01, `docs/journal/backlog.md`).
  *
  * Returns 0 on success, negative errno on wait timeout / PUT failure.
  */

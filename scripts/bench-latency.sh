@@ -41,7 +41,7 @@ check_prereq() {
 	docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
 		|| { echo "s3fs-ebpf-minio container missing — run 'make compose-up'"; exit 1; }
 	# fio object must exist on the S3 side, otherwise the fuse-mount
-	# ls will not see it (see docs/lessons-learned.md §3.1 note on the
+	# ls will not see it (see docs/dev-notes/lessons-learned.md §3.1 note on the
 	# "hello.txt disappeared from MinIO" incident).
 	docker exec s3fs-ebpf-minio mc ls "local/s3fs-test/$FILE" >/dev/null 2>&1 \
 		|| { echo "s3://s3fs-test/$FILE missing in MinIO — seed the bucket first"; exit 1; }

@@ -7,7 +7,7 @@
 #   s3fs-ebpf (A+C):    daemon --cache-dir + kmod .read_folio (VFS page cache 経由)。
 #
 # 3 者を hyperfine warm/cold + microbench + perf stat + big-file cat で並べる。
-# 結果は $OUT_DIR/3way-*.md に出力。docs/benchmark-results.md §7 で解釈。
+# 結果は $OUT_DIR/3way-*.md に出力。docs/journal/benchmark-results.md §7 で解釈。
 
 set -euo pipefail
 

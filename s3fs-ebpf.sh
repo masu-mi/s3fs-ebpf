@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # s3fs-ebpf.sh — end-to-end mount / unmount / policy-reload wrapper.
-# Mirrors the flow documented in docs/deisign.md §4.
+# Mirrors the flow documented in docs/design/design.md §4.
 set -euo pipefail
 
 TOPDIR="$(cd "$(dirname "$0")" && pwd)"

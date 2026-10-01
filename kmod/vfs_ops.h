@@ -114,7 +114,7 @@ void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow);
 
 /*
  * Policy hooks (Layer 2/3 fentry attach anchors). See
- * docs/policy-engine-design.md §4.5. Bodies are no-ops — BPF programs
+ * docs/design/policy-engine-design.md §4.5. Bodies are no-ops — BPF programs
  * supply the real behavior via fentry attach. Return values are
  * consumed by callers (kmod side) as advisory when the hook is
  * BPF-overridden.

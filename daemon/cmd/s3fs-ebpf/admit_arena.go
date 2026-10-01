@@ -200,7 +200,7 @@ type arenaChunkPair struct {
 // after a bucket sync when a key disappeared from S3: kmod's dyn entry
 // is already gone (shrink_dcache flushed the dentry), but the admit
 // hash keeps the orphan ino. Without this, long-running daemons leak
-// arena buffer + admit entries. See docs/week4b-implementation-notes.md
+// arena buffer + admit entries. See docs/journal/week4b-implementation-notes.md
 // §4-2.
 func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
 	admitMu.Lock()

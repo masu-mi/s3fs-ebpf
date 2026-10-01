@@ -1,7 +1,7 @@
 // Package policy is the CEL-based policy engine spike (Week 4 (d)
 // P-01). Minimum viable path: load one .cel file at daemon start,
 // evaluate the `prewarm` expression per Entry, return a bool. The
-// wider architecture (`docs/policy-engine-design.md §4.5`: DSL Layer 1
+// wider architecture (`docs/design/policy-engine-design.md §4.5`: DSL Layer 1
 // + built-in eBPF Layer 2 + user eBPF Layer 3 + KFunc Layer 0) grows
 // from here — additional hooks reuse the same `cel.Env` shape.
 //

@@ -8,7 +8,7 @@
 // **Paper-complete impl lives in policy_wtinylfu_full_ops.bpf.c**
 // (Window LRU tier + Doorkeeper + Aging). This "scoped" variant
 // keeps only the centerpiece (CMS + aging) which turns out to be
-// the strongest choice on our hit-rate bench (docs/hit-rate-bench.md:
+// the strongest choice on our hit-rate bench (docs/journal/hit-rate-bench.md:
 // scoped 80-88 % vs full 49 %). The full variant honors the paper
 // but its Window tier + doorkeeper filter useful signal on
 // small-cache workloads with no one-hit wonders — see the bench
