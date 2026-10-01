@@ -1,6 +1,8 @@
 services:
   minio:
-    image: quay.io/minio/minio:latest
+    # Pigsty Silo: AGPL-3.0 MinIO fork with same CLI/env/health endpoint.
+    # Used because MinIO Inc restricted anonymous pulls on quay.io (2026-10).
+    image: docker.io/pgsty/silo:latest
     container_name: s3fs-ebpf-minio
     command: server /data --console-address ":9001"
     environment:
@@ -19,7 +21,8 @@ services:
       retries: 20
 
   minio-init:
-    image: quay.io/minio/mc:latest
+    # Same silo image also bundles mc, so one image covers both services.
+    image: docker.io/pgsty/silo:latest
     container_name: s3fs-ebpf-minio-init
     depends_on:
       minio:
