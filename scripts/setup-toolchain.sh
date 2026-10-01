@@ -22,6 +22,9 @@ COMMON_PKGS=(
     bpfcc-tools python3-bpfcc
     curl jq
     docker.io
+    # Reference FUSE implementation used by scripts/bench-*.sh for A/B
+    # comparison; credential file is seeded further below.
+    s3fs
 )
 
 case "${ID:-}" in
@@ -137,6 +140,19 @@ if ! command -v go >/dev/null; then
     curl -fsSL "https://go.dev/dl/go${GO_VER}.linux-${ARCH}.tar.gz" \
         | sudo tar -C /usr/local -xz
     echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go.sh
+fi
+
+echo "==> s3fs-fuse credentials"
+# bench-latency.sh mounts s3fs-fuse at /mnt/s3fuse for A/B comparison and
+# reads credentials from /etc/passwd-s3fs. Seed it with the MinIO/Silo
+# defaults used in deploy/docker-compose.yml. Same creds are already in
+# plaintext in the compose file; this is a dev-only convenience.
+if [ ! -s /etc/passwd-s3fs ]; then
+    echo 'minioadmin:minioadmin' | sudo tee /etc/passwd-s3fs >/dev/null
+    sudo chmod 600 /etc/passwd-s3fs
+    echo "==> wrote /etc/passwd-s3fs (minioadmin:minioadmin, 0600)"
+else
+    echo "==> /etc/passwd-s3fs already present, leaving as-is"
 fi
 
 echo "==> docker access"
