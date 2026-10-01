@@ -1,6 +1,6 @@
 services:
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest
     container_name: s3fs-ebpf-minio
     command: server /data --console-address ":9001"
     environment:
@@ -19,7 +19,7 @@ services:
       retries: 20
 
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:latest
     container_name: s3fs-ebpf-minio-init
     depends_on:
       minio:
