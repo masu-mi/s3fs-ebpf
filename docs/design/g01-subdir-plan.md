@@ -2,7 +2,7 @@
 
 **Status**: 設計のみ。実装は次スプリント。
 **依存関係**: F-02 (basename 衝突) は G-01 が landed 済であることを前提にする。同じ commit で 2 個一緒に解決するのが自然。
-**背景**: `docs/backlog.md` の G-01 / F-02、および `docs/week4b-implementation-notes.md §4-4`。
+**背景**: `docs/journal/backlog.md` の G-01 / F-02、および `docs/journal/week4b-implementation-notes.md §4-4`。
 
 ## 1. 現状 (2026-09-29 時点)
 

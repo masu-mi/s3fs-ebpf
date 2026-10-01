@@ -312,8 +312,8 @@ wc -c /mnt/s3demo/hello.txt   # 17
 ## 9. 残タスク
 
 - **Week 4 (a) C**: ✅ 完成 (§10 参照)
-- **Week 4 (b)**: ✅ 完成 (`docs/week4b-implementation-notes.md`)
-- **Week 4 (c)**: ✅ 完成 (`docs/week4c-implementation-notes.md`)
+- **Week 4 (b)**: ✅ 完成 (`docs/journal/week4b-implementation-notes.md`)
+- **Week 4 (c)**: ✅ 完成 (`docs/journal/week4c-implementation-notes.md`)
 - **Week 4 (d)**: Lua/WASM policy engine
 - **Week 4 (e)**: benchmark。s3fs-fuse / Mountpoint との `stat` + `cat` latency 比較
 - **D (upstream patch)**: `bpf_arena_get_kern_vm_start` の EXPORT_SYMBOL_GPL、または kern_vm range 用 fault handler の追加。当てれば A′ 経路が復活し、B の GUP overhead が消える (数百ns オーダーの改善見込み)
@@ -322,7 +322,7 @@ wc -c /mnt/s3demo/hello.txt   # 17
 
 ## 10. Path C (read upcall) 実装で踏んだ点
 
-Path C の設計は `docs/read-path-design.md §3` にある。ここでは実装中に踏んだ地雷だけを残す。
+Path C の設計は `docs/design/read-path-design.md §3` にある。ここでは実装中に踏んだ地雷だけを残す。
 
 ### 10.1 `pin_user_pages_remote` の lockdep WARN
 

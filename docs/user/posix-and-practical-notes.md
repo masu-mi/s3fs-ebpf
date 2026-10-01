@@ -240,7 +240,7 @@ drainEvictionsLoop → dropAdmits(evicted, progs):
    / `-ENODATA` のみ。SLA 側で S3 の詳細 errno (throttle / access
    denied) を区別したい場合は daemon 側 mapping 追加。
 5. **write-through / write-around 選択**: 現在 write-back only。
-   `docs/policy-engine-design.md §7` の non-goal。
+   `docs/design/policy-engine-design.md §7` の non-goal。
 6. **read amplification**: partial admit の chunk size (4 MiB) は
    固定。random small read で無駄が出る。sequential prefetch や
    adaptive chunk sizing は followup。

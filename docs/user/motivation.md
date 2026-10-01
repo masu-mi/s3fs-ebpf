@@ -9,7 +9,7 @@
 > **この節は現実装との照合用**。以下の §1-§7 は Week 0 の initial
 > design で、CEL 採用や eBPF struct_ops の追加など Week 4 以降で
 > 進化した部分がある。Meetup 会場での実演は
-> [`docs/demo-scenario.md`](./demo-scenario.md) の Demo 0-8 台本を
+> [`docs/user/demo-scenario.md`](demo-scenario.md) の Demo 0-8 台本を
 > 参照。実装の詳細は各セクションでリンクする専門 doc を見てほしい。
 
 ### 完成した Building Blocks
@@ -27,7 +27,7 @@
 ### hit-rate 比較 (Zipf α=0.7, 30 files, 200 access, softcap=8)
 
 同じ workload で **policy を変えるだけで hit rate が 6.5% → 88.5%**。
-`docs/hit-rate-bench.md` に詳細と再現手順、caveats。
+`docs/journal/hit-rate-bench.md` に詳細と再現手順、caveats。
 
 ```
 policy=observe         100.00%    0 evict   ← ceiling (no eviction)
@@ -52,16 +52,16 @@ policy=freq2bit_ops      6.50% 11468 evict  ← 2-bit ref counter
 
 ### 現在の narrative の三本柱
 
-1. **FUSE を経由しない → 10× stat latency** (`docs/benchmark-results.md`)
+1. **FUSE を経由しない → 10× stat latency** (`docs/journal/benchmark-results.md`)
 2. **struct_ops で policy を curl 一発 hot swap** — in-flight IO
-   を中断せず algorithm を差替える shape (`docs/policy-engine-design.md §4.5`)
+   を中断せず algorithm を差替える shape (`docs/design/policy-engine-design.md §4.5`)
 3. **hit-rate は policy 選択で 6% → 80% 動く** — 実測、workload 固定
 
 ### Initial design (§1-) からの主な変更点
 
 - **Lua/WASM → CEL + eBPF**: hot path の call overhead が Lua で
   10μs 超だったので、cold-path 判定のみ CEL、実際の cache algorithm
-  は eBPF program として出荷。`docs/policy-engine-design.md §5-§6`
+  は eBPF program として出荷。`docs/design/policy-engine-design.md §5-§6`
 - **Radix Tree/bpf_rbtree → hash table**: Verifier 突破の実装
   難易度を下げるため、初期実装は Linux hashtable + KFunc lookup
   helper (`s3fs_admit_size` etc.) の shape に変更
@@ -70,23 +70,23 @@ policy=freq2bit_ops      6.50% 11468 evict  ← 2-bit ref counter
 
 ### 参照 doc (現行 implementation)
 
-- `docs/demo-scenario.md` — **Meetup デモ台本 (Demo 0-8, 35 min)**
-- `docs/writing-policies.md` — **自作 policy を書く実装ガイド**
-- `docs/policy-engine-design.md` — 3-layer architecture の詳細
-- `docs/policy-attach-comparison.md` — fmod_ret vs struct_ops
-- `docs/hit-rate-bench.md` — 上記の 80% 数値の出典と caveat
-- `docs/trace-harness.md` — offline policy simulator の使い方
-- `docs/posix-and-practical-notes.md` — **FS 拡張の POSIX 準拠 +
+- `docs/user/demo-scenario.md` — **Meetup デモ台本 (Demo 0-8, 35 min)**
+- `docs/user/writing-policies.md` — **自作 policy を書く実装ガイド**
+- `docs/design/policy-engine-design.md` — 3-layer architecture の詳細
+- `docs/design/policy-attach-comparison.md` — fmod_ret vs struct_ops
+- `docs/journal/hit-rate-bench.md` — 上記の 80% 数値の出典と caveat
+- `docs/design/trace-harness.md` — offline policy simulator の使い方
+- `docs/user/posix-and-practical-notes.md` — **FS 拡張の POSIX 準拠 +
   実用性 (E-01/E-02/E-03/D-01/D-02)**
-- `docs/hook-timings-diagrams.md` — **フックポイント + 8 タイミング
+- `docs/design/hook-timings-diagrams.md` — **フックポイント + 8 タイミング
   のオブジェクト図** (read hit/miss、write+close、fsync、eviction、
   unlink、rename)
-- `docs/partial-admit-internals.md` — **partial admit の内部構造 +
+- `docs/design/partial-admit-internals.md` — **partial admit の内部構造 +
   型と参照関係 + 4 シーケンス** (chunk admit / range lookup /
   eviction 返却 / multi-range per ino の状態遷移)
-- `docs/lessons-learned.md` — 実装ハマりポイント (arena mm/gup /
+- `docs/dev-notes/lessons-learned.md` — 実装ハマりポイント (arena mm/gup /
   bpf_loop / struct_ops hot reload / iget_locked / etc.)
-- `docs/backlog.md` — 完了/残タスク一元管理
+- `docs/journal/backlog.md` — 完了/残タスク一元管理
 
 ---
 

@@ -11,7 +11,7 @@ s3fs-ebpf は「S3 を FS として見せる特定用途 PoC」だが、**FUSE �
 **関連 doc**:
 - [`design.md`](design.md) — 現行 3-layer 統合設計
 - [`policy-engine-design.md`](policy-engine-design.md) — Layer 1-4 の policy dispatch 設計 (§4-§6 が本 doc の下敷き)
-- [`ebpf-ecosystem-gaps.md`](ebpf-ecosystem-gaps.md) — upstream に足りない機能
+- [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — upstream に足りない機能
 - [`component-communication.md`](component-communication.md) — 現行 11 通信路の mermaid 図
 
 ---
@@ -178,7 +178,7 @@ data-plane (per-request、hot) と control-plane (rare、cold) を明確に分�
 | **data-plane hot** | request/秒 | fentry BPF (getattr) | BPF struct_ops のまま、KFunc に latency-safe な helper だけ用意 |
 | **data-plane cold** (miss) | miss/秒 | miscdev read + ringbuf + ADMIT_ARENA + SIGNAL_ADMIT | 現状の 3-段 upcall で OK。KF_SLEEPABLE で BPF 側にする道は S3 のような blocking I/O では非現実的 |
 | **control-plane** | ~30s | SYNC_ENTRIES ioctl / DRAIN_EVICTIONS ioctl | 引き続き ioctl or netlink。生 syscall で低コスト |
-| **event stream** (metric / trace) | k/秒 (将来) | 未実装 | **USER_RINGBUF** が本命 (`ebpf-ecosystem-gaps.md §4` 参照) |
+| **event stream** (metric / trace) | k/秒 (将来) | 未実装 | **USER_RINGBUF** が本命 (`../dev-notes/ebpf-ecosystem-gaps.md §4` 参照) |
 
 **設計 principle**: hot path に blocking upcall を入れない。BPF 内で決めきれない事象 (S3 Get) は 3-段 upcall、それ以外は BPF 内で。
 
@@ -325,10 +325,10 @@ mount -t ebpffs \
 現時点で決着していない設計論点:
 
 1. **mount time の daemon 起動**: FUSE モデル (mount コマンドが daemon を fork)、あるいは systemd generator + template unit — どちらが linux distribution 側に受け入れられやすいか
-2. **policy hot swap の semantics**: struct_ops の atomic swap は明確だが、"swap 中に in-flight な hit event はどう扱う?" の GC 保証を明文化必要 (`docs/policy-attach-comparison.md §1.5` の未対応項目)
+2. **policy hot swap の semantics**: struct_ops の atomic swap は明確だが、"swap 中に in-flight な hit event はどう扱う?" の GC 保証を明文化必要 (`docs/design/policy-attach-comparison.md §1.5` の未対応項目)
 3. **backend の failure semantics**: S3 の 4xx/5xx を FS 層でどう見せる (EIO / ENOSPC / EACCES ?) — backend developer に任せると挙動が backend ごとに散らばる。framework 側で強制 mapping を持つべきか
 4. **partial-admit と policy**: D-01 の range-list admit を policy vtable がどう見るか。`on_admit(ino, offset, size)` の hook signature を採るなら backward compat break
-5. **sleepable KFunc の位置付け**: cache policy が sleepable struct_ops で書けるなら、BPF 側で S3 Get を直接呼ぶ道が開くが、`ebpf-ecosystem-gaps.md §3` の制約が厳しい。framework SDK が sleep 可能な helper を wrap するか
+5. **sleepable KFunc の位置付け**: cache policy が sleepable struct_ops で書けるなら、BPF 側で S3 Get を直接呼ぶ道が開くが、`../dev-notes/ebpf-ecosystem-gaps.md §3` の制約が厳しい。framework SDK が sleep 可能な helper を wrap するか
 
 これらは **後続 PoC で 1 つずつ答える**。s3fs-ebpf は答え合わせできる素材を提供する立場。
 

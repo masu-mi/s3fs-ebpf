@@ -151,8 +151,8 @@ docker logs s3fs-ebpf-grafana 2>&1 | grep -iE 'error|provision'
 
 ## 6. 参照
 
-- `docs/lessons-learned.md` §5.4 — arena gc の未対応
-- `docs/benchmark-results.md` — bench の出力例と数字の解釈
+- `docs/dev-notes/lessons-learned.md` §5.4 — arena gc の未対応
+- `docs/journal/benchmark-results.md` — bench の出力例と数字の解釈
 - `scripts/bench-latency.sh` / `bench-write.sh` / `bench-scale.sh` / `bench-3way.sh` — 各 bench の実装
 - `daemon/internal/metrics/exporter.go` — metric 定義の 1 次資料
 - `deploy/grafana/dashboards/s3fs-ebpf-overview.json` — dashboard 本体

@@ -4,11 +4,11 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 
 個別の症状 → 原因 → 対処の一次情報は下記に既にある:
 
-- `docs/week1-build-runtime-notes.md` — ビルド / toolchain
-- `docs/week4a-implementation-notes.md` §10 — Path B/C 実装で踏んだ点
-- `docs/week4b-implementation-notes.md` §2 — sync 設計判断
-- `docs/week4c-implementation-notes.md` §2, §4 — write-back 設計 + follow-up
-- `docs/benchmark-results.md` §6.1 — bench 側の bug/盲点
+- `docs/journal/week1-build-runtime-notes.md` — ビルド / toolchain
+- `docs/journal/week4a-implementation-notes.md` §10 — Path B/C 実装で踏んだ点
+- `docs/journal/week4b-implementation-notes.md` §2 — sync 設計判断
+- `docs/journal/week4c-implementation-notes.md` §2, §4 — write-back 設計 + follow-up
+- `docs/journal/benchmark-results.md` §6.1 — bench 側の bug/盲点
 
 この文書はそれらを **メタ化・パターン化** した資料。
 
@@ -39,7 +39,7 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 
 **対処**: A′ を断念し、B (GUP over user_vm) にピボット。daemon の user_vm 側なら `arena_vm_fault` が発火するので `pin_user_pages_remote` で物理 page を掴んで `kmap_local_page` → `copy_to_user`。
 
-**一般化**: **BPF 側の内部機構と generic kernel access は同じ VM range でも別レイヤ**。upstream の解説 (LWN 記事、kernel doc) が仄めかす API 表面と実際の実装は乖離することがある。1 コミットで済むと思った path が塞がっていたら次のパスを考える判断を早く。詳細 `docs/week4a-implementation-notes.md §3〜§4`。
+**一般化**: **BPF 側の内部機構と generic kernel access は同じ VM range でも別レイヤ**。upstream の解説 (LWN 記事、kernel doc) が仄めかす API 表面と実際の実装は乖離することがある。1 コミットで済むと思った path が塞がっていたら次のパスを考える判断を早く。詳細 `docs/journal/week4a-implementation-notes.md §3〜§4`。
 
 ### 1.2 `new_inode()` が inode を hash に登録せず、admit の `ilookup` が dead code だった (Week 4 (a) fix)
 
@@ -53,7 +53,7 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 - `new_inode()` — anonymous inode 相当。super block に紐付くが、ino ベースの lookup は不可能。他モジュールから ilookup で見つかる必要がなければこれで OK
 - `iget_locked()` — inode_hashtable に登録され、ilookup で発見可能。ino が意味を持つ FS (通常の意味) はほぼ確実にこちら
 
-「ilookup が動くこと」を仮定するコード (admit table の refresh、fsnotify 等) を書く前に、その inode がどう作られているか必ず確認する。詳細 `docs/week4a-c-session-notes.md § invalidate_inode_pages2 の話`。
+「ilookup が動くこと」を仮定するコード (admit table の refresh、fsnotify 等) を書く前に、その inode がどう作られているか必ず確認する。詳細 `docs/journal/week4a-c-session-notes.md § invalidate_inode_pages2 の話`。
 
 ### 1.3 `invalidate_inode_pages2` が Path C の .read_folio と deadlock (Week 4 (a) fix、続き)
 
@@ -66,7 +66,7 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 
 **対処**: `invalidate_inode_pages2` (blocking folio_lock) を `invalidate_mapping_pages` (folio_trylock) に置換。in-flight folio はスキップされるが「まだ initial content で埋まる前の空 folio」なので、reader は目覚めた後に re-fetch して新 arena を叩く。
 
-**一般化**: **daemon → kmod → daemon の 3 段 upcall path では「daemon 側が呼ぶ ioctl が、その ioctl の完了を待っている kmod 側 waiter と同じロックを取らないか」を必ず設計時に確認する**。folio_lock、mmap_sem、i_rwsem あたりが要注意。ロックの blocking 版と trylock 版があるなら upcall path では trylock を優先。詳細 `docs/week4c-implementation-notes.md` (実は Week 4 c の作業ではなく 4 a の fix commit 640a7b2 で導入)。
+**一般化**: **daemon → kmod → daemon の 3 段 upcall path では「daemon 側が呼ぶ ioctl が、その ioctl の完了を待っている kmod 側 waiter と同じロックを取らないか」を必ず設計時に確認する**。folio_lock、mmap_sem、i_rwsem あたりが要注意。ロックの blocking 版と trylock 版があるなら upcall path では trylock を優先。詳細 `docs/journal/week4c-implementation-notes.md` (実は Week 4 c の作業ではなく 4 a の fix commit 640a7b2 で導入)。
 
 ### 1.4 rwlock は dir_emit を含めない — sleepable な reader が要る (Week 4 (b))
 
@@ -85,7 +85,7 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 | mutex | ✓ | ✓ | ✗ | 大半のケース、まず mutex |
 | rw_semaphore | ✓ | ✓ | ✓ | read-heavy + reader sleep 有り |
 
-「sleep する可能性のある API」= copy_to_user / copy_from_user / memory allocation / dir_emit / d_add / filesystem I/O。**とりあえず mutex** → concurrent reader が bottleneck ならば rwsem に上げる。詳細 `docs/week4b-implementation-notes.md §2`。
+「sleep する可能性のある API」= copy_to_user / copy_from_user / memory allocation / dir_emit / d_add / filesystem I/O。**とりあえず mutex** → concurrent reader が bottleneck ならば rwsem に上げる。詳細 `docs/journal/week4b-implementation-notes.md §2`。
 
 ### 1.5 SYNC_ENTRIES に size を持たせ忘れ、cat が empty で返る (Week 4 (b))
 
@@ -95,7 +95,7 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 
 **対処**: SYNC_ENTRIES struct に `size` field を追加。kmod の i_size 決定順を `admit → sync.size → fd->size` に。
 
-**一般化**: **UAPI 拡張は「必要になってから」ではなく「その shape で kmod が正しく動くか」から逆算する**。今回の場合、`s3fs_sync_entry` を設計する時点で「daemon が sync してから admit が届くまでの間、kmod は何を i_size として返すべきか」を先に問うべきだった。UAPI 変更は 1 度出したら後方互換のためのコストが乗るので、初期段階に size のような自明メタデータは詰め込む。詳細 `docs/week4b-implementation-notes.md §2`。
+**一般化**: **UAPI 拡張は「必要になってから」ではなく「その shape で kmod が正しく動くか」から逆算する**。今回の場合、`s3fs_sync_entry` を設計する時点で「daemon が sync してから admit が届くまでの間、kmod は何を i_size として返すべきか」を先に問うべきだった。UAPI 変更は 1 度出したら後方互換のためのコストが乗るので、初期段階に size のような自明メタデータは詰め込む。詳細 `docs/journal/week4b-implementation-notes.md §2`。
 
 ### 1.6 `.create` の同期 semantics — POSIX 待ち vs daemon PUT を切り離す (Week 4 (c))
 
@@ -107,7 +107,7 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 - local state: `s3fs_local_entries` list
 - confirm 時 merge: SYNC_ENTRIES に同 name+ino が来たら local から drop
 
-同型のパターンは FS layer だけでなく分散システム全般で有効 (Kafka の transactional producer、CQRS の event sourcing 等と発想が同じ)。詳細 `docs/week4c-implementation-notes.md §2`。
+同型のパターンは FS layer だけでなく分散システム全般で有効 (Kafka の transactional producer、CQRS の event sourcing 等と発想が同じ)。詳細 `docs/journal/week4c-implementation-notes.md §2`。
 
 ### 1.7 kmalloc/krealloc の MAX_ORDER 上限で `__alloc_pages_noprof` WARN (Week 4 (c)/(e))
 
@@ -134,7 +134,7 @@ newbuf = kvmalloc(new_cap, GFP_KERNEL);
 if (fd->buf) { memcpy(newbuf, fd->buf, fd->size); kvfree(fd->buf); }
 ```
 
-**一般化**: **カーネル空間で「userspace が任意サイズを書ける buffer」を持つなら kvmalloc/kvfree**。kmalloc は速いが 4 MiB で頭打ち。`kvrealloc` は 6.11+ で使えるので mainline ではそちらでも OK。詳細 `docs/benchmark-results.md §8.2` 末尾 caveat。
+**一般化**: **カーネル空間で「userspace が任意サイズを書ける buffer」を持つなら kvmalloc/kvfree**。kmalloc は速いが 4 MiB で頭打ち。`kvrealloc` は 6.11+ で使えるので mainline ではそちらでも OK。詳細 `docs/journal/benchmark-results.md §8.2` 末尾 caveat。
 
 ### 1.8 bench の parallel-cat wrapper が bash `wait` で hang (Week 4 (e))
 
@@ -144,7 +144,7 @@ if (fd->buf) { memcpy(newbuf, fd->buf, fd->size); kvfree(fd->buf); }
 
 **対処**: fio psync (rw=read) に置換。**parallel read の scaling を測る目的は同じ、実装は fio が桁違いに堅牢**。
 
-**一般化**: **shell の parallel primitive を bench の測定コンポーネントに組み込まない**。data plane は fio / stress-ng / iperf 等の specialized tool で回す。bash はセットアップと結果整形のみ。詳細 `docs/benchmark-results.md §10.3` 末尾。
+**一般化**: **shell の parallel primitive を bench の測定コンポーネントに組み込まない**。data plane は fio / stress-ng / iperf 等の specialized tool で回す。bash はセットアップと結果整形のみ。詳細 `docs/journal/benchmark-results.md §10.3` 末尾。
 
 ---
 
@@ -272,7 +272,7 @@ reflog は 90 日残るので、意図せず reset した commit も HEAD@{N} �
 
 ### 4.2 FUSE 比較の公平ライン
 
-s3fs-fuse は `-o use_cache=<dir> -o kernel_cache` で kernel page cache 直読になり hot read で ebpf に肉薄する (`docs/benchmark-results.md §7`)。これを入れずに「s3fs-ebpf は fuse より 100 倍速い」と主張すると caveat が付いて回る。
+s3fs-fuse は `-o use_cache=<dir> -o kernel_cache` で kernel page cache 直読になり hot read で ebpf に肉薄する (`docs/journal/benchmark-results.md §7`)。これを入れずに「s3fs-ebpf は fuse より 100 倍速い」と主張すると caveat が付いて回る。
 
 **bench-3way.sh のパターンを標準化**:
 1. `fuse-raw` (no cache) — 従来主張の baseline
@@ -351,11 +351,11 @@ daemon 再起動 → S3Key ↔ ino の mapping がリセット。umount + remoun
 
 以下は既存ドキュメントで詳しく扱っているので重複を避ける:
 
-- **6.12 の細かい API 変更** (`no_llseek` → `noop_llseek`、`bpf_map_get` の namespace 化 etc.) — `docs/week4a-implementation-notes.md §2`
-- **BPF verifier の pointer type check の性質** — `docs/week2-implementation-notes.md` および verifier-demo
-- **cilium/ebpf の addr_space_cast marshal パッチ** — `docs/cilium-ebpf-addr-space-cast-marshal.patch`
-- **各 bench の数字と解釈** — `docs/benchmark-results.md`
-- **clang 20 / kernel 6.12 の toolchain build** — `docs/week1-build-runtime-notes.md`
+- **6.12 の細かい API 変更** (`no_llseek` → `noop_llseek`、`bpf_map_get` の namespace 化 etc.) — `docs/journal/week4a-implementation-notes.md §2`
+- **BPF verifier の pointer type check の性質** — `docs/journal/week2-implementation-notes.md` および verifier-demo
+- **cilium/ebpf の addr_space_cast marshal パッチ** — `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`
+- **各 bench の数字と解釈** — `docs/journal/benchmark-results.md`
+- **clang 20 / kernel 6.12 の toolchain build** — `docs/journal/week1-build-runtime-notes.md`
 
 ---
 

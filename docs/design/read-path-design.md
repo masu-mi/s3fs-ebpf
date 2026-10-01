@@ -1,6 +1,6 @@
 # Read Path 設計 — Paths A′ / B / C / D
 
-s3fs-ebpf における「kmod の `.read` が daemon が用意した実データを返す」ための架け橋の設計集。Week 4 (a) の探索で 4 通りが浮かんだので、それぞれの位置付け・技術的可否・実装コストを一元管理する。実装状況の記録は `docs/week4a-implementation-notes.md`。
+s3fs-ebpf における「kmod の `.read` が daemon が用意した実データを返す」ための架け橋の設計集。Week 4 (a) の探索で 4 通りが浮かんだので、それぞれの位置付け・技術的可否・実装コストを一元管理する。実装状況の記録は `docs/journal/week4a-implementation-notes.md`。
 
 ---
 
@@ -525,4 +525,4 @@ EXPORT_SYMBOL_GPL(bpf_arena_fault_in_range);
 | kernel を触りたくない、依存も減らしたい | B のみで完結、C は運用要件次第 |
 | latency を極限まで削りたい | D (kernel patch) が確定路線 |
 
-**現状の s3fs-ebpf の位置**: **B + C 実装完了** (2026-09-22)。`docs/motivation.md` sprint 上は Week 4 (a) 完了、実用 FS としての Slow Path も含めて第一段カバー。D は Meetup 後の「発表後の tech-debt 返済 & upstream フェーズ」で扱う想定。
+**現状の s3fs-ebpf の位置**: **B + C 実装完了** (2026-09-22)。`docs/user/motivation.md` sprint 上は Week 4 (a) 完了、実用 FS としての Slow Path も含めて第一段カバー。D は Meetup 後の「発表後の tech-debt 返済 & upstream フェーズ」で扱う想定。

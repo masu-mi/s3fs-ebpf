@@ -11,16 +11,18 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 > 登壇、および Week 5+ の分散 / multi-tenant / 大ファイル対応。
 >
 > **すぐに使ってみたい場合**:
-> - 概要と数値 → [`docs/motivation.md §0`](docs/motivation.md)
-> - Meetup demo (35 分台本) → [`docs/demo-scenario.md`](docs/demo-scenario.md)
-> - **自作 policy を書く** → [`docs/writing-policies.md`](docs/writing-policies.md)
-> - **FS 拡張 (POSIX 準拠 + 実用性)** → [`docs/posix-and-practical-notes.md`](docs/posix-and-practical-notes.md)
-> - **フックポイントとオブジェクト図** → [`docs/hook-timings-diagrams.md`](docs/hook-timings-diagrams.md)
-> - **Partial admit の内部構造とシーケンス** → [`docs/partial-admit-internals.md`](docs/partial-admit-internals.md)
-> - policy engine の詳細 → [`docs/policy-engine-design.md`](docs/policy-engine-design.md)
-> - hit-rate bench 数値と caveats → [`docs/hit-rate-bench.md`](docs/hit-rate-bench.md)
-> - 実装ハマりポイント → [`docs/lessons-learned.md`](docs/lessons-learned.md)
-> - 残 backlog → [`docs/backlog.md`](docs/backlog.md)
+> - 概要と数値 → [`docs/user/motivation.md §0`](docs/user/motivation.md)
+> - Meetup demo (35 分台本) → [`docs/user/demo-scenario.md`](docs/user/demo-scenario.md)
+> - **自作 policy を書く** → [`docs/user/writing-policies.md`](docs/user/writing-policies.md)
+> - **FS 拡張 (POSIX 準拠 + 実用性)** → [`docs/user/posix-and-practical-notes.md`](docs/user/posix-and-practical-notes.md)
+> - **GCS backend で動かす** → [`docs/user/gcs-backend.md`](docs/user/gcs-backend.md)
+> - **フックポイントとオブジェクト図** → [`docs/design/hook-timings-diagrams.md`](docs/design/hook-timings-diagrams.md)
+> - **Partial admit の内部構造とシーケンス** → [`docs/design/partial-admit-internals.md`](docs/design/partial-admit-internals.md)
+> - policy engine の詳細 → [`docs/design/policy-engine-design.md`](docs/design/policy-engine-design.md)
+> - hit-rate bench 数値と caveats → [`docs/journal/hit-rate-bench.md`](docs/journal/hit-rate-bench.md)
+> - 実装ハマりポイント → [`docs/dev-notes/lessons-learned.md`](docs/dev-notes/lessons-learned.md)
+> - 残 backlog → [`docs/journal/backlog.md`](docs/journal/backlog.md)
+> - **トピック別索引** → [`docs/INDEX.md`](docs/INDEX.md)
 
 ---
 
@@ -54,7 +56,7 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 
 `POST /policy/reload` で **走行中に curl 一発で policy 差替え**、in-flight IO は古い vtable で完走。
 
-先行研究比較（ExtFUSE / RFUSE）と根拠は [`docs/related-works.md`](docs/related-works.md) にあります。
+先行研究比較（ExtFUSE / RFUSE）と根拠は [`docs/user/related-works.md`](docs/user/related-works.md) にあります。
 
 ---
 
@@ -297,7 +299,7 @@ for f in hello.txt world.txt models_weights.bin; do stat /mnt/s3demo/$f > /dev/n
 ```bash
 # 1. MinIO を立てて bucket にオブジェクトを入れる (前節参照)
 make compose-up
-docker run --rm --network=deploy_default --entrypoint /bin/sh quay.io/minio/mc:latest -c '
+docker run --rm --network=deploy_default --entrypoint /bin/sh minio/mc:latest -c '
   mc alias set local http://minio:9000 minioadmin minioadmin
   echo hello | mc pipe local/s3fs-test/hello.txt
   echo world | mc pipe local/s3fs-test/world.txt'
@@ -390,7 +392,7 @@ make compose-up
 #   compose 内で bucket "s3fs-test" が自動作成される
 
 # 2. 何かオブジェクトを put (mc / aws / SDK いずれでも可)
-docker run --rm --network=deploy_default --entrypoint /bin/sh quay.io/minio/mc:latest -c '
+docker run --rm --network=deploy_default --entrypoint /bin/sh minio/mc:latest -c '
   mc alias set local http://minio:9000 minioadmin minioadmin
   echo "hello, s3fs-ebpf" | mc pipe local/s3fs-test/hello.txt
   echo "AI weights"       | mc pipe local/s3fs-test/models/weights.bin'
@@ -456,7 +458,7 @@ make bench-3way         # ebpf vs fuse-raw vs fuse-cache 3-way             → /
 make bench-dry          # 旧 runner.sh の存在確認だけ (Week 0/1 skeleton)
 ```
 
-計測 script は `scripts/bench-*.sh`。docs/benchmark-results.md §7-§10 に結果解釈。
+計測 script は `scripts/bench-*.sh`。`docs/journal/benchmark-results.md §7-§10` に結果解釈。
 
 **手動ライフサイクル**:
 
@@ -521,7 +523,7 @@ make readme        # daemon をビルドしてから README.md を再生成
 
 ## ロードマップ
 
-`docs/motivation.md §1` の 1 ヶ月スプリント計画に沿って進める:
+`docs/user/motivation.md §1` の 1 ヶ月スプリント計画に沿って進める:
 
 | Week | ゴール | ステータス |
 |---|---|---|
@@ -533,10 +535,12 @@ make readme        # daemon をビルドしてから README.md を再生成
 | **2 (d)** | MinIO Slow Path 骨 (minio-go / bucket list & stat) | ✅ done (`s3fs-ebpf s3-list` / `s3-stat`) |
 | **3 (a)** | kmod が entry table のオブジェクトを VFS に materialise (lookup / readdir / read / write) | ✅ done (`ls` / `cat` / `echo >` が動作) |
 | **3 (b)** | daemon の fastpath 起動時 prewarm (entry table の全 ino を arena に admit) | ✅ done (`--s3` で real S3 metadata を反映) |
-| **3 (c)** | file 内容の arena バッキング (現在は kmalloc プール) | pending |
-| **3 (d)** | Lua/WASM policy engine + hot reload | pending |
-| **3** | Lua/WASM ポリシー、CLI `stats` / `policy reload` | pending |
-| **4** | s3fs-fuse / Mountpoint との `stat` レイテンシ比較、Meetup 準備 | pending |
+| **3 (c)** | file 内容の arena バッキング (kmalloc → arena) | ✅ done (Path B GUP prewarm + Path C read-miss upcall、`docs/design/read-path-design.md` §3) |
+| **3 (d)** / **4 (d)** | policy engine + hot reload (CEL + built-in eBPF + user eBPF + KFunc の 4 層) | ✅ done (`docs/design/policy-engine-design.md`) |
+| **4 (b)** | dynamic bucket sync (basename 衝突解消、subdir 対応) | ✅ done (`docs/journal/week4b-implementation-notes.md`、`docs/design/g01-subdir-plan.md`) |
+| **4 (c)** | write-back path (fsync blocking / unlink / rename / coalescer) | ✅ done (`docs/journal/week4c-implementation-notes.md`) |
+| **4 (e)** | s3fs-fuse / Mountpoint との latency / throughput bench、Meetup 準備 | ✅ done (`docs/journal/benchmark-results.md`、`docs/journal/hit-rate-bench.md`) |
+| **5+** | 分散 / multi-tenant / 大ファイル対応、残 backlog | pending (`docs/journal/backlog.md`) |
 
 ---
 
@@ -544,9 +548,10 @@ make readme        # daemon をビルドしてから README.md を再生成
 
 **プロジェクト内**
 
-- [`docs/deisign.md`](docs/deisign.md) — 統合設計書
-- [`docs/motivation.md`](docs/motivation.md) — 背景、Meetup 発表構成、スプリント計画
-- [`docs/related-works.md`](docs/related-works.md) — ExtFUSE / RFUSE との比較
+- [`docs/INDEX.md`](docs/INDEX.md) — トピック別索引 (user / design / journal / dev-notes / misc)
+- [`docs/design/design.md`](docs/design/design.md) — 統合設計書
+- [`docs/user/motivation.md`](docs/user/motivation.md) — 背景、Meetup 発表構成、スプリント計画
+- [`docs/user/related-works.md`](docs/user/related-works.md) — ExtFUSE / RFUSE との比較
 
 **Linux カーネル / eBPF**
 

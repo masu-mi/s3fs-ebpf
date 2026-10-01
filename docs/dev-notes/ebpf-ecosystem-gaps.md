@@ -1,10 +1,10 @@
 # eBPF 開発環境の足りないもの — s3fs-ebpf を作って踏んだ地雷
 
-Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel の未提供・未整備」を、**具体的な症状と修正提案** として整理する。`docs/lessons-learned.md` が「同じ地雷を次のプロジェクトで避ける」チェックリストなのに対し、この doc は **upstream に投げるならこの形** の 1 次素材。
+Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel の未提供・未整備」を、**具体的な症状と修正提案** として整理する。`docs/dev-notes/lessons-learned.md` が「同じ地雷を次のプロジェクトで避ける」チェックリストなのに対し、この doc は **upstream に投げるならこの形** の 1 次素材。
 
 範囲: BPF_ARENA / BPF_STRUCT_OPS / KF_SLEEPABLE の 3 機能を中心に、横断的な tooling gap も末尾で扱う。
 
-出典表記: `w4a` = `docs/week4a-implementation-notes.md`、`ll` = `docs/lessons-learned.md`、`pc` = `docs/policy-attach-comparison.md`、`ci-patch` = `docs/cilium-ebpf-addr-space-cast-marshal.patch`。関連する backlog 項目は `backlog.md §K` (upstream 貢献) と対応。
+出典表記: `w4a` = `docs/journal/week4a-implementation-notes.md`、`ll` = `docs/dev-notes/lessons-learned.md`、`pc` = `docs/design/policy-attach-comparison.md`、`ci-patch` = `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`。関連する backlog 項目は `../journal/backlog.md §K` (upstream 貢献) と対応。
 
 ---
 
@@ -104,7 +104,7 @@ Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel �
 
 ### 4.1 cilium/ebpf の marshal bug (patch 済み、upstream PR 未提出)
 
-`docs/cilium-ebpf-addr-space-cast-marshal.patch` 参照。
+`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` 参照。
 
 - **症状**: plain `Mov` instruction の `Offset` が `Instruction.Marshal` 段階で unconditionally 0 に上書きされ、`bpf_addr_space_cast` (opcode `0xbf|ALU64|X` + `Offset=1` + `imm=1`) が verifier reject される (`BPF_MOV uses reserved fields`)
 - **影響**: **addr_space_cast を使う人は誰でも踏む** (LLVM 19+ + `-mattr=+addr_space_cast` の組合せ)
@@ -143,7 +143,7 @@ Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel �
 上の K-01/K-02 のような **5 行〜数十行の kernel 改善** でも upstream 到達に月単位。実装者の合理的判断は「out-of-tree kmod で workaround」に流れる (我々もそう判断した)。
 
 - **副作用**: 生態系が分岐する。BPF_ARENA のようなまだ新しい機能は「本当の使い方」が selftests と各プロジェクトの hack で分裂したまま
-- **改善方向**: これは upstream カルチャの問題で 1 プロジェクトで解けないが、**PoC 側は必ず「upstream patch にすべき変更 vs out-of-tree で許容する hack」を明示的に区別する doc を持つ**。この doc + `docs/backlog.md §K` がその役割
+- **改善方向**: これは upstream カルチャの問題で 1 プロジェクトで解けないが、**PoC 側は必ず「upstream patch にすべき変更 vs out-of-tree で許容する hack」を明示的に区別する doc を持つ**。この doc + `docs/journal/backlog.md §K` がその役割
 
 ---
 

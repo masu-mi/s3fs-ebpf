@@ -7,7 +7,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 - [`policy-engine-design.md`](policy-engine-design.md) — 4-layer policy dispatch (Layer 1 CEL / Layer 2 fmod_ret / Layer 3 user eBPF / Layer 4 KFunc)
 - [`policy-attach-comparison.md`](policy-attach-comparison.md) — fmod_ret vs struct_ops
 - [`hook-timings-diagrams.md`](hook-timings-diagrams.md) — 8 タイミング × 3 path のオブジェクト図
-- [`ebpf-ecosystem-gaps.md`](ebpf-ecosystem-gaps.md) — ここに見えている ioctl/ringbuf/miscdev 選択の理由
+- [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — ここに見えている ioctl/ringbuf/miscdev 選択の理由
 
 ---
 
@@ -190,7 +190,7 @@ sequenceDiagram
     VFS-->>App: bytes
 ```
 
-`docs/read-path-design.md §3` の当初見積 210 LOC が実測 480 LOC になった理由の 1 つがこの 3-段 upcall pattern の実装コスト (`docs/lessons-learned.md §2.3`)。
+`docs/design/read-path-design.md §3` の当初見積 210 LOC が実測 480 LOC になった理由の 1 つがこの 3-段 upcall pattern の実装コスト (`docs/dev-notes/lessons-learned.md §2.3`)。
 
 **§3 の T8 (miscdev read) と T9 (ringbuf) が並走する理由**: 同じ「miss 通知」に見えるが producer が違う。T9 は fentry BPF (`bpf/s3fs_fastpath.bpf.c:183` `bpf_ringbuf_submit`) から stat/lookup 側 miss を出すもので、`bpf_ringbuf_reserve/submit` は BPF prog 用 helper なので transport も BPF map (ringbuf) 一択。T8 は kmod C context の `.read_folio` (`kmod/vfs_ops.c:728`) から read syscall 側 miss を出すもので、`{ino, offset, count}` の range 情報を持つ。両者は現状「stat 経路の warm 起動」と「data 経路の range fetch」で用途分担している。統一の是非は §4 末尾の transport 対応表を参照。
 
@@ -246,7 +246,7 @@ sequenceDiagram
     end
 ```
 
-WAIT flag と coalescer の分岐は E-03 実装 (`docs/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/backlog.md J-05` 参照)。
+WAIT flag と coalescer の分岐は E-03 実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/journal/backlog.md J-05` 参照)。
 
 **§4 の `s3fs_flush_event` が §3 の ringbuf と別 transport になっている理由**: kmod C context (`.release` / `.fsync` → `s3fs_ebpf_flush_pop` = `kmod/vfs_ops.c:1338`) の producer なので、BPF prog 専用の `bpf_ringbuf_reserve/submit` は使えない (`bpf_ringbuf_output` は kmod 側から呼べるが、以下 2 要件が満たせない):
 
@@ -317,13 +317,13 @@ flowchart TB
     KF --> Anchor1
 ```
 
-fmod_ret と struct_ops の trade-off は `docs/policy-attach-comparison.md`。両者が同時 attach 可能 (kmod 側 call site は両方 evaluate) で、meetup demo では struct_ops の atomic swap narrative を推奨 (§3)。
+fmod_ret と struct_ops の trade-off は `docs/design/policy-attach-comparison.md`。両者が同時 attach 可能 (kmod 側 call site は両方 evaluate) で、meetup demo では struct_ops の atomic swap narrative を推奨 (§3)。
 
 ---
 
 ## 6. Sync + eviction feedback (30s 巡回)
 
-periodic 系は独立 ticker で回るが、**メインの feedback は (b) の admit → policy vote → evict_log → drain** — daemon が再送する admit と kmod policy の evict の oscillation を止めるための因果ループがここに閉じている (`docs/backlog.md P-13` の解決点)。
+periodic 系は独立 ticker で回るが、**メインの feedback は (b) の admit → policy vote → evict_log → drain** — daemon が再送する admit と kmod policy の evict の oscillation を止めるための因果ループがここに閉じている (`docs/journal/backlog.md P-13` の解決点)。
 
 ```mermaid
 sequenceDiagram
@@ -374,7 +374,7 @@ evict feedback を持たないと oscillation が起きる根拠と実装は `km
 - 現行 ioctl の overhead (~500ns-1μs) は Path C 全体 (S3 Get ~5-30ms 支配) の 0.02% 以下
 - **将来** の per-request event stream / userspace-driven policy voting なら USER_RINGBUF が本命
 
-詳細は [`ebpf-ecosystem-gaps.md §1-§4`](ebpf-ecosystem-gaps.md#1-bpf_arena--一番苦しんだ領域) の trade-off 議論。
+詳細は [`../dev-notes/ebpf-ecosystem-gaps.md §1-§4`](../dev-notes/ebpf-ecosystem-gaps.md#1-bpf_arena--一番苦しんだ領域) の trade-off 議論。
 
 ---
 
