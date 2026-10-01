@@ -1,12 +1,21 @@
 // s3fs-ebpf CLI entry.
 //
-// Subcommands:
-//   mount       - load kmod, load eBPF, create arena, mount FS
-//   unmount     - reverse of mount
-//   stats       - print fast/slow path counters
-//   policy      - hot-reload the Lua/WASM policy blob
-//   test-arena  - Week 1 round-trip probe: verify bpf_arena creation,
-//                 daemon<->BPF shared memory, and KFunc call from BPF
+// Operational subcommands (top level):
+//   mount        - load kmod, load eBPF, create arena, mount FS
+//   unmount      - reverse of mount
+//   fastpath     - run the fastpath daemon (fentry attach, S3 sync, arena)
+//   stats        - print fast/slow path counters
+//   policy       - hot-reload the cache policy blob
+//   hash-policy  - print SHA256 for a policy .bpf.o (allowlist entry helper)
+//   s3-list      - list objects in a bucket
+//   s3-stat      - stat a single object
+//
+// Development / probe / demo subcommands (under "dev"):
+//   dev test-arena    - Week 1 bpf_arena + KFunc round-trip probe
+//   dev verifier-demo - Week 2 verifier rejection demo
+//   dev probe-kvbase  - Week 4 arena ioctl kvbase probe
+//   dev microbench    - tight-loop stat/read latency bench
+//   dev trace-replay  - offline policy hit-rate simulator
 //
 // mount/unmount/stats/policy remain stubbed until Week 2+.
 package main
@@ -42,29 +51,38 @@ const usage = `Usage: s3fs-ebpf <command> [options]
 Commands:
   mount        Mount an S3 bucket via the s3fs_ebpf VFS
   unmount      Unmount a previously mounted target
+  fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, stream
+               ringbuf miss events, sync S3, serve arena content
   stats        Print fast/slow path counters
   policy       Hot-reload the cache policy blob
-  test-arena   Week 1 probe: bpf_arena + KFunc round-trip (requires 6.9+ kernel
-               and the s3fs_kfunc module loaded)
-  fastpath     Week 2 probe: attach fentry/vfs_getattr, stream ringbuf miss
-               events and hit/miss counters until interrupted
-  verifier-demo Week 2 probe: try to load an intentionally-rejected pure eBPF
-               arena walker and print the verifier's rejection log
-  s3-list      List a bucket. Backend selected by --backend s3|gcs
-               (S3-compatible endpoint or Google Cloud Storage).
-  s3-stat      Stat a single object. Backend selected by --backend s3|gcs.
-  probe-kvbase Week 4 (a) spike: create an arena, ioctl(/dev/s3fs_ebpf,
-               S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, print
-               it alongside the user-VM base for comparison
-  microbench   Week 4 (e): tight-loop stat/read latency on a target path,
-               reports min/p50/p95/p99/max (no fork/exec overhead)
   hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
                See --policy-allowlist and policies/allowlist.example.txt.
-  trace-replay Offline policy simulator (P-04). Feeds a workload trace or
-               a synthetic Zipf sequence through Go-side LRU/SIEVE sims
-               and reports per-policy hit rates in milliseconds.
+  s3-list      List objects in a bucket. Backend: --backend s3|gcs.
+  s3-stat      Stat a single object.     Backend: --backend s3|gcs.
+  dev          Development / probe / demo commands.
+               Run "s3fs-ebpf dev" for the full list.
 
 Run "s3fs-ebpf <command> --help" for command-specific flags.
+`
+
+const devUsage = `Usage: s3fs-ebpf dev <command> [options]
+
+Dev / probe / demo commands:
+  test-arena    Week 1 probe: bpf_arena create + mmap, daemon<->BPF shared
+                memory, and KFunc call round-trip.
+                Requires Linux 6.9+ and s3fs_kfunc module loaded.
+  verifier-demo Week 2 probe: load an intentionally-rejected pure-eBPF arena
+                walker and print the verifier's rejection log.
+  probe-kvbase  Week 4 probe: create an arena, ioctl(/dev/s3fs_ebpf,
+                S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, and compare
+                it against the user-VM base.
+  microbench    Tight-loop stat/read latency bench on a target path.
+                Reports min/p50/p95/p99/max (no fork/exec overhead).
+  trace-replay  Offline policy simulator (P-04). Feeds a workload trace or a
+                synthetic Zipf sequence through Go-side LRU/SIEVE sims and
+                reports per-policy hit rates.
+
+Run "s3fs-ebpf dev <command> --help" for command-specific flags.
 `
 
 func main() {
@@ -80,33 +98,52 @@ func main() {
 		os.Exit(runMount(args))
 	case "unmount", "umount":
 		os.Exit(runUnmount(args))
+	case "fastpath":
+		os.Exit(runFastpath(args))
 	case "stats":
 		os.Exit(runStats(args))
 	case "policy":
 		os.Exit(runPolicy(args))
-	case "test-arena":
-		os.Exit(runTestArena(args))
-	case "fastpath":
-		os.Exit(runFastpath(args))
-	case "verifier-demo":
-		os.Exit(runVerifierDemo(args))
+	case "hash-policy":
+		os.Exit(runHashPolicy(args))
 	case "s3-list":
 		os.Exit(runS3List(args))
 	case "s3-stat":
 		os.Exit(runS3Stat(args))
-	case "probe-kvbase":
-		os.Exit(runProbeKvbase(args))
-	case "microbench":
-		os.Exit(runMicrobench(args))
-	case "hash-policy":
-		os.Exit(runHashPolicy(args))
-	case "trace-replay":
-		os.Exit(runTraceReplay(args))
+	case "dev":
+		os.Exit(runDev(args))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n%s", sub, usage)
 		os.Exit(2)
+	}
+}
+
+func runDev(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprint(os.Stderr, devUsage)
+		return 2
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "test-arena":
+		return runTestArena(rest)
+	case "verifier-demo":
+		return runVerifierDemo(rest)
+	case "probe-kvbase":
+		return runProbeKvbase(rest)
+	case "microbench":
+		return runMicrobench(rest)
+	case "trace-replay":
+		return runTraceReplay(rest)
+	case "-h", "--help", "help":
+		fmt.Print(devUsage)
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "unknown dev command: %s\n\n%s", sub, devUsage)
+		return 2
 	}
 }
 
