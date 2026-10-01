@@ -51,6 +51,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/trace-harness.md`](design/trace-harness.md) | P-04 ms-scale offline policy simulator |
 | [`design/g01-subdir-plan.md`](design/g01-subdir-plan.md) | G-01/F-02 subdir 対応 + basename 衝突の実装計画 (実装済) |
 | [`design/ebpf-fs-framework-design.md`](design/ebpf-fs-framework-design.md) | 汎用 eBPF FS framework 化の hook 分離設計 (4 role × 4 軸) + security model |
+| [`design/ebpf-fuse-advantages-roadmap.md`](design/ebpf-fuse-advantages-roadmap.md) | FUSE に対する 3 点の構造的優位性の整理と、未実装 4 項目 (cgroup policy / bpf_timer / radix tree readdir / BPF Iterator GC) の実装計画 |
 
 ---
 
