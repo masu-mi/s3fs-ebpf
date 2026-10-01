@@ -136,19 +136,14 @@ make daemon-gen # cilium/ebpf を fetch して bpf2go 実行 → build（Week 1+
 
 ## 起動
 
-> **MinIO イメージの事前認証 (2026-10-01〜)** — `deploy/docker-compose.yml`
-> が参照する `quay.io/minio/minio:latest` と `quay.io/minio/mc:latest` は
-> MinIO Inc の配布方針変更により **anonymous pull が全タグで 401** になりました。
-> 開発機ごとに Red Hat/Quay アカウントで一度だけログインしてください:
->
-> ```bash
-> docker login quay.io
-> # Username / Password は https://quay.io のアカウント設定で発行する
-> # Encrypted Password を使う (CLI password は 2FA 下だと通らないため)
-> ```
->
-> 事前に `docker pull quay.io/minio/minio:latest quay.io/minio/mc:latest` で
-> 認証とキャッシュを確認しておくと `make compose-up` が確実に通ります。
+> **Object storage は Pigsty Silo (MinIO fork) を使用** — MinIO Inc は 2026-10
+> 時点で quay.io / Docker Hub 両方で community イメージの anonymous pull を
+> 制限しているため、`deploy/docker-compose.yml` では **`docker.io/pgsty/silo:latest`**
+> (MinIO の AGPL-3.0 fork, <https://silo.pgsty.com/>) に切替えています。
+> CLI (`silo server /data --console-address :9001`) / 環境変数 (`MINIO_ROOT_USER`
+> 等) / health endpoint (`/minio/health/ready`) / port は MinIO と完全互換なので、
+> daemon・bench スクリプト側は無変更です。`mc` も同一イメージ内に同梱されており、
+> `minio-init` も同じ silo イメージで動かしています。
 
 ```bash
 # 1. 観測スタック（MinIO + Prometheus + Grafana + node_exporter）
@@ -398,7 +393,7 @@ for f in hello.txt world.txt models_weights.bin; do stat /mnt/s3demo/$f > /dev/n
 ```bash
 # 1. MinIO を立てて bucket にオブジェクトを入れる (前節参照)
 make compose-up
-docker run --rm --network=deploy_default --entrypoint /bin/sh quay.io/minio/mc:latest -c '
+docker run --rm --network=deploy_default --entrypoint /bin/sh docker.io/pgsty/silo:latest -c '
   mc alias set local http://minio:9000 minioadmin minioadmin
   echo hello | mc pipe local/s3fs-test/hello.txt
   echo world | mc pipe local/s3fs-test/world.txt'
@@ -491,7 +486,7 @@ make compose-up
 #   compose 内で bucket "s3fs-test" が自動作成される
 
 # 2. 何かオブジェクトを put (mc / aws / SDK いずれでも可)
-docker run --rm --network=deploy_default --entrypoint /bin/sh quay.io/minio/mc:latest -c '
+docker run --rm --network=deploy_default --entrypoint /bin/sh docker.io/pgsty/silo:latest -c '
   mc alias set local http://minio:9000 minioadmin minioadmin
   echo "hello, s3fs-ebpf" | mc pipe local/s3fs-test/hello.txt
   echo "AI weights"       | mc pipe local/s3fs-test/models/weights.bin'
