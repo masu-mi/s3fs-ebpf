@@ -18,10 +18,12 @@ import (
 // StatSlot indices mirror `enum s3fs_stat_slot` in
 // include/s3fs_shared_types.h. Keep in sync.
 const (
-	StatFastHits   uint32 = 0
-	StatSlowMisses uint32 = 1
-	StatUnknownFS  uint32 = 2
-	StatSlotMax    uint32 = 3
+	StatFastHits        uint32 = 0
+	StatSlowMisses      uint32 = 1
+	StatUnknownFS       uint32 = 2
+	StatReadIterHits    uint32 = 3
+	StatReadIterMisses  uint32 = 4
+	StatSlotMax         uint32 = 5
 )
 
 // MissOp mirrors `enum s3fs_miss_op`.
@@ -60,20 +62,22 @@ type TestArgs struct {
 type runtimeObjs struct {
 	// Programs.
 	S3fsFpGetattr     *ebpf.Program `ebpf:"s3fs_fp_getattr"`
+	S3fsFpReadIter    *ebpf.Program `ebpf:"s3fs_fp_read_iter"`
 	S3fsTestShared    *ebpf.Program `ebpf:"s3fs_test_shared"`
 	S3fsArenaPrealloc *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 
 	// Maps.
-	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
-	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
-	S3fsEvents     *ebpf.Map `ebpf:"s3fs_events"`
-	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
+	S3fsArena          *ebpf.Map `ebpf:"s3fs_arena"`
+	S3fsCounters       *ebpf.Map `ebpf:"s3fs_counters"`
+	S3fsEvents         *ebpf.Map `ebpf:"s3fs_events"`
+	S3fsInodeIndex     *ebpf.Map `ebpf:"s3fs_inode_index"`
+	S3fsReadPatternMap *ebpf.Map `ebpf:"s3fs_read_pattern_map"`
 }
 
 func (o *runtimeObjs) Close() error {
 	return _S3fsfpClose(
-		o.S3fsFpGetattr, o.S3fsTestShared, o.S3fsArenaPrealloc,
-		o.S3fsArena, o.S3fsCounters, o.S3fsEvents, o.S3fsInodeIndex,
+		o.S3fsFpGetattr, o.S3fsFpReadIter, o.S3fsTestShared, o.S3fsArenaPrealloc,
+		o.S3fsArena, o.S3fsCounters, o.S3fsEvents, o.S3fsInodeIndex, o.S3fsReadPatternMap,
 	)
 }
 
@@ -186,6 +190,54 @@ func (p *Programs) AttachFentry() (link.Link, error) {
 		return nil, fmt.Errorf("attach fentry/vfs_getattr: %w", err)
 	}
 	return l, nil
+}
+
+// AttachFentryReadIter attaches the fentry/generic_file_read_iter observer
+// (R-01). The returned link.Link must be Close()d during teardown.
+func (p *Programs) AttachFentryReadIter() (link.Link, error) {
+	l, err := link.AttachTracing(link.TracingOptions{
+		Program: p.Objs.S3fsFpReadIter,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("attach fentry/generic_file_read_iter: %w", err)
+	}
+	return l, nil
+}
+
+// ReadPattern holds the per-ino access pattern snapshot read from
+// s3fs_read_pattern_map. SeqRatio returns the fraction of sequential reads
+// (0.0–1.0); NaN when no reads have been observed yet.
+type ReadPattern struct {
+	LastEndPos uint64
+	SeqCount   uint32
+	RandCount  uint32
+	TotalBytes uint64
+}
+
+// SeqRatio returns the fraction of sequential reads [0.0, 1.0].
+// Returns 0.0 when no reads have been recorded.
+func (rp ReadPattern) SeqRatio() float64 {
+	total := uint64(rp.SeqCount) + uint64(rp.RandCount)
+	if total == 0 {
+		return 0.0
+	}
+	return float64(rp.SeqCount) / float64(total)
+}
+
+// ReadAccessPattern looks up the access pattern for ino from
+// s3fs_read_pattern_map. Returns (zero, false) when the ino has not been
+// observed by fentry/generic_file_read_iter yet.
+func (p *Programs) ReadAccessPattern(ino uint64) (ReadPattern, bool) {
+	var v s3fsfpS3fsReadPattern
+	if err := p.Objs.S3fsReadPatternMap.Lookup(&ino, &v); err != nil {
+		return ReadPattern{}, false
+	}
+	return ReadPattern{
+		LastEndPos: v.LastEndPos,
+		SeqCount:   v.SeqCount,
+		RandCount:  v.RandCount,
+		TotalBytes: v.TotalBytes,
+	}, true
 }
 
 // rejectDemoObjs targets exactly the reject demo program and its arena

@@ -62,10 +62,24 @@ enum s3fs_miss_op {
 
 /* Per-CPU counter slots (indices into s3fs_counters map). */
 enum s3fs_stat_slot {
-	S3FS_STAT_FAST_HITS   = 0,
-	S3FS_STAT_SLOW_MISSES = 1,
-	S3FS_STAT_UNKNOWN_FS  = 2,
+	S3FS_STAT_FAST_HITS        = 0,
+	S3FS_STAT_SLOW_MISSES      = 1,
+	S3FS_STAT_UNKNOWN_FS       = 2,
+	S3FS_STAT_READ_ITER_HITS   = 3, /* read_folio path served from inode_index */
+	S3FS_STAT_READ_ITER_MISSES = 4, /* generic_file_read_iter: ino not in index */
 	S3FS_STAT_SLOT_MAX,
+};
+
+/*
+ * Per-inode read access pattern, stored in s3fs_read_pattern_map.
+ * Updated by fentry/generic_file_read_iter on every read call.
+ * Daemon reads this map to feed sequential/random signal into policy.
+ */
+struct s3fs_read_pattern {
+	__u64 last_end_pos; /* end offset of the previous read (pos + len) */
+	__u32 seq_count;    /* number of sequential reads observed */
+	__u32 rand_count;   /* number of random reads observed */
+	__u64 total_bytes;  /* cumulative bytes requested via read_iter */
 };
 
 /* Magic identifying an s3fs_ebpf super_block. Kept in sync with
