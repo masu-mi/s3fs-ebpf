@@ -34,6 +34,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/posix-and-practical-notes.md`](user/posix-and-practical-notes.md) | FS 拡張の POSIX 準拠スコアカード (E-01/02/03, D-01/02) |
 | [`user/gcs-backend.md`](user/gcs-backend.md) | GCS backend 対応の使い方と `--backend s3\|gcs` 切替 |
 | [`user/related-works.md`](user/related-works.md) | ExtFUSE / RFUSE / Mountpoint との位置付け |
+| [`user/meetup-ebpf-outline.md`](user/meetup-ebpf-outline.md) | eBPFミートアップ発表アウトライン 20min (KFunc / struct_ops / Layer 0 KFuncs 中心) |
 
 ---
 
