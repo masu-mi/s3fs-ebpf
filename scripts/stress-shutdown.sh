@@ -14,11 +14,11 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=lib/umount.sh
-source "$TOPDIR/scripts/lib/umount.sh"
+# shellcheck source=lib/bench.sh
+source "$TOPDIR/scripts/lib/bench.sh"
 MP=${MP:-/mnt/s3demo}
-DAEMON_BIN=${DAEMON_BIN:-$TOPDIR/bin/s3fs-ebpf}
-KMOD=${KMOD:-$TOPDIR/kmod/s3fs_kfunc.ko}
+S3FS_BIN=${DAEMON_BIN:-$S3FS_BIN}
+S3FS_KMOD=${KMOD:-$S3FS_KMOD}
 ITERS=${ITERS:-200}
 CONCURRENCY=${CONCURRENCY:-16}
 LOG=/tmp/stress-shutdown.log
@@ -26,24 +26,16 @@ LOG=/tmp/stress-shutdown.log
 log() { echo "[stress-shutdown] $*" >&2; }
 
 cleanup() {
-	sudo pkill -9 -f 's3fs-ebpf fastpath' 2>/dev/null || true
+	daemon_kill KILL
 	umount_hard "$MP"
-	lsmod | grep -q '^s3fs_kfunc' && sudo rmmod s3fs_kfunc 2>/dev/null || true
+	sudo rmmod "$S3FS_KMOD_NAME" 2>/dev/null || true
 }
 trap cleanup EXIT
 
+need_built
 log "load kmod + mount + daemon"
-lsmod | grep -q '^s3fs_kfunc' || sudo insmod "$KMOD"
-mountpoint -q "$MP" || { sudo mkdir -p "$MP"; sudo mount -t s3fs_ebpf none "$MP"; }
-sudo pkill -9 -f 's3fs-ebpf fastpath' 2>/dev/null || true
-LD_LIBRARY_PATH="$HOME/.local/lib" sudo -E \
-	"$DAEMON_BIN" fastpath --s3 --sample-every=60s \
-	>"$LOG" 2>&1 &
-daemon_pid=$(pgrep -f 's3fs-ebpf fastpath' || true)
-for _ in $(seq 1 40); do
-	grep -q '\[admit\] ' "$LOG" 2>/dev/null && break
-	sleep 0.2
-done
+ebpf_mount "$MP"
+ebpf_start_daemon "$LOG" --sample-every=60s
 
 log "seed dmesg cursor"
 dmesg_cursor=$(sudo dmesg -T | wc -l)
@@ -58,7 +50,7 @@ done
 # SIGINT mid-flight — daemon still has queued misses / pending waiters.
 sleep 0.05
 log "SIGINT daemon (in-flight waiters expected)"
-sudo pkill -INT -f 's3fs-ebpf fastpath'
+daemon_kill INT
 
 # Wait for cats to drain (they should EIO or return whatever kmod
 # gives them on shutdown — we don't care about payload, only that
@@ -66,11 +58,8 @@ sudo pkill -INT -f 's3fs-ebpf fastpath'
 wait 2>/dev/null || true
 
 # Confirm daemon exits within 10s.
-for _ in $(seq 1 50); do
-	pgrep -f 's3fs-ebpf fastpath' >/dev/null || break
-	sleep 0.2
-done
-if pgrep -f 's3fs-ebpf fastpath' >/dev/null; then
+daemon_wait_exit 10
+if daemon_running; then
 	echo "FAIL: daemon did not exit within 10s of SIGINT" >&2
 	exit 1
 fi
@@ -94,7 +83,7 @@ umount_hard "$MP"
 # instantly the microsecond after SIGINT".
 rmmod_ok=0
 for _ in $(seq 1 25); do
-	if sudo rmmod s3fs_kfunc 2>/dev/null; then rmmod_ok=1; break; fi
+	if sudo rmmod "$S3FS_KMOD_NAME" 2>/dev/null; then rmmod_ok=1; break; fi
 	sleep 0.2
 done
 if [ "$rmmod_ok" -ne 1 ]; then
