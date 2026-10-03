@@ -1,39 +1,30 @@
 #!/usr/bin/env bash
 # setup-kernel-6.12.sh — install a mainline Linux 6.12 LTS kernel on Ubuntu 24.04.
-# bpf_arena is required by the daemon (landed in Linux 6.9); we pin to 6.12
-# because it is the current LTS branch that still ships the arena support.
+# kmod/s3fs_ebpf_dev.c requires >= 6.12 (struct bpf_arena layout); 6.12 is
+# the LTS branch the layout mirror is verified against.
 #
-# This script uses the mainline-ppa .deb builds. Review before running.
+# Debian trixie already ships 6.12 — this script is Ubuntu-only.
+# Uses the kernel.ubuntu.com mainline .deb builds. Review before running.
+#
+#   VERSION=v6.12.5 scripts/setup-kernel-6.12.sh
+#   DRY_RUN=1       scripts/setup-kernel-6.12.sh   # list the debs only
 set -euo pipefail
 
-MAINLINE=https://kernel.ubuntu.com/mainline
+# shellcheck source=lib/mainline.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/mainline.sh"
+
 VERSION="${VERSION:-v6.12}"
-ARCH=$(dpkg --print-architecture)
 
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+[[ "$(os_id)" == ubuntu ]] || warn "not Ubuntu ($(os_id)); mainline debs are built for Ubuntu"
 
-cd "$TMP"
+log "kernel ${VERSION} debs from ${MAINLINE_URL}"
+mapfile -t DEBS < <(mainline_list_debs "$VERSION" 'linux-(image-unsigned|modules|headers)-.*(generic|_all)')
+[[ ${#DEBS[@]} -gt 0 ]] || die "no .deb found. Check ${MAINLINE_URL}/${VERSION}/ manually."
+printf '  %s\n' "${DEBS[@]}" >&2
 
-echo "==> Downloading kernel ${VERSION} debs (${ARCH}) from ${MAINLINE}"
-INDEX=$(curl -fsSL "${MAINLINE}/${VERSION}/${ARCH}/")
-mapfile -t URLS < <(echo "$INDEX" \
-    | grep -oE 'href="[^"]+\.deb"' \
-    | sed -E 's/href="//; s/"$//' \
-    | grep -E "linux-(image-unsigned|modules|headers)-.*generic" \
-    | sort -u)
+confirm "install the above kernel packages?" || die "aborted"
+mainline_fetch_install "$VERSION" "${DEBS[@]}"
 
-if [[ ${#URLS[@]} -eq 0 ]]; then
-    echo "ERROR: no .deb URLs found. Check ${MAINLINE}/${VERSION}/${ARCH}/ manually." >&2
-    exit 1
-fi
-
-for u in "${URLS[@]}"; do
-    curl -fLO "${MAINLINE}/${VERSION}/${ARCH}/${u}"
-done
-
-echo "==> Installing"
-sudo dpkg -i ./*.deb || sudo apt-get -f install -y
-
-echo "Reboot into the new kernel: sudo reboot"
-echo "After reboot verify with: uname -r"
+log "done. Reboot into the new kernel (sudo reboot), then run:"
+info "scripts/setup-toolchain.sh headers kbuild   # headers + gcc/pahole/vmlinux for the new kernel"
+info "make doctor"
