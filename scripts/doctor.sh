@@ -2,8 +2,10 @@
 # doctor.sh — check every host dependency that has broken the build or the
 # benches before, and print the fix for each failure.
 #
-#   scripts/doctor.sh            # build + runtime + bench checks
-#   scripts/doctor.sh --build    # only what `make all` needs
+#   scripts/doctor.sh                    # build + runtime + bench checks
+#   scripts/doctor.sh --build            # only what `make all` needs
+#   scripts/doctor.sh --only kmod|bpf    # one component (Makefile preflight)
+#   scripts/doctor.sh --quiet ...        # print only NG / WARN lines
 #
 # Exit status: 1 if any NG (build will fail), 0 otherwise (WARN allowed).
 # The categories and IDs (K-*, H-*, C-*, T-*, B-*) match
@@ -13,12 +15,25 @@ set -uo pipefail
 # shellcheck source=lib/toolchain.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/toolchain.sh"
 
-MODE=all
-case "${1:-}" in
-    --build) MODE=build ;;
-    ""|--all) ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
-    *) die "unknown option: $1" ;;
+MODE=all QUIET=0 ONLY=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --build) MODE=build ;;
+        --all) MODE=all ;;
+        --quiet) QUIET=1 ;;
+        --only) ONLY=$2; MODE=build; shift ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        *) die "unknown option: $1" ;;
+    esac
+    shift
+done
+
+# --only <component>: the check IDs that gate that component's build.
+case "$ONLY" in
+    "")   ID_FILTER='.*' ;;
+    kmod) ID_FILTER='^(K-1|H-[0-9]|C-3|C-4)$' ;;
+    bpf)  ID_FILTER='^(K-3|C-1|T-1)$' ;;
+    *)    die "unknown component for --only: $ONLY (kmod|bpf)" ;;
 esac
 
 SETUP="scripts/setup-toolchain.sh"
@@ -26,13 +41,25 @@ n_ng=0 n_warn=0
 
 if [[ -t 1 ]]; then B=$'\033[1m' G=$'\033[32m' R=$'\033[31m' Y=$'\033[33m' Z=$'\033[0m'
 else B='' G='' R='' Y='' Z=''; fi
-section() { printf '\n%s[%s]%s\n' "$B" "$1" "$Z"; }
-ok()   { printf '  %sOK  %s %-6s %s\n' "$G" "$Z" "$1" "$2"; }
-ng()   { printf '  %sNG  %s %-6s %s\n' "$R" "$Z" "$1" "$2"; shift 2; fix "$@"; n_ng=$((n_ng + 1)); }
-wn()   { printf '  %sWARN%s %-6s %s\n' "$Y" "$Z" "$1" "$2"; shift 2; fix "$@"; n_warn=$((n_warn + 1)); }
+# Setup steps named in fix hints, collected for the one-line summary.
+FIX_STEPS=()
+want()    { [[ "$1" =~ $ID_FILTER ]]; }
+section() { [[ $QUIET == 1 ]] || printf '\n%s[%s]%s\n' "$B" "$1" "$Z"; }
+ok()   { want "$1" || return 0; [[ $QUIET == 1 ]] || printf '  %sOK  %s %-6s %s\n' "$G" "$Z" "$1" "$2"; }
+ng()   { want "$1" || return 0; printf '  %sNG  %s %-6s %s\n' "$R" "$Z" "$1" "$2"; shift 2; fix "$@"; n_ng=$((n_ng + 1)); }
+wn()   { want "$1" || return 0; printf '  %sWARN%s %-6s %s\n' "$Y" "$Z" "$1" "$2"; shift 2; fix "$@"; n_warn=$((n_warn + 1)); }
 # pahole_fmt 130 -> v1.30
 pahole_fmt() { [[ -n "$1" ]] && echo "v1.${1#1}" || echo "${2:-none}"; }
-fix()  { local l; for l in "$@"; do printf '              -> %s\n' "$l"; done; }
+fix() {
+    local l step
+    for l in "$@"; do
+        printf '              -> %s\n' "$l"
+        if [[ "$l" =~ ^$SETUP\ ([a-z-]+) ]]; then
+            step=${BASH_REMATCH[1]}
+            [[ " ${FIX_STEPS[*]} " == *" $step "* ]] || FIX_STEPS+=("$step")
+        fi
+    done
+}
 
 # -----------------------------------------------------------------------------
 section "kernel ($KREL, $(os_id) $(os_codename))"
@@ -100,10 +127,13 @@ if kernel_cc_is_clang; then
     wn C-3 "kernel was built with clang — kmod build needs LLVM=1, not wired into kmod/Makefile"
 else
     want=$(kernel_gcc_major)
-    kcc=$(detect_kmod_cc); kcc_ok=$?
+    kcc=$(detect_kmod_cc)
     have=$(gcc_major "$kcc")
-    if [[ $kcc_ok -ne 0 || -z "$have" ]]; then
-        ng C-3 "no usable gcc for kmod (kernel built with gcc-${want:-?}, need >= $(( ${want:-14} < 14 ? ${want:-14} : 14 )))" \
+    # Checked here rather than trusting detect_kmod_cc, so an explicit
+    # KMOD_CC= (or the Makefile's fallback name) is held to the same floor.
+    floor=$(( ${want:-0} < S3FS_MIN_KMOD_GCC ? ${want:-0} : S3FS_MIN_KMOD_GCC ))
+    if [[ -z "$have" || "$have" -lt "$floor" ]]; then
+        ng C-3 "no usable gcc for kmod (KMOD_CC=$kcc${have:+ is gcc-$have}; kernel built with gcc-${want:-?}, need >= $floor)" \
             "$SETUP kbuild   (installs gcc-$want or gcc-$S3FS_MIN_KMOD_GCC)"
     elif [[ -n "$want" && "$have" != "$want" ]]; then
         wn C-3 "KMOD_CC=$kcc (gcc-$have) but kernel was built with gcc-$want — usually fine, exact match not available" \
@@ -114,9 +144,9 @@ else
 fi
 
 pwant=$(kernel_pahole_version)
-pahole=$(detect_pahole); pahole_ok=$?
+pahole=$(detect_pahole)
 pv=$(pahole_version "$pahole" "$(pahole_libdir "$pahole")")
-if [[ $pahole_ok -eq 0 && -n "$pv" ]]; then
+if [[ -n "$pv" ]] && { [[ -z "$pwant" ]] || [[ "$pv" -ge "$pwant" ]]; }; then
     ok C-4 "KMOD_PAHOLE=$pahole ($(pahole_fmt "$pv") >= kernel's $(pahole_fmt "$pwant" any))"
 else
     ng C-4 "no pahole >= $(pahole_fmt "$pwant" any) (have: $(pahole_fmt "$pv")) — module BTF silently empty" \
@@ -176,8 +206,13 @@ if [[ "$MODE" == all ]]; then
 fi
 
 # -----------------------------------------------------------------------------
-section "resolved toolchain (scripts/detect-toolchain.sh)"
-"$(dirname "${BASH_SOURCE[0]}")/detect-toolchain.sh" | sed 's/^/  /'
+if [[ $QUIET != 1 ]]; then
+    section "resolved toolchain (scripts/detect-toolchain.sh)"
+    "$(dirname "${BASH_SOURCE[0]}")/detect-toolchain.sh" | sed 's/^/  /'
+fi
 
-printf '\n%d NG, %d WARN\n' "$n_ng" "$n_warn"
+if [[ $QUIET != 1 || $((n_ng + n_warn)) -gt 0 ]]; then
+    printf '\n%d NG, %d WARN%s\n' "$n_ng" "$n_warn" "${ONLY:+ (checks gating $ONLY)}"
+    [[ ${#FIX_STEPS[@]} -gt 0 ]] && printf 'fix all: %s %s\n' "$SETUP" "${FIX_STEPS[*]}"
+fi
 [[ $n_ng -eq 0 ]]

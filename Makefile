@@ -33,6 +33,17 @@ $(foreach v,$(shell $(SCRIPTS_DIR)/detect-toolchain.sh --make),$(eval $(v)))
 KMOD_ENV := $(if $(KMOD_LDLIB),LD_LIBRARY_PATH=$(KMOD_LDLIB)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH})
 KMOD_MAKE_ARGS := KDIR=$(KDIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) PAHOLE=$(KMOD_PAHOLE)
 
+# Preflight: before building, run the doctor checks that gate a component
+# (scripts/doctor.sh --only kmod|bpf, or --build for `make all`) so a known
+# environment gap fails fast with its fix instead of a compiler error — or
+# worse, a "successful" build that only breaks at insmod. The resolved
+# toolchain is passed in so command-line overrides are checked too.
+# Skip with PREFLIGHT=0.
+PREFLIGHT ?= 1
+DOCTOR_ENV := CLANG='$(CLANG)' BPFTOOL='$(BPFTOOL)' KDIR='$(KDIR)' \
+              KMOD_CC='$(KMOD_CC)' KMOD_PAHOLE='$(KMOD_PAHOLE)'
+preflight = $(if $(filter 1,$(PREFLIGHT)),$(DOCTOR_ENV) $(SCRIPTS_DIR)/doctor.sh --quiet $(1),:)
+
 YELLOW := \033[33m
 GREEN  := \033[32m
 CYAN   := \033[36m
@@ -64,7 +75,11 @@ help: ## Show this help
 		}' $(MAKEFILE_LIST)
 
 ## Build:
-all: kmod bpf daemon ## Build all components (kmod + bpf + daemon)
+# One doctor pass up front reports every gap at once, then the components
+# build without re-running their own preflight.
+all: ## Build all components (kmod + bpf + daemon)
+	@$(call preflight,--build)
+	@$(MAKE) --no-print-directory PREFLIGHT=0 kmod bpf daemon
 build: all ## Alias of 'all'
 
 # -----------------------------------------------------------------------------
@@ -72,9 +87,12 @@ build: all ## Alias of 'all'
 # -----------------------------------------------------------------------------
 # CC / HOSTCC / PAHOLE override the kernel Kbuild defaults, which assume
 # the exact gcc / pahole the kernel was built with. See the toolchain
-# block at the top of this Makefile.
+# block at the top of this Makefile. check-kmod-btf.sh fails the build
+# when kbuild silently skipped module BTF (no $$KDIR/vmlinux / old pahole).
 kmod: ## Build kernel module -> kmod/s3fs_kfunc.ko
+	@$(call preflight,--only kmod)
 	$(KMOD_ENV) $(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS)
+	@$(SCRIPTS_DIR)/check-kmod-btf.sh $(KMOD_DIR)/s3fs_kfunc.ko
 
 kmod-clean: ## Clean kernel module build artefacts
 	$(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS) clean
@@ -85,7 +103,9 @@ kmod-clean: ## Clean kernel module build artefacts
 # CLANG / BPFTOOL must be passed explicitly: variables computed in this
 # Makefile are not exported, so the sub-make would fall back to plain
 # `clang` (18 on noble) and fail on __arena casts.
-bpf: vmlinux ## Build eBPF program -> bpf/s3fs_fastpath.bpf.o
+bpf: ## Build eBPF program -> bpf/s3fs_fastpath.bpf.o
+	@$(call preflight,--only bpf)
+	@$(MAKE) --no-print-directory $(BPF_DIR)/vmlinux.h
 	$(MAKE) -C $(BPF_DIR) CLANG=$(CLANG) BPFTOOL=$(BPFTOOL)
 
 bpf-clean: ## Clean eBPF build artefacts
