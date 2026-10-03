@@ -64,50 +64,47 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 
 | 要件 | バージョン |
 |---|---|
-| OS | Ubuntu 24.04 LTS |
-| Kernel | **Linux 6.12 LTS**（`bpf_arena` 必須。6.9 で導入、6.12 で LTS 化） |
-| Compiler | **clang 19+ (推奨 20)** — `__BPF_FEATURE_ADDR_SPACE_CAST` (`-mcpu=v3`) が必要。Ubuntu 24.04 標準の clang-18 では arena deref パスがビルドできません |
-| Go | 1.22+ |
-| Tools | `bpftool`, `fio`, `bcc`, `docker compose` v2, `gettext-base` (envsubst) |
+| OS | Ubuntu 24.04 LTS / Debian (trixie で 6.12 標準) |
+| Kernel | **Linux 6.12 LTS 以上**（`bpf_arena` 必須。`kmod/s3fs_ebpf_dev.c` が 6.12 未満を `#error`、arena レイアウトは 6.12 系で検証） |
+| Kernel headers | `/lib/modules/$(uname -r)/build` + その直下の `vmlinux`（module BTF 生成に必要） |
+| Compiler | **clang 19+ (推奨 20)** — `__BPF_FEATURE_ADDR_SPACE_CAST` (`-mcpu=v3`)。clang-18 だと arena パスが黙って別実装になるので `bpf/Makefile` が拒否します。kmod 用 gcc はカーネルをビルドした版（最低 14）、pahole はカーネルの `CONFIG_PAHOLE_VERSION` 以上 |
+| Go | `daemon/go.mod` の `go` 行 (1.25+) |
+| Tools | `bpftool`, `docker compose` v2, `gettext-base` (envsubst)。bench は `hyperfine`, `fio`, `s3fs` |
+
+依存箇所（カーネル版 / ヘッダ / コンパイラ / ツール / テストツール）ごとの症状と解消方法は
+[`docs/dev-notes/build-env-dependencies.md`](docs/dev-notes/build-env-dependencies.md) にまとめています。
 
 ---
 
 ## 環境準備
 
 ```bash
-# 1. mainline 6.12 LTS カーネルを導入して再起動
+# 0. 何が足りないかを確認 (NG ごとに直し方を表示)
+make doctor
+
+# 1. (Ubuntu) mainline 6.12 LTS カーネルを導入して再起動
 make setup-kernel
 sudo reboot
 # 再起動後: uname -r  →  6.12.x-... であることを確認
 
-# 2. ツールチェイン一式（clang/llvm/bpftool/go/fio/bcc/docker）
-make setup-toolchain
+# 2. ツールチェイン一式 (clang/bpftool/headers/gcc・pahole 整合/go/bench ツール/docker)
+make setup-toolchain        # 個別: scripts/setup-toolchain.sh clang bpftool ...
+                            # 実行内容の確認だけ: DRY_RUN=1 scripts/setup-toolchain.sh
 
-# 3. eBPF 用の vmlinux.h を実行中カーネルの BTF から生成
-make vmlinux
+# 3. 確認 (NG 0 ならビルド可能)
+make doctor
 ```
 
-> **mainline カーネル特有の落とし穴 (Ubuntu 24.04)** — `bpf_arena` の要件で
-> mainline カーネル (`kernel.ubuntu.com/mainline`) を使う前提のため、Ubuntu
-> archive にある stock 向けパッケージ (`linux-tools-$(uname -r)` /
-> `linux-headers-$(uname -r)`) は解決できません。`setup-toolchain` は以下で
-> 回避します:
->
-> - **bpftool**: Ubuntu の `bpftool` は virtual package で、実体は
->   `linux-tools-<kernel>` 側。`linux-tools-generic` (stock 6.8 系) を入れ、
->   `/usr/lib/linux-tools/*/bpftool` を `/usr/local/bin/bpftool` に symlink して
->   `/usr/bin/bpftool` wrapper (uname -r で dispatch して失敗) を上書きします。
->   bpftool は BTF/map/prog 操作については kernel version に非依存です。
-> - **kernel headers**: `kernel.ubuntu.com/mainline/v<ver>/amd64/` から
->   `linux-headers-<ver>_<build>_all.deb` と
->   `linux-headers-<ver>-generic_<build>_amd64.deb` を取得して `dpkg -i` します。
->   セキュリティ上、実行するコマンドを事前に echo して y/N プロンプトで
->   確認します。TTY が無い環境で自動化したい場合は
->   `S3FS_INSTALL_MAINLINE_HEADERS=1` を付けて `make setup-toolchain` を叩いて
->   ください。URL が 404 の場合は build timestamp が別リビジョンの可能性が
->   あるので、ブラウザで一覧を確認してください。
-> - **perf**: mainline 用は archive に無いのでスキップします。必要な場合は
->   mainline カーネルソースから手動 build してください。
+カーネルを入れ替えたら `make setup-kbuild`（ヘッダ・gcc/pahole・`$KDIR/vmlinux` の再整備）を
+再実行してください。Makefile が使う `CLANG` / `KMOD_CC` / `KMOD_PAHOLE` / `BPFTOOL` / `KDIR` は
+`scripts/lib/toolchain.sh` が自動検出し（`make toolchain` で表示）、`make CLANG=clang-21` のように上書きできます。
+
+> **mainline カーネル特有の落とし穴 (Ubuntu 24.04)** — `linux-headers-$(uname -r)` /
+> `linux-tools-$(uname -r)` が archive に無い、ヘッダの Makefile が `gcc-15` を hard-code、
+> distro の pahole 1.25 では module BTF が空になる、ヘッダに `vmlinux` が無い、
+> `/usr/sbin/bpftool` wrapper が失敗する — の 5 点を `setup-toolchain` が順に解消します
+> (詳細は上記 doc の H/C/T 節)。mainline ヘッダの取得は y/N 確認付きで、TTY が無い環境では
+> `ASSUME_YES=1 make setup-toolchain` を使ってください。
 
 ---
 
@@ -130,7 +127,7 @@ make daemon-gen # cilium/ebpf を fetch して bpf2go 実行 → build（Week 1+
 | eBPF オブジェクト | `bpf/s3fs_fastpath.bpf.o` |
 | Go デーモン | `bin/s3fs-ebpf` |
 
-> **カーネル 6.8 でのビルド互換**: 実行時要件は 6.12 LTS ですが、`make all` は 6.8 でも通ります（`insmod` 後の `mount` / `bpftool prog load` が実行時に `bpf_arena` を要求します）。CI 用途で 6.8 コンテナ上でビルド検証だけ回す運用を想定。
+> **6.12 未満でのビルド**: kmod は `kmod/s3fs_ebpf_dev.c` の `#error` で止まります。6.8 などのコンテナでビルド検証だけ回す場合は `make bpf daemon` に限定してください (`make doctor-build` で事前確認できます)。
 
 ---
 
@@ -227,55 +224,53 @@ Usage of mount:
 `make help` の出力（`make readme` 実行時に自動再生成）:
 
 ```text
-s3fs-ebpf — targets
+Usage:
+  make <target>
 
-Build (individual components):
-  make kmod           Build kernel module   -> kmod/s3fs_kfunc.ko
-  make bpf            Build eBPF program    -> bpf/s3fs_fastpath.bpf.o
-  make daemon         Build Go user process -> bin/s3fs-ebpf
-
-Build (combined / codegen):
-  make all            kmod + bpf + daemon
-  make build          alias of 'all'
-  make daemon-gen     bpf2go codegen then daemon (needs network)
-
-Housekeeping:
-  make vmlinux        Regenerate bpf/vmlinux.h from running kernel BTF
-  make vmlinux-clean  Drop bpf/vmlinux.h
-  make kmod-clean     Clean kernel module build artefacts
-  make bpf-clean      Clean eBPF build artefacts
-  make daemon-clean   Clean Go build cache and bin/s3fs-ebpf
-  make clean          Clean everything
-
-Observability stack (docker compose):
-  make compose-up     Start MinIO + Prometheus + Grafana + node_exporter
-  make compose-down   Stop the stack
-  make compose-logs   Tail compose logs
-
-Runtime lifecycle (kmod + mount + daemon):
-  make mount          insmod kmod + mount -t s3fs_ebpf on /mnt/s3demo
-  make unmount        umount + rmmod (also stops any running daemon)
-  make daemon-run     Foreground: run bin/s3fs-ebpf fastpath (needs mount + compose-up)
-  make daemon-stop    SIGINT any running daemon
-
-Benchmarks (all auto-start compose-up requirement + kmod/mount/daemon in-script):
-  make bench           Latency bench (hyperfine + microbench + fio) vs s3fs-fuse
-  make bench-write     Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)
-  make bench-scale     Parallel scaling (numjobs=1..64) stat + read
-  make bench-3way      ebpf vs fuse-raw vs fuse-cache 3-way comparison
-  make setup-bench-env install some pkgs
-
-Week 1 verification (requires 6.12+ kernel):
-  make test-arena     insmod + run bpf_arena/KFunc round-trip probe + rmmod
-
-Environment bootstrap (run once on a fresh host):
-  make setup-kernel     Install mainline Linux 6.12 LTS kernel (reboot after)
-  make setup-toolchain  Install clang, bpftool, go, docker, fio, bcc
-
-Documentation:
-  make readme         Regenerate README.md from README.md.tmpl (envsubst)
-
-Tip: 'make <target> -n' shows the recipe without executing it.
+Targets:
+  Help:
+    help                Show this help
+  Build:
+    all                 Build all components (kmod + bpf + daemon)
+    build               Alias of 'all'
+    kmod                Build kernel module -> kmod/s3fs_kfunc.ko
+    kmod-clean          Clean kernel module build artefacts
+    bpf                 Build eBPF program -> bpf/s3fs_fastpath.bpf.o
+    bpf-clean           Clean eBPF build artefacts
+    vmlinux             Regenerate bpf/vmlinux.h from running kernel BTF
+    vmlinux-clean       Drop bpf/vmlinux.h
+    daemon              Build Go user process -> bin/s3fs-ebpf
+    daemon-gen          Run bpf2go codegen then build daemon (needs network)
+    daemon-clean        Clean Go build cache and bin/s3fs-ebpf
+  Observability stack (docker compose):
+    compose-up          Start MinIO + Prometheus + Grafana + node_exporter
+    compose-down        Stop the observability stack
+    compose-logs        Tail compose logs
+  Runtime lifecycle:
+    mount               insmod kmod + mount s3fs_ebpf on $(MOUNT_POINT)
+    unmount             umount + rmmod (also stops any running daemon)
+    daemon-run          Run daemon in foreground (needs mount + compose-up)
+    daemon-stop         Send SIGINT to any running daemon
+  Benchmarks:
+    bench               Latency bench (hyperfine + microbench + fio) vs s3fs-fuse
+    bench-write         Write-back throughput bench (dd 1M/10M/100M, ebpf vs fuse)
+    bench-scale         Parallel scaling bench (numjobs=1..64, stat + read)
+    bench-3way          ebpf vs fuse-raw vs fuse-cache 3-way comparison
+    setup-bench-env     Install bench dependencies (hyperfine, fio, s3fs, /etc/passwd-s3fs)
+  Host bootstrap:
+    doctor              Check kernel / headers / compilers / tools and print fixes
+    doctor-build        Same as doctor, limited to what 'make all' needs
+    toolchain           Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
+    setup-kernel        Install mainline Linux 6.12 LTS kernel (Ubuntu; reboot after)
+    setup-toolchain     Install everything (clang, bpftool, headers, gcc/pahole, go, bench)
+    setup-kbuild        Re-run kernel-specific fixes (headers, gcc, pahole, vmlinux) after a kernel change
+    lint-scripts        shellcheck scripts/ and s3fs-ebpf.sh
+  Documentation:
+    readme              Regenerate README.md from README.md.tmpl
+  Week 1 verification:
+    test-arena          insmod + run bpf_arena/KFunc round-trip probe + rmmod
+  Cleanup:
+    clean               Clean all build artefacts
 ```
 
 ---

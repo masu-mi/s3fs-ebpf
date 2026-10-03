@@ -64,50 +64,47 @@ Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メ�
 
 | 要件 | バージョン |
 |---|---|
-| OS | Ubuntu 24.04 LTS |
-| Kernel | **Linux 6.12 LTS**（`bpf_arena` 必須。6.9 で導入、6.12 で LTS 化） |
-| Compiler | **clang 19+ (推奨 20)** — `__BPF_FEATURE_ADDR_SPACE_CAST` (`-mcpu=v3`) が必要。Ubuntu 24.04 標準の clang-18 では arena deref パスがビルドできません |
-| Go | 1.22+ |
-| Tools | `bpftool`, `fio`, `bcc`, `docker compose` v2, `gettext-base` (envsubst) |
+| OS | Ubuntu 24.04 LTS / Debian (trixie で 6.12 標準) |
+| Kernel | **Linux 6.12 LTS 以上**（`bpf_arena` 必須。`kmod/s3fs_ebpf_dev.c` が 6.12 未満を `#error`、arena レイアウトは 6.12 系で検証） |
+| Kernel headers | `/lib/modules/$(uname -r)/build` + その直下の `vmlinux`（module BTF 生成に必要） |
+| Compiler | **clang 19+ (推奨 20)** — `__BPF_FEATURE_ADDR_SPACE_CAST` (`-mcpu=v3`)。clang-18 だと arena パスが黙って別実装になるので `bpf/Makefile` が拒否します。kmod 用 gcc はカーネルをビルドした版（最低 14）、pahole はカーネルの `CONFIG_PAHOLE_VERSION` 以上 |
+| Go | `daemon/go.mod` の `go` 行 (1.25+) |
+| Tools | `bpftool`, `docker compose` v2, `gettext-base` (envsubst)。bench は `hyperfine`, `fio`, `s3fs` |
+
+依存箇所（カーネル版 / ヘッダ / コンパイラ / ツール / テストツール）ごとの症状と解消方法は
+[`docs/dev-notes/build-env-dependencies.md`](docs/dev-notes/build-env-dependencies.md) にまとめています。
 
 ---
 
 ## 環境準備
 
 ```bash
-# 1. mainline 6.12 LTS カーネルを導入して再起動
+# 0. 何が足りないかを確認 (NG ごとに直し方を表示)
+make doctor
+
+# 1. (Ubuntu) mainline 6.12 LTS カーネルを導入して再起動
 make setup-kernel
 sudo reboot
 # 再起動後: uname -r  →  6.12.x-... であることを確認
 
-# 2. ツールチェイン一式（clang/llvm/bpftool/go/fio/bcc/docker）
-make setup-toolchain
+# 2. ツールチェイン一式 (clang/bpftool/headers/gcc・pahole 整合/go/bench ツール/docker)
+make setup-toolchain        # 個別: scripts/setup-toolchain.sh clang bpftool ...
+                            # 実行内容の確認だけ: DRY_RUN=1 scripts/setup-toolchain.sh
 
-# 3. eBPF 用の vmlinux.h を実行中カーネルの BTF から生成
-make vmlinux
+# 3. 確認 (NG 0 ならビルド可能)
+make doctor
 ```
 
-> **mainline カーネル特有の落とし穴 (Ubuntu 24.04)** — `bpf_arena` の要件で
-> mainline カーネル (`kernel.ubuntu.com/mainline`) を使う前提のため、Ubuntu
-> archive にある stock 向けパッケージ (`linux-tools-$(uname -r)` /
-> `linux-headers-$(uname -r)`) は解決できません。`setup-toolchain` は以下で
-> 回避します:
->
-> - **bpftool**: Ubuntu の `bpftool` は virtual package で、実体は
->   `linux-tools-<kernel>` 側。`linux-tools-generic` (stock 6.8 系) を入れ、
->   `/usr/lib/linux-tools/*/bpftool` を `/usr/local/bin/bpftool` に symlink して
->   `/usr/bin/bpftool` wrapper (uname -r で dispatch して失敗) を上書きします。
->   bpftool は BTF/map/prog 操作については kernel version に非依存です。
-> - **kernel headers**: `kernel.ubuntu.com/mainline/v<ver>/amd64/` から
->   `linux-headers-<ver>_<build>_all.deb` と
->   `linux-headers-<ver>-generic_<build>_amd64.deb` を取得して `dpkg -i` します。
->   セキュリティ上、実行するコマンドを事前に echo して y/N プロンプトで
->   確認します。TTY が無い環境で自動化したい場合は
->   `S3FS_INSTALL_MAINLINE_HEADERS=1` を付けて `make setup-toolchain` を叩いて
->   ください。URL が 404 の場合は build timestamp が別リビジョンの可能性が
->   あるので、ブラウザで一覧を確認してください。
-> - **perf**: mainline 用は archive に無いのでスキップします。必要な場合は
->   mainline カーネルソースから手動 build してください。
+カーネルを入れ替えたら `make setup-kbuild`（ヘッダ・gcc/pahole・`$KDIR/vmlinux` の再整備）を
+再実行してください。Makefile が使う `CLANG` / `KMOD_CC` / `KMOD_PAHOLE` / `BPFTOOL` / `KDIR` は
+`scripts/lib/toolchain.sh` が自動検出し（`make toolchain` で表示）、`make CLANG=clang-21` のように上書きできます。
+
+> **mainline カーネル特有の落とし穴 (Ubuntu 24.04)** — `linux-headers-$(uname -r)` /
+> `linux-tools-$(uname -r)` が archive に無い、ヘッダの Makefile が `gcc-15` を hard-code、
+> distro の pahole 1.25 では module BTF が空になる、ヘッダに `vmlinux` が無い、
+> `/usr/sbin/bpftool` wrapper が失敗する — の 5 点を `setup-toolchain` が順に解消します
+> (詳細は上記 doc の H/C/T 節)。mainline ヘッダの取得は y/N 確認付きで、TTY が無い環境では
+> `ASSUME_YES=1 make setup-toolchain` を使ってください。
 
 ---
 
@@ -130,7 +127,7 @@ make daemon-gen # cilium/ebpf を fetch して bpf2go 実行 → build（Week 1+
 | eBPF オブジェクト | `bpf/s3fs_fastpath.bpf.o` |
 | Go デーモン | `bin/s3fs-ebpf` |
 
-> **カーネル 6.8 でのビルド互換**: 実行時要件は 6.12 LTS ですが、`make all` は 6.8 でも通ります（`insmod` 後の `mount` / `bpftool prog load` が実行時に `bpf_arena` を要求します）。CI 用途で 6.8 コンテナ上でビルド検証だけ回す運用を想定。
+> **6.12 未満でのビルド**: kmod は `kmod/s3fs_ebpf_dev.c` の `#error` で止まります。6.8 などのコンテナでビルド検証だけ回す場合は `make bpf daemon` に限定してください (`make doctor-build` で事前確認できます)。
 
 ---
 

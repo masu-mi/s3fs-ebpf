@@ -2,7 +2,9 @@
 
 Ubuntu 24.04 (noble) + Ubuntu mainline カーネル `6.12.90-061290-generic` の組合せで `make test-arena` を通すまでに 5 つの環境課題を踏んだ。再現できるよう課題・原因・対策・副作用を並べる。
 
-対応スクリプト: [`scripts/setup-week1-runtime.sh`](../../scripts/setup-week1-runtime.sh)
+対応スクリプト: [`scripts/setup-week1-runtime.sh`](../../scripts/setup-week1-runtime.sh) (現在は `scripts/setup-toolchain.sh kbuild` / `make setup-kbuild` へのラッパー)
+
+> **現状**: 課題 2〜4 の gcc / pahole / KDIR 解決は Makefile が自動検出するようになったため、下記の `CC=` / `PAHOLE=` / `LD_LIBRARY_PATH` の手動指定は不要。依存箇所の整理と `make doctor` の対応は [`dev-notes/build-env-dependencies.md`](../dev-notes/build-env-dependencies.md) を参照。
 
 ---
 
