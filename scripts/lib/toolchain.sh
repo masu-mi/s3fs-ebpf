@@ -132,6 +132,20 @@ detect_kmod_cc() {
     return 1
 }
 
+# kmod_kcflags <kmod-cc> — extra KCFLAGS for building with an older gcc
+# than the kernel's. The kernel's .config records gcc-15 features
+# (CONFIG_CC_HAS_COUNTED_BY), so headers use __counted_by() and gcc-14
+# prints "'counted_by' attribute directive ignored" for every include.
+# The attribute only feeds bounds checking (no layout change), so the
+# warning is pure noise in that combination. Prints nothing otherwise.
+kmod_kcflags() {
+    local want have
+    want=$(kernel_gcc_major); have=$(gcc_major "$1")
+    [[ -n "$want" && -n "$have" && "$have" -lt "$want" \
+        && "$(kconfig CC_HAS_COUNTED_BY)" == y ]] && echo "-Wno-attributes"
+    return 0
+}
+
 # --- pahole -----------------------------------------------------------------
 
 # pahole_version <bin> [libdir] — encoded version (v1.30 -> 130), empty if
