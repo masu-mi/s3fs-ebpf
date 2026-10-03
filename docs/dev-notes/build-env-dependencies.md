@@ -9,6 +9,8 @@ make setup-kbuild      # カーネル入替後: headers + gcc/pahole/vmlinux だ
 make toolchain         # Makefile が実際に使う CLANG / KMOD_CC / ... を表示
 ```
 
+`make all` / `make kmod` / `make bpf` はビルド前に同じ検査を対象を絞って実行し (`doctor.sh --quiet --build` / `--only kmod|bpf`)、NG があればコンパイル前に直し方と `fix all: scripts/setup-toolchain.sh <steps>` を出して止まる。`PREFLIGHT=0` で無効化できる。さらに `make kmod` はビルド後に `scripts/check-kmod-btf.sh` で `.ko` の `.BTF` サイズを確認する — kbuild は vmlinux が無いと BTF 生成を **スキップしたまま exit 0** するため、以前は `make all` が成功して insmod で初めて落ちていた (H-2 / C-4)。
+
 関連: 初回踏破の記録 [`journal/week1-build-runtime-notes.md`](../journal/week1-build-runtime-notes.md)、bench 環境の修正記録 [`journal/bench-env-notes.md`](../journal/bench-env-notes.md)。
 
 ---
@@ -45,7 +47,7 @@ make toolchain         # Makefile が実際に使う CLANG / KMOD_CC / ... を�
 |---|---|---|---|---|
 | C-1 | **clang 19+** (BPF) | clang-18 だと **エラーにならず** `arena_types.h` が `__arena` を素のポインタにフォールバックしたオブジェクトができる | `-mcpu=v3` の `__BPF_FEATURE_ADDR_SPACE_CAST` は clang 19+。noble 標準は 18 | 自動検出 (`clang-30`..`clang-19` → `clang`)。noble は `clang-20` (noble-updates)、bookworm は apt.llvm.org。`bpf/Makefile` に `check-clang` ガードを追加 |
 | C-2 | `llvm-strip-<N>` | `make daemon-gen` (bpf2go) のみ失敗 | bpf2go は `-cc clang-20` から `llvm-strip-20` を導出する。フルパスを渡すと `llvm-strip` になる | `llvm-<N>` を一緒に入れる。CLANG はコマンド名 (`clang-20`) で渡す |
-| C-3 | kmod 用 gcc = カーネルをビルドした gcc (最低 14) | `gcc-15: not found` / gcc-13 で `-fmin-function-alignment` 不明 | ヘッダの Makefile がビルド時のコンパイラ名を hard-code。mainline 6.12 は gcc-15、noble は gcc-14 まで | `CONFIG_GCC_VERSION` から major を読み、`gcc-<major>` → 同 major の `gcc` → `gcc-14` 以上の最新、の順に選んで `CC=`/`HOSTCC=` で渡す |
+| C-3 | kmod 用 gcc = カーネルをビルドした gcc の major (最低 14)。major が一致していれば kbuild の `warning: the compiler differs from the one used to build the kernel` (パッケージ版の文字列差) は無害 | `gcc-15: not found` / gcc-13 で `-fmin-function-alignment` 不明 | ヘッダの Makefile がビルド時のコンパイラ名を hard-code。mainline 6.12 は gcc-15、noble は gcc-14 まで | `CONFIG_GCC_VERSION` から major を読み、`gcc-<major>` → 同 major の `gcc` → `gcc-14` 以上の最新、の順に選んで `CC=`/`HOSTCC=` で渡す |
 | C-4 | pahole ≥ `CONFIG_PAHOLE_VERSION` | module BTF が **黙って** 空 (410 B) → insmod で kfunc 登録失敗 | noble の dwarves 1.25 は 1.30 でビルドされたカーネルの distilled base BTF を扱えない | distro pahole で足りればそれ、足りなければ `$HOME/.local` にソースビルド。`LD_LIBRARY_PATH` は **ローカル pahole を使う時だけ** 付く |
 
 ### T: ツール
