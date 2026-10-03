@@ -16,23 +16,22 @@ MOUNT_POINT ?= /mnt/s3demo
 FUSE_MOUNT  ?= /mnt/s3fuse
 METRICS_ADDR ?= :9600
 
-# Week 2 requires __BPF_FEATURE_ADDR_SPACE_CAST (clang 19+ with -mcpu=v3).
-# Ubuntu 24.04 ships clang-18.1 as /usr/bin/clang; noble-updates carries
-# clang-20 which we prefer when available. Override with `make CLANG=...`.
-CLANG ?= $(shell command -v clang-20 2>/dev/null || command -v clang-19 2>/dev/null || echo clang)
+# Toolchain: CLANG BPFTOOL KDIR KMOD_CC KMOD_PAHOLE KMOD_LDLIB.
+# Resolved by scripts/lib/toolchain.sh (shared with `make doctor` and
+# scripts/setup-toolchain.sh) so the rules live in one place:
+#   CLANG       first clang >= 19 (-mcpu=v3 addr_space_cast; noble's
+#               default clang is 18)
+#   KMOD_CC     gcc matching the kernel's CONFIG_GCC_VERSION, else the
+#               newest gcc >= 14 (Ubuntu mainline headers hard-code gcc-15)
+#   KMOD_PAHOLE pahole >= CONFIG_PAHOLE_VERSION, else $$HOME/.local build
+#   BPFTOOL     a bpftool that runs (Ubuntu wrapper / Debian /usr/sbin)
+# Each is a `?=` default: `make CLANG=clang-21` or an env var wins.
+# Background: docs/dev-notes/build-env-dependencies.md
+$(foreach v,$(shell $(SCRIPTS_DIR)/detect-toolchain.sh --make),$(eval $(v)))
 
-# Ubuntu mainline 6.12 kernel headers hard-code CC=gcc-15 but noble only
-# ships up to gcc-14. Detect the highest available and pass it through
-# to the kmod sub-make. See docs/journal/week1-build-runtime-notes.md #2.
-KMOD_CC ?= $(shell command -v gcc-15 2>/dev/null || command -v gcc-14 2>/dev/null || command -v gcc 2>/dev/null || echo gcc)
-
-# Distro pahole 1.25 silently emits empty BTF against kernels built with
-# pahole 1.30+; a user-local rebuild lives at $HOME/.local. See Week 1
-# notes #3. Fall back to system pahole if the local build isn't there.
-KMOD_PAHOLE ?= $(shell test -x $(HOME)/.local/bin/pahole && echo $(HOME)/.local/bin/pahole || command -v pahole 2>/dev/null || echo pahole)
-
-# Locally-built pahole needs its libdwarves; prepend if present.
-KMOD_LDLIB := $(HOME)/.local/lib
+# LD_LIBRARY_PATH prefix for a $$HOME/.local pahole (needs its libdwarves).
+KMOD_ENV := $(if $(KMOD_LDLIB),LD_LIBRARY_PATH=$(KMOD_LDLIB)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH})
+KMOD_MAKE_ARGS := KDIR=$(KDIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) PAHOLE=$(KMOD_PAHOLE)
 
 YELLOW := \033[33m
 GREEN  := \033[32m
@@ -49,7 +48,8 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way setup-bench-env \
-        setup-kernel setup-toolchain readme test-arena clean
+        doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
+        lint-scripts readme test-arena clean
 
 ## Help:
 help: ## Show this help
@@ -70,22 +70,23 @@ build: all ## Alias of 'all'
 # -----------------------------------------------------------------------------
 # Kernel module
 # -----------------------------------------------------------------------------
-# LD_LIBRARY_PATH lets a $HOME/.local pahole find its libdwarves.so;
-# CC / HOSTCC / PAHOLE override the kernel Kbuild defaults that assume
-# gcc-15 / distro pahole. All three are computed at the top of this
-# Makefile and can be overridden per-invocation.
+# CC / HOSTCC / PAHOLE override the kernel Kbuild defaults, which assume
+# the exact gcc / pahole the kernel was built with. See the toolchain
+# block at the top of this Makefile.
 kmod: ## Build kernel module -> kmod/s3fs_kfunc.ko
-	LD_LIBRARY_PATH=$(KMOD_LDLIB):$$LD_LIBRARY_PATH \
-	$(MAKE) -C $(KMOD_DIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) PAHOLE=$(KMOD_PAHOLE)
+	$(KMOD_ENV) $(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS)
 
 kmod-clean: ## Clean kernel module build artefacts
-	$(MAKE) -C $(KMOD_DIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) clean
+	$(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS) clean
 
 # -----------------------------------------------------------------------------
 # eBPF
 # -----------------------------------------------------------------------------
+# CLANG / BPFTOOL must be passed explicitly: variables computed in this
+# Makefile are not exported, so the sub-make would fall back to plain
+# `clang` (18 on noble) and fail on __arena casts.
 bpf: vmlinux ## Build eBPF program -> bpf/s3fs_fastpath.bpf.o
-	$(MAKE) -C $(BPF_DIR)
+	$(MAKE) -C $(BPF_DIR) CLANG=$(CLANG) BPFTOOL=$(BPFTOOL)
 
 bpf-clean: ## Clean eBPF build artefacts
 	$(MAKE) -C $(BPF_DIR) clean
@@ -98,7 +99,7 @@ vmlinux: $(BPF_DIR)/vmlinux.h ## Regenerate bpf/vmlinux.h from running kernel BT
 # and the bpf sub-make then fails with "unknown type name '__u32'".
 $(BPF_DIR)/vmlinux.h:
 	@tmp=$$(mktemp $@.tmp.XXXXXX) && \
-	  ( $(SCRIPTS_DIR)/gen-vmlinux.sh > $$tmp && mv $$tmp $@ ) || \
+	  ( BPFTOOL=$(BPFTOOL) $(SCRIPTS_DIR)/gen-vmlinux.sh > $$tmp && chmod 644 $$tmp && mv $$tmp $@ ) || \
 	  { rm -f $$tmp; exit 1; }
 
 vmlinux-clean: ## Drop bpf/vmlinux.h
@@ -110,6 +111,7 @@ vmlinux-clean: ## Drop bpf/vmlinux.h
 daemon: | $(BIN_DIR) ## Build Go user process -> bin/s3fs-ebpf
 	cd $(DAEMON_DIR) && go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
+# BPF_CLANG is a command name (clang-20), so bpf2go finds llvm-strip-20.
 daemon-gen: | $(BIN_DIR) ## Run bpf2go codegen then build daemon (needs network)
 	cd $(DAEMON_DIR) && BPF_CLANG=$(CLANG) go generate ./... && \
 		go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
@@ -170,8 +172,7 @@ daemon-run: daemon ## Run daemon in foreground (needs mount + compose-up)
 		echo "==> $(MOUNT_POINT) not mounted; run 'make mount' first"; exit 1; \
 	fi
 	@echo "==> running $(DAEMON_BIN) fastpath (foreground, Ctrl+C to stop)"
-	LD_LIBRARY_PATH=$(KMOD_LDLIB):$$LD_LIBRARY_PATH sudo -E \
-		$(DAEMON_BIN) fastpath --s3 --metrics-addr=$(METRICS_ADDR) --sample-every=5s --sync-every=30s
+	sudo -E $(DAEMON_BIN) fastpath --s3 --metrics-addr=$(METRICS_ADDR) --sample-every=5s --sync-every=30s
 
 daemon-stop: ## Send SIGINT to any running daemon
 	@if pgrep -f 's3fs-ebpf fastpath' >/dev/null; then \
@@ -200,15 +201,31 @@ bench-3way: all ## ebpf vs fuse-raw vs fuse-cache 3-way comparison
 	@echo "==> 3-way (ebpf vs fuse-raw vs fuse-cache) bench — results in /tmp/bench-3way/"
 	$(SCRIPTS_DIR)/bench-3way.sh
 
-setup-bench-env: ## Install bench dependencies (hyperfine, s3fs)
-	apt install hyperfine s3fs
+setup-bench-env: ## Install bench dependencies (hyperfine, fio, s3fs, /etc/passwd-s3fs)
+	$(SCRIPTS_DIR)/setup-toolchain.sh bench
 
 ## Host bootstrap:
-setup-kernel: ## Install mainline Linux 6.12 LTS kernel (reboot after)
+doctor: ## Check kernel / headers / compilers / tools and print fixes
+	@$(SCRIPTS_DIR)/doctor.sh
+
+doctor-build: ## Same as doctor, limited to what 'make all' needs
+	@$(SCRIPTS_DIR)/doctor.sh --build
+
+toolchain: ## Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
+	@printf '%-12s %s\n' CLANG '$(CLANG)' BPFTOOL '$(BPFTOOL)' KDIR '$(KDIR)' \
+	  KMOD_CC '$(KMOD_CC)' KMOD_PAHOLE '$(KMOD_PAHOLE)' KMOD_LDLIB '$(KMOD_LDLIB)'
+
+setup-kernel: ## Install mainline Linux 6.12 LTS kernel (Ubuntu; reboot after)
 	$(SCRIPTS_DIR)/setup-kernel-6.12.sh
 
-setup-toolchain: ## Install clang, bpftool, go, docker, fio, bcc
+setup-toolchain: ## Install everything (clang, bpftool, headers, gcc/pahole, go, bench)
 	$(SCRIPTS_DIR)/setup-toolchain.sh
+
+setup-kbuild: ## Re-run kernel-specific fixes (headers, gcc, pahole, vmlinux) after a kernel change
+	$(SCRIPTS_DIR)/setup-toolchain.sh headers kbuild
+
+lint-scripts: ## shellcheck scripts/ and s3fs-ebpf.sh
+	shellcheck $(SCRIPTS_DIR)/*.sh $(SCRIPTS_DIR)/lib/*.sh $(TOPDIR)/s3fs-ebpf.sh
 
 ## Documentation:
 readme: $(README) ## Regenerate README.md from README.md.tmpl
@@ -218,7 +235,7 @@ $(README): $(README_TMPL) $(DAEMON_BIN) Makefile
 	@echo "==> regenerating $(notdir $(README))"
 	@CLI_HELP="$$($(DAEMON_BIN) --help 2>&1)" \
 	 CLI_MOUNT_HELP="$$($(DAEMON_BIN) mount --help 2>&1)" \
-	 MAKE_HELP="$$($(MAKE) --no-print-directory help)" \
+	 MAKE_HELP="$$($(MAKE) --no-print-directory help | sed 's/\x1b\[[0-9;]*m//g')" \
 	 envsubst '$$CLI_HELP $$CLI_MOUNT_HELP $$MAKE_HELP' \
 	   < $(README_TMPL) > $(README)
 

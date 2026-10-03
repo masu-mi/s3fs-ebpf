@@ -17,16 +17,27 @@ OBJS := s3fs_fastpath.bpf.o policy_observe.bpf.o \
         policy_pressure_ops.bpf.o policy_time_decay_ops.bpf.o \
         policy_size_aware_ops.bpf.o
 
-.PHONY: all clean vmlinux
+.PHONY: all clean vmlinux check-clang
 
 all: vmlinux $(OBJS)
+
+# clang < 19 does not define __BPF_FEATURE_ADDR_SPACE_CAST, and
+# arena_types.h then *silently* falls back to plain pointers — the build
+# succeeds but the objects differ. Fail loudly instead.
+check-clang:
+	@v=$$($(CLANG) --version 2>/dev/null | sed -nE 's/.*clang version ([0-9]+).*/\1/p' | head -n1); \
+	if [ -z "$$v" ] || [ "$$v" -lt 19 ]; then \
+		echo "ERROR: CLANG=$(CLANG) is clang $${v:-?}; need >= 19 for -mcpu=v3 __arena casts." >&2; \
+		echo "       Run 'make doctor' (C-1) or pass CLANG=clang-20." >&2; \
+		exit 1; \
+	fi
 
 vmlinux: vmlinux.h
 
 vmlinux.h:
-	../scripts/gen-vmlinux.sh > $@
+	BPFTOOL=$(BPFTOOL) ../scripts/gen-vmlinux.sh > $@
 
-%.bpf.o: %.bpf.c vmlinux.h arena_types.h
+%.bpf.o: %.bpf.c vmlinux.h arena_types.h | check-clang
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 
 clean:
