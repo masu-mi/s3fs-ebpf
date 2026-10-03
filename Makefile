@@ -31,7 +31,10 @@ $(foreach v,$(shell $(SCRIPTS_DIR)/detect-toolchain.sh --make),$(eval $(v)))
 
 # LD_LIBRARY_PATH prefix for a $$HOME/.local pahole (needs its libdwarves).
 KMOD_ENV := $(if $(KMOD_LDLIB),LD_LIBRARY_PATH=$(KMOD_LDLIB)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH})
-KMOD_MAKE_ARGS := KDIR=$(KDIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) PAHOLE=$(KMOD_PAHOLE)
+# KMOD_KCFLAGS: -Wno-attributes only when KMOD_CC is older than the kernel's
+# gcc (gcc-14 vs mainline's gcc-15 -> counted_by noise); see kmod_kcflags.
+KMOD_MAKE_ARGS := KDIR=$(KDIR) CC=$(KMOD_CC) HOSTCC=$(KMOD_CC) PAHOLE=$(KMOD_PAHOLE) \
+                  $(if $(KMOD_KCFLAGS),KCFLAGS=$(KMOD_KCFLAGS))
 
 # Preflight: before building, run the doctor checks that gate a component
 # (scripts/doctor.sh --only kmod|bpf, or --build for `make all`) so a known
@@ -233,7 +236,8 @@ doctor-build: ## Same as doctor, limited to what 'make all' needs
 
 toolchain: ## Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
 	@printf '%-12s %s\n' CLANG '$(CLANG)' BPFTOOL '$(BPFTOOL)' KDIR '$(KDIR)' \
-	  KMOD_CC '$(KMOD_CC)' KMOD_PAHOLE '$(KMOD_PAHOLE)' KMOD_LDLIB '$(KMOD_LDLIB)'
+	  KMOD_CC '$(KMOD_CC)' KMOD_PAHOLE '$(KMOD_PAHOLE)' KMOD_LDLIB '$(KMOD_LDLIB)' \
+	  KMOD_KCFLAGS '$(KMOD_KCFLAGS)'
 
 setup-kernel: ## Install mainline Linux 6.12 LTS kernel (Ubuntu; reboot after)
 	$(SCRIPTS_DIR)/setup-kernel-6.12.sh

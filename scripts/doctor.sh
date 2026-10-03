@@ -136,8 +136,9 @@ else
         ng C-3 "no usable gcc for kmod (KMOD_CC=$kcc${have:+ is gcc-$have}; kernel built with gcc-${want:-?}, need >= $floor)" \
             "$SETUP kbuild   (installs gcc-$want or gcc-$S3FS_MIN_KMOD_GCC)"
     elif [[ -n "$want" && "$have" != "$want" ]]; then
-        wn C-3 "KMOD_CC=$kcc (gcc-$have) but kernel was built with gcc-$want — usually fine, exact match not available" \
-            "install gcc-$want if modpost/objtool complains"
+        wn C-3 "KMOD_CC=$kcc (gcc-$have) but kernel was built with gcc-$want — builds fine; kbuild prints 'compiler differs'" \
+            "gcc-$have lacks newer attributes (e.g. counted_by); Makefile adds KCFLAGS=$(kmod_kcflags "$kcc") to silence that noise" \
+            "exact match: install gcc-$want if your distro has it"
     else
         ok C-3 "KMOD_CC=$kcc (gcc-$have, kernel built with gcc-${want:-?})"
     fi
