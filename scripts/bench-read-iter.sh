@@ -17,8 +17,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=lib/umount.sh
-source "$TOPDIR/scripts/lib/umount.sh"
+# shellcheck source=lib/bench.sh
+source "$TOPDIR/scripts/lib/bench.sh"
 
 OUT_DIR=${OUT_DIR:-/tmp/bench}
 MP_EBPF=/mnt/s3demo
@@ -29,45 +29,25 @@ MICRO_ITERS=${MICRO_ITERS:-10000}
 
 mkdir -p "$OUT_DIR"
 log() { echo "[bench-read-iter] $*" >&2; }
-BIN="$TOPDIR/bin/s3fs-ebpf"
+BIN="$S3FS_BIN"
 
 check_prereq() {
-	docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
-		|| { echo "s3fs-ebpf-minio container missing — run 'make compose-up'"; exit 1; }
-	docker exec s3fs-ebpf-minio mc alias set local http://localhost:9000 \
-		minioadmin minioadmin >/dev/null 2>&1
-	docker exec s3fs-ebpf-minio mc stat "local/s3fs-test/$FILE" >/dev/null 2>&1 \
-		|| { echo "s3://s3fs-test/$FILE missing — run 'make compose-up'"; exit 1; }
+	need_built
+	minio_require "$FILE"
 }
 
-# start_ebpf [extra-flags]
+# start_ebpf [extra-flags...]
 # Loads kmod, mounts, starts daemon, waits for prewarm.
 start_ebpf() {
-	local extra="${1:-}"
-	log "starting daemon flags='$extra'"
-	lsmod | grep -q '^s3fs_kfunc' || sudo insmod "$TOPDIR/kmod/s3fs_kfunc.ko"
-	mountpoint -q "$MP_EBPF" \
-		|| { sudo mkdir -p "$MP_EBPF"; sudo mount -t s3fs_ebpf none "$MP_EBPF"; }
-	# Kill any stale daemon. Character-class trick avoids pkill matching itself.
-	sudo pkill -9 -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 0.5
-	LD_LIBRARY_PATH=$HOME/.local/lib sudo -E \
-		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 --sample-every=300s \
-		--metrics-addr="" $extra \
-		>"$OUT_DIR/fastpath-ri.log" 2>&1 &
-	for _ in $(seq 1 60); do
-		grep -q '\[admit\] ' "$OUT_DIR/fastpath-ri.log" && break
-		sleep 0.2
-	done
-	sleep 0.3
+	log "starting daemon flags='$*'"
+	ebpf_mount "$MP_EBPF"
+	ebpf_start_daemon "$OUT_DIR/fastpath-ri.log" \
+		--sample-every=300s --metrics-addr="" "$@"
 	log "prewarm done (log: $OUT_DIR/fastpath-ri.log)"
 }
 
 stop_ebpf() {
-	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 1
-	umount_hard "$MP_EBPF"
-	sudo rmmod s3fs_kfunc 2>/dev/null || true
+	ebpf_stop "$MP_EBPF"
 }
 trap stop_ebpf EXIT
 
@@ -75,7 +55,7 @@ check_prereq
 
 # ── Phase 1: WITH fentry/generic_file_read_iter ──────────────────────────
 log "=== phase 1: WITH hook (default) ==="
-start_ebpf ""
+start_ebpf
 # Warmup to stabilise TLB / pipeline before timing.
 "$BIN" dev microbench --op=read --path="$MP_EBPF/$FILE" \
 	--iters=500 --warmup=200 --label='warmup' >/dev/null 2>&1 || true

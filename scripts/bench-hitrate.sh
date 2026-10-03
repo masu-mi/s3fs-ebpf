@@ -18,8 +18,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=lib/umount.sh
-source "$TOPDIR/scripts/lib/umount.sh"
+# shellcheck source=lib/bench.sh
+source "$TOPDIR/scripts/lib/bench.sh"
 MOUNT=${MOUNT:-/mnt/s3demo}
 METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
 BUCKET=${BUCKET:-s3fs-test}
@@ -42,14 +42,9 @@ log() { echo "[hitrate] $*" >&2; }
 
 # --- prereq --------------------------------------------------------------
 
-need() { command -v "$1" >/dev/null || { echo "missing $1"; exit 1; }; }
-need docker
-need curl
-need python3
-docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
-	|| { echo "s3fs-ebpf-minio not running (make compose-up)"; exit 1; }
-[ -f "$TOPDIR/kmod/s3fs_kfunc.ko" ] || { echo "kmod not built (make kmod)"; exit 1; }
-[ -x "$TOPDIR/bin/s3fs-ebpf" ]      || { echo "daemon not built (make daemon)"; exit 1; }
+need_cmds docker curl python3
+need_built
+minio_require
 
 # --- bucket seed ---------------------------------------------------------
 
@@ -58,16 +53,16 @@ docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
 # big.bin, etc.) would still admit and skew softcap accounting.
 seed_bucket() {
 	log "clearing bucket $BUCKET and seeding $N_FILES hitrate files"
-	docker exec s3fs-ebpf-minio mc rm --recursive --force \
+	docker exec "$MINIO_CONTAINER" mc rm --recursive --force \
 		"local/$BUCKET" >/dev/null 2>&1 || true
-	docker exec s3fs-ebpf-minio mc mb --ignore-existing \
+	docker exec "$MINIO_CONTAINER" mc mb --ignore-existing \
 		"local/$BUCKET" >/dev/null
 	# One .txt per iteration index, distinct content so a hit is
 	# obviously the cached copy.
 	local i
 	for i in $(seq 0 $((N_FILES-1))); do
 		printf 'hitrate file %02d line1\nhitrate file %02d line2\n' "$i" "$i" \
-			| docker exec -i s3fs-ebpf-minio \
+			| docker exec -i "$MINIO_CONTAINER" \
 				mc pipe "local/$BUCKET/hitrate_$i.txt" >/dev/null
 	done
 }
@@ -104,15 +99,7 @@ PY
 # --- lifecycle -----------------------------------------------------------
 
 cleanup() {
-	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	# give SIGINT time to drain; then umount + rmmod
-	local i
-	for i in 1 2 3 4 5; do
-		pgrep -f 's3fs-ebpf fastpath' >/dev/null || break
-		sleep 0.5
-	done
-	umount_hard "$MOUNT"
-	lsmod | grep -q '^s3fs_kfunc' && sudo rmmod s3fs_kfunc 2>/dev/null || true
+	ebpf_stop "$MOUNT"
 }
 trap cleanup EXIT
 
@@ -120,21 +107,12 @@ trap cleanup EXIT
 start_stack() {
 	local pol=$1
 	cleanup
-	sudo insmod "$TOPDIR/kmod/s3fs_kfunc.ko"
-	sudo mkdir -p "$MOUNT"
-	sudo mount -t s3fs_ebpf none "$MOUNT"
-	LD_LIBRARY_PATH=$HOME/.local/lib sudo -E \
-		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 \
+	ebpf_mount "$MOUNT"
+	# Ready = prewarm complete: daemon logs "[admit] N entries".
+	ebpf_start_daemon "$OUT/daemon-${pol}.log" \
 		--policy-bpf="builtin:policy_${pol}" \
 		--metrics-addr=:9600 \
-		--sample-every=2s --sync-every="$SYNC_EVERY" \
-		>"$OUT/daemon-${pol}.log" 2>&1 &
-	# Wait for prewarm-complete: daemon logs "[admit] N entries".
-	local i
-	for i in $(seq 1 60); do
-		grep -q '\[admit\] ' "$OUT/daemon-${pol}.log" && break
-		sleep 0.2
-	done
+		--sample-every=2s --sync-every="$SYNC_EVERY"
 	log "$pol: prewarm done, forcing 4 policy eval rounds to converge below softcap"
 	# SIEVE needs 3 rounds (grace → clear → evict); LRU / freq2bit
 	# / S3-FIFO converge faster but do no harm here. Sleep between so the
@@ -200,6 +178,7 @@ run_one() {
 
 	local f_miss f_reload f_evict
 	f_miss=$(read_counter s3fs_ebpf_read_miss_upcalls_total)
+	# shellcheck disable=SC2034  # kept for symmetry with b_reload
 	f_reload=$(read_counter s3fs_ebpf_read_miss_errors_total)
 	f_evict=$(read_counter s3fs_ebpf_policy_evictions_total)
 

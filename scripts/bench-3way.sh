@@ -12,8 +12,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=lib/umount.sh
-source "$TOPDIR/scripts/lib/umount.sh"
+# shellcheck source=lib/bench.sh
+source "$TOPDIR/scripts/lib/bench.sh"
 OUT_DIR=${OUT_DIR:-/tmp/bench-3way}
 MP_EBPF=/mnt/s3demo
 MP_FUSE_RAW=/mnt/s3fuse            # raw、キャッシュ無効
@@ -28,66 +28,39 @@ MICRO_ITERS=${MICRO_ITERS:-20000}
 PERF_ITERS=${PERF_ITERS:-200}
 
 mkdir -p "$OUT_DIR" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
-sudo chown "$USER:$USER" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
+sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
 
 log() { echo "[bench-3way] $*" >&2; }
 
-PERF_BIN=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null \
-	| awk -F/ '{ print $NF" "$0 }' | sort -Vr | awk 'NR==1 {print $2}')
-PERF_BIN=${PERF_BIN:-perf}
+PERF_BIN=$(perf_bin)
 
 # --- setup ---------------------------------------------------------
 check_prereq() {
-	for t in hyperfine s3fs; do
-		command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }
-	done
+	need_cmds hyperfine s3fs
+	need_built
+	minio_require "$FILE" "$BIG_FILE"
 }
 
 start_fuse_raw() {
 	log "mount fuse-raw at $MP_FUSE_RAW"
-	sudo mkdir -p "$MP_FUSE_RAW"
-	umount_hard "$MP_FUSE_RAW"
-	sudo s3fs s3fs-test "$MP_FUSE_RAW" \
-		-o url=http://127.0.0.1:9000 -o use_path_request_style \
-		-o passwd_file=/etc/passwd-s3fs -o allow_other \
-		-o uid=$(id -u) -o gid=$(id -g) -o umask=0022
+	fuse_mount_raw "$MP_FUSE_RAW"
 }
 
 start_fuse_cache() {
 	log "mount fuse-cache at $MP_FUSE_CACHE (use_cache + kernel_cache)"
-	sudo mkdir -p "$MP_FUSE_CACHE"
-	umount_hard "$MP_FUSE_CACHE"
-	rm -rf "$FUSE_CACHE_DIR" && mkdir -p "$FUSE_CACHE_DIR"
-	sudo s3fs s3fs-test "$MP_FUSE_CACHE" \
-		-o url=http://127.0.0.1:9000 -o use_path_request_style \
-		-o passwd_file=/etc/passwd-s3fs -o allow_other \
-		-o uid=$(id -u) -o gid=$(id -g) -o umask=0022 \
-		-o use_cache="$FUSE_CACHE_DIR" -o kernel_cache \
-		-o max_stat_cache_size=100000
+	fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"
 }
 
 start_ebpf() {
 	log "load kmod + mount ebpf + start daemon with --cache-dir"
-	lsmod | grep -q '^s3fs_kfunc' || sudo insmod "$TOPDIR/kmod/s3fs_kfunc.ko"
-	mountpoint -q "$MP_EBPF" || { sudo mkdir -p "$MP_EBPF"; sudo mount -t s3fs_ebpf none "$MP_EBPF"; }
-	sudo pkill -9 -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 0.5
-	LD_LIBRARY_PATH=$HOME/.local/lib sudo -E \
-		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 \
-		--cache-dir="$EBPF_CACHE_DIR" --sample-every=60s \
-		>"$OUT_DIR/fastpath.log" 2>&1 &
-	for _ in $(seq 1 40); do
-		grep -q '\[admit\] ' "$OUT_DIR/fastpath.log" && break; sleep 0.2
-	done
-	sleep 0.2
+	ebpf_mount "$MP_EBPF"
+	ebpf_start_daemon "$OUT_DIR/fastpath.log" \
+		--cache-dir="$EBPF_CACHE_DIR" --sample-every=60s
 }
 
 stop_all() {
 	log "stopping"
-	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 1
-	umount_hard "$MP_EBPF"
-	sudo rmmod s3fs_kfunc 2>/dev/null || true
+	ebpf_stop "$MP_EBPF"
 	umount_hard "$MP_FUSE_CACHE"
 	# leave MP_FUSE_RAW mounted for the next bench-latency run
 }
@@ -119,7 +92,7 @@ run_hf_big() {
 # --- 3. microbench read (syscall latency) -------------------------
 run_micro() {
 	log "microbench read syscall-level ($MICRO_ITERS iters)"
-	BIN="$TOPDIR/bin/s3fs-ebpf"
+	BIN="$S3FS_BIN"
 	# fuse-cache prime
 	cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true
 	{

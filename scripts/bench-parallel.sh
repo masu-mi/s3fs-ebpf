@@ -21,8 +21,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=lib/umount.sh
-source "$TOPDIR/scripts/lib/umount.sh"
+# shellcheck source=lib/bench.sh
+source "$TOPDIR/scripts/lib/bench.sh"
 
 OUT_DIR=${OUT_DIR:-/tmp/bench-parallel}
 MP_EBPF=/mnt/s3demo
@@ -39,68 +39,39 @@ METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
 DASHBOARD_URL=${DASHBOARD_URL:-http://localhost:3000/d/s3fs-ebpf-overview}
 
 mkdir -p "$OUT_DIR" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
-sudo chown "$USER:$USER" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
+sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
 
 log() { echo "[bench-parallel] $*" >&2; }
 
 check_prereq() {
-	for t in s3fs docker; do
-		command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }
-	done
-	docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
-		|| { echo "s3fs-ebpf-minio container missing — run make compose-up"; exit 1; }
-	docker exec s3fs-ebpf-minio mc ls "local/s3fs-test/$FILE" >/dev/null 2>&1 \
-		|| { echo "s3://s3fs-test/$FILE missing — seed the bucket first"; exit 1; }
+	need_cmds s3fs
+	need_built
+	minio_require "$FILE"
 }
 
 start_fuse_raw() {
 	log "mount fuse-raw at $MP_FUSE_RAW"
-	sudo mkdir -p "$MP_FUSE_RAW"
-	umount_hard "$MP_FUSE_RAW"
-	sudo s3fs s3fs-test "$MP_FUSE_RAW" \
-		-o url=http://127.0.0.1:9000 -o use_path_request_style \
-		-o passwd_file=/etc/passwd-s3fs -o allow_other \
-		-o "uid=$(id -u)" -o "gid=$(id -g)" -o umask=0022
+	fuse_mount_raw "$MP_FUSE_RAW"
 }
 
 start_fuse_cache() {
 	log "mount fuse-cache at $MP_FUSE_CACHE (use_cache + kernel_cache)"
-	sudo mkdir -p "$MP_FUSE_CACHE"
-	umount_hard "$MP_FUSE_CACHE"
-	rm -rf "$FUSE_CACHE_DIR" && mkdir -p "$FUSE_CACHE_DIR"
-	sudo s3fs s3fs-test "$MP_FUSE_CACHE" \
-		-o url=http://127.0.0.1:9000 -o use_path_request_style \
-		-o passwd_file=/etc/passwd-s3fs -o allow_other \
-		-o "uid=$(id -u)" -o "gid=$(id -g)" -o umask=0022 \
-		-o "use_cache=$FUSE_CACHE_DIR" -o kernel_cache \
-		-o max_stat_cache_size=100000
+	fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"
 }
 
 start_ebpf() {
 	log "load kmod + mount ebpf + start daemon"
-	lsmod | grep -q '^s3fs_kfunc' || sudo insmod "$TOPDIR/kmod/s3fs_kfunc.ko"
-	mountpoint -q "$MP_EBPF" || { sudo mkdir -p "$MP_EBPF"; sudo mount -t s3fs_ebpf none "$MP_EBPF"; }
-	sudo pkill -9 -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 0.5
-	LD_LIBRARY_PATH="$HOME/.local/lib" sudo -E \
-		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 \
+	ebpf_mount "$MP_EBPF"
+	ebpf_start_daemon "$OUT_DIR/fastpath.log" \
 		--cache-dir="$EBPF_CACHE_DIR" --sample-every=5s --sync-every=60s \
-		--metrics-addr=:9600 \
-		>"$OUT_DIR/fastpath.log" 2>&1 &
-	for _ in $(seq 1 60); do
-		grep -q '\[admit\] ' "$OUT_DIR/fastpath.log" 2>/dev/null && break
-		sleep 0.3
-	done
+		--metrics-addr=:9600
 }
 
 stop_all() {
 	log "stopping"
 	sudo pkill -9 -f 'bench-parallel-reader' 2>/dev/null || true
 	sudo pkill -9 -f 'bench-parallel-writer' 2>/dev/null || true
-	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 1
-	umount_hard "$MP_EBPF"
-	sudo rmmod s3fs_kfunc 2>/dev/null || true
+	ebpf_stop "$MP_EBPF"
 	umount_hard "$MP_FUSE_CACHE"
 	umount_hard "$MP_FUSE_RAW"
 }

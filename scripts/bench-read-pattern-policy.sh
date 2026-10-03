@@ -34,8 +34,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=lib/umount.sh
-source "$TOPDIR/scripts/lib/umount.sh"
+# shellcheck source=lib/bench.sh
+source "$TOPDIR/scripts/lib/bench.sh"
 
 OUT_DIR=${OUT_DIR:-/tmp/bench}
 MP_EBPF=/mnt/s3demo
@@ -44,56 +44,35 @@ POLICY="$TOPDIR/policies/bench-no-large-prewarm.cel"
 
 mkdir -p "$OUT_DIR"
 log() { echo "[bench-read-pattern] $*" >&2; }
-BIN="$TOPDIR/bin/s3fs-ebpf"
 
 check_prereq() {
-	for cmd in docker; do
-		command -v "$cmd" >/dev/null || { echo "missing: $cmd"; exit 1; }
-	done
-	docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
-		|| { echo "s3fs-ebpf-minio missing — run 'make compose-up'"; exit 1; }
-	docker exec s3fs-ebpf-minio mc alias set local http://localhost:9000 \
-		minioadmin minioadmin >/dev/null 2>&1
-	docker exec s3fs-ebpf-minio mc stat "local/s3fs-test/$BIG_FILE" >/dev/null 2>&1 \
-		|| { echo "s3://s3fs-test/$BIG_FILE missing — run 'make compose-up'"; exit 1; }
+	need_built
+	minio_require "$BIG_FILE"
 	[ -f "$POLICY" ] \
 		|| { echo "policy missing: $POLICY"; exit 1; }
 }
 
 DAEMON_LOG=""
 
-# start_ebpf <label> [extra-flags]
+# start_ebpf <label> [extra-flags...]
 # Loads kmod, mounts, starts daemon with no-prewarm-large policy.
 # Waits until entry sync is visible so the large file is in the entry
 # table but NOT admitted (policy returns prewarm=false for it).
 start_ebpf() {
-	local label="$1" extra="${2:-}"
+	local label="$1"; shift
 	DAEMON_LOG="$OUT_DIR/fastpath-$label.log"
-	log "starting daemon label=$label extra='$extra'"
-	lsmod | grep -q '^s3fs_kfunc' || sudo insmod "$TOPDIR/kmod/s3fs_kfunc.ko"
-	mountpoint -q "$MP_EBPF" \
-		|| { sudo mkdir -p "$MP_EBPF"; sudo mount -t s3fs_ebpf none "$MP_EBPF"; }
-	sudo pkill -9 -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 0.5
-	LD_LIBRARY_PATH=$HOME/.local/lib sudo -E \
-		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 --sample-every=300s \
-		--policy="$POLICY" --metrics-addr="" $extra \
-		>"$DAEMON_LOG" 2>&1 &
-	# Wait for initial sync so the entry table includes $BIG_FILE.
-	for _ in $(seq 1 80); do
-		grep -q '\[sync\] initial:' "$DAEMON_LOG" && break
-		sleep 0.2
-	done
+	log "starting daemon label=$label extra='$*'"
+	ebpf_mount "$MP_EBPF"
+	# Ready = initial sync done, so the entry table includes $BIG_FILE.
+	DAEMON_READY_PATTERN='\[sync\] initial:' ebpf_start_daemon "$DAEMON_LOG" \
+		--sample-every=300s --policy="$POLICY" --metrics-addr="" "$@"
 	# Give the prewarm loop a moment to skip large files.
 	sleep 0.5
 	log "daemon ready; $BIG_FILE entry live but NOT admitted (prewarm=false)"
 }
 
 stop_ebpf() {
-	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 1
-	umount_hard "$MP_EBPF" 2>/dev/null || true
-	sudo rmmod s3fs_kfunc 2>/dev/null || true
+	ebpf_stop "$MP_EBPF"
 }
 trap stop_ebpf EXIT
 
@@ -105,7 +84,7 @@ check_prereq
 
 # ── Phase 1: WITHOUT pattern-aware admit (D-01 chunk baseline) ───────────
 log "=== phase 1: WITHOUT --pattern-aware-admit (chunk baseline) ==="
-start_ebpf "without" ""
+start_ebpf "without"
 
 log "cold-read $BIG_FILE (expect ceil(size/4MiB) upcalls)"
 T_WITHOUT=$( { time cat "$MP_EBPF/$BIG_FILE" > /dev/null; } 2>&1 )
@@ -133,7 +112,7 @@ stop_ebpf
 trap - EXIT
 
 # ── Get file size from MinIO for reference ────────────────────────────────
-FILE_BYTES=$(docker exec s3fs-ebpf-minio mc stat "local/s3fs-test/$BIG_FILE" 2>/dev/null \
+FILE_BYTES=$(docker exec "$MINIO_CONTAINER" mc stat "local/$S3_BUCKET/$BIG_FILE" 2>/dev/null \
 	| awk '/Size:/{gsub(/[^0-9]/,"",$2); print $2+0}')
 FILE_MIB=$(awk "BEGIN{printf \"%.1f\", $FILE_BYTES/1048576}")
 EXPECTED_CHUNKS=$(awk "BEGIN{printf \"%d\", int(($FILE_BYTES+4194303)/4194304)}")

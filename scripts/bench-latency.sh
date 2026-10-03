@@ -13,8 +13,8 @@
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-# shellcheck source=lib/umount.sh
-source "$TOPDIR/scripts/lib/umount.sh"
+# shellcheck source=lib/bench.sh
+source "$TOPDIR/scripts/lib/bench.sh"
 OUT_DIR=${OUT_DIR:-/tmp/bench}
 MP_EBPF=/mnt/s3demo
 MP_FUSE=/mnt/s3fuse
@@ -34,28 +34,17 @@ mkdir -p "$OUT_DIR"
 log() { echo "[bench] $*" >&2; }
 
 check_prereq() {
-	for t in hyperfine s3fs fio docker; do
-		command -v "$t" >/dev/null || { echo "missing $t (apt install $t or run scripts/setup-toolchain.sh)"; exit 1; }
-	done
-	# MinIO must be reachable; the bench does docker exec ... mc cat/put etc.
-	docker inspect s3fs-ebpf-minio >/dev/null 2>&1 \
-		|| { echo "s3fs-ebpf-minio container missing — run 'make compose-up'"; exit 1; }
-	# Ensure mc inside the minio container has credentials; the default
-	# config has none, so mc ls exits 0 even for missing objects (silent
-	# anonymous access), which defeats the check below without this line.
-	docker exec s3fs-ebpf-minio mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null 2>&1
-	# fio object must exist on the S3 side, otherwise the fuse-mount
-	# ls will not see it (see docs/dev-notes/lessons-learned.md §3.1 note on the
+	need_cmds hyperfine s3fs fio
+	need_built
+	# The object must exist on the S3 side, otherwise the fuse mount will
+	# not see it (see docs/dev-notes/lessons-learned.md §3.1 note on the
 	# "hello.txt disappeared from MinIO" incident).
-	# Use mc stat (not mc ls) — mc ls exits 0 on anonymous buckets even
-	# when the object is absent, so it cannot reliably detect missing files.
-	docker exec s3fs-ebpf-minio mc stat "local/s3fs-test/$FILE" >/dev/null 2>&1 \
-		|| { echo "s3://s3fs-test/$FILE missing in MinIO — run 'make compose-up' to re-seed"; exit 1; }
+	minio_require "$FILE"
 }
 
 # Auto-mount fuse-raw at $MP_FUSE so runs from a clean host (`make
-# compose-up; make all; make bench`) succeed. Previous behavior forced
-# the operator to pre-mount by hand.
+# compose-up; make all; make bench`) succeed. An operator-owned mount is
+# reused and left in place.
 FUSE_STARTED=0
 start_fuse() {
 	if mountpoint -q "$MP_FUSE"; then
@@ -63,44 +52,21 @@ start_fuse() {
 		return
 	fi
 	log "mounting s3fs-fuse at $MP_FUSE"
-	sudo mkdir -p "$MP_FUSE"
-	sudo s3fs s3fs-test "$MP_FUSE" \
-		-o url=http://127.0.0.1:9000 -o use_path_request_style \
-		-o passwd_file=/etc/passwd-s3fs -o allow_other \
-		-o uid="$(id -u)" -o gid="$(id -g)" -o umask=0022 \
-		-o compat_dir -o enable_noobj_cache \
-		|| { echo "s3fs mount failed — check /etc/passwd-s3fs and MinIO"; exit 1; }
+	fuse_mount "$MP_FUSE" -o compat_dir -o enable_noobj_cache \
+		|| { echo "s3fs mount failed — check $S3FS_PASSWD_FILE and MinIO"; exit 1; }
 	FUSE_STARTED=1
 }
 
 start_ebpf() {
 	log "loading kmod + mounting + starting daemon"
-	lsmod | grep -q '^s3fs_kfunc' || sudo insmod "$TOPDIR/kmod/s3fs_kfunc.ko"
-	mountpoint -q "$MP_EBPF" || { sudo mkdir -p "$MP_EBPF"; sudo mount -t s3fs_ebpf none "$MP_EBPF"; }
-	# fast[p]ath: character-class trick — matches the daemon's cmdline
-	# ("fastpath") but NOT the literal string "fast[p]ath" in pkill's own
-	# argument list, preventing pkill from sending SIGKILL to itself and
-	# triggering a bash "Killed" job notification with \r that corrupts output.
-	sudo pkill -9 -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 0.5
-	LD_LIBRARY_PATH=$HOME/.local/lib sudo -E \
-		"$TOPDIR/bin/s3fs-ebpf" fastpath --s3 --sample-every=60s \
-		--metrics-addr=:9600 \
-		>"$OUT_DIR/fastpath.log" 2>&1 &
-	for _ in $(seq 1 40); do
-		grep -q '\[admit\] ' "$OUT_DIR/fastpath.log" && break
-		sleep 0.2
-	done
-	sleep 0.2
+	ebpf_mount "$MP_EBPF"
+	ebpf_start_daemon "$OUT_DIR/fastpath.log" --sample-every=60s --metrics-addr=:9600
 	log "prewarm done"
 }
 
 stop_ebpf() {
 	log "stopping ebpf stack"
-	sudo pkill -INT -f 's3fs-ebpf fast[p]ath' 2>/dev/null || true
-	sleep 1
-	umount_hard "$MP_EBPF"
-	sudo rmmod s3fs_kfunc 2>/dev/null || true
+	ebpf_stop "$MP_EBPF"
 	# Only unmount fuse if we brought it up (avoid stealing an
 	# operator-owned pre-existing mount).
 	if [ "$FUSE_STARTED" -eq 1 ]; then
@@ -142,7 +108,7 @@ hyperfine --warmup 2 --min-runs 30 --shell=none \
 
 # ---------- 2. microbench: syscall-level (fork/exec 排除) --------------
 log "microbench: syscall-level stat/read ($MICRO_ITERS iters each)"
-BIN="$TOPDIR/bin/s3fs-ebpf"
+BIN="$S3FS_BIN"
 {
 	echo '## microbench (syscall-level, no fork/exec)'
 	echo
@@ -163,9 +129,7 @@ cat "$OUT_DIR/micro.md" >&2
 # 各 FS で cat をループ実行し cycles / instructions / cache-misses を
 # 見る。1 cat あたりの CPU 消費が Fast Path でどれだけ削れるかの根拠。
 # perf-shim は kernel version 依存でエラーになるので手掘り fallback。
-PERF_BIN=$(ls /usr/lib/linux-tools/*/perf 2>/dev/null \
-	| awk -F/ '{ print $NF" "$0 }' | sort -Vr | awk 'NR==1 {print $2}')
-PERF_BIN=${PERF_BIN:-perf}
+PERF_BIN=$(perf_bin)
 log "perf stat: CPU consumption (using $PERF_BIN)"
 PERF_ITERS=$(( MICRO_ITERS / 100 ))
 perf_cat() {
