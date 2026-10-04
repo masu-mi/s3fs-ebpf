@@ -98,9 +98,9 @@ run_micro() {
 	{
 		echo '## microbench read (syscall-level)'
 		echo '```'
-		"$BIN" microbench --op=read --path="$MP_FUSE_RAW/$FILE"   --iters="$MICRO_ITERS" --label='fuse-raw   '
-		"$BIN" microbench --op=read --path="$MP_FUSE_CACHE/$FILE" --iters="$MICRO_ITERS" --label='fuse-cache '
-		"$BIN" microbench --op=read --path="$MP_EBPF/$FILE"       --iters="$MICRO_ITERS" --label='ebpf-A+C   '
+		"$BIN" dev microbench --op=read --path="$MP_FUSE_RAW/$FILE"   --iters="$MICRO_ITERS" --label='fuse-raw   '
+		"$BIN" dev microbench --op=read --path="$MP_FUSE_CACHE/$FILE" --iters="$MICRO_ITERS" --label='fuse-cache '
+		"$BIN" dev microbench --op=read --path="$MP_EBPF/$FILE"       --iters="$MICRO_ITERS" --label='ebpf-A+C   '
 		echo '```'
 	} > "$OUT_DIR/3way-micro.md"
 	cat "$OUT_DIR/3way-micro.md" >&2

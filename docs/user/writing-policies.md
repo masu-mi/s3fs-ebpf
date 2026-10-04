@@ -565,13 +565,13 @@ kmod / mount 起動なしに、workload trace を Go 側 policy simulator
 
 ```bash
 # Zipf(0.7) 200 accesses を LRU と SIEVE で比較 (default)
-./bin/s3fs-ebpf trace-replay --policies=lru,sieve
+./bin/s3fs-ebpf dev trace-replay --policies=lru,sieve
 
 # 10000 accesses × Zipf α=0.9 を強い skew で
-./bin/s3fs-ebpf trace-replay --zipf=0.9,30,10000 --policies=lru,sieve
+./bin/s3fs-ebpf dev trace-replay --zipf=0.9,30,10000 --policies=lru,sieve
 
 # 記録済 JSONL trace を replay
-./bin/s3fs-ebpf trace-replay --trace=/tmp/prod.jsonl --policies=lru,sieve
+./bin/s3fs-ebpf dev trace-replay --trace=/tmp/prod.jsonl --policies=lru,sieve
 ```
 
 **制約**: simulator は Go reimpl なので **BPF policy と挙動が一致しない**
@@ -605,7 +605,7 @@ curl -s http://localhost:9600/metrics | grep policy_hook_invocations
 # 実 bench (30s/policy)
 ./scripts/bench-hitrate.sh
 # より速い algorithm 比較 (ms scale)
-./bin/s3fs-ebpf trace-replay --policies=lru,sieve --zipf=<α>,<N>,<accesses>
+./bin/s3fs-ebpf dev trace-replay --policies=lru,sieve --zipf=<α>,<N>,<accesses>
 ```
 
 - `docs/journal/hit-rate-bench.md` の caveats 節で "workload sensitivity"、

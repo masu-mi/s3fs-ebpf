@@ -115,9 +115,9 @@ BIN="$S3FS_BIN"
 	for op in stat read; do
 		echo "### $op $FILE"
 		echo '```'
-		"$BIN" microbench --op="$op" --path="$MP_EBPF/$FILE" \
+		"$BIN" dev microbench --op="$op" --path="$MP_EBPF/$FILE" \
 			--iters="$MICRO_ITERS" --label='s3fs-ebpf B '
-		"$BIN" microbench --op="$op" --path="$MP_FUSE/$FILE" \
+		"$BIN" dev microbench --op="$op" --path="$MP_FUSE/$FILE" \
 			--iters="$MICRO_ITERS" --label='s3fs-fuse   '
 		echo '```'
 		echo

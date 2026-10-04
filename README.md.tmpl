@@ -349,7 +349,7 @@ for i in 1 2 3 4 5; do stat /mnt/s3demo > /dev/null; done
 「なぜ KFunc が必要か」を verifier のログで示すためのデモ。純 eBPF で arena 上の linked-list を `while (n) { n = n->next; }` で辿ろうとして、verifier の 1M 命令上限 (`BPF_COMPLEXITY_LIMIT_INSNS`) に落ちる様子を見せます。
 
 ```bash
-sudo ./bin/s3fs-ebpf verifier-demo
+sudo ./bin/s3fs-ebpf dev verifier-demo
 ```
 
 期待出力 (末尾抜粋):
@@ -537,7 +537,7 @@ make readme        # daemon をビルドしてから README.md を再生成
 | **1** | `bpf_arena` 疎通、daemon↔BPF 共有メモリ、KFunc 呼び出し (`make test-arena`) | ✅ done |
 | **2 (a)** | arena `__arena` deref パス (`bpf_addr_space_cast`) の疎通 | ✅ done (cilium/ebpf の Marshal バグを vendor patch で回避) |
 | **2 (b)** | eBPF Fast Path (`fentry/vfs_getattr_nosec` → hit/miss counter + ringbuf) | ✅ done (`s3fs-ebpf fastpath`) |
-| **2 (c)** | Verifier 拒否デモ | ✅ done (`s3fs-ebpf verifier-demo`) |
+| **2 (c)** | Verifier 拒否デモ | ✅ done (`s3fs-ebpf dev verifier-demo`) |
 | **2 (d)** | MinIO Slow Path 骨 (minio-go / bucket list & stat) | ✅ done (`s3fs-ebpf s3-list` / `s3-stat`) |
 | **3 (a)** | kmod が entry table のオブジェクトを VFS に materialise (lookup / readdir / read / write) | ✅ done (`ls` / `cat` / `echo >` が動作) |
 | **3 (b)** | daemon の fastpath 起動時 prewarm (entry table の全 ino を arena に admit) | ✅ done (`--s3` で real S3 metadata を反映) |

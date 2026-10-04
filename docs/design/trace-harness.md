@@ -7,7 +7,7 @@ per-policy hit rate — no kmod, no mount, no S3. Complements
 Runs via:
 
 ```
-s3fs-ebpf trace-replay [flags]
+s3fs-ebpf dev trace-replay [flags]
 ```
 
 ## Why
@@ -53,7 +53,7 @@ Zipf traces matching `scripts/bench-hitrate.sh`'s Python generator
 ### synthetic Zipf (default)
 
 ```
-$ s3fs-ebpf trace-replay --policies=lru,sieve
+$ s3fs-ebpf dev trace-replay --policies=lru,sieve
 # trace-replay: 200 events, softcap=8
 # policy       accesses       hits     misses     rate
   lru               200         81        119   40.50%
@@ -64,7 +64,7 @@ Matches `bench-hitrate.sh` workload params (α=0.7, files=30,
 accesses=200, softcap=8). Change with `--zipf=alpha,files,accesses`:
 
 ```
-$ s3fs-ebpf trace-replay --zipf=0.9,30,10000
+$ s3fs-ebpf dev trace-replay --zipf=0.9,30,10000
 # trace-replay: 10000 events, softcap=8
   lru             10000       5967       4033   59.67%
   sieve           10000       6570       3430   65.70%
@@ -73,7 +73,7 @@ $ s3fs-ebpf trace-replay --zipf=0.9,30,10000
 ### recorded trace
 
 ```
-$ s3fs-ebpf trace-replay --trace=/tmp/prod.jsonl --policies=lru,sieve
+$ s3fs-ebpf dev trace-replay --trace=/tmp/prod.jsonl --policies=lru,sieve
 ```
 
 ## Simulator policies vs BPF policies

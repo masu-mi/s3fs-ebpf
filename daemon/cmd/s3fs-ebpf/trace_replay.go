@@ -37,16 +37,16 @@ func runTraceReplay(args []string) int {
 		"Zipf RNG seed. Same seed = same trace = identical bench across policies.")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr,
-			"usage: s3fs-ebpf trace-replay [flags]\n\n"+
+			"usage: s3fs-ebpf dev trace-replay [flags]\n\n"+
 				"Offline replay of a workload trace against Go-side policy simulators.\n"+
 				"Reports per-policy hit rate without loading kmod/BPF.\n\n"+
 				"Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n"+
 			"  # Match scripts/bench-hitrate.sh's default Zipf workload:\n"+
-			"  s3fs-ebpf trace-replay --policies=lru,sieve\n\n"+
+			"  s3fs-ebpf dev trace-replay --policies=lru,sieve\n\n"+
 			"  # Replay a recorded JSONL trace against all policies:\n"+
-			"  s3fs-ebpf trace-replay --trace=/tmp/prod.jsonl \\\n"+
+			"  s3fs-ebpf dev trace-replay --trace=/tmp/prod.jsonl \\\n"+
 			"      --policies=lru,sieve --softcap=32\n")
 	}
 	fs.Parse(args)

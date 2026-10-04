@@ -43,7 +43,7 @@ s3fs-ebpf における「kmod の `.read` が daemon が用意した実データ
 - `struct bpf_arena` の BTF-derived redefine + `container_of` で `arena->kern_vm->addr` を **抜くことはできる**
 - 実測: user_vm=0x7a5ca837d000, kern_vm=0xffffd39d4b8a1000, size=4 GiB
 - pointer 自体は正しい canonical kernel VA。問題は「deref」の段
-- CLI: `sudo ./bin/s3fs-ebpf probe-kvbase` で今も再現可能 (歴史遺物として残置)
+- CLI: `sudo ./bin/s3fs-ebpf dev probe-kvbase` で今も再現可能 (歴史遺物として残置)
 
 ---
 
