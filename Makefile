@@ -151,7 +151,11 @@ daemon: | $(BIN_DIR) ## Build Go user process -> bin/s3fs-ebpf
 	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
 # BPF_CLANG is a command name (clang-20), so bpf2go finds llvm-strip-20.
+# The preflight refuses clang < 19: the generated objects are committed and
+# embedded, and an old clang silently drops bpf_addr_space_cast (guarded by
+# daemon/internal/ebpf/arena_cast_test.go).
 daemon-gen: | $(BIN_DIR) ## Run bpf2go codegen then build daemon (needs network)
+	@$(call preflight,--only bpf)
 	cd $(DAEMON_DIR) && $(GO_ENV) BPF_CLANG=$(CLANG) $(GO) generate ./... && \
 		$(GO_ENV) $(GO) build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
