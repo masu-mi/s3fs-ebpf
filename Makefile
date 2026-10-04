@@ -90,12 +90,21 @@ build: all ## Alias of 'all'
 # -----------------------------------------------------------------------------
 # CC / HOSTCC / PAHOLE override the kernel Kbuild defaults, which assume
 # the exact gcc / pahole the kernel was built with. See the toolchain
-# block at the top of this Makefile. check-kmod-btf.sh fails the build
-# when kbuild silently skipped module BTF (no $$KDIR/vmlinux / old pahole).
+# block at the top of this Makefile.
+#
+# check-kmod-btf.sh fails the build when kbuild silently skipped module BTF
+# (no $$KDIR/vmlinux / old pahole). For external modules kbuild does not
+# list vmlinux as a prerequisite of the .ko, so a BTF-less .ko built
+# *before* `setup-toolchain.sh kbuild` stays "up to date" afterwards. The
+# check removes it, and we relink once: if the environment is fixed (the
+# preflight passed) that produces the real BTF; if not, it fails again.
 kmod: ## Build kernel module -> kmod/s3fs_kfunc.ko
 	@$(call preflight,--only kmod)
 	$(KMOD_ENV) $(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS)
-	@$(SCRIPTS_DIR)/check-kmod-btf.sh $(KMOD_DIR)/s3fs_kfunc.ko
+	@$(SCRIPTS_DIR)/check-kmod-btf.sh --quiet $(KMOD_DIR)/s3fs_kfunc.ko || { \
+	  echo "==> s3fs_kfunc.ko has no BTF (stale build from before vmlinux/pahole were fixed?) — relinking once"; \
+	  $(KMOD_ENV) $(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS) && \
+	  $(SCRIPTS_DIR)/check-kmod-btf.sh $(KMOD_DIR)/s3fs_kfunc.ko; }
 
 kmod-clean: ## Clean kernel module build artefacts
 	$(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS) clean
