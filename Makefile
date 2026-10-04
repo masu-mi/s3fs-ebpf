@@ -280,8 +280,8 @@ $(README): $(README_TMPL) $(DAEMON_BIN) Makefile
 test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	@echo "==> insmod kmod/s3fs_kfunc.ko"
 	@if ! lsmod | grep -q '^s3fs_kfunc'; then sudo insmod $(KMOD_DIR)/s3fs_kfunc.ko; fi
-	@echo "==> running $(DAEMON_BIN) test-arena"
-	@sudo $(DAEMON_BIN) test-arena; rc=$$?; \
+	@echo "==> running $(DAEMON_BIN) dev test-arena"
+	@sudo $(DAEMON_BIN) dev test-arena; rc=$$?; \
 	 echo "==> rmmod s3fs_kfunc"; \
 	 sudo rmmod s3fs_kfunc || true; \
 	 exit $$rc
