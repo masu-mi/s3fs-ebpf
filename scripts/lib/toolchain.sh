@@ -217,7 +217,16 @@ go_required_version() {
 # go_version <go-binary> — "1.25.0" or empty. GOTOOLCHAIN=local so an old
 # go does not report the toolchain it would auto-download for go.mod.
 go_version() {
-    GOTOOLCHAIN=local "$1" env GOVERSION 2>/dev/null | sed 's/^go//'
+    env -u GOROOT GOTOOLCHAIN=local "$1" env GOVERSION 2>/dev/null | sed 's/^go//'
+}
+
+# go_root <go-binary> — the GOROOT that binary belongs to, ignoring any
+# GOROOT in the environment. A GOROOT left over from an older install
+# (e.g. `export GOROOT=...` in ~/.bashrc) makes a newer go run the old
+# compiler: "compile: version go1.24.5 does not match go tool version
+# go1.25.0".
+go_root() {
+    env -u GOROOT GOTOOLCHAIN=local "$1" env GOROOT 2>/dev/null
 }
 
 # go_candidates — every go binary worth considering, PATH first. Besides

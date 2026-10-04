@@ -31,8 +31,11 @@ $(foreach v,$(shell $(SCRIPTS_DIR)/detect-toolchain.sh --make),$(eval $(v)))
 
 # LD_LIBRARY_PATH prefix for a $$HOME/.local pahole (needs its libdwarves).
 # GO: a go satisfying daemon/go.mod even when an older `go` is first on
-# PATH. Its directory is prepended so `go generate`'s `go run` matches.
-GO_ENV := $(if $(findstring /,$(GO)),PATH=$(dir $(GO)):$$PATH)
+# PATH. Its directory is prepended so `go generate`'s `go run` matches,
+# and GOROOT is pinned to GO's own root: a GOROOT exported for an older
+# install would otherwise make it run the old compiler ("compile: version
+# go1.24.5 does not match go tool version go1.25.0").
+GO_ENV := $(if $(GO_ROOT),GOROOT=$(GO_ROOT)) $(if $(findstring /,$(GO)),PATH=$(dir $(GO)):$$PATH)
 
 KMOD_ENV := $(if $(KMOD_LDLIB),LD_LIBRARY_PATH=$(KMOD_LDLIB)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH})
 # KMOD_KCFLAGS: -Wno-attributes only when KMOD_CC is older than the kernel's
@@ -250,7 +253,7 @@ doctor-build: ## Same as doctor, limited to what 'make all' needs
 toolchain: ## Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
 	@printf '%-12s %s\n' CLANG '$(CLANG)' BPFTOOL '$(BPFTOOL)' KDIR '$(KDIR)' \
 	  KMOD_CC '$(KMOD_CC)' KMOD_PAHOLE '$(KMOD_PAHOLE)' KMOD_LDLIB '$(KMOD_LDLIB)' \
-	  KMOD_KCFLAGS '$(KMOD_KCFLAGS)' GO '$(GO)'
+	  KMOD_KCFLAGS '$(KMOD_KCFLAGS)' GO '$(GO)' GO_ROOT '$(GO_ROOT)'
 
 setup-kernel: ## Install mainline Linux 6.12 LTS kernel (Ubuntu; reboot after)
 	$(SCRIPTS_DIR)/setup-kernel-6.12.sh

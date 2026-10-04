@@ -177,6 +177,11 @@ elif ver_ge "$ghave" "$gwant"; then
 else
     wn T-2 "go $ghave ($gbin) < $gwant — relies on GOTOOLCHAIN auto-download (fails offline)" "$SETUP go"
 fi
+groot=$(go_root "$gbin")
+if [[ -n "${GOROOT:-}" && -n "$groot" && "$GOROOT" != "$groot" ]]; then
+    wn T-4 "GOROOT=$GOROOT is exported but GO=$gbin belongs to $groot — go build fails with 'compile: version ... does not match go tool version'" \
+        "make pins GOROOT=$groot itself; for interactive use remove 'export GOROOT=...' from your shell rc (modern go needs no GOROOT)"
+fi
 [[ -n "$gpath" || -z "$ghave" ]] \
     || wn T-3 "$gbin is not on PATH (make still uses it)" "export PATH=$(dirname "$gbin"):\$PATH"
 
