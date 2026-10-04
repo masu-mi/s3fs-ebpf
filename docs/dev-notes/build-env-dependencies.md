@@ -9,7 +9,7 @@ make setup-kbuild      # カーネル入替後: headers + gcc/pahole/vmlinux だ
 make toolchain         # Makefile が実際に使う CLANG / KMOD_CC / ... を表示
 ```
 
-`make all` / `make kmod` / `make bpf` はビルド前に同じ検査を対象を絞って実行し (`doctor.sh --quiet --build` / `--only kmod|bpf`)、NG があればコンパイル前に直し方と `fix all: scripts/setup-toolchain.sh <steps>` を出して止まる。`PREFLIGHT=0` で無効化できる。さらに `make kmod` はビルド後に `scripts/check-kmod-btf.sh` で `.ko` の `.BTF` サイズを確認する — kbuild は vmlinux が無いと BTF 生成を **スキップしたまま exit 0** するため、以前は `make all` が成功して insmod で初めて落ちていた (H-2 / C-4)。
+`make all` / `make kmod` / `make bpf` はビルド前に同じ検査を対象を絞って実行し (`doctor.sh --quiet --build` / `--only kmod|bpf`)、NG があればコンパイル前に直し方と `fix all: scripts/setup-toolchain.sh <steps>` を出して止まる。`PREFLIGHT=0` で無効化できる。さらに `make kmod` はビルド後に `scripts/check-kmod-btf.sh` で `.ko` の `.BTF` サイズを確認する — kbuild は vmlinux が無いと BTF 生成を **スキップしたまま exit 0** するため、以前は `make all` が成功して insmod で初めて落ちていた (H-2 / C-4)。外部モジュールの kbuild は vmlinux を `.ko` の依存に含めないため、**vmlinux / pahole を直す前にビルドした BTF 無し `.ko` は直した後も「最新」扱いのまま残る**。BTF 検証で失敗したら `.ko` を消して 1 回だけ再リンクするので、環境が直っていればそのまま通る。
 
 関連: 初回踏破の記録 [`journal/week1-build-runtime-notes.md`](../journal/week1-build-runtime-notes.md)、bench 環境の修正記録 [`journal/bench-env-notes.md`](../journal/bench-env-notes.md)。
 
