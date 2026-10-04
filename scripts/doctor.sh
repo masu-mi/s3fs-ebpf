@@ -163,16 +163,22 @@ else
     ng T-1 "no working bpftool (Ubuntu wrapper fails on mainline kernels; Debian puts it in /usr/sbin)" \
         "$SETUP bpftool   or: make BPFTOOL=/path/to/bpftool"
 fi
-gwant=$(go_required_version); ghave=$(go_installed_version)
+gwant=$(go_required_version)
+gbin=$(detect_go); ghave=$(go_installed_version)
+gpath=$(command -v go 2>/dev/null || true)
 if [[ -z "$ghave" ]]; then
     ng T-2 "go not found (daemon/go.mod wants $gwant)" "$SETUP go"
 elif ver_ge "$ghave" "$gwant"; then
-    ok T-2 "go $ghave >= $gwant (daemon/go.mod)"
+    ok T-2 "GO=$gbin ($ghave >= $gwant, daemon/go.mod)"
+    if [[ -n "$gpath" && "$gpath" != "$gbin" ]]; then
+        wn T-3 "\`go\` on PATH is $gpath ($(go_version "$gpath")) — make uses GO=$gbin, interactive shells do not" \
+            "put $(dirname "$gbin") before $(dirname "$gpath") in PATH (shell rc / mise / asdf), or remove the old go"
+    fi
 else
-    wn T-2 "go $ghave < $gwant — relies on GOTOOLCHAIN auto-download (fails offline)" "$SETUP go"
+    wn T-2 "go $ghave ($gbin) < $gwant — relies on GOTOOLCHAIN auto-download (fails offline)" "$SETUP go"
 fi
-command -v go >/dev/null 2>&1 || [[ -z "$ghave" ]] \
-    || wn T-3 "go is in /usr/local/go/bin but not on PATH" "export PATH=\$PATH:/usr/local/go/bin"
+[[ -n "$gpath" || -z "$ghave" ]] \
+    || wn T-3 "$gbin is not on PATH (make still uses it)" "export PATH=$(dirname "$gbin"):\$PATH"
 
 # -----------------------------------------------------------------------------
 if [[ "$MODE" == all ]]; then

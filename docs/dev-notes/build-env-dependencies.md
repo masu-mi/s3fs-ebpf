@@ -55,7 +55,7 @@ make toolchain         # Makefile が実際に使う CLANG / KMOD_CC / ... を�
 | ID | 要件 | 症状 | 原因 | 解消 |
 |---|---|---|---|---|
 | T-1 | 実行できる bpftool | `bpftool: not found` / `WARNING: bpftool not found for kernel ...` | Ubuntu の `/usr/sbin/bpftool` は `uname -r` で `linux-tools-<ver>` に dispatch する wrapper (mainline に該当パッケージ無し)。Debian は `/usr/sbin` で一般ユーザーの PATH 外 | `detect_bpftool` が PATH → `/usr/sbin` → `/usr/lib/linux-tools/*/bpftool` の順に「実際に動く」ものを探す。BTF dump はカーネル版非依存 |
-| T-2 | Go ≥ `daemon/go.mod` の `go` 行 (現在 1.25.0) | 古い Go だと GOTOOLCHAIN の自動 DL 頼み (オフラインで失敗) | 旧 `setup-toolchain.sh` は 1.22.5 を hard-code していた | `setup-toolchain.sh go` が go.mod から版を読む |
+| T-2 | Go ≥ `daemon/go.mod` の `go` 行 (現在 1.25.0) | 古い Go だと GOTOOLCHAIN の自動 DL 頼み (オフラインで失敗) | 旧 `setup-toolchain.sh` は 1.22.5 を hard-code していた | `setup-toolchain.sh go` が go.mod の版を `/usr/local/go` に入れる。ただし apt の golang・`~/go`・mise/asdf などの古い `go` が PATH で先に見つかると、入れても `go` は古いまま。そこで Makefile は `detect_go` (PATH → `/usr/local/go` → `~/sdk/go*` → `/usr/lib/go-1.*` から要件を満たすもの) を `GO` として使い、doctor は PATH 側の古い go を T-3 で指摘する |
 
 ### B: テストツール / ベンチ実行環境
 

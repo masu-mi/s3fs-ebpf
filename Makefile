@@ -30,6 +30,10 @@ METRICS_ADDR ?= :9600
 $(foreach v,$(shell $(SCRIPTS_DIR)/detect-toolchain.sh --make),$(eval $(v)))
 
 # LD_LIBRARY_PATH prefix for a $$HOME/.local pahole (needs its libdwarves).
+# GO: a go satisfying daemon/go.mod even when an older `go` is first on
+# PATH. Its directory is prepended so `go generate`'s `go run` matches.
+GO_ENV := $(if $(findstring /,$(GO)),PATH=$(dir $(GO)):$$PATH)
+
 KMOD_ENV := $(if $(KMOD_LDLIB),LD_LIBRARY_PATH=$(KMOD_LDLIB)$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH})
 # KMOD_KCFLAGS: -Wno-attributes only when KMOD_CC is older than the kernel's
 # gcc (gcc-14 vs mainline's gcc-15 -> counted_by noise); see kmod_kcflags.
@@ -141,12 +145,12 @@ vmlinux-clean: ## Drop bpf/vmlinux.h
 # Go user process (daemon)
 # -----------------------------------------------------------------------------
 daemon: | $(BIN_DIR) ## Build Go user process -> bin/s3fs-ebpf
-	cd $(DAEMON_DIR) && go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
+	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
 # BPF_CLANG is a command name (clang-20), so bpf2go finds llvm-strip-20.
 daemon-gen: | $(BIN_DIR) ## Run bpf2go codegen then build daemon (needs network)
-	cd $(DAEMON_DIR) && BPF_CLANG=$(CLANG) go generate ./... && \
-		go build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
+	cd $(DAEMON_DIR) && $(GO_ENV) BPF_CLANG=$(CLANG) $(GO) generate ./... && \
+		$(GO_ENV) $(GO) build -o $(BIN_DIR)/s3fs-ebpf ./cmd/s3fs-ebpf
 
 daemon-clean: ## Clean Go build cache and bin/s3fs-ebpf
 	# Note: intentionally NOT running `go clean ./...` — it removes *.o
@@ -246,7 +250,7 @@ doctor-build: ## Same as doctor, limited to what 'make all' needs
 toolchain: ## Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
 	@printf '%-12s %s\n' CLANG '$(CLANG)' BPFTOOL '$(BPFTOOL)' KDIR '$(KDIR)' \
 	  KMOD_CC '$(KMOD_CC)' KMOD_PAHOLE '$(KMOD_PAHOLE)' KMOD_LDLIB '$(KMOD_LDLIB)' \
-	  KMOD_KCFLAGS '$(KMOD_KCFLAGS)'
+	  KMOD_KCFLAGS '$(KMOD_KCFLAGS)' GO '$(GO)'
 
 setup-kernel: ## Install mainline Linux 6.12 LTS kernel (Ubuntu; reboot after)
 	$(SCRIPTS_DIR)/setup-kernel-6.12.sh

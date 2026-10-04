@@ -214,10 +214,46 @@ go_required_version() {
     awk '$1 == "go" { print $2; exit }' "$S3FS_TOPDIR/daemon/go.mod" 2>/dev/null
 }
 
-# go_installed_version — "1.25.0" or empty.
+# go_version <go-binary> — "1.25.0" or empty. GOTOOLCHAIN=local so an old
+# go does not report the toolchain it would auto-download for go.mod.
+go_version() {
+    GOTOOLCHAIN=local "$1" env GOVERSION 2>/dev/null | sed 's/^go//'
+}
+
+# go_candidates — every go binary worth considering, PATH first. Besides
+# PATH: setup-toolchain.sh's /usr/local/go, golang.org/dl (~/sdk), and
+# Debian/Ubuntu golang-1.NN packages (/usr/lib/go-1.NN).
+go_candidates() {
+    local c
+    {
+        command -v go 2>/dev/null
+        echo /usr/local/go/bin/go
+        # shellcheck disable=SC2012  # ls -v gives version sort
+        ls -1dv "$HOME"/sdk/go*/bin/go /usr/lib/go-1.*/bin/go 2>/dev/null | tac
+    } | while read -r c; do [[ -x "$c" ]] && echo "$c"; done | awk '!seen[$0]++'
+}
+
+# detect_go — a go satisfying daemon/go.mod. A `go` earlier on PATH (apt,
+# ~/go, mise/asdf, ...) can shadow the /usr/local/go that
+# `setup-toolchain.sh go` installs; the Makefile uses this path instead of
+# relying on PATH order. Returns 1 (printing the PATH go) if none fits.
+detect_go() {
+    if [[ -n "${GO:-}" ]]; then echo "$GO"; return 0; fi
+    local want c v first=""
+    want=$(go_required_version)
+    while read -r c; do
+        [[ -z "$first" ]] && first=$c
+        v=$(go_version "$c")
+        [[ -n "$v" ]] && ver_ge "$v" "$want" && { echo "$c"; return 0; }
+    done < <(go_candidates)
+    echo "${first:-go}"
+    return 1
+}
+
+# go_installed_version — version of detect_go's pick, or empty.
 go_installed_version() {
     local g
-    g=$(command -v go 2>/dev/null || { [[ -x /usr/local/go/bin/go ]] && echo /usr/local/go/bin/go; }) || return 0
-    [[ -n "$g" ]] || return 0
-    GOTOOLCHAIN=local "$g" env GOVERSION 2>/dev/null | sed 's/^go//'
+    g=$(detect_go) || true
+    [[ -x "$g" ]] || g=$(command -v "$g" 2>/dev/null) || return 0
+    go_version "$g"
 }
