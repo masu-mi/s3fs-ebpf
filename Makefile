@@ -204,7 +204,7 @@ unmount: ## umount + rmmod (also stops any running daemon)
 	fi
 	@if lsmod | grep -q '^s3fs_kfunc'; then \
 		echo "==> rmmod s3fs_kfunc"; \
-		sudo rmmod s3fs_kfunc; \
+		$(SCRIPTS_DIR)/kmod-unload.sh s3fs_kfunc; \
 	fi
 
 daemon-run: daemon ## Run daemon in foreground (needs mount + compose-up)
@@ -290,7 +290,7 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	@echo "==> running $(DAEMON_BIN) dev test-arena"
 	@sudo $(DAEMON_BIN) dev test-arena; rc=$$?; \
 	 echo "==> rmmod s3fs_kfunc"; \
-	 sudo rmmod s3fs_kfunc || true; \
+	 $(SCRIPTS_DIR)/kmod-unload.sh s3fs_kfunc || true; \
 	 exit $$rc
 
 ## Cleanup:

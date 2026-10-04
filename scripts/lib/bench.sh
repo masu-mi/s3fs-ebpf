@@ -126,7 +126,9 @@ ebpf_stop() {
 	daemon_kill INT
 	daemon_wait_exit 5
 	umount_hard "$1"
-	sudo rmmod "$S3FS_KMOD_NAME" 2>/dev/null || true
+	# Retries: the BPF progs' module reference is dropped asynchronously
+	# after the daemon exits (see scripts/kmod-unload.sh).
+	"$TOPDIR/scripts/kmod-unload.sh" "$S3FS_KMOD_NAME" || true
 }
 
 # --- s3fs-fuse (A/B reference) ------------------------------------------------
