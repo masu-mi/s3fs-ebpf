@@ -124,3 +124,20 @@ scripts/setup-toolchain.sh   doctor が NG にする項目をステップ単位�
 | **Debian bookworm** | K-1 (標準 6.1)、C-1 (clang は 16 まで → apt.llvm.org)、C-4、B-2 (標準 `docker-compose` は v1) | 6.12+ カーネルを用意してから `make setup-toolchain`、残りは doctor の指示に従う |
 
 どの環境でも最後は `make doctor` が NG 0 になることを確認してから `make all` する。
+
+---
+
+## 5. 検証記録
+
+| 環境 | `make doctor` | `make all` | `make test-arena` | `make bench` |
+|---|---|---|---|---|
+| dev1: Ubuntu 24.04 + mainline `6.12.0-061200` (gcc-14 ビルド) | NG 0 | ✅ | ✅ A/B/C PASS | ✅ (cat big.bin 6.7× / 10m.bin 7.7× / 100m.bin 11.3× vs s3fs-fuse) |
+| Ubuntu 24.04 + mainline `6.12.90-061290` (gcc-15 ビルド, kmod は gcc-14) | NG 0 (C-3 WARN) | ✅ | — | — |
+
+この検証で新たに見つかって直したもの (§1 の各行にも反映):
+
+- 環境を直す前にビルドした BTF 無し `.ko` が「最新」扱いで残る → BTF 検証失敗時に 1 回だけ再リンク
+- `export GOROOT` の残骸で新しい go が古いコンパイラを呼ぶ (T-4)
+- `s3fs-ebpf dev` 配下へ移った `test-arena` / `microbench` を旧名で呼んでいた (Makefile / bench)
+- コミット済み bpf2go object が clang < 19 生成で `addr_space_cast` 無し → verifier 拒否 (C-1、`arena_cast_test.go`)
+- `rmmod` が BPF prog の module 参照解放 (非同期) と競合して "in use" → `scripts/kmod-unload.sh` でリトライ
