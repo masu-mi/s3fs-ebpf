@@ -18,14 +18,15 @@ kmod_cc=$(detect_kmod_cc)
 pahole=$(detect_pahole)
 ldlib=$(pahole_libdir "$pahole")
 kcflags=$(kmod_kcflags "$kmod_cc")
+go=$(detect_go)
 
 if [[ "${1:-}" == --make ]]; then
     # One token per variable: values never contain spaces.
-    printf 'CLANG?=%s BPFTOOL?=%s KDIR?=%s KMOD_CC?=%s KMOD_PAHOLE?=%s KMOD_LDLIB?=%s KMOD_KCFLAGS?=%s\n' \
-        "$clang" "$bpftool" "$KDIR" "$kmod_cc" "$pahole" "$ldlib" "$kcflags"
+    printf 'CLANG?=%s BPFTOOL?=%s KDIR?=%s KMOD_CC?=%s KMOD_PAHOLE?=%s KMOD_LDLIB?=%s KMOD_KCFLAGS?=%s GO?=%s\n' \
+        "$clang" "$bpftool" "$KDIR" "$kmod_cc" "$pahole" "$ldlib" "$kcflags" "$go"
 else
     printf '%-12s %s\n' \
         CLANG "$clang" BPFTOOL "$bpftool" KDIR "$KDIR" \
         KMOD_CC "$kmod_cc" KMOD_PAHOLE "$pahole" KMOD_LDLIB "${ldlib:-(none)}" \
-        KMOD_KCFLAGS "${kcflags:-(none)}"
+        KMOD_KCFLAGS "${kcflags:-(none)}" GO "$go"
 fi

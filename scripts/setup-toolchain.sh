@@ -256,18 +256,25 @@ step_kbuild() {
 
 # -----------------------------------------------------------------------------
 step_go() {
-    local want have
+    local want have g
     want=$(go_required_version); have=$(go_installed_version)
     log "Go >= $want (daemon/go.mod)"
-    if [[ -n "$have" ]] && ver_ge "$have" "$want"; then info "go $have"; return 0; fi
-    [[ -n "$have" ]] && info "go $have is older than $want; installing go$want into /usr/local/go"
-    local url="https://go.dev/dl/go${want}.linux-${ARCH_DEB}.tar.gz"
-    run sudo rm -rf /usr/local/go
-    run "curl -fsSL $url | sudo tar -C /usr/local -xz"
-    run "echo 'export PATH=/usr/local/go/bin:\$PATH' | sudo tee /etc/profile.d/go.sh >/dev/null"
-    command -v go >/dev/null 2>&1 && [[ "$(command -v go)" != /usr/local/go/bin/go ]] \
-        && warn "$(command -v go) shadows /usr/local/go/bin/go on PATH"
-    info "open a new shell (or: export PATH=/usr/local/go/bin:\$PATH)"
+    if [[ -n "$have" ]] && ver_ge "$have" "$want"; then
+        info "GO=$(detect_go) ($have)"
+    else
+        [[ -n "$have" ]] && info "go $have is older than $want; installing go$want into /usr/local/go"
+        local url="https://go.dev/dl/go${want}.linux-${ARCH_DEB}.tar.gz"
+        run sudo rm -rf /usr/local/go
+        run "curl -fsSL $url | sudo tar -C /usr/local -xz"
+        run "echo 'export PATH=/usr/local/go/bin:\$PATH' | sudo tee /etc/profile.d/go.sh >/dev/null"
+    fi
+    # The Makefile resolves GO itself (detect_go), but an older `go` earlier
+    # on PATH still wins in interactive shells — say where it comes from.
+    g=$(command -v go 2>/dev/null || true)
+    if [[ "$DRY_RUN" != 1 && -n "$g" && "$g" != "$(detect_go)" ]]; then
+        warn "\`go\` on PATH is $g ($(go_version "$g")); make uses $(detect_go)."
+        info "for interactive use put $(dirname "$(detect_go)") first in PATH (check ~/.bashrc, ~/.profile, mise/asdf)"
+    fi
 }
 
 # -----------------------------------------------------------------------------
