@@ -58,8 +58,8 @@
 
 背景: softcap (8) は eviction 投票の発動条件で、容量ではない。そのため hit-rate ベンチ (`hr` Validity review) は容量で正規化されておらず、W-TinyLFU 88.5% は容量 8 の Belady 上限 61〜65% を超えている。下の順に着手する。S-01〜S-03 が終わるまで、hit 率を Meetup で数字として出さない。
 
-- [ ] **S-01** 差分 invalidate (`as §4 P7`) — `s3fs_ebpf_admit_replace` は全置換のたびに一覧の全 ino の page cache を破棄している。1 ファイルの miss で、hot なファイルの page cache まで消える。前回の admit と (uaddr, size, offset) が同じ ino は破棄・`i_size_write` を省略する。旧エントリとの比較は staged 作成時に lock 下で行う。**受け入れ条件**: 1 ファイルの miss upcall の後も、他の admit 済みファイルの read が `.read_folio` に来ない (`folio_hits` / `read_miss_upcalls` が増えない)。目安 0.5 日
-- [ ] **S-02** バイト容量上限 + victim 選択 (`as §4 P1-P3, §5`) — 内容は次の 4 点。目安 2〜3 日
+- [x] ✅ **S-01** 差分 invalidate — 実装済 (617f7ba、実機検証は S-06)。 (`as §4 P7`) — `s3fs_ebpf_admit_replace` は全置換のたびに一覧の全 ino の page cache を破棄している。1 ファイルの miss で、hot なファイルの page cache まで消える。前回の admit と (uaddr, size, offset) が同じ ino は破棄・`i_size_write` を省略する。旧エントリとの比較は staged 作成時に lock 下で行う。**受け入れ条件**: 1 ファイルの miss upcall の後も、他の admit 済みファイルの read が `.read_folio` に来ない (`folio_hits` / `read_miss_upcalls` が増えない)。目安 0.5 日
+- [x] ✅ **S-02** バイト容量上限 + victim 選択 — 実装済 (方式 (a) スコア化。module param `capacity_bytes` / `softcap`、daemon `--cache-capacity` / `--softcap`。bench-hitrate は既定で capacity mode。in-flight の ino は evict しない。実機検証は S-06)。 (`as §4 P1-P3, §5`) — 内容は次の 4 点。目安 2〜3 日
   - daemon `--cache-capacity=<bytes>` (既定 = arena サイズ) を ioctl で kmod に渡す
   - kmod は投票の後もまだ上限を超えていれば、policy の順位で上限以下まで削る
   - 順位の取り方: (a) `on_evict` の戻り値をスコア化 (0 = keep, 大きいほど追い出し優先)、または (b) vtable に `select_victim()` を追加。まず (a) で始め、既存 policy の yes/no は「スコア 1」として互換を保つ
@@ -67,7 +67,7 @@
 
   **受け入れ条件**: どの policy でも `adm` のバイト総量が上限以下。bench-hitrate の全行の hit 率が `opt` 以下になる
 - [ ] **S-03** page cache hit を policy に供給 (`as §4 P5, §6.3`) — 既存の `fentry/generic_file_read_iter` (全 read で発火) から per-ino のアクセスを policy に渡す。手段は共有 map か `on_access` 相当の hook。頻度系 policy (W-TinyLFU / freq2bit) が page cache hit を数えられるようにする。**受け入れ条件**: page cache 経由の繰り返し read で policy の頻度カウンタが増える。目安 1〜2 日
-- [ ] **S-04** evict 反映の遅れ (`as §4 P6`) — daemon の drain は 2 秒周期で、その間の全置換で evict 済み ino が再送・復活する。kmod が直近の evict 済み ino を覚えて再送を弾くか、ADMIT_ARENA ioctl の戻りで evict 結果を即時に返す。目安 0.5〜1 日
+- [x] ✅ **S-04** evict 反映の遅れ — 実装済 (8db7c82、push 直前に drain)。 (`as §4 P6`) — daemon の drain は 2 秒周期で、その間の全置換で evict 済み ino が再送・復活する。kmod が直近の evict 済み ino を覚えて再送を弾くか、ADMIT_ARENA ioctl の戻りで evict 結果を即時に返す。目安 0.5〜1 日
 - [ ] **S-05** 再計測 (S-01〜S-03 の後) — 計測後に `hr` / `br` / `mo` の数字を差し替える。目安 0.5 日 + 実機
   - `bench-hitrate.sh`: 3 seed 以上、`opt` / `adm_*` を併記、中央値とばらつき
   - `bench-write.sh`: `ebpf-fsync` 行

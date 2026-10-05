@@ -381,8 +381,10 @@ int BPF_PROG(mypolicy_hit, __u64 ino) {
 
 SEC("struct_ops/on_evict")
 int BPF_PROG(mypolicy_evict, __u64 ino) {
-    // admit hash が softcap 超過時に per-ino 呼ばれる。
-    // return 1 = kmod-side hash_del で evict、return 0 = keep。
+    // admit_replace ごとに一覧の全 ino について呼ばれる。
+    // 戻り値はスコア: 0 = keep、>0 = evict 候補 (大きいほど優先)。
+    // legacy mode では >0 は全部 evict、capacity mode では収まるまで
+    // スコア順に evict (下の「eviction のモード」参照)。
     __u8 *v = bpf_map_lookup_elem(&mypolicy_state, &ino);
     if (!v) return 0;  // first sight — grace
     return (*v == 0) ? 1 : 0;
@@ -431,14 +433,29 @@ clang -O2 -g -Wall -target bpf -mcpu=v3 \
 - **`on_hit(ino)`** — HOT PATH: `.read_folio` から per-folio 呼ばれる。
   100 MiB read で 25600 回。O(1) map 更新のみ推奨。bpf_loop() は
   絶対に呼ばない
-- **`on_evict(ino)`** — softcap 超過時に per-ino 呼ばれる。
-  return 1 で kmod が admit hash から `hash_del` する。cold path
+- **`on_evict(ino)`** — admit_replace ごとに一覧の全 ino について呼ばれる。
+  戻り値はスコア (0 = keep、>0 = evict 候補、大きいほど先に追い出す)。cold path
+- **`on_admit(count, hint)`** と `on_evict` は同じ全置換ラウンドで続けて呼ばれる。
+  入ったばかりの ino にも on_evict が来るので、grace (初見は 0) を持つこと
 - **`on_admit(count, hint)`** — admit_replace batch ごと 1 回。
   cold path、bpf_loop() 使える (aging 等)
 - **`on_pressure(count, threshold)`** — softcap 越えた瞬間 1 回。
   advisory (return 無視)
 
 hook 全部は optional — 不要なら空 (`return 0;`) にする。
+
+### eviction のモード (S-02)
+
+kmod の module parameter (daemon の `--softcap` / `--cache-capacity` で設定) で切り替わる:
+
+| モード | 条件 | 動き |
+|---|---|---|
+| legacy | `capacity_bytes=0` (既定) | 送られてきた一覧が `softcap` (既定 8) 件を超えたら、スコア >0 の ino を**全部** evict。残る件数は policy 次第 |
+| capacity | `capacity_bytes>0` | admit 済みバイト数が上限を超えている間だけ、スコアの高い順 → スコア 0 は古い順に evict。上限に収まった時点で止まる。softcap は無視 |
+
+どちらのモードでも、miss upcall で reader が待っている ino は evict しない。
+capacity mode では policy は「誰を先に追い出すか」を決めるだけで、上限は kmod が守る。
+詳細は `docs/design/admit-and-softcap.md`。
 
 ### verifier で reject されたら
 
@@ -458,7 +475,8 @@ kmod-side state を BPF から読むための primitive 集。`kmod/tree_travers
 | KFunc | 戻り値 | 意味 |
 |---|---|---|
 | `s3fs_kfunc_admit_count()` | u32 | 現 admit hash size |
-| `s3fs_kfunc_softcap()` | u32 | kmod の hardcoded softcap (=8) |
+| `s3fs_kfunc_softcap()` | u32 | `softcap` module param (既定 8、legacy mode の発動条件) |
+| `s3fs_kfunc_capacity_bytes()` | u64 | `capacity_bytes` module param (0 = legacy mode) |
 | `s3fs_kfunc_evictions_total()` | u32 | 累計 eviction 数 |
 | `s3fs_kfunc_time_ns()` | u64 | monotonic ns since boot (suspend 込) |
 | `s3fs_kfunc_ino_size(ino)` | u64 | admit hash 内の ino のサイズ (無ければ 0) |

@@ -4,6 +4,8 @@
 
 コード (`kmod/vfs_ops.c`, `daemon/cmd/s3fs-ebpf/admit_arena.go`, `main.go`) の実際の動きに合わせた説明。設計意図ではなく「今どう動いているか」を書き、キャッシュアルゴリズムとしての問題点と改善案を末尾にまとめる。
 
+> **2026-10-05 更新**: §4 の P7 (S-01)、P1〜P3 (S-02, capacity mode)、P6 (S-04) は実装済み (§8)。§2〜§3 は既定の legacy mode の説明として有効。
+
 ---
 
 ## 1. 読み込みの 4 層
@@ -199,3 +201,22 @@ page cache hit を policy に見せる方法は既にある材料で作れる。
 3. **page cache hit を policy に供給**: §6.3。頻度系 policy の前提
 4. **evict 反映の遅れ (P6)**: kmod 側で「evict 済み ino」を覚えておき、daemon の再送を無視 (または ioctl の戻りで即時に返す)
 5. **disk cache (A) の上限管理**
+
+---
+
+## 8. 実装状況 (2026-10-05)
+
+| 項目 | 状態 | 内容 |
+|---|---|---|
+| S-01 (P7) | 実装済 | `admit_replace` は旧テーブルに同一の (ino, offset, uaddr, size) があり、daemon mm も同じ range の page cache を破棄しない。新しい内容は必ず新しい arena chunk (新 uaddr) に入るので、これで十分。`s3fs_ebpf_admit_invalidations_total` で観測できる |
+| S-02 (P1〜P3) | 実装済 | module param `capacity_bytes` (>0 で capacity mode) と `softcap` (実行時に可変)。daemon `--cache-capacity` / `--softcap` で設定する。capacity mode では `on_evict` の戻り値をスコアとして扱う (高い順 → 0 は古い順) |
+| S-04 (P6) | 実装済 | daemon は push の直前に evict log を drain する (`reconcileEvictionsLocked`)。kmod が evict するのは daemon の push 中だけなので、復活の窓が無くなる |
+| 追加 | 実装済 | miss upcall で reader が待っている ino はどちらのモードでも evict しない (`pending_exists`)。以前は、自分の push で入れた ino をその場で追い出し、reader が placeholder buffer に落ちる可能性があった |
+| S-03 (P5) | 未着手 | page cache hit を policy に供給する |
+
+capacity mode でも残る点:
+
+- **件数ではなくバイト**: bench はファイルが等サイズなので `SOFTCAP × 44 B` で slot 数を再現している
+- **判定は全置換ラウンド単位 (P4)**: admit が増えるのは必ず daemon の push (= `admit_replace`) 経由なので、上限は push のたびに守られる。ただし policy は push ごとに全件を再評価するので、LRU / SIEVE などの「アクセス単位」のアルゴリズムは引き続き近似になる
+- **in-flight の ino は上限計算から外せない**: 待ち reader がいる ino は evict しないので、その分は一時的に上限を超えることがある (`pr_info_ratelimited` で記録)
+- **実機未検証** (S-06)
