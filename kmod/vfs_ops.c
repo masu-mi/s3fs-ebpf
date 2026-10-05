@@ -389,6 +389,29 @@ static struct s3fs_admit *admit_lookup_at_locked(u64 ino, u64 pos)
 	return NULL;
 }
 
+/*
+ * Drop every admitted range of `ino` (partial admits can register
+ * several). Takes the admit lock. Returns how many were dropped.
+ */
+static unsigned int admit_drop_all_ranges(u64 ino)
+{
+	struct s3fs_admit *a;
+	struct hlist_node *tmp;
+	unsigned int n = 0;
+
+	spin_lock(&s3fs_admits_lock);
+	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
+		if (a->ino != ino)
+			continue;
+		hash_del(&a->node);
+		atomic_dec(&s3fs_admits_count);
+		kfree(a);
+		n++;
+	}
+	spin_unlock(&s3fs_admits_lock);
+	return n;
+}
+
 static void admit_clear_locked(void)
 {
 	struct s3fs_admit *a;
@@ -2067,7 +2090,49 @@ static int s3fs_ebpf_file_fsync(struct file *file, loff_t start,
 	return s3fs_maybe_enqueue_flush(file, true);
 }
 
+/*
+ * nocache=1 — FUSE-equivalent read path, for A/B benchmarks only.
+ *
+ * s3fs-fuse without `-o kernel_cache` (the "fuse-raw" baseline) drops an
+ * inode's page cache on every open and has no content cache of its own,
+ * so each open+read goes kernel → userspace daemon → S3. With nocache
+ * set, .open does the same here: it drops the inode's page cache and
+ * its arena admit ranges, so the next .read_folio misses and upcalls
+ * the daemon, which GETs from S3 (run the daemon without --cache-dir).
+ * What remains different from FUSE is that metadata stays in kmod (no
+ * getattr/open upcall) and the transport (miss queue + arena + ioctl
+ * vs /dev/fuse).
+ *
+ * Inodes with an unflushed write buffer are left alone so a read-back
+ * before the PUT still sees local data. Runtime-toggleable:
+ *   echo 1 > /sys/module/s3fs_kfunc/parameters/nocache
+ */
+static bool s3fs_nocache;
+module_param_named(nocache, s3fs_nocache, bool, 0644);
+MODULE_PARM_DESC(nocache,
+	"Drop page cache + arena admit on every open (FUSE-raw-like reads, benchmark only)");
+
+static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
+{
+	struct s3fs_file_data *fd = inode->i_private;
+	bool dirty = false;
+
+	if (!READ_ONCE(s3fs_nocache))
+		return 0;
+	if (fd) {
+		mutex_lock(&fd->lock);
+		dirty = fd->dirty;
+		mutex_unlock(&fd->lock);
+	}
+	if (dirty)
+		return 0;
+	admit_drop_all_ranges(inode->i_ino);
+	invalidate_mapping_pages(inode->i_mapping, 0, -1);
+	return 0;
+}
+
 static const struct file_operations s3fs_ebpf_file_fops = {
+	.open		= s3fs_ebpf_file_open,
 	.llseek		= generic_file_llseek,
 	.read_iter	= generic_file_read_iter,
 	.write		= s3fs_ebpf_file_write,
