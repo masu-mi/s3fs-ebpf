@@ -131,6 +131,13 @@ ebpf_stop() {
 	"$TOPDIR/scripts/kmod-unload.sh" "$S3FS_KMOD_NAME" || true
 }
 
+# ebpf_nocache <0|1> — toggle the kmod's FUSE-raw-like read mode (drop
+# page cache + arena admit on every open; see kmod/vfs_ops.c
+# s3fs_ebpf_file_open). Resets on rmmod.
+ebpf_nocache() {
+	echo "$1" | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/nocache" >/dev/null
+}
+
 # --- s3fs-fuse (A/B reference) ------------------------------------------------
 
 # fuse_mount <mp> [extra s3fs args...] — mount $S3_BUCKET with the common

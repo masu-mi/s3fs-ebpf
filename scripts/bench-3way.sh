@@ -5,8 +5,15 @@
 #   s3fs-fuse (cache):  -o use_cache=<dir> -o kernel_cache -o max_stat_cache_size で
 #                       ローカルディスク staging + kernel page cache 有効。
 #   s3fs-ebpf (A+C):    daemon --cache-dir + kmod .read_folio (VFS page cache 経由)。
+#   s3fs-ebpf (nocache): fuse-raw の対照群。kmod nocache=1 で open ごとに
+#                       page cache + arena admit を捨て、daemon は --cache-dir
+#                       無しで再起動 → open+read のたびに upcall + S3 GET。
+#                       FUSE (kernel_cache 無し) と同じ「毎 open で userspace
+#                       経由で取り直す」形で、差は transport と metadata
+#                       (getattr/open upcall の有無) だけになる。
 #
-# 3 者を hyperfine warm/cold + microbench + perf stat + big-file cat で並べる。
+# 3 者を hyperfine warm/cold + microbench + perf stat + big-file cat で並べ、
+# 最後に同じ計測を ebpf-nocache で取る (NOCACHE=0 で skip)。
 # 結果は $OUT_DIR/3way-*.md に出力。docs/journal/benchmark-results.md §7 で解釈。
 
 set -euo pipefail
@@ -26,6 +33,7 @@ WARMUP=${WARMUP:-5}
 RUNS=${RUNS:-200}
 MICRO_ITERS=${MICRO_ITERS:-20000}
 PERF_ITERS=${PERF_ITERS:-200}
+NOCACHE=${NOCACHE:-1}
 
 mkdir -p "$OUT_DIR" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
 sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
@@ -107,22 +115,24 @@ run_micro() {
 }
 
 # --- 4. perf stat CPU consumption ---------------------------------
+# perf_cat <mp> <label> — perf stat over $PERF_ITERS cats of $FILE.
+perf_cat() {
+	local mp=$1 label=$2
+	sudo "$PERF_BIN" stat -e task-clock,cycles,instructions,cache-references,cache-misses \
+		--no-inherit -x, -- \
+		bash -c "for i in \$(seq 1 $PERF_ITERS); do cat $mp/$FILE >/dev/null; done" \
+		2>&1 | awk -F',' -v L="$label" -v N="$PERF_ITERS" '
+			$3=="task-clock"       { printf "%-14s | task-clock=%s ms per-op=%.2f μs\n", L, $1, ($1*1000)/N }
+			$3=="cycles"           { printf "%-14s | cycles/op=%.0f freq=%s %s\n",       L, $1/N, $6, $7 }
+			$3=="instructions"     { printf "%-14s | inst/op=%.0f IPC=%s\n",             L, $1/N, $6 }
+			$3=="cache-references" { printf "%-14s | cache-refs/op=%.1f\n",              L, $1/N }
+			$3=="cache-misses"     { printf "%-14s | cache-miss/op=%.2f miss%%=%s\n",    L, $1/N, $6 }
+		'
+}
+
 run_perf() {
 	log "perf stat CPU consumption ($PERF_ITERS cats each)"
 	cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true
-	perf_cat() {
-		local mp=$1 label=$2
-		sudo "$PERF_BIN" stat -e task-clock,cycles,instructions,cache-references,cache-misses \
-			--no-inherit -x, -- \
-			bash -c "for i in \$(seq 1 $PERF_ITERS); do cat $mp/$FILE >/dev/null; done" \
-			2>&1 | awk -F',' -v L="$label" -v N="$PERF_ITERS" '
-				$3=="task-clock"       { printf "%-14s | task-clock=%s ms per-op=%.2f μs\n", L, $1, ($1*1000)/N }
-				$3=="cycles"           { printf "%-14s | cycles/op=%.0f freq=%s %s\n",       L, $1/N, $6, $7 }
-				$3=="instructions"     { printf "%-14s | inst/op=%.0f IPC=%s\n",             L, $1/N, $6 }
-				$3=="cache-references" { printf "%-14s | cache-refs/op=%.1f\n",              L, $1/N }
-				$3=="cache-misses"     { printf "%-14s | cache-miss/op=%.2f miss%%=%s\n",    L, $1/N, $6 }
-			'
-	}
 	{
 		echo '## perf stat 3-way (per cat)'
 		echo '```'
@@ -135,6 +145,45 @@ run_perf() {
 	cat "$OUT_DIR/3way-perf.md" >&2
 }
 
+# --- 5. ebpf-nocache (fuse-raw counterpart) -----------------------
+# Same mount, daemon restarted without --cache-dir, kmod nocache=1.
+# Runs after the A+C phases because the kmod/mount is shared.
+run_nocache() {
+	log "ebpf-nocache: restart daemon without --cache-dir, kmod nocache=1"
+	ebpf_start_daemon "$OUT_DIR/fastpath-nocache.log" --sample-every=60s
+	ebpf_nocache 1
+	{
+		echo '## ebpf-nocache (kmod nocache=1, daemon without --cache-dir)'
+		echo
+		echo '### hyperfine cat (vs fuse-raw)'
+	} > "$OUT_DIR/3way-nocache.md"
+	hyperfine --warmup "$WARMUP" --min-runs "$RUNS" --shell=none \
+		--export-markdown "$OUT_DIR/3way-nocache-cat.md" \
+		--command-name 'fuse-raw'      "cat $MP_FUSE_RAW/$FILE" \
+		--command-name 'ebpf-nocache'  "cat $MP_EBPF/$FILE" >&2
+	hyperfine --warmup 2 --min-runs 20 --shell=none \
+		--export-markdown "$OUT_DIR/3way-nocache-big.md" \
+		--command-name 'fuse-raw'      "cat $MP_FUSE_RAW/$BIG_FILE" \
+		--command-name 'ebpf-nocache'  "cat $MP_EBPF/$BIG_FILE" >&2
+	cat "$OUT_DIR/3way-nocache-cat.md" "$OUT_DIR/3way-nocache-big.md" >> "$OUT_DIR/3way-nocache.md"
+	{
+		echo
+		echo '### microbench read (open+read+close)'
+		echo '```'
+		"$S3FS_BIN" dev microbench --op=read --path="$MP_EBPF/$FILE" --iters="$MICRO_ITERS" --label='ebpf-nocache'
+		echo '```'
+		echo
+		echo '### perf stat (per cat)'
+		echo '```'
+		perf_cat "$MP_EBPF" 'ebpf-nocache'
+		echo '```'
+		echo
+		echo "read_miss_upcalls_total after run: $(curl -s localhost:9600/metrics | awk '$1=="s3fs_ebpf_read_miss_upcalls_total"{print $2}')"
+	} >> "$OUT_DIR/3way-nocache.md"
+	ebpf_nocache 0
+	cat "$OUT_DIR/3way-nocache.md" >&2
+}
+
 # --- execute -------------------------------------------------------
 check_prereq
 start_fuse_raw
@@ -145,5 +194,8 @@ run_hf_warm
 run_hf_big
 run_micro
 run_perf
+if [ "$NOCACHE" = 1 ]; then
+	run_nocache
+fi
 
 log "done. results in $OUT_DIR/"
