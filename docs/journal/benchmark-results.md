@@ -34,6 +34,15 @@ Week 4 (e) の初回計測記録。Meetup スライドの原資料として、�
 - **`stat` は tie** — 両 FS とも in-memory metadata cache に落ちるので kernel-syscall 分の 1〜2 μs が支配的
 - **cold-cache 比較 (drop_caches=3)** は両方 100ms 台で並ぶ。`drop_caches=3` は inode + dentry も飛ばすので、cold の主コストが「path re-lookup + inode 再作成」に移り、FS-side 差分が見えなくなる。純 read-cold なら `drop_caches=1` にすべき (§追試)
 
+### 0.1 数字の根拠レビュー (2026-10-05) — 引用前に確認
+
+meetup outline (`docs/user/meetup-ebpf-outline.md`) の性能表を再確認した結果:
+
+- **read 875×**: `5.20 μs` (§3.2 の今回 run の p50) と `4.55 ms` (「前回 100k iter 実測」の p50、別 run) の比。今回 run の fuse 側は `p50=~4.5ms` (概算値) なので、同一 run 内で比べると ~865×。§3.3 は「886×」と書いており一致しない。**「約 870×、同一 run の p50 比」** と丸めて出すのが安全。測っているのは read 単体ではなく **open+read+close / 16 B / warm** の 1 iter (`microbench`)。fuse-raw 側は毎回 MinIO への HTTP GET を含む。
+- **fuse-cache と比べた倍率は指標で違う**: §7 によれば、wall-clock の `cat` は 2.05〜2.45×、microbench (open+read+close) は 245×。245× の差の正体は open ごとの FUSE upcall (§7.5)。「kernel_cache 有効でも 2〜2.5×」は cat の数字なので、read latency の質問に答えるときは 245× (open 込み) と区別する。
+- **write 17× は durability が揃っていない**: s3fs-fuse は close() 内で S3 PUT を同期実行する。ebpf の close() (`.release`) は flush を enqueue して即 return する (`kmod/vfs_ops.c` `s3fs_ebpf_file_release`)。つまり §8 の `ebpf` 行は「PUT 完了」を含まない。比べているのは「ローカルバッファへの書き込み」と「書き込み + durable PUT」。`scripts/bench-write.sh` に `ebpf-fsync` (`conv=notrunc,fsync`、`.fsync` は daemon の PUT 完了まで block) を追加したので、fuse と同条件の数字は次回 run で取る。それまでは「close までの latency」として 17× を出し、durable 比較ではないと明記する。100 MiB の ebpf `88 ms ± 32` は CV 36% で n=5、ばらつきも大きい。
+- **hit-rate (88.5% vs 7.5%)** は s3fs-ebpf 内の policy 比較で、s3fs-fuse との比較ではない。capacity 8 の Belady 上限 (61〜65%) を超えており、cache hit 率としては成立していない。`docs/journal/hit-rate-bench.md` の Validity review を参照。
+
 ---
 
 ## 0.5. 大きな Caveat — s3fs-fuse は `-o use_cache=/path -o kernel_cache` を意図的に無効化して測っている
@@ -172,7 +181,7 @@ Go の `time.Now` で 1 iter 単位に前後を挟む。ラッパープロセス
 ### 3.3 解釈
 
 - **stat は完全 tie** — 両 FS とも in-memory metadata cache 経由。p50 1.376 vs 1.395 μs は誤差の範囲。**BPF Fast Path で「stat が速くなる」主張の余地はここでは薄い** (FUSE も daemon-side cache が効いている)
-- **read は 886× 開く** — この差の内訳:
+- **read は ~870× 開く** (今回 run の p50 同士: 4.5 ms / 5.203 μs ≈ 865×。前回 100k iter の 4.552 ms を使うと 875×) — この差の内訳:
   - s3fs-ebpf B: kmod の `s3fs_admit_read` (spinlock + hash lookup) → `pin_user_pages_remote` → `kmap_local_page` → `copy_to_user` → `unpin`。ページ内 read なので 1 page 分。**5 μs**
   - s3fs-fuse: VFS → FUSE upcall (queue + wake daemon) → daemon userspace → MinIO HTTP GET (localhost) → daemon parse → FUSE reply → kernel → user。**4.5 ms**、うち大部分は HTTP round-trip
 - **s3fs-fuse read ops/s = 209** はほぼ MinIO の HTTP latency 上限。s3fs-fuse に local disk cache 入れれば別 (`-o use_cache=...`)、今回は無効

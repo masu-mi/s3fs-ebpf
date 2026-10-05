@@ -3,6 +3,58 @@
 Compares built-in cache policies on a Zipf-skewed access workload.
 Runs via `./scripts/bench-hitrate.sh`.
 
+## ⚠ Validity review (2026-10-05) — read before quoting these numbers
+
+The table below is **not** a capacity-normalised hit-rate comparison.
+Checked against the code and an offline Belady bound on the exact
+trace (`s3fs-ebpf dev trace-replay`, which now has `opt` / `noevict`):
+
+| reference on the bench trace (Zipf α=0.7, 30 files, 200 reads, seed 42) | hit rate |
+|---|---:|
+| `opt` (Belady MIN, capacity 8, cold start) | 61.0 % |
+| `opt` with the best possible warm start (prewarmed 8) | 65.0 % |
+| strict LRU, capacity 8 | 40.5 % |
+| no eviction (cold) / prewarmed all 30 (= `observe`) | 85.5 % / 100 % |
+
+1. **W-TinyLFU 88.5 %, SIEVE 65–66 %, size_aware 66 % are at or above
+   the optimum for 8 slots.** No policy can beat Belady at the same
+   capacity, so these runs held more than 8 files. Cause:
+   `S3FS_EVICT_SOFTCAP` is an eviction *trigger*, not a capacity.
+   `s3fs_ebpf_admit_replace` consults `on_evict` only when the snapshot
+   it was handed exceeds 8 entries, and then drops every entry the
+   policy votes for. The set can end far above 8 (few votes) or far
+   below it (many votes). A policy that rarely votes "evict" keeps most
+   of the 30 prewarmed files admitted. The ranking follows the eviction count almost exactly
+   (161 → 88.5 %, 475 → 65–66 %, … 10 320 → 10.5 %), i.e. it mostly
+   measures *how often a policy evicts*, not how well it picks victims.
+2. **Evicted files kept their page cache** (fixed in this commit:
+   `kmod/vfs_ops.c` `s3fs_evict_page_cache`). `.read_iter =
+   generic_file_read_iter` served them without reaching `.read_folio`,
+   so they counted as hits and their `on_hit` never fired. All numbers
+   below predate the fix and need re-measuring.
+3. **Parameter drift**: the script defaulted to α=0.9 / 400 accesses
+   while this page and `trace-replay` say α=0.7 / 200. The recorded
+   rates are all multiples of 0.5 %, consistent with 200 accesses.
+   Defaults are now α=0.7 / 200 again.
+4. **Stale numbers in prose**: the 2026-09-28 table says LRU 13.0 % /
+   freq2bit 10.5 %. The "7.5 % / 6.5 %" (and "W-TinyLFU vs LRU = 12×")
+   quoted below, in README and in the meetup outline come from an
+   earlier run. Against the current table the ratio is 88.5 / 13.0 ≈ 6.8×.
+5. **One trace, one run**: a single seed and 200 reads. The ±3 pp and
+   ±20 pp variances quoted below are anecdotal (no repeated runs are
+   recorded).
+6. The Go simulator's `--zipf` trace is *not* the bench trace (Go
+   `math/rand` ≠ Python `random`). The sim-vs-bench comparison in
+   `docs/design/trace-harness.md` therefore compared different
+   sequences. The bench now writes `$OUT/trace.jsonl` and replays it.
+
+`scripts/bench-hitrate.sh` now prints `adm_mean` / `adm_max` (the
+admit-set size sampled during the workload) per policy and an
+`opt`/`lru`/`sieve`/`noevict` reference block on the same trace. Only
+compare rates between rows with similar `adm_*`. A capacity-normalised
+comparison needs the kmod to enforce the cap (or the daemon to prune to
+it) after every round. That is follow-up work.
+
 ## Setup
 
 - 30 tiny (44 B) files seeded into `s3fs-test` bucket via `mc pipe`.
