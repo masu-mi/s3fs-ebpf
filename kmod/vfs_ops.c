@@ -299,6 +299,13 @@ atomic_long_t s3fs_evictions_total = ATOMIC_LONG_INIT(0);
  */
 atomic_long_t s3fs_folio_hits = ATOMIC_LONG_INIT(0);
 
+/*
+ * Cumulative page-cache invalidations done by admit_replace for new or
+ * moved ranges (S-01). With diff invalidation this grows only with real
+ * content changes, not with every full-list re-send.
+ */
+atomic_long_t s3fs_admit_invalidations = ATOMIC_LONG_INIT(0);
+
 /* Ring buffer of ino values evicted by policy vote since the last
  * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
  * head/tail. Overflow (queue full) is counted separately so the
@@ -540,8 +547,9 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			    u32 count)
 {
 	struct s3fs_admit **staged = NULL;
+	bool *changed = NULL;
 	struct mm_struct *prev_mm;
-	u32 i;
+	u32 i, n_changed = 0;
 	int err = 0;
 
 	if (count && (!entries || !mm))
@@ -559,6 +567,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		staged = kcalloc(count, sizeof(*staged), GFP_KERNEL);
 		if (!staged)
 			return -ENOMEM;
+		changed = kcalloc(count, sizeof(*changed), GFP_KERNEL);
+		if (!changed) {
+			kfree(staged);
+			return -ENOMEM;
+		}
 		for (i = 0; i < count; i++) {
 			staged[i] = kmalloc(sizeof(*staged[i]), GFP_KERNEL);
 			if (!staged[i]) {
@@ -574,6 +587,35 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	}
 
 	spin_lock(&s3fs_admits_lock);
+	/*
+	 * S-01: decide which entries actually changed before the old table
+	 * is dropped. The daemon re-sends the whole list on every miss /
+	 * sync / eval, so most entries are byte-identical to what is
+	 * already admitted; invalidating their page cache would make one
+	 * file's miss throw away every hot file's cache. A range is
+	 * unchanged when the same (ino, offset, uaddr, size) is already
+	 * admitted for the same daemon mm — new content always arrives at
+	 * a fresh arena chunk (new uaddr), so that is enough to keep the
+	 * page cache valid.
+	 */
+	for (i = 0; i < count; i++) {
+		struct s3fs_admit *a;
+		bool same = false;
+
+		if (s3fs_admitted_mm == mm) {
+			hash_for_each_possible(s3fs_admits, a, node,
+					       staged[i]->ino) {
+				if (a->ino == staged[i]->ino &&
+				    a->offset == staged[i]->offset &&
+				    a->uaddr == staged[i]->uaddr &&
+				    a->size == staged[i]->size) {
+					same = true;
+					break;
+				}
+			}
+		}
+		changed[i] = !same;
+	}
 	admit_clear_locked();
 	for (i = 0; i < count; i++)
 		hash_add(s3fs_admits, &staged[i]->node, staged[i]->ino);
@@ -609,15 +651,24 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			i_size_write(inode, entries[i].size);
 			/* Drop any stale page cache filled from the kmalloc
 			 * fallback path (or from a prior admit with a
-			 * different size). Uses folio_trylock, so folios
-			 * held by a concurrent .read_folio waiting on the
-			 * upcall are skipped rather than deadlocked — those
-			 * are pre-uptodate anyway and will be filled from
-			 * the arena on the retry after signal_admit fires. */
-			invalidate_mapping_pages(inode->i_mapping, 0, -1);
+			 * different size) — only for ranges that are new or
+			 * moved (S-01, see above). Uses folio_trylock, so
+			 * folios held by a concurrent .read_folio waiting on
+			 * the upcall are skipped rather than deadlocked —
+			 * those are pre-uptodate anyway and will be filled
+			 * from the arena on the retry after signal_admit
+			 * fires. */
+			if (changed[i]) {
+				invalidate_mapping_pages(inode->i_mapping, 0, -1);
+				n_changed++;
+			}
 			iput(inode);
 		}
 	}
+
+	kfree(changed);
+	changed = NULL;
+	atomic_long_add(n_changed, &s3fs_admit_invalidations);
 
 	/* Policy hook fires after the admit snapshot lands. Both attach
 	 * paths (fmod_ret + struct_ops) are consulted so either can be
@@ -720,6 +771,7 @@ out_free_staged:
 	while (i--)
 		kfree(staged[i]);
 	kfree(staged);
+	kfree(changed);
 	return err;
 }
 

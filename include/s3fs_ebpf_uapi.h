@@ -248,6 +248,8 @@ struct s3fs_mark_dirty {
  *   [1] s3fs_folio_hits      — .read_folio arena hits (kmod-side
  *                              cache hits, divide by (this + read_miss
  *                              _upcalls) for true hit ratio)
+ *   [2] s3fs_admit_invalidations — page-cache invalidations by
+ *                              admit_replace for new/moved ranges
  */
 #define S3FS_STATS_MAX 16
 struct s3fs_stats {

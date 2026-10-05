@@ -393,6 +393,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			st.values[0] = (u64)atomic_long_read(&s3fs_evictions_total);
 		if (st.count > 1)
 			st.values[1] = (u64)atomic_long_read(&s3fs_folio_hits);
+		if (st.count > 2)
+			st.values[2] = (u64)atomic_long_read(&s3fs_admit_invalidations);
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;

@@ -92,6 +92,7 @@ extern atomic_long_t s3fs_evictions_total;
  * hit). Divide by (this + read_miss_upcalls) for the true kmod-side
  * cache hit ratio. */
 extern atomic_long_t s3fs_folio_hits;
+extern atomic_long_t s3fs_admit_invalidations;
 
 /* Running admit hash size. Read from s3fs_kfunc_admit_count() in
  * tree_traversal.c so BPF policy programs can make pressure-aware
