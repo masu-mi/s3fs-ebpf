@@ -14,6 +14,17 @@
 # mount + daemon so state doesn't leak between runs, seeds
 # hitrate_<N>.txt into the bucket, runs the workload, delta-reads
 # /metrics for hits & misses, prints a comparison table.
+#
+# Reading the table: SOFTCAP is an eviction *trigger* (kmod only applies
+# policy votes once the admit set exceeds it), not a capacity, so each
+# row also reports the admit-set size actually seen during the workload
+# (adm_mean / adm_max). Rates are only comparable between policies with
+# similar adm_*; a policy that rarely votes "evict" keeps more files
+# admitted and scores higher for that reason alone. The reference block
+# at the end replays the identical trace ($OUT/trace.jsonl) through
+# `s3fs-ebpf dev trace-replay`: `opt` (Belady) is the best any policy can
+# do with SOFTCAP slots — a live rate above it means the run held more
+# than SOFTCAP files, not that the policy beat the optimum.
 
 set -euo pipefail
 
@@ -24,8 +35,11 @@ MOUNT=${MOUNT:-/mnt/s3demo}
 METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
 BUCKET=${BUCKET:-s3fs-test}
 N_FILES=${N_FILES:-30}          # working set size (softcap=8 → 22 evict candidates)
-N_ACCESS=${N_ACCESS:-400}       # workload length
-ZIPF_ALPHA=${ZIPF_ALPHA:-0.9}   # skew — smaller = more uniform
+# Defaults match the recorded results in docs/journal/hit-rate-bench.md
+# and `trace-replay`'s --zipf default.
+N_ACCESS=${N_ACCESS:-200}       # workload length
+ZIPF_ALPHA=${ZIPF_ALPHA:-0.7}   # skew — smaller = more uniform
+SOFTCAP=${SOFTCAP:-8}           # must match kmod S3FS_EVICT_SOFTCAP (reference sims only)
 # Softcap converges from N → 8 in 3 sync rounds (grace + clear +
 # evict), so we need >=3 sync-every intervals of settle. Also lets
 # evict-drain feedback loop remove evicted inos from daemon snapshot
@@ -150,6 +164,18 @@ run_one() {
 	b_evict=$(read_counter s3fs_ebpf_policy_evictions_total)
 	b_admits=$(read_counter s3fs_ebpf_admits_current)
 	log "$pol: baseline miss=$b_miss err=$b_reload evict=$b_evict admits_current=$b_admits"
+	# Effective cache size: admit-set samples taken at every interleave
+	# point and at the end of the workload.
+	local adm_sum=0 adm_n=0 adm_max=0 adm
+	sample_admits() {
+		adm=$(read_counter s3fs_ebpf_admits_current)
+		adm=${adm:-0}
+		adm=${adm%.*}
+		adm_sum=$((adm_sum + adm))
+		adm_n=$((adm_n + 1))
+		[ "$adm" -gt "$adm_max" ] && adm_max=$adm
+		return 0
+	}
 
 	log "$pol: running $N_ACCESS accesses (with in-workload eval every $INTERLEAVE)"
 	local start_ns end_ns i=0
@@ -168,10 +194,12 @@ run_one() {
 		# after convergence — the state was empty when the last
 		# forced-eval round ran, so on_evict granted universal grace.
 		if [ "$INTERLEAVE" -gt 0 ] && [ $((i % INTERLEAVE)) -eq 0 ]; then
+			sample_admits
 			curl -s -X POST "${METRICS_URL%/metrics}/policy/eval" >/dev/null
 		fi
-	done < <(gen_workload)
+	done < "$OUT/workload.txt"
 	end_ns=$(date +%s%N)
+	sample_admits
 
 	log "$pol: workload done, settling ${POST}s for counter mirror"
 	sleep "$POST"
@@ -194,9 +222,25 @@ run_one() {
 	fi
 	ms_per=$(awk "BEGIN{printf \"%.2f\", ($end_ns-$start_ns)/1000000/$N_ACCESS}")
 
+	local adm_mean
+	adm_mean=$(awk "BEGIN{printf \"%.1f\", $adm_sum/($adm_n>0?$adm_n:1)}")
+
 	# One line per policy — the comparison table.
-	printf 'RESULT policy=%-14s  hits=%5d  misses=%5d  rate=%6s%%  evictions=%5d  ms/access=%s\n' \
-		"$pol" "$d_hits" "$d_miss" "$rate" "$d_evict" "$ms_per" | tee -a "$OUT/summary.txt"
+	printf 'RESULT policy=%-14s  hits=%5d  misses=%5d  rate=%6s%%  evictions=%5d  adm_mean=%5s  adm_max=%3d  ms/access=%s\n' \
+		"$pol" "$d_hits" "$d_miss" "$rate" "$d_evict" "$adm_mean" "$adm_max" "$ms_per" | tee -a "$OUT/summary.txt"
+}
+
+# Reference bounds on the exact trace the live runs used. trace-replay
+# starts cold while the live bench starts prewarmed, so a warm start can
+# add at most SOFTCAP hits (the first SOFTCAP distinct files) to `opt`.
+reference_bounds() {
+	{
+		echo
+		echo "REFERENCE (dev trace-replay on $OUT/trace.jsonl, softcap=$SOFTCAP, cold start;"
+		echo "           prewarmed live runs: opt bound += at most $SOFTCAP/$N_ACCESS)"
+		"$S3FS_BIN" dev trace-replay --trace="$OUT/trace.jsonl" \
+			--softcap="$SOFTCAP" --policies=lru,sieve,opt,noevict
+	} | tee -a "$OUT/summary.txt"
 }
 
 # --- main ----------------------------------------------------------------
@@ -204,12 +248,19 @@ run_one() {
 : > "$OUT/summary.txt"
 seed_bucket
 
+# Materialise the trace once: the live loop and the reference sims read
+# the same file, and it is kept with the results for later replay.
+gen_workload > "$OUT/workload.txt"
+awk '{ printf "{\"ts\":%d,\"ino\":%d,\"op\":\"read\"}\n", (NR-1)*1000000, 100+$1 }' \
+	"$OUT/workload.txt" > "$OUT/trace.jsonl"
+
 echo "=================================================================="
 echo "hit-rate bench — $N_FILES files, Zipf α=$ZIPF_ALPHA, $N_ACCESS accesses"
 echo "=================================================================="
 for pol in $POLICIES; do
 	run_one "$pol"
 done
+reference_bounds
 
 echo
 echo "==== summary ($OUT/summary.txt) ===="

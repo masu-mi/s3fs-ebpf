@@ -10,8 +10,8 @@ import (
 )
 
 // runTraceReplay is the P-04 offline trace harness. Feeds a workload
-// (either a JSON Lines file or a synthetic Zipf trace matching
-// scripts/bench-hitrate.sh) through Go-side policy simulators and
+// (either a JSON Lines file — bench-hitrate.sh writes its exact trace
+// to $OUT/trace.jsonl — or a synthetic Zipf trace) through Go-side policy simulators and
 // reports per-policy hit rates in milliseconds — no kmod, no mount.
 //
 // Not a replacement for the live bench: BPF struct_ops semantics
@@ -26,9 +26,12 @@ func runTraceReplay(args []string) int {
 			"Overrides --zipf when set.")
 	zipf := fs.String("zipf", "",
 		"Generate a synthetic Zipf trace: alpha,files,accesses. "+
-			"Default '0.7,30,200' matches scripts/bench-hitrate.sh. "+
+			"Default '0.7,30,200' uses scripts/bench-hitrate.sh's default "+
+			"parameters, but Go's RNG differs from the script's Python "+
+			"generator, so the sequence is NOT the bench's — pass the "+
+			"bench's $OUT/trace.jsonl via --trace for a like-for-like reference. "+
 			"Ignored when --trace is set.")
-	policies := fs.String("policies", "lru,sieve",
+	policies := fs.String("policies", "lru,sieve,opt,noevict",
 		"Comma-separated policy names to run in order. Available: "+
 			strings.Join(availablePolicies(), ","))
 	softcap := fs.Int("softcap", 8,
@@ -43,8 +46,8 @@ func runTraceReplay(args []string) int {
 				"Flags:\n")
 		fs.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n"+
-			"  # Match scripts/bench-hitrate.sh's default Zipf workload:\n"+
-			"  s3fs-ebpf dev trace-replay --policies=lru,sieve\n\n"+
+			"  # Reference bounds for the trace a bench-hitrate.sh run used:\n"+
+			"  s3fs-ebpf dev trace-replay --trace=/tmp/bench-hitrate/trace.jsonl\n\n"+
 			"  # Replay a recorded JSONL trace against all policies:\n"+
 			"  s3fs-ebpf dev trace-replay --trace=/tmp/prod.jsonl \\\n"+
 			"      --policies=lru,sieve --softcap=32\n")
@@ -67,7 +70,7 @@ func runTraceReplay(args []string) int {
 		"policy", "accesses", "hits", "misses", "rate")
 	for _, name := range names {
 		name = strings.TrimSpace(name)
-		p, err := makePolicy(name, *softcap)
+		p, err := makePolicy(name, *softcap, events)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "trace-replay: %v\n", err)
 			return 1
@@ -88,8 +91,8 @@ func loadEvents(tracePath, zipfSpec string, seed int64) ([]trace.Event, error) {
 		defer f.Close()
 		return trace.Read(f)
 	}
-	// Default matches the bench-hitrate.sh Python Zipf (α=0.7, 30
-	// files, 200 accesses).
+	// Default uses bench-hitrate.sh's parameters (α=0.7, 30 files,
+	// 200 accesses); the sequence itself differs (Go vs Python RNG).
 	spec := zipfSpec
 	if spec == "" {
 		spec = "0.7,30,200"
@@ -103,15 +106,23 @@ func loadEvents(tracePath, zipfSpec string, seed int64) ([]trace.Event, error) {
 }
 
 func availablePolicies() []string {
-	return []string{"lru", "sieve"}
+	return []string{"lru", "sieve", "opt", "noevict"}
 }
 
-func makePolicy(name string, cap int) (trace.Policy, error) {
+// makePolicy builds a simulator. "opt" (Belady) needs the whole trace
+// up front; "noevict" ignores the capacity. Both are reference bounds,
+// not candidate policies: a live hit rate at softcap=cap above "opt"
+// means the bench is not measuring a capacity-cap cache.
+func makePolicy(name string, cap int, events []trace.Event) (trace.Policy, error) {
 	switch name {
 	case "lru":
 		return trace.NewLRU(cap), nil
 	case "sieve":
 		return trace.NewSIEVE(cap), nil
+	case "opt":
+		return trace.NewOPT(cap, events), nil
+	case "noevict":
+		return trace.NewNoEvict(), nil
 	default:
 		return nil, fmt.Errorf("unknown policy %q — available: %s",
 			name, strings.Join(availablePolicies(), ","))

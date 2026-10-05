@@ -101,12 +101,13 @@ func Write(w io.Writer, events []Event) error {
 
 // GenerateZipf produces `n` read events over `files` distinct inos,
 // sampled from Zipf(alpha). Fixed random seed for reproducibility —
-// same params → same trace, matching scripts/bench-hitrate.sh's
-// Python Zipf generator (seed=42).
+// same params → same trace.
 //
 // The Zipf distribution here uses the classic weight w_i ∝ 1/(i+1)^α
-// (ranks starting at 1). Same shape as bench-hitrate.sh, so the two
-// harnesses drive identical workloads.
+// (ranks starting at 1), the same shape as bench-hitrate.sh. The
+// sequence is NOT the bench's: math/rand and Python's random produce
+// different streams for seed=42. For a reference on the exact bench
+// trace, replay the $OUT/trace.jsonl that bench-hitrate.sh writes.
 func GenerateZipf(files int, n int, alpha float64, seed int64) []Event {
 	if files < 1 {
 		return nil
