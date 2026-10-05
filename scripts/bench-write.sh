@@ -2,11 +2,18 @@
 # scripts/bench-write.sh — Week 4 (e) 追加: write throughput 比較。
 #
 # `dd conv=notrunc` で overwrite in place を 1 MiB / 10 MiB / 100 MiB
-# 各サイズで実施し、wall clock を hyperfine で計測。write は close 時
-# flush なので dd 単独の time が close-to-durable 相当。
+# 各サイズで実施し、wall clock を hyperfine で計測。
 #
-# ebpf の write path は Week 4 (c) で入った close/fsync flush。
-# fuse-raw は毎 write に FUSE upcall → daemon が S3 PUT。
+# durability の違いに注意:
+#   - s3fs-fuse (raw/cache) は close() 内で S3 PUT を同期実行するので、
+#     dd の wall time = write + PUT 完了 (close-to-durable)。
+#   - ebpf の close() (.release) は flush を enqueue して即 return する
+#     fire-and-forget。PUT は daemon が非同期に行うため、`ebpf` 行は
+#     「PUT 完了」を含まない。
+#   - `ebpf-fsync` は conv=notrunc,fsync で .fsync (daemon の PUT 完了
+#     まで block) を通す。fuse と同じ「durable になるまで」の比較はこちら。
+#
+# fuse-raw は毎 write に FUSE upcall → close で daemon が S3 PUT。
 # fuse-cache は kernel_cache 経由なので同じシナリオでも挙動が変わる。
 
 set -euo pipefail
@@ -89,6 +96,7 @@ run_size() {
 		--command-name "fuse-raw"   "sudo dd if=$payload of=$target_fuse_raw   bs=$sizebytes count=1 conv=notrunc" \
 		--command-name "fuse-cache" "sudo dd if=$payload of=$target_fuse_cache bs=$sizebytes count=1 conv=notrunc" \
 		--command-name "ebpf"       "sudo dd if=$payload of=$target_ebpf       bs=$sizebytes count=1 conv=notrunc" \
+		--command-name "ebpf-fsync" "sudo dd if=$payload of=$target_ebpf       bs=$sizebytes count=1 conv=notrunc,fsync" \
 		>&2 || true
 
 	log "verify byte-for-byte roundtrip via S3"
