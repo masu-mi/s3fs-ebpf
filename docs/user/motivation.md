@@ -29,6 +29,12 @@
 同じ workload で **policy を変えるだけで hit rate が 6.5% → 88.5%**。
 `docs/journal/hit-rate-bench.md` に詳細と再現手順、caveats。
 
+> ⚠ この数字は容量で正規化した hit 率ではない。capacity 8 の Belady 上限は
+> この trace で 61〜65% なので、それを超える行は 8 件より多く admit されたまま
+> 走っている。softcap は eviction の trigger で、容量ではない。page cache の
+> 計上 bug を修正した後の再計測待ち。詳細は
+> `docs/journal/hit-rate-bench.md` の Validity review。
+
 ```
 policy=observe         100.00%    0 evict   ← ceiling (no eviction)
 policy=wtinylfu_ops     88.50%  161 evict   ← CMS + bpf_loop aging
