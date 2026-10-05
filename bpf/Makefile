@@ -15,7 +15,8 @@ OBJS := s3fs_fastpath.bpf.o policy_observe.bpf.o \
         policy_s3fifo_ops.bpf.o \
         policy_wtinylfu_ops.bpf.o policy_wtinylfu_full_ops.bpf.o \
         policy_pressure_ops.bpf.o policy_time_decay_ops.bpf.o \
-        policy_size_aware_ops.bpf.o
+        policy_size_aware_ops.bpf.o \
+        kfunc_walk.bpf.o
 
 .PHONY: all clean vmlinux check-clang
 
