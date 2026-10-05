@@ -73,6 +73,11 @@ type Counters struct {
 	// real kmod cache hit ratio.
 	FolioHits atomic.Uint64 // counter
 
+	// AdmitInvalidations: page-cache invalidations admit_replace did
+	// for new or moved ranges (S3FS_IOC_STATS[2], S-01). Should track
+	// real content changes, not the number of full-list re-sends.
+	AdmitInvalidations atomic.Uint64 // counter
+
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
 	// ReadIterMisses counts reads where the ino was unknown (triggers
@@ -168,6 +173,7 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 
 		// True kmod-side cache hit — read_folio served from arena.
 		{"s3fs_ebpf_folio_hits_total", "kmod-side .read_folio calls served from arena (true cache hit). Divide by (this + read_miss_upcalls_total) for hit ratio.", "counter", Global.FolioHits.Load()},
+		{"s3fs_ebpf_admit_invalidations_total", "Page-cache invalidations by admit_replace for new or moved admit ranges (unchanged ranges keep their page cache).", "counter", Global.AdmitInvalidations.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (read prewarm hit).", "counter", Global.ReadIterHits.Load()},

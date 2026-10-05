@@ -1101,6 +1101,9 @@ func sampleKmodStats(ctx context.Context, devPath string, every time.Duration) {
 			if len(vals) >= 2 {
 				metrics.Global.FolioHits.Store(vals[1])
 			}
+			if len(vals) >= 3 {
+				metrics.Global.AdmitInvalidations.Store(vals[2])
+			}
 		}
 	}
 }
