@@ -74,7 +74,7 @@ struct s3fs_policy_ops {
 	int (*on_hit)(__u64 ino);
 };
 
-SEC("struct_ops.s/on_admit")
+SEC("struct_ops/on_admit")
 int BPF_PROG(lru_admit, __u64 count, __u64 hint)
 {
 	__u32 k = 0;
@@ -102,7 +102,7 @@ int BPF_PROG(lru_admit, __u64 count, __u64 hint)
 	return 0;
 }
 
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(lru_evict, __u64 ino)
 {
 	__u32 k0 = 0;
@@ -119,7 +119,7 @@ int BPF_PROG(lru_evict, __u64 ino)
 	return 0;
 }
 
-SEC("struct_ops.s/on_pressure")
+SEC("struct_ops/on_pressure")
 int BPF_PROG(lru_pressure, __u64 count, __u64 threshold)
 {
 	return 0;
@@ -129,7 +129,7 @@ int BPF_PROG(lru_pressure, __u64 count, __u64 threshold)
  * the whole reason a hit matters to LRU: an entry that keeps getting
  * accessed keeps looking young to on_evict's `epoch - seed >= CAP_AGE`
  * comparison. Fires per folio in the read hot path. */
-SEC("struct_ops.s/on_hit")
+SEC("struct_ops/on_hit")
 int BPF_PROG(lru_hit, __u64 ino)
 {
 	__u32 k = 0;

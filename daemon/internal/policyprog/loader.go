@@ -14,9 +14,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
+	"golang.org/x/sys/unix"
 )
 
 // Slot indices — must match bpf/policy_observe.bpf.c PSTAT_*.
@@ -30,9 +33,14 @@ const (
 // supported and auto-detected from the .bpf.o:
 //
 //   - fentry / fmod_ret programs: individual attach per hook,
-//     N Link objects, hot swap = N link.Update calls
+//     N Link objects. Tracing links do not implement BPF_LINK_UPDATE
+//     (cilium/ebpf returns ErrNotSupported), so hot swap = attach the
+//     N new links, then close the N old ones; in between both policies
+//     are attached and run.
 //   - struct_ops program: single vtable map, 1 Link object,
-//     hot swap = 1 link.Update on the vtable
+//     hot swap = 1 BPF_LINK_UPDATE that retargets the existing link at
+//     the new vtable map (kmod .update callback = 1 RCU pointer swap).
+//     See SwapFrom.
 //
 // See docs/design/policy-engine-design.md §4.5 for the trade-off analysis.
 type Program struct {
@@ -42,6 +50,7 @@ type Program struct {
 	Links    []link.Link              // one per attached hook or 1 for struct_ops
 	Path     string                   // source path for logs
 	IsStruct bool                     // true when a struct_ops map was found
+	VTable   *ebpf.Map                // the attached struct_ops map (struct_ops only)
 }
 
 // Load reads a .bpf.o and returns a ready-to-attach Program. The
@@ -120,9 +129,94 @@ func (p *Program) attachStructOps() error {
 				name, err)
 		}
 		p.Links = append(p.Links, l)
+		p.VTable = m
 		return nil // exactly one vtable per policy
 	}
 	return fmt.Errorf("policyprog: no struct_ops map in %s", p.Path)
+}
+
+// structOpsVTable returns the first struct_ops map in the collection.
+func (p *Program) structOpsVTable() *ebpf.Map {
+	for _, m := range p.Coll.Maps {
+		if m.Type() == ebpf.StructOpsMap {
+			return m
+		}
+	}
+	return nil
+}
+
+// SwapFrom makes p the active policy in place of old, which must be
+// attached. p must be loaded but not yet attached. On success p owns
+// the live link(s) and old has none left, so old.Close() only frees
+// its collection.
+//
+// struct_ops → struct_ops: one BPF_LINK_UPDATE on old's link with
+// p's vtable map (flags=BPF_F_REPLACE, old map as the expected
+// current value). The kernel calls the kmod's .update callback, which
+// swaps the RCU pointer once — readers see either the whole old vtable
+// or the whole new one. Requires both objects to use
+// SEC(".struct_ops.link") (BPF_F_LINK) and kernel 6.4+.
+//
+// Any other combination (fentry/fmod_ret on either side), or a kernel
+// that refuses the update, falls back to attach-new-then-close-old:
+// the kmod reg callback publishes the new vtable and the old link's
+// unreg sees it was superseded. Returns updated=true when the atomic
+// link update path was used.
+func (p *Program) SwapFrom(old *Program) (updated bool, err error) {
+	if p.IsStruct && old != nil && old.IsStruct && old.VTable != nil && len(old.Links) == 1 {
+		if nm := p.structOpsVTable(); nm != nil {
+			uerr := updateStructOpsLink(old.Links[0], nm, old.VTable)
+			if uerr == nil {
+				p.Links, old.Links = old.Links, nil
+				p.VTable, old.VTable = nm, nil
+				return true, nil
+			}
+			fmt.Fprintf(os.Stderr,
+				"policyprog: BPF_LINK_UPDATE %s → %s failed (%v); falling back to attach + detach\n",
+				old.Path, p.Path, uerr)
+		}
+	}
+	if err := p.Attach(); err != nil {
+		return false, err
+	}
+	if old != nil {
+		for _, l := range old.Links {
+			_ = l.Close()
+		}
+		old.Links = nil
+	}
+	return false, nil
+}
+
+// updateStructOpsLink issues BPF_LINK_UPDATE for a struct_ops link.
+// cilium/ebpf's structOpsLink.Update only accepts *ebpf.Program and
+// always returns ErrNotSupported, so the map-flavoured update
+// (link_update.new_map_fd / old_map_fd share the prog fd slots) is
+// done with a raw bpf(2) call.
+func updateStructOpsLink(l link.Link, newMap, oldMap *ebpf.Map) error {
+	fl, ok := l.(interface{ FD() int })
+	if !ok {
+		return fmt.Errorf("link %T exposes no fd", l)
+	}
+	attr := struct {
+		LinkFd   uint32
+		NewMapFd uint32
+		Flags    uint32
+		OldMapFd uint32
+	}{
+		LinkFd:   uint32(fl.FD()),
+		NewMapFd: uint32(newMap.FD()),
+		Flags:    unix.BPF_F_REPLACE,
+		OldMapFd: uint32(oldMap.FD()),
+	}
+	_, _, errno := unix.Syscall(unix.SYS_BPF, unix.BPF_LINK_UPDATE,
+		uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	runtime.KeepAlive(newMap)
+	runtime.KeepAlive(oldMap)
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 // Close detaches (if attached) and frees the collection.
@@ -134,6 +228,7 @@ func (p *Program) Close() {
 		_ = l.Close()
 	}
 	p.Links = nil
+	p.VTable = nil
 	if p.Coll != nil {
 		p.Coll.Close()
 	}
@@ -152,7 +247,7 @@ func (p *Program) ReadStat(slot uint32) (uint64, error) {
 	return v, nil
 }
 
-// AttachedCount returns how many fentry links are live (useful for
+// AttachedCount returns how many links are live (useful for
 // smoke-verifying multi-hook programs like the freq2bit fmod_ret set).
 func (p *Program) AttachedCount() int { return len(p.Links) }
 

@@ -32,6 +32,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -486,7 +487,12 @@ func runFastpath(args []string) int {
 		return allowlist.Verify(path)
 	}
 
-	var polProg *policyprog.Program
+	// polProg is swapped by POST /policy/reload (HTTP goroutine) and
+	// read by samplePolicyStats; polMu serialises both.
+	var (
+		polMu   sync.Mutex
+		polProg *policyprog.Program
+	)
 	if bpfPath, err := policyprog.Resolve(policyBPFEffective, repoRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "policy-bpf: %v\n", err)
 		return 1
@@ -505,15 +511,24 @@ func runFastpath(args []string) int {
 			fmt.Fprintf(os.Stderr, "policy-bpf attach: %v\n", err)
 			return 1
 		}
-		defer polProg.Close()
-		fmt.Printf("[policy-bpf] loaded %s (%d fentry hooks attached)\n",
-			bpfPath, polProg.AttachedCount())
+		// Close whatever program is current at exit — after a hot
+		// reload that is no longer the one loaded here, so the defer
+		// must not capture polProg by value.
+		defer func() {
+			polMu.Lock()
+			polProg.Close()
+			polMu.Unlock()
+		}()
+		fmt.Printf("[policy-bpf] loaded %s (%d links attached, struct_ops=%v)\n",
+			bpfPath, polProg.AttachedCount(), polProg.IsStruct)
 
-		// Wire up POST /policy/reload for hot swap. New program is
-		// loaded + attached BEFORE the old one is closed so the kmod
-		// side sees "new reg → old unreg (superseded)" and never
-		// goes without an active vtable (guarded by kmod-side
-		// s3fs_policy_unreg check).
+		// Wire up POST /policy/reload for hot swap. struct_ops →
+		// struct_ops retargets the live link with one BPF_LINK_UPDATE
+		// (kmod .update = single RCU pointer swap). Otherwise the new
+		// program is attached BEFORE the old one is closed so the kmod
+		// side sees "new reg → old unreg (superseded)" and never goes
+		// without an active vtable (guarded by kmod-side
+		// s3fs_policy_unreg check). See policyprog.SwapFrom.
 		metrics.ReloadHandler = func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -544,16 +559,23 @@ func runFastpath(args []string) int {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			if err := newProg.Attach(); err != nil {
+			polMu.Lock()
+			defer polMu.Unlock()
+			old := polProg
+			updated, err := newProg.SwapFrom(old)
+			if err != nil {
 				newProg.Close()
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			old := polProg
 			polProg = newProg
 			old.Close()
-			fmt.Printf("[policy-bpf] hot-reloaded %s → %s\n", old.Path, newPath)
-			fmt.Fprintf(w, "reloaded to %s\n", newPath)
+			how := "attach+detach"
+			if updated {
+				how = "BPF_LINK_UPDATE"
+			}
+			fmt.Printf("[policy-bpf] hot-reloaded %s → %s (%s)\n", old.Path, newPath, how)
+			fmt.Fprintf(w, "reloaded to %s (%s)\n", newPath, how)
 		}
 		// POST /policy/eval: force an admit_replace with the current
 		// snapshot so the policy program's on_admit / on_evict fires
@@ -773,8 +795,11 @@ func runFastpath(args []string) int {
 	// program's policy_stats map every N and mirrors into the
 	// metrics endpoint so Grafana can chart hook activity alongside
 	// the daemon-side counters. No-op when --policy-bpf is empty.
-	if polProg != nil {
-		go samplePolicyStats(ctx, polProg, 5*time.Second)
+	polMu.Lock()
+	havePolicy := polProg != nil
+	polMu.Unlock()
+	if havePolicy {
+		go samplePolicyStats(ctx, &polMu, &polProg, 5*time.Second)
 	}
 
 	for {
@@ -983,7 +1008,7 @@ func warmFromS3(ctx context.Context, progs *fpebpf.Programs, c objstore.Backend,
 // samplePolicyStats mirrors the loaded policy BPF program's counters
 // into metrics.Global on a ticker. Uses lookups from the shared map
 // (see bpf/policy_observe.bpf.c PSTAT_* indices).
-func samplePolicyStats(ctx context.Context, p *policyprog.Program, every time.Duration) {
+func samplePolicyStats(ctx context.Context, mu *sync.Mutex, cur **policyprog.Program, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -991,12 +1016,19 @@ func samplePolicyStats(ctx context.Context, p *policyprog.Program, every time.Du
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if v, err := p.ReadStat(policyprog.StatInvocations); err == nil {
-				metrics.Global.PolicyHookInvocations.Store(v)
+			// Re-resolve every tick under the reload lock: a hot
+			// reload closes the old program's maps, so a captured
+			// pointer would read a closed (or reused) fd.
+			mu.Lock()
+			if p := *cur; p != nil {
+				if v, err := p.ReadStat(policyprog.StatInvocations); err == nil {
+					metrics.Global.PolicyHookInvocations.Store(v)
+				}
+				if v, err := p.ReadStat(policyprog.StatLastCount); err == nil {
+					metrics.Global.PolicyLastAdmitCount.Store(v)
+				}
 			}
-			if v, err := p.ReadStat(policyprog.StatLastCount); err == nil {
-				metrics.Global.PolicyLastAdmitCount.Store(v)
-			}
+			mu.Unlock()
 		}
 	}
 }

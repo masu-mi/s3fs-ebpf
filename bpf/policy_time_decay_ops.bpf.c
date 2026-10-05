@@ -65,7 +65,7 @@ struct {
  * production (or take it via a config map). */
 #define DECAY_NS  (5ULL * 1000ULL * 1000ULL * 1000ULL)
 
-SEC("struct_ops.s/on_admit")
+SEC("struct_ops/on_admit")
 int BPF_PROG(time_decay_admit, __u64 count, __u64 hint)
 {
 	__u32 k;
@@ -103,7 +103,7 @@ int BPF_PROG(time_decay_admit, __u64 count, __u64 hint)
 	return 0;
 }
 
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(time_decay_evict, __u64 ino)
 {
 	__u64 *last = bpf_map_lookup_elem(&time_decay_last_hit, &ino);
@@ -120,13 +120,13 @@ int BPF_PROG(time_decay_evict, __u64 ino)
 	return 0;
 }
 
-SEC("struct_ops.s/on_pressure")
+SEC("struct_ops/on_pressure")
 int BPF_PROG(time_decay_pressure, __u64 count, __u64 threshold)
 {
 	return 0;
 }
 
-SEC("struct_ops.s/on_hit")
+SEC("struct_ops/on_hit")
 int BPF_PROG(time_decay_hit, __u64 ino)
 {
 	__u64 now = s3fs_kfunc_time_ns();

@@ -17,8 +17,13 @@
  *       .on_hit      = (void *)my_on_hit,
  *   };
  *
+ * Programs must be non-sleepable (SEC("struct_ops/..."), not
+ * "struct_ops.s/..."): the eval wrappers call them inside
+ * rcu_read_lock(), and on_hit fires per folio on the read path.
+ *
  * kmod side dispatches via rcu_dereference'd pointer; the whole
- * vtable is swapped in a single link.Update.
+ * vtable is swapped by one BPF_LINK_UPDATE on the struct_ops link
+ * (-> s3fs_policy_update, a single rcu_assign_pointer).
  */
 struct s3fs_policy_ops {
 	int (*on_admit)(u64 count, u64 arena_used_hint);
