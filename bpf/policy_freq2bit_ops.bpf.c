@@ -49,7 +49,7 @@ struct {
 	__uint(max_entries, PSTAT_MAX);
 } policy_stats SEC(".maps");
 
-SEC("struct_ops.s/on_admit")
+SEC("struct_ops/on_admit")
 int BPF_PROG(freq2bit_admit, __u64 count, __u64 hint)
 {
 	__u32 k;
@@ -71,7 +71,7 @@ int BPF_PROG(freq2bit_admit, __u64 count, __u64 hint)
 	return 0;
 }
 
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(freq2bit_evict, __u64 ino)
 {
 	__u8 *fp = bpf_map_lookup_elem(&freq2bit_counter, &ino);
@@ -87,13 +87,13 @@ int BPF_PROG(freq2bit_evict, __u64 ino)
 	return 0;
 }
 
-SEC("struct_ops.s/on_pressure")
+SEC("struct_ops/on_pressure")
 int BPF_PROG(freq2bit_pressure, __u64 count, __u64 threshold)
 {
 	return 0;
 }
 
-SEC("struct_ops.s/on_hit")
+SEC("struct_ops/on_hit")
 int BPF_PROG(freq2bit_hit, __u64 ino)
 {
 	__u8 *fp = bpf_map_lookup_elem(&freq2bit_counter, &ino);

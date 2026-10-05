@@ -236,7 +236,7 @@ static __always_inline void reset_dk(void)
 	bpf_loop(DK_U64S, dk_reset_cb, NULL, 0);
 }
 
-SEC("struct_ops.s/on_admit")
+SEC("struct_ops/on_admit")
 int BPF_PROG(wtinylfu_full_admit, __u64 count, __u64 hint)
 {
 	__u32 k;
@@ -263,7 +263,7 @@ int BPF_PROG(wtinylfu_full_admit, __u64 count, __u64 hint)
 	return 0;
 }
 
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(wtinylfu_full_evict, __u64 ino)
 {
 	struct wtlfu_state *s = bpf_map_lookup_elem(&wtinylfu_tier, &ino);
@@ -307,13 +307,13 @@ int BPF_PROG(wtinylfu_full_evict, __u64 ino)
 	return 0;
 }
 
-SEC("struct_ops.s/on_pressure")
+SEC("struct_ops/on_pressure")
 int BPF_PROG(wtinylfu_full_pressure, __u64 count, __u64 threshold)
 {
 	return 0;
 }
 
-SEC("struct_ops.s/on_hit")
+SEC("struct_ops/on_hit")
 int BPF_PROG(wtinylfu_full_hit, __u64 ino)
 {
 	/* Doorkeeper: first hit does not bump CMS (Bloom-filter shield

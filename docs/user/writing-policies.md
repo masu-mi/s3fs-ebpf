@@ -363,14 +363,14 @@ struct {
     __uint(max_entries, PSTAT_MAX);
 } policy_stats SEC(".maps");
 
-SEC("struct_ops.s/on_admit")
+SEC("struct_ops/on_admit")
 int BPF_PROG(mypolicy_admit, __u64 count, __u64 hint) {
     // 1 admit_replace batch ごと呼ばれる。cold path なので好きな処理
     // OK (max_entries 内)。return は無視される (advisory hook)
     return 0;
 }
 
-SEC("struct_ops.s/on_hit")
+SEC("struct_ops/on_hit")
 int BPF_PROG(mypolicy_hit, __u64 ino) {
     // .read_folio hit branch から per-folio 呼ばれる — HOT PATH。
     // 短く。O(1) 操作のみ。
@@ -379,7 +379,7 @@ int BPF_PROG(mypolicy_hit, __u64 ino) {
     return 0;
 }
 
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(mypolicy_evict, __u64 ino) {
     // admit hash が softcap 超過時に per-ino 呼ばれる。
     // return 1 = kmod-side hash_del で evict、return 0 = keep。
@@ -388,7 +388,7 @@ int BPF_PROG(mypolicy_evict, __u64 ino) {
     return (*v == 0) ? 1 : 0;
 }
 
-SEC("struct_ops.s/on_pressure")
+SEC("struct_ops/on_pressure")
 int BPF_PROG(mypolicy_pressure, __u64 count, __u64 threshold) {
     return 0;  // advisory only
 }
@@ -476,7 +476,7 @@ extern __u64 s3fs_kfunc_ino_size(__u64)       __ksym;
 ### 使用例
 
 ```c
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(pressure_evict, __u64 ino) {
     __u32 admits = s3fs_kfunc_admit_count();
     __u32 cap    = s3fs_kfunc_softcap();
@@ -516,13 +516,30 @@ curl -X POST http://localhost:9600/policy/reload \
 curl -X POST http://localhost:9600/policy/eval
 ```
 
-kmod-side は RCU で vtable を atomic swap、既存 vtable で走行中の
-call は完走、次の call から新 vtable を使う。dmesg で観測:
+struct_ops → struct_ops の reload は既存 link に対する 1 回の
+`BPF_LINK_UPDATE` (new_map_fd = 新 vtable、`BPF_F_REPLACE` で旧 map を
+期待値に指定)。kernel が kmod の `.update` callback を呼び、kmod-side は
+RCU で vtable を 1 ポインタ swap — 既存 vtable で走行中の call は完走、
+次の call から新 vtable を使う。dmesg で観測:
+
+```
+s3fs_ebpf: policy struct_ops updated (hot swap)
+```
+
+fmod_ret (tracing link は `BPF_LINK_UPDATE` 非対応) との相互切替や、
+link update を拒否する kernel (< 6.4) では「新を attach → 旧を close」に
+fallback し、dmesg は次のようになる:
 
 ```
 s3fs_ebpf: policy struct_ops registered (ops=<new_addr>)
 s3fs_ebpf: policy struct_ops unregistered (superseded, keeping <new_addr>)
 ```
+
+> **sleepable にしない**: kmod は `rcu_read_lock()` の中から vtable を
+> 呼ぶ (`kmod/policy_struct_ops.c`)。`SEC("struct_ops.s/...")` にすると
+> sleepable trampoline (`might_fault()`) が RCU read-side で走り、
+> `CONFIG_DEBUG_ATOMIC_SLEEP` kernel で splat する。`SEC("struct_ops/...")`
+> を使うこと。
 
 ## Allowlist で user policy を承認する
 

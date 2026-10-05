@@ -67,7 +67,7 @@ struct s3fs_policy_ops {
 	int (*on_hit)(__u64 ino);
 };
 
-SEC("struct_ops.s/on_admit")
+SEC("struct_ops/on_admit")
 int BPF_PROG(sieve_admit, __u64 count, __u64 hint)
 {
 	__u32 k;
@@ -89,7 +89,7 @@ int BPF_PROG(sieve_admit, __u64 count, __u64 hint)
 	return 0;
 }
 
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(sieve_evict, __u64 ino)
 {
 	__u8 *vp = bpf_map_lookup_elem(&sieve_visited, &ino);
@@ -111,7 +111,7 @@ int BPF_PROG(sieve_evict, __u64 ino)
 	return 1;
 }
 
-SEC("struct_ops.s/on_pressure")
+SEC("struct_ops/on_pressure")
 int BPF_PROG(sieve_pressure, __u64 count, __u64 threshold)
 {
 	return 0;
@@ -121,7 +121,7 @@ int BPF_PROG(sieve_pressure, __u64 count, __u64 threshold)
  * subsequent on_evict pass gives the entry the second-chance branch
  * (clear + keep) instead of the eviction branch. Fires per folio in
  * the read hot path; O(1) map update. */
-SEC("struct_ops.s/on_hit")
+SEC("struct_ops/on_hit")
 int BPF_PROG(sieve_hit, __u64 ino)
 {
 	__u8 one = 1;

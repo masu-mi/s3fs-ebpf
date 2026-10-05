@@ -10,8 +10,11 @@
  * one BPF map update.
  *
  * Compared with fmod_ret:
- *   fmod_ret: per-hook attach, N link.Update calls to swap policy
- *   struct_ops: 1 vtable, 1 link.Update for atomic policy swap
+ *   fmod_ret: per-hook attach; tracing links have no BPF_LINK_UPDATE,
+ *             so a swap is N attaches + N detaches (both policies run
+ *             in between)
+ *   struct_ops: 1 vtable, 1 BPF_LINK_UPDATE -> .update below swaps the
+ *             RCU pointer once (atomic policy swap)
  *   fmod_ret: fentry-style, retval override
  *   struct_ops: function-pointer dispatch, retval is natural
  *
@@ -179,7 +182,9 @@ static void s3fs_policy_unreg(void *kdata, struct bpf_link *link)
 	}
 }
 
-/* update: hot-swap the vtable atomically (single pointer swap). */
+/* update: hot-swap the vtable atomically (single pointer swap).
+ * Invoked by BPF_LINK_UPDATE on a SEC(".struct_ops.link") link — the
+ * daemon's POST /policy/reload path (policyprog.SwapFrom). */
 static int s3fs_policy_update(void *kdata, void *old_kdata,
 			      struct bpf_link *link)
 {

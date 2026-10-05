@@ -160,7 +160,7 @@ static __always_inline void cms_age(void)
 	bpf_loop(CMS_W * CMS_D, age_slot_cb, NULL, 0);
 }
 
-SEC("struct_ops.s/on_admit")
+SEC("struct_ops/on_admit")
 int BPF_PROG(wtinylfu_admit, __u64 count, __u64 hint)
 {
 	__u32 k;
@@ -187,7 +187,7 @@ int BPF_PROG(wtinylfu_admit, __u64 count, __u64 hint)
 	return 0;
 }
 
-SEC("struct_ops.s/on_evict")
+SEC("struct_ops/on_evict")
 int BPF_PROG(wtinylfu_evict, __u64 ino)
 {
 	__u32 est = cms_estimate(ino);
@@ -201,13 +201,13 @@ int BPF_PROG(wtinylfu_evict, __u64 ino)
 	return 0;
 }
 
-SEC("struct_ops.s/on_pressure")
+SEC("struct_ops/on_pressure")
 int BPF_PROG(wtinylfu_pressure, __u64 count, __u64 threshold)
 {
 	return 0;
 }
 
-SEC("struct_ops.s/on_hit")
+SEC("struct_ops/on_hit")
 int BPF_PROG(wtinylfu_hit, __u64 ino)
 {
 	cms_bump(ino);

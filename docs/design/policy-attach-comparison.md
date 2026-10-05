@@ -58,12 +58,12 @@ struct s3fs_policy_ops s3fifo_ops = { .on_evict = ..., ... };
 ### 1.3 Hot swap の atomicity
 
 **fmod_ret**:
-- 3 hook を個別に attach、hot swap は 3 links を順次 `link.Update()`
-- **差替え瞬間の inconsistency 可能性**: on_admit は新 policy、on_evict は旧 policy、の状態がありうる (short window だが 0 ではない)
+- 3 hook を個別に attach。tracing link (fentry / fmod_ret) は `BPF_LINK_UPDATE` 非対応 (cilium/ebpf の `Update` も `ErrNotSupported`) なので、hot swap は「新 3 links を attach → 旧 3 links を close」
+- **差替え瞬間の inconsistency 可能性**: on_admit は新 policy、on_evict は旧 policy、の状態がありうる。さらに attach〜close の間は新旧両方の fmod_ret が同じ hook に乗って連鎖実行される (short window だが 0 ではない)
 - 実装で緩和するには全 links を synchronize させる external barrier が要る
 
 **struct_ops**:
-- 1 vtable map、hot swap は `rcu_assign_pointer + synchronize_rcu()` の 1 操作
+- 1 vtable map、hot swap は既存 link への `BPF_LINK_UPDATE` 1 回 (new_map_fd = 新 vtable、`BPF_F_REPLACE`)。kernel が kmod の `.update` を呼び、`rcu_assign_pointer + synchronize_rcu()` の 1 操作になる (daemon: `policyprog.SwapFrom`、要 `.struct_ops.link` + kernel 6.4+)
 - **原理的に atomic** — RCU readers は「旧 vtable の全 method」か「新 vtable の全 method」のどちらかを見る
 - kmod 側 update callback (`s3fs_policy_update`) が実装済で、grace period 明示
 
@@ -92,7 +92,7 @@ struct s3fs_policy_ops s3fifo_ops = { .on_evict = ..., ... };
 | bpftool prog show の見え方 | 3 `tracing` prog | 3 `struct_ops` prog + 1 STRUCT_OPS map |
 | bpftool link show | 3 link (attach_type modify_return) | 1 link (attach_type struct_ops) |
 | Attach 失敗時 partial state | 1〜2 個 attach 成功、残 fail の場合 unwind 必要 | atomic (成功か全 fail か) |
-| Hot reload 単位 | `link.Update` × N | `link.Update` × 1 |
+| Hot reload 単位 | attach × N + close × N (tracing link は update 非対応) | `BPF_LINK_UPDATE` × 1 |
 | kmod 側 debug print の見え方 | 3 callback、fentry stub 呼出 | reg/unreg/update callback 明示的に log 可能 |
 | kmod 実装複雑度 | 1 個 register 呼出 | init/init_member/reg/unreg/update/validate/cfi_stubs |
 
