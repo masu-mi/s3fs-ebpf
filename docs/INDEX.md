@@ -47,6 +47,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
+| [`design/admit-and-softcap.md`](design/admit-and-softcap.md) | admit / softcap の実際の挙動、キャッシュアルゴリズムとしての問題点 (容量上限なし等)、page cache との役割分担と改善項目 |
 | [`design/policy-engine-design.md`](design/policy-engine-design.md) | 4 layer (CEL + built-in eBPF + user eBPF + KFunc) architecture の設計 |
 | [`design/policy-attach-comparison.md`](design/policy-attach-comparison.md) | fmod_ret vs struct_ops の attach 方式比較 |
 | [`design/trace-harness.md`](design/trace-harness.md) | P-04 ms-scale offline policy simulator |
