@@ -111,7 +111,7 @@ __bpf_kfunc s64 s3fs_kfunc_arena_list_walk(u64 head_uaddr, u32 max_nodes,
 /*
  * P-08 Layer 0 primitives — read-only kernel state exposed to Layer 2/3
  * policy programs. Both KFuncs are safe from any BPF hook context:
- * atomic_read is lock-free, softcap is a compile-time constant.
+ * atomic_read is lock-free, softcap is a READ_ONCE of a module param.
  *
  * BPF-side usage (see bpf/policy_pressure_ops.bpf.c):
  *   extern __u32 s3fs_kfunc_admit_count(void) __ksym;
@@ -124,7 +124,17 @@ __bpf_kfunc u32 s3fs_kfunc_admit_count(void)
 
 __bpf_kfunc u32 s3fs_kfunc_softcap(void)
 {
-	return S3FS_EVICT_SOFTCAP;
+	return READ_ONCE(s3fs_softcap);
+}
+
+/*
+ * Admit-set byte capacity (S-02 `capacity_bytes` module parameter);
+ * 0 means legacy vote mode, where only softcap applies. Lets policies
+ * scale their scores to how close the set is to the bound.
+ */
+__bpf_kfunc u64 s3fs_kfunc_capacity_bytes(void)
+{
+	return READ_ONCE(s3fs_capacity_bytes);
 }
 
 /*
@@ -183,6 +193,7 @@ BTF_KFUNCS_START(s3fs_kfunc_ids_tracing)
 BTF_ID_FLAGS(func, s3fs_kfunc_traverse_stub, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
 BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
+BTF_ID_FLAGS(func, s3fs_kfunc_capacity_bytes)
 BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
 BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
 BTF_ID_FLAGS(func, s3fs_kfunc_ino_size)
@@ -200,6 +211,7 @@ BTF_KFUNCS_END(s3fs_kfunc_ids_syscall)
 BTF_KFUNCS_START(s3fs_kfunc_ids_struct_ops)
 BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
 BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
+BTF_ID_FLAGS(func, s3fs_kfunc_capacity_bytes)
 BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
 BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
 BTF_ID_FLAGS(func, s3fs_kfunc_ino_size)

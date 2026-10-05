@@ -99,10 +99,13 @@ extern atomic_long_t s3fs_admit_invalidations;
  * decisions. Updated under s3fs_admits_lock. */
 extern atomic_t s3fs_admits_count;
 
-/* Soft cap that gates eviction voting — must equal the local
- * `softcap` in s3fs_ebpf_admit_replace(). Duplicated as an extern
- * so tree_traversal.c can expose it as a KFunc. */
+/* Default for the `softcap` module parameter (entry count above which
+ * eviction votes are applied, legacy mode). Runtime value lives in
+ * s3fs_softcap so tree_traversal.c can expose it as a KFunc. */
 #define S3FS_EVICT_SOFTCAP 8U
+extern unsigned int s3fs_softcap;
+/* `capacity_bytes` module parameter (S-02). 0 = legacy vote mode. */
+extern unsigned long long s3fs_capacity_bytes;
 
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
  * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock inside. */

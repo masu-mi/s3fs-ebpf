@@ -402,8 +402,29 @@ func runFastpath(args []string) int {
 		"[F-01] when true (default), each sync round runs the prewarm hook on any entry "+
 			"that appeared since the previous round so the first cat hits Path B/A "+
 			"instead of the ~30ms Path C upcall. Off to keep sync rounds purely metadata.")
+	softcapFlag := fs.Int("softcap", -1,
+		"[S-02] legacy-mode eviction trigger: apply policy votes once the admit "+
+			"snapshot exceeds this many entries. Writes the kmod `softcap` module "+
+			"parameter; -1 (default) leaves the kmod value (8) as is.")
+	cacheCapacity := fs.Int64("cache-capacity", -1,
+		"[S-02] admit-set capacity in bytes. >0 switches kmod to capacity mode "+
+			"(evict by policy score, then oldest first, until the admitted bytes fit); "+
+			"0 restores legacy vote mode; -1 (default) leaves the kmod value as is.")
 	newClient := backendFlags(fs)
 	fs.Parse(args)
+
+	if *softcapFlag >= 0 {
+		if err := setKmodParam("softcap", fmt.Sprint(*softcapFlag)); err != nil {
+			fmt.Fprintf(os.Stderr, "softcap: %v\n", err)
+			return 1
+		}
+	}
+	if *cacheCapacity >= 0 {
+		if err := setKmodParam("capacity_bytes", fmt.Sprint(*cacheCapacity)); err != nil {
+			fmt.Fprintf(os.Stderr, "cache-capacity: %v\n", err)
+			return 1
+		}
+	}
 
 	if *patternAdmit && *noReadIterHook {
 		fmt.Fprintln(os.Stderr, "--pattern-aware-admit requires the read-iter hook; cannot combine with --no-read-iter-hook")

@@ -41,6 +41,7 @@
 #include <linux/refcount.h>
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
+#include <linux/sort.h>
 #include <linux/spinlock.h>
 #include <linux/statfs.h>
 #include <linux/string.h>
@@ -278,11 +279,38 @@ static DEFINE_SPINLOCK(s3fs_admits_lock);
  * pressure-aware decisions (see bpf/policy_pressure_ops.bpf.c). */
 atomic_t s3fs_admits_count = ATOMIC_INIT(0);
 
-/* Soft threshold — evict pressure fires when count exceeds this.
- * Exported via s3fs_kfunc_softcap() so BPF programs know the same
- * number kmod's admit_replace loop uses. Must match the local
- * `softcap` constant in s3fs_ebpf_admit_replace(). */
-#define S3FS_EVICT_SOFTCAP 8U
+/*
+ * Eviction limits (S-02). Both are module parameters, writable at
+ * runtime under /sys/module/s3fs_kfunc/parameters/ (the daemon sets
+ * them from --softcap / --cache-capacity). Exported to BPF via
+ * s3fs_kfunc_softcap() / s3fs_kfunc_capacity_bytes().
+ *
+ * capacity_bytes == 0 (default) — legacy vote mode: once the pushed
+ *   snapshot holds more than `softcap` entries, every entry the policy
+ *   votes for is evicted. softcap is a trigger, not a capacity: the
+ *   result can end anywhere between 0 and all entries.
+ *
+ * capacity_bytes > 0 — capacity mode: after the votes, while the
+ *   admitted bytes exceed capacity_bytes, evict in order of policy
+ *   score (on_evict return value, higher = evict first; existing
+ *   yes/no policies return 1), then oldest-first among entries the
+ *   policy wanted to keep. Stops as soon as the set fits, so the bound
+ *   holds for every policy and nothing is evicted below it. softcap is
+ *   ignored in this mode.
+ *
+ * Either way an ino with a reader blocked on its miss upcall is never
+ * evicted: that reader retries the admit lookup right after
+ * SIGNAL_ADMIT and would otherwise fall back to the placeholder buffer.
+ */
+unsigned int s3fs_softcap = S3FS_EVICT_SOFTCAP;
+module_param_named(softcap, s3fs_softcap, uint, 0644);
+MODULE_PARM_DESC(softcap,
+	"Legacy mode: apply eviction votes when the admit snapshot exceeds this many entries (default 8)");
+
+unsigned long long s3fs_capacity_bytes;
+module_param_named(capacity_bytes, s3fs_capacity_bytes, ullong, 0644);
+MODULE_PARM_DESC(capacity_bytes,
+	"Admit-set byte capacity; >0 enables capacity mode (evict by policy score until it fits). 0 = legacy vote mode");
 
 /* Cumulative count of admit entries removed by policy_ops eviction
  * votes. Exposed via S3FS_IOC_STATS so the daemon can mirror it into
@@ -400,11 +428,12 @@ static struct s3fs_admit *admit_lookup_at_locked(u64 ino, u64 pos)
  * Drop every admitted range of `ino` (partial admits can register
  * several). Takes the admit lock. Returns how many were dropped.
  */
-static unsigned int admit_drop_all_ranges(u64 ino)
+static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
 {
 	struct s3fs_admit *a;
 	struct hlist_node *tmp;
 	unsigned int n = 0;
+	u64 b = 0;
 
 	spin_lock(&s3fs_admits_lock);
 	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
@@ -412,10 +441,13 @@ static unsigned int admit_drop_all_ranges(u64 ino)
 			continue;
 		hash_del(&a->node);
 		atomic_dec(&s3fs_admits_count);
+		b += a->size;
 		kfree(a);
 		n++;
 	}
 	spin_unlock(&s3fs_admits_lock);
+	if (bytes)
+		*bytes = b;
 	return n;
 }
 
@@ -540,6 +572,35 @@ static void s3fs_evict_page_cache(u64 ino)
 		return;
 	invalidate_mapping_pages(inode->i_mapping, 0, -1);
 	iput(inode);
+}
+
+static bool pending_exists(u64 ino); /* defined with the upcall machinery */
+
+/* Evict every admitted range of `ino`: drop it from the table, report
+ * it to the daemon (evict log) and drop its page cache. Returns false
+ * when nothing was admitted. *freed gets the bytes released. */
+static bool admit_evict_ino(u64 ino, u64 *freed)
+{
+	if (!admit_drop_all_ranges(ino, freed))
+		return false;
+	evict_log_push(ino);
+	s3fs_evict_page_cache(ino);
+	return true;
+}
+
+struct s3fs_victim {
+	int score; /* policy on_evict return value, clamped >= 0 */
+	u32 idx;   /* position in the pushed snapshot (daemon keeps admission order) */
+};
+
+/* Highest score first; ties (incl. all score-0 keeps) oldest first. */
+static int s3fs_victim_cmp(const void *a, const void *b)
+{
+	const struct s3fs_victim *x = a, *y = b;
+
+	if (x->score != y->score)
+		return x->score > y->score ? -1 : 1;
+	return x->idx < y->idx ? -1 : (x->idx > y->idx);
 }
 
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
@@ -711,47 +772,70 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 */
 	{
 		u32 fmodret_votes = 0, structops_votes = 0, evicted = 0;
-		const u32 softcap = S3FS_EVICT_SOFTCAP;
+		const u32 softcap = READ_ONCE(s3fs_softcap);
+		const u64 cap_bytes = READ_ONCE(s3fs_capacity_bytes);
+		struct s3fs_victim *cand = NULL;
+		u64 live_bytes = 0;
+		u32 ncand = 0;
+
+		if (cap_bytes) {
+			for (i = 0; i < count; i++)
+				live_bytes += entries[i].size;
+			if (live_bytes > cap_bytes) {
+				cand = kcalloc(count, sizeof(*cand), GFP_KERNEL);
+				if (!cand)
+					pr_warn_ratelimited("s3fs_ebpf: capacity eviction skipped (-ENOMEM)\n");
+			}
+		}
 
 		for (i = 0; i < count; i++) {
 			int fr_vote = s3fs_policy_on_evict(entries[i].ino);
 			int so_vote = s3fs_policy_ops_eval_evict(entries[i].ino);
+			int score = max3(fr_vote, so_vote, 0);
 
 			if (fr_vote != 0)
 				fmodret_votes++;
 			if (so_vote != 0)
 				structops_votes++;
 
-			/* Enforcement: struct_ops has priority; fmod_ret is
-			 * advisory when both are attached. */
-			if (count <= softcap)
+			if (cap_bytes) {
+				/* Capacity mode: rank now, evict below. */
+				if (cand) {
+					cand[ncand].score = score;
+					cand[ncand].idx = i;
+					ncand++;
+				}
 				continue;
-			if (so_vote != 0 || fr_vote != 0) {
-				struct s3fs_admit *a;
-				struct hlist_node *tmp;
-				bool dropped = false;
-
-				spin_lock(&s3fs_admits_lock);
-				hash_for_each_possible_safe(s3fs_admits, a, tmp,
-							    node, entries[i].ino) {
-					if (a->ino != entries[i].ino)
-						continue;
-					hash_del(&a->node);
-					atomic_dec(&s3fs_admits_count);
-					kfree(a);
-					dropped = true;
-					break;
-				}
-				spin_unlock(&s3fs_admits_lock);
-				if (dropped) {
-					evicted++;
-					/* Log for daemon feedback so it stops
-					 * re-sending this ino on the next
-					 * admit_replace round. */
-					evict_log_push(entries[i].ino);
-					s3fs_evict_page_cache(entries[i].ino);
-				}
 			}
+
+			/* Legacy mode: any vote evicts, once over softcap. */
+			if (count <= softcap || !score)
+				continue;
+			if (pending_exists(entries[i].ino))
+				continue;
+			if (admit_evict_ino(entries[i].ino, NULL))
+				evicted++;
+		}
+
+		if (cand) {
+			u32 k;
+
+			sort(cand, ncand, sizeof(*cand), s3fs_victim_cmp, NULL);
+			for (k = 0; k < ncand && live_bytes > cap_bytes; k++) {
+				u64 ino = entries[cand[k].idx].ino;
+				u64 freed = 0;
+
+				if (pending_exists(ino))
+					continue;
+				if (!admit_evict_ino(ino, &freed))
+					continue; /* other range of an ino already evicted */
+				evicted++;
+				live_bytes -= min(freed, live_bytes);
+			}
+			kfree(cand);
+			if (live_bytes > cap_bytes)
+				pr_info_ratelimited("s3fs_ebpf: admit set %llu B still over capacity %llu B (in-flight misses)\n",
+						    live_bytes, cap_bytes);
 		}
 		if (fmodret_votes)
 			pr_info("s3fs_ebpf: fmod_ret voted evict on %u/%u entries\n",
@@ -761,8 +845,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				structops_votes, count);
 		if (evicted) {
 			atomic_long_add(evicted, &s3fs_evictions_total);
-			pr_info("s3fs_ebpf: policy evicted %u entries (softcap=%u)\n",
-				evicted, softcap);
+			pr_info("s3fs_ebpf: policy evicted %u entries (softcap=%u capacity_bytes=%llu)\n",
+				evicted, softcap, cap_bytes);
 		}
 	}
 	return 0;
@@ -895,6 +979,24 @@ static void pending_unhash(struct s3fs_pending *p)
 		return;
 	}
 	spin_unlock(&s3fs_pending_lock);
+}
+
+/* True while a .read_folio is blocked on a miss upcall for `ino`
+ * (the entry stays hashed until SIGNAL_ADMIT unhashes it). */
+static bool pending_exists(u64 ino)
+{
+	struct s3fs_pending *p;
+	bool found = false;
+
+	spin_lock(&s3fs_pending_lock);
+	hash_for_each_possible(s3fs_pending, p, node, ino) {
+		if (p->ino == ino) {
+			found = true;
+			break;
+		}
+	}
+	spin_unlock(&s3fs_pending_lock);
+	return found;
 }
 
 static int miss_enqueue(u64 ino, loff_t offset, size_t count)
@@ -2178,7 +2280,7 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 	}
 	if (dirty)
 		return 0;
-	admit_drop_all_ranges(inode->i_ino);
+	admit_drop_all_ranges(inode->i_ino, NULL);
 	invalidate_mapping_pages(inode->i_mapping, 0, -1);
 	return 0;
 }

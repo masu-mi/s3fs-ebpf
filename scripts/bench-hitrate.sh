@@ -15,16 +15,17 @@
 # hitrate_<N>.txt into the bucket, runs the workload, delta-reads
 # /metrics for hits & misses, prints a comparison table.
 #
-# Reading the table: SOFTCAP is an eviction *trigger* (kmod only applies
-# policy votes once the admit set exceeds it), not a capacity, so each
-# row also reports the admit-set size actually seen during the workload
-# (adm_mean / adm_max). Rates are only comparable between policies with
-# similar adm_*; a policy that rarely votes "evict" keeps more files
-# admitted and scores higher for that reason alone. The reference block
-# at the end replays the identical trace ($OUT/trace.jsonl) through
-# `s3fs-ebpf dev trace-replay`: `opt` (Belady) is the best any policy can
-# do with SOFTCAP slots — a live rate above it means the run held more
-# than SOFTCAP files, not that the policy beat the optimum.
+# Capacity: by default the kmod runs in capacity mode (S-02) with
+# CAPACITY_BYTES = SOFTCAP * FILE_BYTES, i.e. exactly SOFTCAP of the
+# equal-size bench files. Policies then only rank victims and kmod evicts
+# until the set fits, so every row is a SOFTCAP-slot hit rate and is
+# comparable with the `opt` (Belady) reference at the end, which replays
+# the identical trace ($OUT/trace.jsonl) through `dev trace-replay`.
+# CAPACITY_BYTES=0 reproduces the old legacy vote mode, where SOFTCAP is
+# only an eviction trigger and a policy that rarely votes "evict" keeps
+# more files admitted (rates can then exceed `opt`). Each row also
+# reports the admit-set size seen during the workload (adm_mean /
+# adm_max) as a check.
 
 set -euo pipefail
 
@@ -39,7 +40,9 @@ N_FILES=${N_FILES:-30}          # working set size (softcap=8 → 22 evict candi
 # and `trace-replay`'s --zipf default.
 N_ACCESS=${N_ACCESS:-200}       # workload length
 ZIPF_ALPHA=${ZIPF_ALPHA:-0.7}   # skew — smaller = more uniform
-SOFTCAP=${SOFTCAP:-8}           # must match kmod S3FS_EVICT_SOFTCAP (reference sims only)
+SOFTCAP=${SOFTCAP:-8}           # slots; passed to kmod (--softcap) and the reference sims
+FILE_BYTES=44                   # size of each seeded hitrate_<N>.txt (see seed_bucket)
+CAPACITY_BYTES=${CAPACITY_BYTES:-$((SOFTCAP * FILE_BYTES))}  # 0 = legacy vote mode
 # Softcap converges from N → 8 in 3 sync rounds (grace + clear +
 # evict), so we need >=3 sync-every intervals of settle. Also lets
 # evict-drain feedback loop remove evicted inos from daemon snapshot
@@ -126,7 +129,8 @@ start_stack() {
 	ebpf_start_daemon "$OUT/daemon-${pol}.log" \
 		--policy-bpf="builtin:policy_${pol}" \
 		--metrics-addr=:9600 \
-		--sample-every=2s --sync-every="$SYNC_EVERY"
+		--sample-every=2s --sync-every="$SYNC_EVERY" \
+		--softcap="$SOFTCAP" --cache-capacity="$CAPACITY_BYTES"
 	log "$pol: prewarm done, forcing 4 policy eval rounds to converge below softcap"
 	# SIEVE needs 3 rounds (grace → clear → evict); LRU / freq2bit
 	# / S3-FIFO converge faster but do no harm here. Sleep between so the
@@ -237,6 +241,7 @@ reference_bounds() {
 	{
 		echo
 		echo "REFERENCE (dev trace-replay on $OUT/trace.jsonl, softcap=$SOFTCAP, cold start;"
+		echo "           live runs used capacity_bytes=$CAPACITY_BYTES — 0 means legacy mode, not slot-bounded)"
 		echo "           prewarmed live runs: opt bound += at most $SOFTCAP/$N_ACCESS)"
 		"$S3FS_BIN" dev trace-replay --trace="$OUT/trace.jsonl" \
 			--softcap="$SOFTCAP" --policies=lru,sieve,opt,noevict
@@ -255,7 +260,7 @@ awk '{ printf "{\"ts\":%d,\"ino\":%d,\"op\":\"read\"}\n", (NR-1)*1000000, 100+$1
 	"$OUT/workload.txt" > "$OUT/trace.jsonl"
 
 echo "=================================================================="
-echo "hit-rate bench — $N_FILES files, Zipf α=$ZIPF_ALPHA, $N_ACCESS accesses"
+echo "hit-rate bench — $N_FILES files, Zipf α=$ZIPF_ALPHA, $N_ACCESS accesses, softcap=$SOFTCAP capacity_bytes=$CAPACITY_BYTES"
 echo "=================================================================="
 for pol in $POLICIES; do
 	run_one "$pol"
