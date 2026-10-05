@@ -269,3 +269,58 @@ func TestOSFileCloseWakesBlockedRead(t *testing.T) {
 	}
 }
 
+
+// S-04: every push drains kmod's evict log first, so an ino kmod just
+// evicted is not re-sent (resurrected) by the next push, while a fresh
+// re-admit of that same ino still goes through.
+func TestReplaceAdmit_ReconcilesEvictionsBeforePush(t *testing.T) {
+	admitMu.Lock()
+	admits = []admitEntry{
+		{Ino: 1, Uaddr: 0x1000, Size: 44},
+		{Ino: 2, Uaddr: 0x2000, Size: 44},
+		{Ino: 3, Uaddr: 0x3000, Size: 44},
+	}
+	admitMu.Unlock()
+
+	var pushed [][]admitEntry
+	origArena, origDrain := admitArena, drainEvictionsFn
+	admitArena = func(_ string, entries []admitEntry) error {
+		pushed = append(pushed, append([]admitEntry(nil), entries...))
+		return nil
+	}
+	log := [][]uint64{{2}, {3}} // kmod evicted 2, then (next round) 3
+	drainEvictionsFn = func(string) ([]uint64, uint32, error) {
+		if len(log) == 0 {
+			return nil, 0, nil
+		}
+		out := log[0]
+		log = log[1:]
+		return out, 0, nil
+	}
+	defer func() { admitArena, drainEvictionsFn = origArena, origDrain }()
+
+	// Miss on ino 4: the push must not carry evicted ino 2.
+	if err := replaceAdmit("/dev/null", admitEntry{Ino: 4, Uaddr: 0x4000, Size: 44}, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Re-read of evicted ino 3 (evicted between the two pushes): the
+	// stale copy goes, the fresh admit stays.
+	if err := replaceAdmit("/dev/null", admitEntry{Ino: 3, Uaddr: 0x5000, Size: 44}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	inos := func(es []admitEntry) map[uint64]uint64 {
+		m := map[uint64]uint64{}
+		for _, e := range es {
+			m[e.Ino] = e.Uaddr
+		}
+		return m
+	}
+	p0, p1 := inos(pushed[0]), inos(pushed[1])
+	if _, ok := p0[2]; ok || len(p0) != 3 {
+		t.Fatalf("push 0 = %v, want {1,3,4} without evicted 2", p0)
+	}
+	if len(p1) != 3 || p1[3] != 0x5000 {
+		t.Fatalf("push 1 = %v, want {1,4,3@0x5000}", p1)
+	}
+}

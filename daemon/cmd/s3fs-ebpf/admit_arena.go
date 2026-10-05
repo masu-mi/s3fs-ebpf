@@ -47,6 +47,38 @@ var (
 	admits  []admitEntry
 )
 
+// drainEvictionsFn is drainEvictions behind a var so tests can feed a
+// fake kmod evict log.
+var drainEvictionsFn = drainEvictions
+
+// admitProgs is the loader that owns the arena, so reconcile can return
+// evicted ranges to the free-list from any push path. Set once by
+// setAdmitProgs after fpebpf.Load; nil in offline mode / tests.
+// Guarded by admitMu.
+var admitProgs *fpebpf.Programs
+
+func setAdmitProgs(p *fpebpf.Programs) {
+	admitMu.Lock()
+	admitProgs = p
+	admitMu.Unlock()
+}
+
+// reconcileEvictionsLocked pulls kmod's evict log and drops those inos
+// from the daemon-side snapshot before the caller pushes it (S-04).
+// kmod only evicts inside an admit_replace that the daemon itself
+// issued under admitMu, so draining right before every push closes
+// the window in which drainEvictionsLoop (2 s tick) had not run yet
+// and the next push re-sent — and so resurrected — evicted inos.
+// Errors are ignored: the periodic loop is still the fallback.
+// Caller holds admitMu.
+func reconcileEvictionsLocked(devPath string) {
+	evicted, _, err := drainEvictionsFn(devPath)
+	if err != nil || len(evicted) == 0 {
+		return
+	}
+	dropAdmitsLocked(evicted, admitProgs)
+}
+
 // setAdmits stores the initial (prewarm) admit list and pushes it to
 // kmod. Any prior state is dropped.
 func setAdmits(devPath string, initial []admitEntry) error {
@@ -71,6 +103,9 @@ func setAdmits(devPath string, initial []admitEntry) error {
 func replaceAdmit(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
 	admitMu.Lock()
 	defer admitMu.Unlock()
+	// Before planReplaceAdmit: if entry.Ino itself was evicted, its old
+	// range is freed here and the fresh entry is then simply appended.
+	reconcileEvictionsLocked(devPath)
 	var arenaBase uint64
 	if progs != nil {
 		arenaBase = progs.Arena().BaseAddr()
@@ -124,6 +159,7 @@ func planReplaceAdmit(admits []admitEntry, entry admitEntry, arenaBase uint64) (
 func refreshAdmits(devPath string) (int, error) {
 	admitMu.Lock()
 	defer admitMu.Unlock()
+	reconcileEvictionsLocked(devPath)
 	if err := admitArena(devPath, admits); err != nil {
 		return 0, err
 	}
@@ -154,12 +190,17 @@ func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
 	if len(evicted) == 0 {
 		return 0
 	}
+	admitMu.Lock()
+	defer admitMu.Unlock()
+	return dropAdmitsLocked(evicted, progs)
+}
+
+// dropAdmitsLocked is dropAdmits with admitMu already held.
+func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 	skip := make(map[uint64]struct{}, len(evicted))
 	for _, ino := range evicted {
 		skip[ino] = struct{}{}
 	}
-	admitMu.Lock()
-	defer admitMu.Unlock()
 	filtered := admits[:0]
 	var freedRanges []arenaChunkPair
 	arenaBase := uint64(0)
@@ -205,6 +246,7 @@ type arenaChunkPair struct {
 func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
 	admitMu.Lock()
 	defer admitMu.Unlock()
+	reconcileEvictionsLocked(devPath)
 	pruned := admits[:0]
 	dropped := 0
 	for _, e := range admits {

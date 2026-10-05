@@ -616,6 +616,8 @@ func runFastpath(args []string) int {
 		return 1
 	}
 	defer progs.Close()
+	setAdmitProgs(progs)
+	defer setAdmitProgs(nil)
 
 	fentry, err := progs.AttachFentry()
 	if err != nil {
