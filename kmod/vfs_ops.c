@@ -490,6 +490,28 @@ noinline int s3fs_policy_on_hit(u64 ino)
 	return s3fs_policy_default_ret;
 }
 
+/*
+ * Drop the page cache of a policy-evicted ino. Without this an evicted
+ * file keeps being served from its page cache (.read_iter =
+ * generic_file_read_iter never reaches .read_folio), so eviction would
+ * neither cause a miss nor be visible to on_hit/hit-rate accounting —
+ * the admit table would stop bounding what is actually cached.
+ * invalidate_mapping_pages() only drops clean, unlocked, unmapped
+ * folios, same as the snapshot refresh above.
+ */
+static void s3fs_evict_page_cache(u64 ino)
+{
+	struct inode *inode;
+
+	if (!s3fs_active_sb)
+		return;
+	inode = ilookup(s3fs_active_sb, ino);
+	if (!inode)
+		return;
+	invalidate_mapping_pages(inode->i_mapping, 0, -1);
+	iput(inode);
+}
+
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			    const struct s3fs_admit_entry *entries,
 			    u32 count)
@@ -653,6 +675,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 					 * re-sending this ino on the next
 					 * admit_replace round. */
 					evict_log_push(entries[i].ino);
+					s3fs_evict_page_cache(entries[i].ino);
 				}
 			}
 		}
