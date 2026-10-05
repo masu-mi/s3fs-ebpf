@@ -7,7 +7,7 @@
 - 新規 follow-up は該当週次 note に書いてからここに 1 行反映
 - 優先度は **P0 = 次スプリントで着手 / P1 = Week 5 で着手 / P2 = Meetup 後の polish** の 3 段
 
-出典表記: `w4a` = `docs/journal/week4a-implementation-notes.md`、`w4b` = `docs/journal/week4b-implementation-notes.md`、`w4c` = `docs/journal/week4c-implementation-notes.md`、`w4ac` = `docs/journal/week4a-c-session-notes.md`、`ll` = `docs/dev-notes/lessons-learned.md`、`br` = `docs/journal/benchmark-results.md`、`be` = `docs/journal/bench-env-notes.md`、`pe` = `docs/design/policy-engine-design.md`。
+出典表記: `w4a` = `docs/journal/week4a-implementation-notes.md`、`w4b` = `docs/journal/week4b-implementation-notes.md`、`w4c` = `docs/journal/week4c-implementation-notes.md`、`w4ac` = `docs/journal/week4a-c-session-notes.md`、`ll` = `docs/dev-notes/lessons-learned.md`、`br` = `docs/journal/benchmark-results.md`、`be` = `docs/journal/bench-env-notes.md`、`pe` = `docs/design/policy-engine-design.md`、`as` = `docs/design/admit-and-softcap.md`、`hr` = `docs/journal/hit-rate-bench.md`、`mo` = `docs/user/meetup-ebpf-outline.md`。
 
 ---
 
@@ -53,6 +53,32 @@
 - [x] ✅ **C-01** MinIO metric 名 version 依存の確認 (`be §4-3`) — 完、`minio_s3_traffic_{received,sent}_bytes` は現行 MinIO で存在確認 (dashboard 変更不要)
 - [x] ✅ **C-02** dashboard `rate(...[30s])` の window を `[1m]` に統一 (`be §4-3`) — 完 (次 commit)。`s3fs-ebpf-overview.json` の 14 箇所 (`sed 's/\[30s\])/[1m])/g'`) を一括置換。5s scrape × 12 サンプル/1m で曲線が安定
 - [x] ✅ **C-03** flush errors panel を stat + threshold に (`be §4-4`) — 完 (次 commit)。旧 "Flush events / errors" (panel 8) を "Flush events" (w=8 timeseries) と "Flush errors (last 5m)" (w=4 stat, `increase(...[5m])` + green<1 / red≥1 threshold, `colorMode=background`) の 2 panel に分割。0 が地味に見えないので `> 0` で赤く光る運用に。Grafana API で id=23 が provisioned、version=8 まで bump 済
+
+### S. キャッシュ / eviction の正しさ (2026-10-05 レビュー、`as §4-§7`)
+
+背景: softcap (8) は eviction 投票の発動条件で、容量ではない。そのため hit-rate ベンチ (`hr` Validity review) は容量で正規化されておらず、W-TinyLFU 88.5% は容量 8 の Belady 上限 61〜65% を超えている。下の順に着手する。S-01〜S-03 が終わるまで、hit 率を Meetup で数字として出さない。
+
+- [ ] **S-01** 差分 invalidate (`as §4 P7`) — `s3fs_ebpf_admit_replace` は全置換のたびに一覧の全 ino の page cache を破棄している。1 ファイルの miss で、hot なファイルの page cache まで消える。前回の admit と (uaddr, size, offset) が同じ ino は破棄・`i_size_write` を省略する。旧エントリとの比較は staged 作成時に lock 下で行う。**受け入れ条件**: 1 ファイルの miss upcall の後も、他の admit 済みファイルの read が `.read_folio` に来ない (`folio_hits` / `read_miss_upcalls` が増えない)。目安 0.5 日
+- [ ] **S-02** バイト容量上限 + victim 選択 (`as §4 P1-P3, §5`) — 内容は次の 4 点。目安 2〜3 日
+  - daemon `--cache-capacity=<bytes>` (既定 = arena サイズ) を ioctl で kmod に渡す
+  - kmod は投票の後もまだ上限を超えていれば、policy の順位で上限以下まで削る
+  - 順位の取り方: (a) `on_evict` の戻り値をスコア化 (0 = keep, 大きいほど追い出し優先)、または (b) vtable に `select_victim()` を追加。まず (a) で始め、既存 policy の yes/no は「スコア 1」として互換を保つ
+  - `s3fs_kfunc_softcap()` は実行時の値を返す。件数上限 (旧 softcap) は module param / ioctl で可変にして残す (既定 8 = デモ値)
+
+  **受け入れ条件**: どの policy でも `adm` のバイト総量が上限以下。bench-hitrate の全行の hit 率が `opt` 以下になる
+- [ ] **S-03** page cache hit を policy に供給 (`as §4 P5, §6.3`) — 既存の `fentry/generic_file_read_iter` (全 read で発火) から per-ino のアクセスを policy に渡す。手段は共有 map か `on_access` 相当の hook。頻度系 policy (W-TinyLFU / freq2bit) が page cache hit を数えられるようにする。**受け入れ条件**: page cache 経由の繰り返し read で policy の頻度カウンタが増える。目安 1〜2 日
+- [ ] **S-04** evict 反映の遅れ (`as §4 P6`) — daemon の drain は 2 秒周期で、その間の全置換で evict 済み ino が再送・復活する。kmod が直近の evict 済み ino を覚えて再送を弾くか、ADMIT_ARENA ioctl の戻りで evict 結果を即時に返す。目安 0.5〜1 日
+- [ ] **S-05** 再計測 (S-01〜S-03 の後) — 計測後に `hr` / `br` / `mo` の数字を差し替える。目安 0.5 日 + 実機
+  - `bench-hitrate.sh`: 3 seed 以上、`opt` / `adm_*` を併記、中央値とばらつき
+  - `bench-write.sh`: `ebpf-fsync` 行
+  - `bench-3way.sh`: `ebpf-nocache` 行
+- [ ] **S-06** 実機検証 (6.12) — 今回のレビューでビルドだけ通した変更を、実機で確認する。目安 0.5 日
+  - `verifier-demo` の KFunc 後半 (`s3fs_kfunc_arena_list_walk`)
+  - `POST /policy/reload` が `BPF_LINK_UPDATE` 経由になること (dmesg `updated (hot swap)`)
+  - 非 sleepable struct_ops のロード
+  - evict 時の page cache 破棄
+  - `nocache=1`
+- [ ] **S-07** disk cache (A 層, `--cache-dir`) の上限管理 (`as §6.3`) — 現状は無制限。P1 寄りだが S-02 と同じ容量設計に揃える
 
 ---
 
@@ -188,6 +214,17 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 「今日〜明日で何を触るか」目線での並び:
 
+**2026-10-05 更新 — 最優先は S 系 (キャッシュの正しさ)**:
+
+1. **S-06** 実機検証 (今回入れた変更がまず動くこと)
+2. **S-01** 差分 invalidate (小さく、性能への効果が最大)
+3. **S-02** バイト容量上限 + victim 選択 (hit 率比較の前提)
+4. **S-03** page cache hit を policy に供給
+5. **S-04** evict 反映の遅れ
+6. **S-05** 再計測 → Meetup 資料の数字を確定
+
+以下は旧リスト (A/B/C 系は完了済):
+
 1. **A-01** daemon exit 時の SYNC clear (5 min の 1 行修正)
 2. **B-05** README 再生成 (1 command)
 3. **A-04** 古い warmFromS3 log 削除 (log noise 除去)
@@ -213,3 +250,4 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - `docs/journal/benchmark-results.md §6`
 - `docs/journal/bench-env-notes.md §4`
 - `docs/design/policy-engine-design.md §6` / `§7` / `§9`
+- `docs/design/admit-and-softcap.md §4` / `§5` / `§7` (S 系)
