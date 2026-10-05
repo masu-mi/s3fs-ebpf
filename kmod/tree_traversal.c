@@ -6,15 +6,20 @@
  * Week 1: adds `s3fs_kfunc_echo` (registered against BPF_PROG_TYPE_SYSCALL)
  *         to prove the eBPF → KFunc call path independent of arena access.
  *
- * Week 2 will grow this file into the arena-dereferencing traversal that
- * the fentry-hooked BPF program will invoke.
+ * Verifier-demo counterpart: `s3fs_kfunc_arena_list_walk` is the same
+ * arena linked-list walk that bpf/s3fs_fastpath.bpf.c's
+ * s3fs_deep_walk_reject tries (and fails) to express in pure eBPF.
  */
 
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
+#include <linux/kernel.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/sched.h>
+#include <linux/sched/signal.h>
+#include <linux/uaccess.h>
 
 #include "tree_traversal.h"
 #include "vfs_ops.h" /* s3fs_policy_on_admit/evict/pressure prototypes */
@@ -42,6 +47,65 @@ __bpf_kfunc int s3fs_kfunc_traverse_stub(void *arena_root)
 __bpf_kfunc u32 s3fs_kfunc_echo(u32 v)
 {
 	return v * 2u + 1u;
+}
+
+/*
+ * s3fs_kfunc_arena_list_walk - the KFunc half of `s3fs-ebpf dev
+ * verifier-demo`.
+ *
+ * Walks a singly-linked list laid out in the caller's bpf_arena
+ * ({u64 next; u64 payload;} nodes, `next` = arena user_vm address, 0
+ * terminates) and sums the payloads into *sum. This is exactly the
+ * loop s3fs_deep_walk_reject writes in eBPF; the verifier cannot
+ * bound the pointer chase there, but here it is ordinary C:
+ *
+ *   - safety comes from copy_from_user (a bad `next` is -EFAULT, not
+ *     an oops) instead of static verification;
+ *   - termination comes from max_nodes (cycles -> -ELOOP) plus
+ *     fatal_signal_pending / cond_resched, instead of the 1M insn cap.
+ *
+ * Arena pointers stored in arena memory are user_vm addresses, so the
+ * walk reads through current->mm. That makes it a syscall-context
+ * KFunc: registered for BPF_PROG_TYPE_SYSCALL (BPF_PROG_TEST_RUN from
+ * the process that mmap'd the arena) and KF_SLEEPABLE because
+ * copy_from_user may fault pages in.
+ *
+ * Returns the number of nodes visited, or -EINVAL / -EFAULT / -ELOOP /
+ * -EINTR.
+ */
+#define S3FS_WALK_MAX_NODES (1u << 24)
+
+__bpf_kfunc s64 s3fs_kfunc_arena_list_walk(u64 head_uaddr, u32 max_nodes,
+					   u64 *sum)
+{
+	struct {
+		u64 next;
+		u64 payload;
+	} node;
+	u64 cur = head_uaddr, acc = 0;
+	u32 n = 0;
+
+	if (!sum || !current->mm)
+		return -EINVAL;
+	if (!max_nodes || max_nodes > S3FS_WALK_MAX_NODES)
+		max_nodes = S3FS_WALK_MAX_NODES;
+
+	while (cur) {
+		if (n >= max_nodes)
+			return -ELOOP;
+		if (copy_from_user(&node, u64_to_user_ptr(cur), sizeof(node)))
+			return -EFAULT;
+		acc += node.payload;
+		cur = node.next;
+		n++;
+		if (!(n & 1023)) {
+			if (fatal_signal_pending(current))
+				return -EINTR;
+			cond_resched();
+		}
+	}
+	*sum = acc;
+	return n;
 }
 
 /*
@@ -127,6 +191,7 @@ BTF_KFUNCS_END(s3fs_kfunc_ids_tracing)
 /* KFuncs callable from BPF_PROG_TYPE_SYSCALL (BPF_PROG_TEST_RUN harness). */
 BTF_KFUNCS_START(s3fs_kfunc_ids_syscall)
 BTF_ID_FLAGS(func, s3fs_kfunc_echo)
+BTF_ID_FLAGS(func, s3fs_kfunc_arena_list_walk, KF_SLEEPABLE)
 BTF_KFUNCS_END(s3fs_kfunc_ids_syscall)
 
 /* KFuncs callable from BPF_PROG_TYPE_STRUCT_OPS (policy vtables).

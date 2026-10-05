@@ -451,21 +451,27 @@ with an unbounded pointer chase). ...
 	BPF program is too large. Processed 1000001 insn
 	processed 1000001 insns (limit 1000000) max_states_per_insn 4 total_states 9664 peak_states 9664 mark_read 1
 
+== KFunc counterpart ==========================================
+built a 100000-node linked list in a 391-page arena (head=0x...)
+s3fs_deep_walk_kfunc loaded: the verifier accepted it (the loop lives in the KFunc).
+walked 100000 nodes in ..., sum=5000050000 (want 5000050000)
+
 == outcome ====================================================
-The verifier refused this program. In s3fs-ebpf the same walk
-is expressed as a KFunc call (see kmod/tree_traversal.c and
-the `make test-arena` subtest C), which runs unbounded C and
-bypasses the eBPF verifier entirely.
+The verifier refused the pure-eBPF walk. The same walk handed to
+s3fs_kfunc_arena_list_walk (kmod/tree_traversal.c, called from
+bpf/kfunc_walk.bpf.c) loads and runs: ...
 ```
+
+後半 (KFunc counterpart) は `make bpf` 済みの `bpf/kfunc_walk.bpf.o` と kmod のロードが前提です。どちらかが無い場合は `SKIP:` を表示して前半 (verifier 拒否) だけを見せます。
 
 対比:
 
 | 実装 | Verifier | 効果 |
 |---|---|---|
 | pure eBPF `while (n) { n = n->next; }` | ❌ `BPF program is too large. Processed 1000001 insn` | 深さ不定のツリー走査は静的解析で 1M 命令の状態爆発を起こす |
-| KFunc (`s3fs_kfunc_traverse_stub` / kmod C コード) | ✅ 通過 (`make test-arena` subtest C) | KFunc の境界で verifier が「信頼」する → 中身は普通の C なのでループ制限なし |
+| BPF → KFunc `s3fs_kfunc_arena_list_walk` (`bpf/kfunc_walk.bpf.c` → `kmod/tree_traversal.c`) | ✅ 通過 (同じ `verifier-demo` の後半で実行) | BPF 側は KFunc 呼出 1 回の直線コード。ループは kmod の C で、安全性は `copy_from_user` (不正 `next` は -EFAULT)、停止性は `max_nodes` (循環は -ELOOP) + signal check が担保 |
 
-デモは exit 0 で「rejected as expected」を返します。将来のカーネル改良で万一ロードが通ってしまった場合は exit 2 (「デモは obsolete」) を返します。
+デモは exit 0 で「rejected as expected」(+ KFunc 走査の結果一致) を返します。KFunc 走査の結果が合わなければ exit 1。将来のカーネル改良で万一ロードが通ってしまった場合は exit 2 (「デモは obsolete」) を返します。
 
 ---
 

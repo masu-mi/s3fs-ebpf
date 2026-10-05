@@ -73,7 +73,9 @@ Dev / probe / demo commands:
                 memory, and KFunc call round-trip.
                 Requires Linux 6.9+ and s3fs_kfunc module loaded.
   verifier-demo Week 2 probe: load an intentionally-rejected pure-eBPF arena
-                walker and print the verifier's rejection log.
+                walker and print the verifier's rejection log, then run the
+                same walk through the s3fs_kfunc_arena_list_walk KFunc
+                (needs bpf/kfunc_walk.bpf.o and s3fs_kfunc loaded).
   probe-kvbase  Week 4 probe: create an arena, ioctl(/dev/s3fs_ebpf,
                 S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, and compare
                 it against the user-VM base.
@@ -1163,12 +1165,18 @@ func opName(op uint32) string {
 // runVerifierDemo tries to load the intentionally-rejected pure-eBPF
 // arena walker and prints the verifier's rejection log. Exit codes:
 //
-//	0 — program was rejected (the expected demo outcome, log printed)
-//	1 — I/O or setup failure (message on stderr)
+//	0 — program was rejected (the expected demo outcome, log printed) and
+//	    the KFunc walk returned the right sum, or was skipped because
+//	    bpf/kfunc_walk.bpf.o / s3fs_kfunc is not available
+//	1 — I/O or setup failure, or the KFunc walk returned a wrong result
 //	2 — program unexpectedly loaded (a future kernel accepted it —
 //	    the demo is obsolete and someone should update the pitch)
 func runVerifierDemo(args []string) int {
 	fs := flag.NewFlagSet("verifier-demo", flag.ExitOnError)
+	kfuncObj := fs.String("kfunc-obj", defaultKfuncWalkObj(),
+		"BPF object holding the KFunc-based walk (bpf/kfunc_walk.bpf.o); \"\" skips that half")
+	nodes := fs.Int("nodes", 100000,
+		"linked-list length for the KFunc walk (the reject half fails at any length)")
 	fs.Parse(args)
 
 	fmt.Println("== verifier-demo ==============================================")
@@ -1188,12 +1196,23 @@ func runVerifierDemo(args []string) int {
 	}
 	fmt.Printf("=== verifier log ===\n%+v\n", ve)
 	fmt.Println()
+
+	rc, skipped := 0, true
+	if *kfuncObj != "" {
+		rc, skipped = runKfuncWalkDemo(*kfuncObj, *nodes)
+		fmt.Println()
+	}
+
 	fmt.Println("== outcome ====================================================")
-	fmt.Println("The verifier refused this program. In s3fs-ebpf the same walk")
-	fmt.Println("is expressed as a KFunc call (see kmod/tree_traversal.c and")
-	fmt.Println("the `make test-arena` subtest C), which runs unbounded C and")
-	fmt.Println("bypasses the eBPF verifier entirely.")
-	return 0
+	fmt.Println("The verifier refused the pure-eBPF walk. The same walk handed to")
+	fmt.Println("s3fs_kfunc_arena_list_walk (kmod/tree_traversal.c, called from")
+	fmt.Println("bpf/kfunc_walk.bpf.c) loads and runs: the loop is ordinary kernel")
+	fmt.Println("C, bounded by max_nodes + signal checks and made memory-safe by")
+	fmt.Println("copy_from_user instead of by the verifier.")
+	if skipped {
+		fmt.Println("(KFunc half skipped — see SKIP above.)")
+	}
+	return rc
 }
 
 // backendFlags registers the shared flags for backend selection
