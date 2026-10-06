@@ -1083,6 +1083,15 @@ func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Dura
 // D-02: `progs` is threaded so dropAdmits can return arena chunks
 // to the free-list (fpebpf.Programs.FreeArenaChunk).
 func drainEvictionsLoop(ctx context.Context, devPath string, progs *fpebpf.Programs, every time.Duration) {
+	// T-03: open once and reuse the fd across ticks instead of
+	// open/close on every 2s poll.
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[evict-drain] open %s: %v\n", devPath, err)
+		return
+	}
+	defer f.Close()
+
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -1090,7 +1099,7 @@ func drainEvictionsLoop(ctx context.Context, devPath string, progs *fpebpf.Progr
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			evicted, overflow, err := drainEvictions(devPath)
+			evicted, overflow, err := drainEvictionsOn(int(f.Fd()))
 			if err != nil {
 				continue
 			}
@@ -1110,6 +1119,14 @@ func drainEvictionsLoop(ctx context.Context, devPath string, progs *fpebpf.Progr
 // Independent from sampleCounters (BPF map) and samplePolicyStats
 // (policy program map) because the source of truth is different.
 func sampleKmodStats(ctx context.Context, devPath string, every time.Duration) {
+	// T-03: open once and reuse the fd across ticks.
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[stats] open %s: %v\n", devPath, err)
+		return
+	}
+	defer f.Close()
+
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -1117,7 +1134,7 @@ func sampleKmodStats(ctx context.Context, devPath string, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			vals, err := readStats(devPath)
+			vals, err := readStatsOn(int(f.Fd()))
 			if err != nil {
 				continue
 			}

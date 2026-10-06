@@ -270,6 +270,108 @@ func TestOSFileCloseWakesBlockedRead(t *testing.T) {
 }
 
 
+// TestPlanPruneAdmits_FreesArenaChunksForDropped pins the T-01 fix:
+// pruneAdmitsTo must return arena ranges for entries that are not in
+// keepInos so the caller can give them back to the D-02 free-list.
+// Prior code only counted dropped entries and leaked the arena bytes.
+func TestPlanPruneAdmits_FreesArenaChunksForDropped(t *testing.T) {
+	const arenaBase uint64 = 0x200000
+	snapshot := []admitEntry{
+		{Ino: 1, Uaddr: arenaBase + 0, Size: 100},
+		{Ino: 2, Uaddr: arenaBase + 200, Size: 50},
+		{Ino: 3, Uaddr: arenaBase + 400, Size: 80},
+	}
+	keep := map[uint64]struct{}{2: {}} // only ino 2 survives
+
+	pruned, freed := planPruneAdmits(snapshot, keep, arenaBase)
+
+	if got, want := len(pruned), 1; got != want {
+		t.Fatalf("len(pruned) = %d, want %d", got, want)
+	}
+	if pruned[0].Ino != 2 {
+		t.Errorf("pruned[0].Ino = %d, want 2", pruned[0].Ino)
+	}
+	if got, want := len(freed), 2; got != want {
+		t.Fatalf("len(freed) = %d, want %d (one chunk per dropped ino)", got, want)
+	}
+	// Check both dropped inos' chunks are present (order not guaranteed).
+	chunks := map[uint32]uint32{}
+	for _, r := range freed {
+		chunks[r.offset] = r.size
+	}
+	if sz, ok := chunks[0]; !ok || sz != 100 {
+		t.Errorf("missing chunk offset=0 size=100; freed=%v", freed)
+	}
+	if sz, ok := chunks[400]; !ok || sz != 80 {
+		t.Errorf("missing chunk offset=400 size=80; freed=%v", freed)
+	}
+}
+
+// TestPlanPruneAdmits_ArenaBaseZeroSkipsFree covers offline mode:
+// when arenaBase=0, no chunks are reported even though entries are dropped.
+func TestPlanPruneAdmits_ArenaBaseZeroSkipsFree(t *testing.T) {
+	snapshot := []admitEntry{
+		{Ino: 1, Uaddr: 0x100000, Size: 64},
+		{Ino: 2, Uaddr: 0x200000, Size: 32},
+	}
+	pruned, freed := planPruneAdmits(snapshot, map[uint64]struct{}{1: {}}, 0)
+
+	if got, want := len(pruned), 1; got != want {
+		t.Fatalf("len(pruned) = %d, want %d", got, want)
+	}
+	if len(freed) != 0 {
+		t.Errorf("freed = %v, want empty (arenaBase=0 must suppress chunk reports)", freed)
+	}
+}
+
+// TestPlanPruneAdmits_KeepAllProducesNoDelta pins the no-change path:
+// when all inos are in keepInos no entries are dropped and no chunks
+// are reported. pruneAdmitsTo relies on len(freed)==0 to skip the ioctl.
+func TestPlanPruneAdmits_KeepAllProducesNoDelta(t *testing.T) {
+	const arenaBase uint64 = 0x100000
+	snapshot := []admitEntry{
+		{Ino: 7, Uaddr: arenaBase + 0, Size: 44},
+		{Ino: 8, Uaddr: arenaBase + 100, Size: 44},
+	}
+	keep := map[uint64]struct{}{7: {}, 8: {}}
+
+	pruned, freed := planPruneAdmits(snapshot, keep, arenaBase)
+
+	if got, want := len(pruned), 2; got != want {
+		t.Fatalf("len(pruned) = %d, want %d", got, want)
+	}
+	if len(freed) != 0 {
+		t.Errorf("freed = %v, want empty (no entries dropped)", freed)
+	}
+}
+
+// TestDropAdmitsLocked_ReturnsDroppedCount pins the T-02 fix: the
+// return value must be the number of admit entries actually removed,
+// not the number of freed arena chunks. The two differ when progs==nil
+// (offline mode), where no arena chunks are freed but entries are still
+// dropped — the prior code returned 0 in that case, causing the
+// "[evict-drain] dropped 0 admits" log to mislead operators.
+func TestDropAdmitsLocked_ReturnsDroppedCount(t *testing.T) {
+	// Offline mode: progs==nil, so no arena chunks are freed.
+	// The returned count must still reflect the number of entries removed.
+	admitMu.Lock()
+	admits = []admitEntry{
+		{Ino: 10, Uaddr: 0x1000, Size: 44},
+		{Ino: 11, Uaddr: 0x2000, Size: 44},
+		{Ino: 12, Uaddr: 0x3000, Size: 44},
+	}
+	n := dropAdmitsLocked([]uint64{10, 12}, nil /* progs=nil, offline */)
+	gotAdmits := len(admits)
+	admitMu.Unlock()
+
+	if n != 2 {
+		t.Errorf("dropAdmitsLocked returned %d, want 2 (two inos removed)", n)
+	}
+	if gotAdmits != 1 {
+		t.Errorf("len(admits) = %d after drop, want 1", gotAdmits)
+	}
+}
+
 // S-04: every push drains kmod's evict log first, so an ino kmod just
 // evicted is not re-sent (resurrected) by the next push, while a fresh
 // re-admit of that same ino still goes through.

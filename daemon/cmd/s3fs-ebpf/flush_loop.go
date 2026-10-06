@@ -89,18 +89,12 @@ func signalFlush(devFd int, ino uint64, errCode int32) error {
 	return nil
 }
 
-// drainEvictions returns the ino list kmod evicted since the last
-// drain. Callers use this to prune their local admit snapshot so the
-// next admit_replace doesn't re-send evicted inos.
-func drainEvictions(devPath string) ([]uint64, uint32, error) {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
-	if err != nil {
-		return nil, 0, fmt.Errorf("open %s: %w", devPath, err)
-	}
-	defer f.Close()
+// drainEvictionsOn issues S3FS_IOC_DRAIN_EVICTIONS on a caller-provided
+// fd. Use this in loops where the fd is opened once and reused (T-03).
+func drainEvictionsOn(devFd int) ([]uint64, uint32, error) {
 	arg := drainEvictionsArg{Cap: evictLogMax}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		f.Fd(), uintptr(s3fsIocDrainEvictions),
+		uintptr(devFd), uintptr(s3fsIocDrainEvictions),
 		uintptr(unsafe.Pointer(&arg))); errno != 0 {
 		return nil, 0, fmt.Errorf("ioctl DRAIN_EVICTIONS: %w", errno)
 	}
@@ -109,23 +103,43 @@ func drainEvictions(devPath string) ([]uint64, uint32, error) {
 	return out, arg.Overflow, nil
 }
 
-// readStats issues S3FS_IOC_STATS and returns the value slots. Slot 0
-// is s3fs_evictions_total; slot layout is UAPI-defined additive-only.
-func readStats(devPath string) ([]uint64, error) {
+// drainEvictions returns the ino list kmod evicted since the last
+// drain. Callers use this to prune their local admit snapshot so the
+// next admit_replace doesn't re-send evicted inos. For callers that
+// already hold an open fd use drainEvictionsOn instead.
+func drainEvictions(devPath string) ([]uint64, uint32, error) {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", devPath, err)
+		return nil, 0, fmt.Errorf("open %s: %w", devPath, err)
 	}
 	defer f.Close()
+	return drainEvictionsOn(int(f.Fd()))
+}
+
+// readStatsOn issues S3FS_IOC_STATS on a caller-provided fd.
+// Slot 0 is s3fs_evictions_total; slot layout is UAPI-defined additive-only.
+// Use this in loops where the fd is opened once and reused (T-03).
+func readStatsOn(devFd int) ([]uint64, error) {
 	arg := statsArg{Count: statsMax}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		f.Fd(), uintptr(s3fsIocStats),
+		uintptr(devFd), uintptr(s3fsIocStats),
 		uintptr(unsafe.Pointer(&arg))); errno != 0 {
 		return nil, fmt.Errorf("ioctl STATS: %w", errno)
 	}
 	out := make([]uint64, arg.Filled)
 	copy(out, arg.Values[:arg.Filled])
 	return out, nil
+}
+
+// readStats issues S3FS_IOC_STATS and returns the value slots. For
+// callers that already hold an open fd use readStatsOn instead.
+func readStats(devPath string) ([]uint64, error) {
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", devPath, err)
+	}
+	defer f.Close()
+	return readStatsOn(int(f.Fd()))
 }
 
 // markDirty tells kmod to re-set fd->dirty for `ino` after a PUT
