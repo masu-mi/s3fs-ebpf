@@ -196,6 +196,11 @@ func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
 }
 
 // dropAdmitsLocked is dropAdmits with admitMu already held.
+// Returns the number of admit entries actually removed (not the count of
+// freed arena chunks, which may be smaller when progs==nil or Uaddr is
+// outside the arena). T-02: prior code returned len(freedRanges) causing
+// the "[evict-drain] dropped N admits" log to under-report when running
+// without a wired arena.
 func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 	skip := make(map[uint64]struct{}, len(evicted))
 	for _, ino := range evicted {
@@ -207,8 +212,10 @@ func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 	if progs != nil {
 		arenaBase = progs.Arena().BaseAddr()
 	}
+	dropped := 0
 	for _, e := range admits {
 		if _, ok := skip[e.Ino]; ok {
+			dropped++
 			if progs != nil && arenaBase != 0 && e.Uaddr >= arenaBase {
 				freedRanges = append(freedRanges, arenaChunkPair{
 					offset: uint32(e.Uaddr - arenaBase),
@@ -226,7 +233,7 @@ func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 			progs.FreeArenaChunk(r.offset, r.size)
 		}
 	}
-	return len(freedRanges)
+	return dropped
 }
 
 // arenaChunkPair is dropAdmits's per-eviction bookkeeping — a
@@ -237,27 +244,61 @@ type arenaChunkPair struct {
 	size   uint32
 }
 
+// planPruneAdmits is the pure-function core of pruneAdmitsTo: given the
+// current snapshot, it returns the filtered slice (keeping only inos in
+// keepInos) and the arena ranges of the dropped entries so the caller can
+// return them to the D-02 free-list. arenaBase==0 suppresses chunk
+// reporting (offline mode). Split out so the arena-free invariant can be
+// unit-tested without an eBPF loader.
+func planPruneAdmits(
+	snapshot []admitEntry,
+	keepInos map[uint64]struct{},
+	arenaBase uint64,
+) (pruned []admitEntry, freed []arenaChunkPair) {
+	pruned = snapshot[:0]
+	for _, e := range snapshot {
+		if _, ok := keepInos[e.Ino]; ok {
+			pruned = append(pruned, e)
+			continue
+		}
+		if arenaBase != 0 && e.Uaddr >= arenaBase {
+			freed = append(freed, arenaChunkPair{
+				offset: uint32(e.Uaddr - arenaBase),
+				size:   uint32(e.Size),
+			})
+		}
+	}
+	return pruned, freed
+}
+
 // pruneAdmitsTo drops any admit whose ino is not in `keepInos`. Called
 // after a bucket sync when a key disappeared from S3: kmod's dyn entry
 // is already gone (shrink_dcache flushed the dentry), but the admit
 // hash keeps the orphan ino. Without this, long-running daemons leak
 // arena buffer + admit entries. See docs/journal/week4b-implementation-notes.md
 // §4-2.
+//
+// T-01: also returns each dropped entry's arena range to the free-list
+// (via admitProgs.FreeArenaChunk) so a prune round reclaims arena bytes
+// the same way eviction feedback does. Prior code only incremented a
+// counter, leaking arena memory on S3 object deletion.
 func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
 	admitMu.Lock()
 	defer admitMu.Unlock()
 	reconcileEvictionsLocked(devPath)
-	pruned := admits[:0]
-	dropped := 0
-	for _, e := range admits {
-		if _, ok := keepInos[e.Ino]; ok {
-			pruned = append(pruned, e)
-		} else {
-			dropped++
-		}
+	arenaBase := uint64(0)
+	if admitProgs != nil {
+		arenaBase = admitProgs.Arena().BaseAddr()
 	}
+	pruned, freed := planPruneAdmits(admits, keepInos, arenaBase)
+	dropped := len(admits) - len(pruned)
 	admits = pruned
 	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
+	if admitProgs != nil {
+		for _, r := range freed {
+			admitProgs.FreeArenaChunk(r.offset, r.size)
+		}
+	}
 	if dropped == 0 {
 		return nil // no delta, skip the ioctl
 	}
