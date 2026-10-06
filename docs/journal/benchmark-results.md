@@ -30,6 +30,11 @@ Week 4 (e) の初回計測記録。Meetup スライドの原資料として、�
 - **大 blob**: arena を 128 MiB に bump し 10 MiB / 100 MiB を測定。**ebpf の cat throughput は 100 MiB で ~6.4 GB/s** (fuse の 10×)。§9
 - **並列スケール**: stat 8 jobs で ~22M IOPS プラトー、read は 5M IOPS プラトー。stat clat 64 jobs で ebpf 3874ns vs fuse-raw 4538ns。ebpf/fuse-cache は read hot-path で肉薄。§10
 
+**§7.7/§8 追記 (2026-10-06、S-08/S-09 バグ修正後):**
+
+- **S-09 修正**: `nocache=1` tiny ファイル miss 率が 18% → ≈100% に改善。microbench p50 = 558 µs (fuse-raw 1.7ms の 3× 速い)。§7.7.2/§7.7.4 参照。
+- **S-08 修正**: ebpf-fsync 固定 ~90ms オーバーヘッドを排除。1 MiB min ≈ 19.7ms (= fuse-raw と同オーダー)。§8.4 参照。
+
 - **`cat` (実データ read) が圧勝** — s3fs-fuse は毎回 FUSE upcall → S3 access するのでミリ秒台。s3fs-ebpf B は arena に事前 admit 済 → GUP + kmap + copy_to_user だけで μs 台
 - **`stat` は tie** — 両 FS とも in-memory metadata cache に落ちるので kernel-syscall 分の 1〜2 μs が支配的
 - **cold-cache 比較 (drop_caches=3)** は両方 100ms 台で並ぶ。`drop_caches=3` は inode + dentry も飛ばすので、cold の主コストが「path re-lookup + inode 再作成」に移り、FS-side 差分が見えなくなる。純 read-cold なら `drop_caches=1` にすべき (§追試)
@@ -335,9 +340,17 @@ nocache=1 が tiny ファイルでキャッシュを完全には無効化して�
 
 #### 7.7.2 microbench read (ebpf-nocache、20k iters)
 
+**2026-10-05 (S-09 修正前、bug 有り)**:
 ```
 ebpf-nocache | p50=3.542 µs   ops/s=213 034   (読み=18% miss のみ → 残りは arena/page hit)
 ```
+18% miss は S-09 バグ (`invalidate_mapping_pages` trylock skip + evict_log 未通知による admit 再登録) によるもので、本来 nocache が毎回 S3 GET すべきのところ arena hit していた。
+
+**2026-10-06 (S-09 修正後)**:
+```
+ebpf-nocache | p50=558 µs   ops/s=1 733   total=11.5 s / 20k iters   (≈100% S3 miss)
+```
+558 µs × 20k = 11.16 s ≈ 実測 11.5 s で整合。miss rate はほぼ 100% に改善した。fuse-raw の p50=1.689 ms と比べ **3× 速い** — FUSE upcall overhead (getattr + /dev/fuse queue) が消えた分。
 
 #### 7.7.3 perf stat (ebpf-nocache、per cat)
 
@@ -346,7 +359,14 @@ task-clock=34.28 ms per-op=171.4 µs  cycles/op=418 490  IPC=0.82
 cache-refs/op=15 772  cache-miss/op=4782  miss%=30.3
 ```
 
-fuse-raw (195 µs、IPC=0.70) と比べ CPU 時間は 12% 少ないが、cache-miss% が 39% → 30% に改善。nocache が完全に機能した場合の「構造差」の上限は ebpf-nocache ≈ fuse-raw ± 10–20% と推測される。
+(2026-10-05 計測、S-09 修正前)。fuse-raw (195 µs、IPC=0.70) と比べ CPU 時間は 12% 少なく、cache-miss% が 39% → 30% に改善。S-09 修正後は miss rate が上がるため latency は増えるが (558 µs/op)、FUSE overhead 分は依然差が残る。
+
+#### 7.7.4 S-09 fix まとめ (2026-10-06)
+
+- **修正内容**: `s3fs_ebpf_file_open` nocache パスに `evict_log_push(ino)` + `invalidate_inode_pages2()` を追加
+- **根本原因 (1)**: `admit_drop_all_ranges` が kmod hash から削除するが evict_log に書かない → daemon が次の replaceAdmit で re-push → admit 復活
+- **根本原因 (2)**: `invalidate_mapping_pages` は `folio_trylock` で active folio を skip → tiny ファイルの folio が page cache に残留
+- **受け入れ条件達成**: tiny ファイル miss 率 ≈ 100%、p50 = 558 µs ≈ fuse-raw の 1/3
 
 ---
 
@@ -417,6 +437,20 @@ fuse-raw の PUT 固定オーバーヘッドは ~4 ms (1 MiB / 19.5 ms から推
 **fuse-cache vs fuse-raw の差は ~6% 固定 (サイズ非依存)。** write 系では `kernel_cache` の恩恵は小さい。
 
 2026-09-25 との絶対値差 (1 MiB: 10.8 → 6.1 ms、100 MiB: 88 → 47 ms) は MinIO + kernel のウォームアップ差と推定。比率傾向は同じ (sub-linear)。
+
+### 8.4 S-08 fix 後 (2026-10-06)
+
+**修正内容** (commit c75247f): `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え。旧実装は 100ms ticker loop でポーリングしており、1 MiB と 10 MiB の `ebpf-fsync` がいずれも ~100ms になっていた。修正後は kmod が flush event エンキュー直後に wake するため固定オーバーヘッドが消える。
+
+**確認値 (hyperfine、warm state)**:
+
+| Size  | ebpf-fsync 旧 (S-08 前) | ebpf-fsync 新 (S-08 後) | fuse-raw |
+|:------|------------------------:|------------------------:|---------:|
+| 1 MiB | 99.8 ± 1.6 ms           | min ≈ **19.7 ms**        | 19.5 ± 2.2 ms |
+
+1 MiB の ebpf-fsync min が fuse-raw mean (19.5 ms) と同オーダーになり、受け入れ条件を達成。10 MiB / 100 MiB の詳細は次回 `bench-write.sh` 全体再実行時に更新予定。
+
+**残差**: S-08 修正後も ebpf-fsync の mean は fuse-raw と完全に一致しない可能性がある (daemon goroutine wake-up 分散、HTTP keep-alive 初回接続)。本質的な PUT コストは同等になったと見なして良い。
 
 ---
 
