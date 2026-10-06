@@ -40,6 +40,7 @@ N_FILES=${N_FILES:-30}          # working set size (softcap=8 → 22 evict candi
 # and `trace-replay`'s --zipf default.
 N_ACCESS=${N_ACCESS:-200}       # workload length
 ZIPF_ALPHA=${ZIPF_ALPHA:-0.7}   # skew — smaller = more uniform
+SEED=${SEED:-42}                # random seed for workload generation
 SOFTCAP=${SOFTCAP:-8}           # slots; passed to kmod (--softcap) and the reference sims
 FILE_BYTES=44                   # size of each seeded hitrate_<N>.txt (see seed_bucket)
 CAPACITY_BYTES=${CAPACITY_BYTES:-$((SOFTCAP * FILE_BYTES))}  # 0 = legacy vote mode
@@ -91,10 +92,10 @@ seed_bucket() {
 # trace. First few indices dominate — that's the "hot working set"
 # the policies compete over.
 gen_workload() {
-	python3 - "$N_FILES" "$N_ACCESS" "$ZIPF_ALPHA" <<'PY'
+	python3 - "$N_FILES" "$N_ACCESS" "$ZIPF_ALPHA" "$SEED" <<'PY'
 import random, sys
-n, k, alpha = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3])
-random.seed(42)  # deterministic
+n, k, alpha, seed = int(sys.argv[1]), int(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
+random.seed(seed)
 w = [1.0/((i+1)**alpha) for i in range(n)]
 tot = sum(w)
 cum = []
@@ -260,7 +261,7 @@ awk '{ printf "{\"ts\":%d,\"ino\":%d,\"op\":\"read\"}\n", (NR-1)*1000000, 100+$1
 	"$OUT/workload.txt" > "$OUT/trace.jsonl"
 
 echo "=================================================================="
-echo "hit-rate bench — $N_FILES files, Zipf α=$ZIPF_ALPHA, $N_ACCESS accesses, softcap=$SOFTCAP capacity_bytes=$CAPACITY_BYTES"
+echo "hit-rate bench — $N_FILES files, Zipf α=$ZIPF_ALPHA, $N_ACCESS accesses, softcap=$SOFTCAP capacity_bytes=$CAPACITY_BYTES seed=$SEED"
 echo "=================================================================="
 for pol in $POLICIES; do
 	run_one "$pol"

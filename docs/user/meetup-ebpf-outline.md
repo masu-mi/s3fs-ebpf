@@ -84,19 +84,18 @@
 
 ### 6. 性能 (2min)
 
-| 指標 | s3fs-ebpf | s3fs-fuse (cache 無効) | 差 |
-|---|---|---|---|
-| open+read+close, 16 B, warm (microbench p50) | 5.20 μs | ~4.5 ms | **~870×** |
-| 100 MiB overwrite, `dd` 完了まで (close まで) | 88 ms ± 32 | 1516 ms ± 315 | **17×** ※ |
+スライドに出す 3 行 (2026-10-05 実測):
 
-- ※ s3fs-fuse は close() 内で S3 PUT まで同期実行、ebpf の close は flush を enqueue して即 return (PUT は非同期)。durable 同士の比較ではない → スライドに注記するか、`ebpf-fsync` 行 (`scripts/bench-write.sh` に追加済、未計測) の数字に差し替える
-- 前の版の「875×」は ebpf の今回 run と fuse の前回 run (4.552 ms) の比。同一 run の p50 同士だと ~865×
-- ~870× は「arena + page cache 有り ebpf」対「キャッシュ無し fuse」の比で、caching の差が大半を占める。構造の差は対照群 `ebpf-nocache` (kmod `nocache=1` + daemon `--cache-dir` 無し = 毎 open で upcall + S3 GET。FUSE kernel_cache 無しと同じ形) との比較で示す → `scripts/bench-3way.sh`、要計測。スライドに出すなら「fuse-raw vs ebpf-nocache」(構造差) と「fuse-cache vs ebpf-A+C」(ベストケース同士) の 2 行が公平
-- 前の版にあった「cache hit率 W-TinyLFU 88.5% vs LRU 7.5% (12×)」は削除:
-  1. 両方 s3fs-ebpf の policy 同士で、s3fs-fuse との比較ではない (表の列と矛盾)
-  2. capacity 8 の Belady 上限は同じ trace で 61% (最良の warm start でも 65%)。88.5% は 8 slot の hit 率として成立しない。softcap は eviction の trigger で容量ではない。順位はほぼ eviction 回数の逆順 (`docs/journal/hit-rate-bench.md` Validity review)
-  3. 最新 run では LRU は 13.0% (7.5% は古い run)
-  4. 計測後に kmod の bug (evict 後も page cache から hit 扱い) を修正したので再計測が必要
+| 指標 | s3fs-ebpf | s3fs-fuse | 差 |
+|---|---|---|---|
+| open+read+close, warm (microbench p50) | 3.0 µs | 1.69 ms (raw) / 0.53 ms (cache) | **554×** vs raw / **175×** vs cache |
+| 100 MiB write, close まで (non-durable) | 47.4 ms ± 2.6 | 347.5 ms ± 18.4 (raw) | **7.3×** |
+| 100 MiB write, fsync まで (durable) | 297.8 ms ± 15.4 | 347.5 ms ± 18.4 (raw) | **1.2×** |
+
+- **read 554×** は「arena + page cache 有り ebpf (A+C)」対「キャッシュ無し fuse-raw」の比。構造差 (caching 無し同士) は bench-3way.sh の `ebpf-nocache` 対 `fuse-raw` で big.bin +11%、tiny ファイルで -57% (要 nocache バグ修正後に再測)
+- **write 7.3×** は non-durable 比較 (close-and-forget)。スライドには「非同期 flush」と明記
+- **durable write (100 MiB) で 1.2× 速い**: fsync で daemon PUT 完了まで block。小ファイル (1 MiB) では ebpf-fsync が fuse-raw より 5× 遅い (daemon PUT の固定オーバーヘッド ~90 ms、要修正)
+- fuse-cache (use_cache + kernel_cache 有効) との比較: cat wall-clock **2.2×** 速い、microbench **175×** 速い (`docs/journal/benchmark-results.md` §7 参照)
 
 ### 7. まとめ (2min)
 
@@ -149,4 +148,5 @@
 - **write 比較の durability 非対称**: ebpf は close で PUT を待たない → `ebpf-fsync` 行を追加 (要再計測)
 - **キャッシュ無し同士の対照群が無かった**: fuse-raw の比較相手は常にキャッシュ有りの ebpf だった → kmod に `nocache` module param (open ごとに page cache + admit を破棄) を追加し、`bench-3way.sh` に `ebpf-nocache` を追加
 - **read 875× の出典が 2 run 混在**: 同一 run の比は ~865×。§3.3 の「886×」とも不一致 → 「~870×」に統一
-- 再計測が必要: hit-rate 全行 (page cache 修正後)、write の `ebpf-fsync`。いずれも単一 run・n 小なので、複数 run の中央値とばらつきも併記したい
+- ✅ hit-rate 再計測済 (2026-10-05): 3 seed × 10 policy。S-01+S-02 修正後の正当な比較。`docs/journal/hit-rate-bench.md` §"Result (2026-10-05)" 参照。
+- 再計測が必要: write の `ebpf-fsync`、3-way の `ebpf-nocache`。いずれも単一 run・n 小なので、複数 run の中央値とばらつきも併記したい

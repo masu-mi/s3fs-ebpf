@@ -68,16 +68,18 @@
   **受け入れ条件**: どの policy でも `adm` のバイト総量が上限以下。bench-hitrate の全行の hit 率が `opt` 以下になる
 - [x] ✅ **S-03** page cache hit を policy に供給 — 実装済。`kmod/tree_traversal.c` に `s3fs_kfunc_policy_hit(u64 ino)` KFunc を追加 (`BPF_PROG_TYPE_TRACING` に register)、`bpf/s3fs_fastpath.bpf.c` の `fentry/generic_file_read_iter` hit パス (`offp != NULL`) から呼び出す。page cache 経由の繰り返し read でも policy の `on_hit` が dispatch される。`.read_folio` (arena-hit) で既に `on_hit` を呼んでいるパスでの二重呼び出しはどの policy も idempotent / cap-bounded なので許容。BPF オブジェクト再生成 + kmod ビルド + Go テスト全通過。実機検証は S-06。
 - [x] ✅ **S-04** evict 反映の遅れ — 実装済 (8db7c82、push 直前に drain)。 (`as §4 P6`) — daemon の drain は 2 秒周期で、その間の全置換で evict 済み ino が再送・復活する。kmod が直近の evict 済み ino を覚えて再送を弾くか、ADMIT_ARENA ioctl の戻りで evict 結果を即時に返す。目安 0.5〜1 日
-- [ ] **S-05** 再計測 (S-01〜S-03 の後) — 計測後に `hr` / `br` / `mo` の数字を差し替える。目安 0.5 日 + 実機
-  - `bench-hitrate.sh`: 3 seed 以上、`opt` / `adm_*` を併記、中央値とばらつき
-  - `bench-write.sh`: `ebpf-fsync` 行
-  - `bench-3way.sh`: `ebpf-nocache` 行
+- [x] ✅ **S-05** 再計測 (S-01〜S-03 の後) — `hr` / `br` / `mo` を更新済。
+  - ✅ `bench-hitrate.sh`: 3 seed × 10 policy (seed 42/1337/7)、`opt`/`adm_*` 併記、中央値とばらつき。`hr §"Result (2026-10-05)"` 参照。
+  - ✅ `bench-write.sh`: `ebpf-fsync` 行取得済み。`br §8.2` 参照。
+  - ✅ `bench-3way.sh`: `ebpf-nocache` 行取得済み。`br §7.7` 参照。
 - [ ] **S-06** 実機検証 (6.12) — 今回のレビューでビルドだけ通した変更を、実機で確認する。目安 0.5 日
   - `verifier-demo` の KFunc 後半 (`s3fs_kfunc_arena_list_walk`)
   - `POST /policy/reload` が `BPF_LINK_UPDATE` 経由になること (dmesg `updated (hot swap)`)
   - 非 sleepable struct_ops のロード
   - evict 時の page cache 破棄
   - `nocache=1`
+- [ ] **S-08** ebpf-fsync の固定オーバーヘッド (~90 ms) — `bench-write.sh` の `ebpf-fsync` 行で発覚 (2026-10-05)。1 MiB と 10 MiB の PUT 時間がほぼ同じ (~100 ms) で、fuse-raw の 1 MiB PUT (~13 ms) と比べ 7× 大きい固定コスト。調査起点: `daemon/internal/s3/client.go` の flush/PUT 実装 + `http.Transport` の connection reuse (`MaxIdleConnsPerHost`) 設定。**受け入れ条件**: 1 MiB `ebpf-fsync` が fuse-raw (19.5 ms) と同オーダーになること。目安 0.5〜1 日
+- [ ] **S-09** ebpf-nocache の tiny ファイル miss rate が低い (~18%) — `bench-3way.sh` の `ebpf-nocache` + microbench で発覚 (2026-10-05)。`nocache=1` が `invalidate_mapping_pages` を呼ぶが arena データが残り、admit 再登録後に arena hit する経路が残っている疑い。big.bin (1 MiB) では miss 率 ~100% で正常動作しているため tiny ファイル固有の挙動。調査起点: kmod の `open()` nocache handler で `admit_hash_del(ino)` が呼ばれているか + arena chunk が open 時にクリアされているか確認。**受け入れ条件**: microbench miss 率が ~100%、p50 が fuse-raw と同オーダー。目安 0.5 日
 - [x] ✅ **S-07** disk cache (A 層, `--cache-dir`) の上限管理 — 実装済。`DiskCache.maxBytes` フィールドを追加、`NewDiskCache` に `maxBytes int64` (0=unlimited) を追加、`Write` 前に `evictIfNeeded` (dir scan → mtime 昇順で古い順に削除) を呼ぶ。`s3.Config` / `gcs.Config` に `MaxCacheBytes` を追加、daemon に `--disk-cache-capacity` フラグ + `S3FS_DISK_CACHE_CAPACITY` env を追加。`TestDiskCache_Eviction` / `TestDiskCache_EvictionDisabled` で動作を pin。
 
 ---

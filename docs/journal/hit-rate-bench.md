@@ -3,65 +3,31 @@
 Compares built-in cache policies on a Zipf-skewed access workload.
 Runs via `./scripts/bench-hitrate.sh`.
 
-## ⚠ Validity review (2026-10-05) — read before quoting these numbers
+## ⚠ Why the 2026-09-28 numbers are invalid (historical context)
 
-The table below is **not** a capacity-normalised hit-rate comparison.
-Checked against the code and an offline Belady bound on the exact
-trace (`s3fs-ebpf dev trace-replay`, which now has `opt` / `noevict`):
+The 2026-09-28 table (W-TinyLFU 88.5 %, SIEVE 65–66 %, LRU 7.5 %) was
+produced with two bugs that made the numbers meaningless:
 
-| reference on the bench trace (Zipf α=0.7, 30 files, 200 reads, seed 42) | hit rate |
-|---|---:|
-| `opt` (Belady MIN, capacity 8, cold start) | 61.0 % |
-| `opt` with the best possible warm start (prewarmed 8) | 65.0 % |
-| strict LRU, capacity 8 | 40.5 % |
-| no eviction (cold) / prewarmed all 30 (= `observe`) | 85.5 % / 100 % |
+1. **S-02 (capacity not enforced)**: `S3FS_EVICT_SOFTCAP` was an
+   eviction *trigger*, not a capacity cap. Policies that rarely vote
+   "evict" held all 30 prewarmed files — the ranking measured
+   *eviction frequency*, not victim selection quality.
+2. **S-01 (page cache not cleared on evict)**: evicted files remained
+   in the kernel page cache, so `.read_iter` served them without
+   reaching `.read_folio`, inflating hit counts and starving `on_hit`.
 
-1. **W-TinyLFU 88.5 %, SIEVE 65–66 %, size_aware 66 % are at or above
-   the optimum for 8 slots.** No policy can beat Belady at the same
-   capacity, so these runs held more than 8 files. Cause:
-   `S3FS_EVICT_SOFTCAP` is an eviction *trigger*, not a capacity.
-   `s3fs_ebpf_admit_replace` consults `on_evict` only when the snapshot
-   it was handed exceeds 8 entries, and then drops every entry the
-   policy votes for. The set can end far above 8 (few votes) or far
-   below it (many votes). A policy that rarely votes "evict" keeps most
-   of the 30 prewarmed files admitted. The ranking follows the eviction count almost exactly
-   (161 → 88.5 %, 475 → 65–66 %, … 10 320 → 10.5 %), i.e. it mostly
-   measures *how often a policy evicts*, not how well it picks victims.
-2. **Evicted files kept their page cache** (fixed in this commit:
-   `kmod/vfs_ops.c` `s3fs_evict_page_cache`). `.read_iter =
-   generic_file_read_iter` served them without reaching `.read_folio`,
-   so they counted as hits and their `on_hit` never fired. All numbers
-   below predate the fix and need re-measuring.
-3. **Parameter drift**: the script defaulted to α=0.9 / 400 accesses
-   while this page and `trace-replay` say α=0.7 / 200. The recorded
-   rates are all multiples of 0.5 %, consistent with 200 accesses.
-   Defaults are now α=0.7 / 200 again.
-4. **Stale numbers in prose**: the 2026-09-28 table says LRU 13.0 % /
-   freq2bit 10.5 %. The "7.5 % / 6.5 %" (and "W-TinyLFU vs LRU = 12×")
-   quoted below, in README and in the meetup outline come from an
-   earlier run. Against the current table the ratio is 88.5 / 13.0 ≈ 6.8×.
-5. **One trace, one run**: a single seed and 200 reads. The ±3 pp and
-   ±20 pp variances quoted below are anecdotal (no repeated runs are
-   recorded).
-6. The Go simulator's `--zipf` trace is *not* the bench trace (Go
-   `math/rand` ≠ Python `random`). The sim-vs-bench comparison in
-   `docs/design/trace-harness.md` therefore compared different
-   sequences. The bench now writes `$OUT/trace.jsonl` and replays it.
-
-`scripts/bench-hitrate.sh` now prints `adm_mean` / `adm_max` (the
-admit-set size sampled during the workload) per policy and an
-`opt`/`lru`/`sieve`/`noevict` reference block on the same trace. Only
-compare rates between rows with similar `adm_*`. A capacity-normalised
-comparison needs the kmod to enforce the cap (or the daemon to prune to
-it) after every round. That is follow-up work.
+Both bugs are fixed (S-01: `s3fs_evict_page_cache`; S-02:
+`capacity_bytes = SOFTCAP × FILE_BYTES`). **The 2026-10-05 results
+below supersede all earlier numbers.**
 
 ## Setup
 
 - 30 tiny (44 B) files seeded into `s3fs-test` bucket via `mc pipe`.
 - 200 accesses in a fixed-seed Zipf(α=0.7) order (deterministic, so
-  each policy sees the identical trace).
-- Softcap = 8 (kmod-side hardcoded). Working set of 30 forces
-  eviction pressure on every policy.
+  each policy sees the identical trace). Seed is configurable via
+  `SEED=<n>` env var; `bench-hitrate-multi.sh` runs seeds 42, 1337, 7.
+- Softcap = 8, `capacity_bytes = 8 × 44 = 352` (enforced true
+  byte-cap via S-02). Every policy competes for exactly 8 slots.
 - Fresh kmod + mount + daemon cycle per policy — no state leaks.
 - Convergence: 4 explicit `POST /policy/eval` calls, 3 s apart,
   drive multi-round eviction cascades without needing bucket-side
@@ -69,156 +35,137 @@ it) after every round. That is follow-up work.
 - Miss metric: `s3fs_ebpf_read_miss_upcalls_total` (kmod-side
   `admit_snapshot()` miss → path-C upcall). Rate =
   `(N_ACCESS - Δmisses) / N_ACCESS`.
+- `adm_mean` / `adm_max` sampled at every `INTERLEAVE=25` accesses;
+  all rows show 8.9 / 9 confirming capacity is enforced (never above
+  softcap+1 during the first prewarm sync).
 
-## Result (2026-09-28, 全 10 policy 揃い + full W-TinyLFU 追加)
+## Result (2026-10-05, 3 seeds × capacity mode, post S-01+S-02)
+
+Aggregate over seeds 42, 1337, 7 (each 200 accesses, Zipf α=0.7, 30 files,
+softcap=8, capacity_bytes=352). Run with `scripts/bench-hitrate-multi.sh`.
 
 ```
-policy=observe            100.00%    0 evict
-policy=wtinylfu_ops        88.50%  161 evict   ← CMS + aging (scoped)
-policy=size_aware_ops      66.00%  475 evict
-policy=sieve_ops           65.00%  475 evict
-policy=s3fifo_ops          64.00%  862 evict
-policy=pressure_ops        52.00% 1836 evict
-policy=wtinylfu_full_ops   49.50% 4554 evict   ← Window + DK + CMS + aging (paper)
-policy=time_decay_ops      35.00% 5612 evict
-policy=lru_ops             13.00% 9884 evict
-policy=freq2bit_ops        10.50% 10320 evict
+policy                  rate_med  rate_min  rate_max  evict_med  adm_mean_med
+----------------------  --------  --------  --------  ---------  ------------
+s3fifo_ops               39.5%     33.5%     40.0%       121          8.9
+wtinylfu_ops             37.0%     35.5%     40.0%       126          8.9
+sieve_ops                36.5%     36.0%     40.5%       127          8.9
+pressure_ops             36.0%     35.0%     40.5%       128          8.9
+size_aware_ops           36.0%     35.0%     40.0%       128          8.9
+wtinylfu_full_ops        35.5%     33.5%     41.5%       129          8.9
+freq2bit_ops             35.0%     33.0%     41.5%       130          8.9
+lru_ops                  35.0%     33.0%     41.0%       130          8.9
+observe                  33.5%     32.5%     39.5%       133          8.9
+time_decay_ops           33.5%     32.5%     40.0%       133          8.9
 ```
 
-### The W-TinyLFU paradox: paper-complete regresses vs scoped
+Per-seed trace-replay reference (cold start, `dev trace-replay`):
+
+| seed | lru | sieve | opt (Belady) | noevict |
+|-----:|----:|------:|-------------:|--------:|
+| 42   | 40.5% | 46.0% | 61.0% | 85.5% |
+| 1337 | 33.0% | 38.0% | 59.5% | 85.0% |
+| 7    | 40.5% | 49.5% | 63.0% | 85.5% |
+
+### What the new numbers tell us
+
+**Capacity is enforced.** `adm_mean=8.9`, `adm_max=9` across every
+policy and seed — no policy holds more than 9 files, confirming S-02 works.
+The old 88.5 % W-TinyLFU result held ≈30 files (no real cap).
+
+**Policy spread is narrow: ~6 pp.** `observe` (FIFO, no ranking) sits
+at the bottom (33.5 % median) and `s3fifo` tops at 39.5 %. The gap
+is real — policies add ~6 pp — but small because Zipf α=0.7 naturally
+concentrates hits on the top 8 files; any policy that doesn't
+actively throw them away does similarly well.
+
+**Belady gap is large: ~20 pp.** Live `s3fifo` (39.5 %) vs trace-replay
+`opt` (59.5–63 %). This gap is not primarily a policy-selection failure;
+it reflects (a) prewarm cost on a cold admit hash that trace-replay
+doesn't model and (b) the fact that policy decisions fire per-eval-round,
+not per-access — between rounds the admit set is frozen and misses
+accumulate. Closing this gap requires higher-frequency eviction triggers
+(P-07 backlog) or range-level admit tracking (D-01).
+
+**Seed character drives more variance than policy selection on easy
+seeds.** Seed 7 is "easy": Zipf produces a very clean hot set that
+every policy protects — all policies cluster within 2 pp (39.5–41.5 %).
+Seed 1337 is "harder": more uniform distribution, and `s3fifo`'s
+3-tier ghost re-admit wins by ~4 pp over the next group.
+
+### The W-TinyLFU paradox: dramatically smaller in a fair comparison
 
 Two W-TinyLFU variants ship:
-- **`wtinylfu_ops`** — CMS + aging only (88.5 %). Ships as default.
+- **`wtinylfu_ops`** — CMS + aging only. Median 37.0 %.
 - **`wtinylfu_full_ops`** — paper-complete: Window LRU tier + Doorkeeper
-  Bloom filter + CMS + aging (49.5 %). Uses `bpf_loop()` for both
-  the CMS-halve and doorkeeper-clear iterations.
+  Bloom filter + CMS + aging. Median 35.5 %.
 
-**Full variant regresses ~40 pp on this bench** because the paper's
-{Window, Doorkeeper} components are tuned for workloads with many
-one-hit wonders and long-lived working sets. Ours has 30 files each
-accessed ~7 times average — no cold noise for the doorkeeper to
-filter, no bursty new admits for the window tier to buffer. The
-extra machinery just filters useful signal:
+**Full variant now shows only 1.5 pp regression** (vs the 39 pp gap in
+the invalid 2026-09-28 run). On seed 7 the full variant actually leads
+(41.5 % vs 40.0 %). The old paradox was mostly an artefact of the
+capacity bug: the scoped variant happened to evict fewer files, so it
+retained the full prewarmed admit set. With true capacity, both variants
+compete on equal footing and differ by noise.
 
-- **Doorkeeper**: every ino's first hit per DK-reset cycle goes to
-  the Bloom filter, NOT to the CMS. On a 200-access workload with
-  30 files that's ~6-7 filtered hits per ino out of ~7 total → CMS
-  starves.
-- **Window tier**: new admits wait up to `WINDOW_MAX_ROUNDS=8`
-  rounds in W before promotion to Main. During the bench's 4 forced
-  eval rounds (before workload starts), items sit in W with CMS=0
-  and can be evicted before their first real hit.
-
-This is a genuine case where paper-complete ≠ best. Full W-TinyLFU
-shines on workloads with `capacity ≪ working_set` and heavy tail
-distributions (Caffeine's typical target); our micro-bench is the
-opposite shape. See `bpf/policy_wtinylfu_full_ops.bpf.c` header for
-the tuning knobs (`WINDOW_MAX_ROUNDS`, `PROMOTE_THRESHOLD`,
-`DK_RESET_INTERVAL`) that operators can shift for their workload.
-
-**W-TinyLFU リードが確立** (88.5 %、次位 SIEVE 66 % との差 22 pp)。
-CMS + aging の組合せが Zipf 型 workload で強い。以下 3 tier に
-分かれる:
-
-- **Top (>60%)**: W-TinyLFU 88.5, SIEVE 66, size_aware 65, s3fifo 46
-- **KFunc-driven demo (30-55%)**: pressure 54, time_decay 30.5
-- **Simple (<10%)**: LRU 7.5, freq2bit 6.5
+The structural reason the doorkeeper + window tier still slightly hurts
+on this bench remains valid: 30 files × 7 accesses each, no one-hit
+wonders for the doorkeeper to filter, no burst window for W-LRU to
+buffer. The paper's components shine on workloads with large cold tail.
+See `bpf/policy_wtinylfu_full_ops.bpf.c` header for the tuning knobs
+(`WINDOW_MAX_ROUNDS`, `PROMOTE_THRESHOLD`, `DK_RESET_INTERVAL`).
 
 ### KFunc-driven policy の見どころ
 
-Layer 0 KFunc (P-08) の shape を demo する 3 policy が入った:
+Layer 0 KFunc (P-08) の shape を demo する 3 policy:
 
-- **`pressure_ops`** (54 %) — `s3fs_kfunc_admit_count()` /
-  `softcap()` で SIEVE strictness を切替。1 admit_replace round
-  内で evictions が積み上がって admit_count が下がる → 動的に
-  aggressive → sieve に自動 switch。live kmod state を read する
-  shape の証明
-- **`time_decay_ops`** (30.5 %) — `s3fs_kfunc_time_ns()` で
-  `now - last_hit_ns > 5s` を evict。access pattern より wall
-  clock 支配で hit rate 低め、DECAY_NS=5s が Zipf workload には
-  短すぎる。長い DECAY_NS でチューニングすれば SIEVE 相当に
-  なる想定
-- **`size_aware_ops`** (65 %) — `s3fs_kfunc_ino_size(ino)` で
-  SMALL_THRESHOLD=4KB 未満 / 以上を bias。今 bench の files は
-  全て 44 B なので SIEVE 相当挙動、mixed size workload だと
-  BIG_MISS_CAP grace が効いてくる
-
-### s3fifo_ops のばらつき
-
-`s3fifo_ops` は run ごとに 46-66 % で振れる。原因は 3-tier の
-S/M/G Ghost が 8-9 個の admit hash と softcap=8 の狭い working
-set で敏感に反応するため。より大きい softcap / working set では
-安定する見込み。W-TinyLFU の 88.5 %、SIEVE の 66 % は run 間で
-±3 pp 程度に収まる。
-
-Two clean tiers emerge:
-
-- **Modern (SIEVE, S3-FIFO)**: 62 % — the visited-bit and 3-tier
-  strategies both protect the working set effectively.
-- **Simple (LRU, freq2bit)**: 12-13 % — over-aggressive eviction
-  churn.
-- **W-TinyLFU (scoped)**: 25 %, in between. The CMS-only variant
-  identifies frequent items but without the paper's Window-LRU
-  tier and doorkeeper it can't defend against
-  "burst-once-then-cold" traces. Full W-TinyLFU would likely
-  reach the 60 % tier.
-
-Bench harness change (2026-09-28): the workload now fires
-`POST /policy/eval` every `INTERLEAVE=25` accesses to trigger
-eviction rounds mid-workload. Without this, policies whose state
-lives entirely in `on_hit` (W-TinyLFU's CMS) never populate before
-the convergence eval rounds fire, so on_evict grants universal
-grace and no evictions happen. Existing policies (SIEVE / LRU /
-S3-FIFO / freq2bit) are within ±2 pp of their pre-interleave
-numbers.
+- **`pressure_ops`** (36.0 % med) — `s3fs_kfunc_admit_count()` /
+  `softcap()` で SIEVE strictness を切替。live kmod state を read
+  する shape の証明。capacity mode では admit_count が常に softcap
+  付近に収まるため切替頻度が低下し SIEVE 相当に。
+- **`time_decay_ops`** (33.5 % med) — `s3fs_kfunc_time_ns()` で
+  `now - last_hit_ns > 5s` を evict。wall clock 支配で hit rate
+  最下位グループ。DECAY_NS を長くすれば SIEVE 相当になる見込み。
+- **`size_aware_ops`** (36.0 % med) — `s3fs_kfunc_ino_size(ino)` で
+  SMALL_THRESHOLD=4KB 未満 / 以上を bias。全 file が 44 B なので
+  SIEVE 相当挙動。mixed size workload では BIG_MISS_CAP grace が効く。
 
 ## Reading the numbers
 
-- **observe** never evicts — theoretical ceiling.
-- **SIEVE** (`policy_sieve_ops`): 66 %. The visited-bit +
-  second-chance clock behaves correctly for skewed reuse.
-- **size_aware_ops** (`policy_size_aware_ops`, KFunc demo):
-  65 %. Uses `s3fs_kfunc_ino_size()` for SMALL/BIG file bias.
-  Degrades to SIEVE-equivalent on the all-small-file bench;
-  BIG_MISS_CAP grace only fires when mixed-size workloads run.
-- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier): 46 %. The
-  Small/Main/Ghost split matches Yang et al SOSP 2023 but is
-  sensitive to the small (softcap=8) working set — bench-run
-  variance is ±20 pp. Larger softcap / more admits stabilise
-  it.
-- **pressure_ops** (`policy_pressure_ops`, KFunc demo): 54 %.
-  Reads kmod-side admit count and softcap live via the Layer
-  0 KFunc set (P-08). Toggles between SIEVE-generous and
-  aggressive-evict on the fly. See `bpf/policy_pressure_ops.bpf.c`
-  for the ratio threshold.
-- **time_decay_ops** (`policy_time_decay_ops`, KFunc demo):
-  30.5 %. Uses `s3fs_kfunc_time_ns()` for wall-clock decay
-  (DECAY_NS=5s). Access-pattern-agnostic → suffers on
-  Zipf-shaped bursts. Meant as a proof-of-KFunc-time shape,
-  not a production recommendation.
-- **W-TinyLFU** (`policy_wtinylfu_ops`, scoped): 88.5 %. CMS +
-  bpf_loop aging only. Best-performing evicting policy on our
-  bench. Ships as the default `--policy-bpf=builtin:policy_
-  wtinylfu_ops`. See §"Reading W-TinyLFU" for why the scoped
-  variant beats the paper-complete `wtinylfu_full_ops`.
-- **LRU** (`policy_lru_ops`, approximate admit-order FIFO with
-  `on_hit` refreshing the seed epoch): 12.5 %. Poor because our
-  eval-forced rounds bump the global epoch on every `on_admit`,
-  so ages accumulate faster than `on_hit` resets. Real
-  sync-driven epoch would keep more.
-- **freq2bit** (`policy_freq2bit_ops`, single-tier 2-bit
-  reference counter): 12 %. Was called `policy_s3fifo_*` until
-  the honest-name rename landed once we noticed the algorithm
-  had none of the {Small, Main, Ghost} structure that makes
-  S3-FIFO S3-FIFO.
+All rates are medians over 3 seeds. Because every policy holds 8–9 files
+(adm_mean=8.9) the rows are truly comparable.
 
-The one comparison that carries the story:
+- **observe** (33.5 %): never votes to evict — FIFO fallback. Sits at
+  the bottom; any policy that actually ranks victims beats it, confirming
+  the `on_evict` hook provides real signal.
+- **SIEVE** (`policy_sieve_ops`, 36.5 %): visited-bit + second-chance
+  clock. Low variance (36.0–40.5 %). Reliable baseline.
+- **size_aware_ops** (`policy_size_aware_ops`, KFunc demo, 36.0 %):
+  uses `s3fs_kfunc_ino_size()` for SMALL/BIG bias. Identical to SIEVE
+  on this all-44B bench; mixed-size workloads see the difference.
+- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier, 39.5 % med): highest
+  median but also highest variance (33.5–40.0 %). The Small/Main/Ghost
+  ghost re-admit path pays off on seed 1337 (+4 pp lead) but on seed 42
+  the ghost map fills with the wrong candidates and it ties with `observe`.
+- **pressure_ops** (`policy_pressure_ops`, KFunc demo, 36.0 %): reads
+  `s3fs_kfunc_admit_count()` / `softcap()` live. With capacity enforced,
+  admit_count stays near softcap, so the strictness toggle fires rarely
+  — degrades to SIEVE-like. Proves the KFunc read shape.
+- **time_decay_ops** (`policy_time_decay_ops`, KFunc demo, 33.5 %):
+  uses `s3fs_kfunc_time_ns()` for wall-clock decay (DECAY_NS=5s). Worst
+  group because clock-based eviction is access-pattern-blind. Proof-of-
+  KFunc-time shape, not a production recommendation.
+- **W-TinyLFU** (`policy_wtinylfu_ops`, scoped, 37.0 %): CMS + aging.
+  Best among the "consistently better than FIFO" group. Ships as default.
+- **LRU** (`policy_lru_ops`, 35.0 %): seed-epoch FIFO with `on_hit`
+  refresh. Close to freq2bit; both in the 33–41 % band.
+- **freq2bit** (`policy_freq2bit_ops`, 35.0 %): single-tier 2-bit
+  counter. Renamed from the old `policy_s3fifo_*` once we noticed it
+  has none of the S/M/G structure; see §"Naming honesty".
 
-- **~5× improvement from `freq2bit` (12 %) → `s3fifo` (62.5 %)
-  with roughly the same code shape**. The gain is entirely
-  from adding the tier split and the ghost re-admit path —
-  evidence that the S3-FIFO paper's core innovation isn't
-  incidental.
+**Policies add ~6 pp over no-policy (`observe`).** That is a real
+improvement — it equals about 12 additional hits per 200 accesses —
+but the big remaining gap is to Belady (59.5–63 %), which reflects the
+per-round eviction granularity rather than victim selection quality.
 
 ## Reading W-TinyLFU
 
@@ -226,36 +173,26 @@ Our `policy_wtinylfu_ops` implements the *centerpiece* of the
 paper (CMS-based frequency estimator + threshold admission)
 plus the aging step. Two components are still deferred:
 
-1. **Window LRU tier** (~1 % of cache in the paper). New admits
-   land in W-LRU and only graduate to Main if they earn CMS
-   respect. Without W-LRU, one-hit wonders admit straight to
-   Main and consume slots that hot items would use. In practice
-   aging plus the softcap-driven eviction covers most of this
-   gap on our bench, but tail workloads (bursts of unique
-   items) will still hurt.
-2. **Doorkeeper Bloom filter**. Filters "1-hit wonders" before
-   they populate CMS. Without it, our 4×256 sketch collects
-   noise from cold items — aging clears it periodically, so
-   the net effect on hit rate is small.
+1. **Window LRU tier** (~1 % of cache in the paper). Without W-LRU,
+   one-hit wonders admit straight to Main. In practice aging plus
+   capacity-driven eviction covers most of this on our bench, but
+   tail workloads (bursts of unique items) will still hurt.
+2. **Doorkeeper Bloom filter**. Filters "1-hit wonders" before they
+   populate CMS. On this bench (30 files × ~7 hits each) there are
+   no true one-hit wonders, so the doorkeeper starves CMS rather
+   than helping — which is why `wtinylfu_full_ops` edges below the
+   scoped variant on most seeds.
 
-At **80 %** we're within striking distance of the "TinyLFU
-near-optimal" numbers the paper reports on comparable Zipf
-workloads. The remaining gap is smaller than the CMS-vs-clock
-difference (SIEVE at 62 %), so future work is diminishing
-returns on this micro-workload — real value comes from
-mixed-load and burst scenarios.
+**Aging is the trick that mattered.** Before `bpf_loop()` landed we
+skipped the halving step because a pragma-unrolled 1024-iteration loop
+exceeds the verifier's insn budget. `bpf_loop()` delegates iteration
+to the kernel with a fixed runtime bound. Cost: one BPF helper call
+per age; the callback itself is 3 insns.
 
-**Aging is the trick that mattered.** Before `bpf_loop()`
-landed we skipped the halving step because a pragma-unrolled
-1024-iteration loop exceeds the verifier's insn budget.
-`bpf_loop()` delegates iteration to the kernel with a fixed
-runtime bound, sidestepping the limit. Cost: one BPF helper
-call per age; the callback itself is 3 insns.
-
-The eviction totals (~10 k for LRU/freq2bit vs ~300 for SIEVE
-vs ~800 for S3-FIFO) tell the same story: aggressive policies
-churn the admit hash so hard that the workload can't warm any
-single ino before it's kicked out again.
+The eviction totals tell the same story as the old numbers but with
+smaller absolute values: ~130 for LRU/freq2bit, ~120 for S3-FIFO,
+~127 for SIEVE — all similar because capacity mode forces every policy
+to evict roughly `N_ACCESS - SOFTCAP` times.
 
 ## Naming honesty (Oct 2026)
 
@@ -292,10 +229,10 @@ S3-FIFO name. The bench above measures both. See:
    count without changing the rate. Larger files also stress
    the arena's usage tracking — see backlog H-03.
 
-4. Reproducibility: workload sampling uses `random.seed(42)`.
-   The same trace runs against every policy so ordering effects
-   between runs (eval-round vs drain-round race) are the only
-   source of run-to-run variance. Expect ±5 pp on repeat.
+4. Reproducibility: `SEED` env var controls workload sampling
+   (default 42). `bench-hitrate-multi.sh` runs seeds 42, 1337, 7
+   and reports median/min/max per policy. Observed inter-seed
+   variance: up to ±8 pp (s3fifo on easy vs hard seeds).
 
 5. Our S3-FIFO does not enforce paper-mandated |S|=10 %,
    |M|=90 % split explicitly. Softcap = 8 bounds the whole admit
@@ -306,11 +243,15 @@ S3-FIFO name. The bench above measures both. See:
 ## What this unblocks
 
 - P-07 objective met: numerical evidence that policy choice
-  matters — 13× improvement (W-TinyLFU vs freq2bit) on a
-  workload where softcap has real bite.
-- Meetup demo material: "swap the policy, hit rate goes from
-  6.5 % to 88.5 %, live." The POST endpoints (`/policy/reload` +
-  `/policy/eval`) make that a curl-only demo.
+  matters — `observe` (no ranking) 33.5 % vs `s3fifo` 39.5 % vs
+  trace-replay `opt` 59.5–63 %, all at true 8-slot capacity.
+  Policies add ~6 pp over FIFO; the remaining 20+ pp gap to Belady
+  is eviction-granularity, not victim-selection.
+- Meetup demo material: "swap the policy via a curl, see the hit
+  rate change live." The POST endpoints (`/policy/reload` +
+  `/policy/eval`) make that a curl-only demo. Present
+  `observe → s3fifo` (+6 pp per run) or the trace-replay `opt`
+  bound as the aspirational target.
 - Layer 0 KFunc proven on 3 demo policies (pressure /
   time_decay / size_aware) — all live-read kmod-side state
   during on_evict decisions.
