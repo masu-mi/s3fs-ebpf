@@ -78,9 +78,13 @@
   - 非 sleepable struct_ops のロード
   - evict 時の page cache 破棄
   - `nocache=1`
-- [ ] **S-08** ebpf-fsync の固定オーバーヘッド (~90 ms) — `bench-write.sh` の `ebpf-fsync` 行で発覚 (2026-10-05)。1 MiB と 10 MiB の PUT 時間がほぼ同じ (~100 ms) で、fuse-raw の 1 MiB PUT (~13 ms) と比べ 7× 大きい固定コスト。調査起点: `daemon/internal/s3/client.go` の flush/PUT 実装 + `http.Transport` の connection reuse (`MaxIdleConnsPerHost`) 設定。**受け入れ条件**: 1 MiB `ebpf-fsync` が fuse-raw (19.5 ms) と同オーダーになること。目安 0.5〜1 日
-- [ ] **S-09** ebpf-nocache の tiny ファイル miss rate が低い (~18%) — `bench-3way.sh` の `ebpf-nocache` + microbench で発覚 (2026-10-05)。`nocache=1` が `invalidate_mapping_pages` を呼ぶが arena データが残り、admit 再登録後に arena hit する経路が残っている疑い。big.bin (1 MiB) では miss 率 ~100% で正常動作しているため tiny ファイル固有の挙動。調査起点: kmod の `open()` nocache handler で `admit_hash_del(ino)` が呼ばれているか + arena chunk が open 時にクリアされているか確認。**受け入れ条件**: microbench miss 率が ~100%、p50 が fuse-raw と同オーダー。目安 0.5 日
+- [x] ✅ **S-08** ebpf-fsync の固定オーバーヘッド (~90 ms) — 修正済 (commit c75247f、2026-10-06)。根本原因: daemon の flush ioctl が PUT 完了を非同期でポーリング (100ms 周期 ticker) していた。修正: `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え、kmod が flush event を受け取り次第即 wake。**結果**: 1 MiB ebpf-fsync min=19.7ms → fuse-raw (19.5ms) と同オーダーに達した。`br §8.4` 参照。
+- [x] ✅ **S-09** ebpf-nocache の tiny ファイル miss rate が低い (~18%) — 修正済 (2026-10-06)。根本原因 2 点: (1) kmod の `admit_drop_all_ranges` が evict_log に通知しないため daemon が re-push して admit が復活; (2) `invalidate_mapping_pages` が trylock で active folio を skip。修正: `s3fs_ebpf_file_open` nocache パスに `evict_log_push(ino)` + `invalidate_inode_pages2()` fallback を追加。**結果**: tiny ファイルの microbench miss 率が ~18% → ≈100% に改善、p50 = 558µs (vs fuse-raw 1.7ms で 3× 速い)。`br §7.7` 参照。
 - [x] ✅ **S-07** disk cache (A 層, `--cache-dir`) の上限管理 — 実装済。`DiskCache.maxBytes` フィールドを追加、`NewDiskCache` に `maxBytes int64` (0=unlimited) を追加、`Write` 前に `evictIfNeeded` (dir scan → mtime 昇順で古い順に削除) を呼ぶ。`s3.Config` / `gcs.Config` に `MaxCacheBytes` を追加、daemon に `--disk-cache-capacity` フラグ + `S3FS_DISK_CACHE_CAPACITY` env を追加。`TestDiskCache_Eviction` / `TestDiskCache_EvictionDisabled` で動作を pin。
+
+### T. コードレビュー起票 (2026-10-06)
+
+- [x] ✅ **T-01** `pruneAdmitsTo` が arena チャンクを解放しない (arena リーク) — 修正済。`planPruneAdmits` pure 関数を切り出し `pruneAdmitsTo` がそれを呼んで `admitProgs.FreeArenaChunk` に freed ranges を渡すよう変更。回帰テスト 3 件 (`TestPlanPruneAdmits_FreesArenaChunksForDropped` / `_ArenaBaseZeroSkipsFree` / `_KeepAllProducesNoDelta`) を追加。
 
 ---
 
@@ -181,6 +185,13 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **R-01-eval-overhead** R-01 hook overhead bench — 完 (本 commit)。`scripts/bench-read-iter.sh` を追加。fentry hook の有無 (`--no-read-iter-hook` フラグで切替) で read microbench の p50/p95/p99 を比較。LRU_HASH lookup + 2 atomic increment の理論オーバーヘッドが < 1 μs であることを定量化。
 - [x] ✅ **R-01-eval-scenario** pattern-aware admit (sequential 大ファイル最適化) — 完 (本 commit)。`admit_arena.go` の `handleReadMiss` に `patternAwareAdmitEnabled` ガードを追加: `SeqRatio() ≥ 0.70` の場合に `GetRange(chunk)` ではなく `Get(全体)` を発行する R-01 最適化。`--pattern-aware-admit` フラグで有効化。評価スクリプト `scripts/bench-read-pattern-policy.sh` + `policies/bench-no-large-prewarm.cel` で upcall 削減 (10 MiB file: 3 upcalls → 1) + cold-read latency 3× 短縮 (3 × 30 ms → 1 × 30 ms) を実測可能。fentry が `.read_folio` block 前に発火するため初回 miss 時点で `seq_count ≥ 1` が保証され、warmup reads 不要。
 
+### T. コードレビュー起票 — polish (2026-10-06)
+
+- [x] ✅ **T-02** `dropAdmitsLocked` 戻り値の意味ズレ — 修正済。`dropped` カウンタを別途管理し `len(freedRanges)` ではなく実際に削除した ino 数を返すよう変更。回帰テスト `TestDropAdmitsLocked_ReturnsDroppedCount` を追加。
+- [x] ✅ **T-03** `drainEvictions` / `readStats` がポーリング毎に fd open/close — 修正済。`drainEvictionsOn(devFd int)` / `readStatsOn(devFd int)` を追加し、`drainEvictionsLoop` / `sampleKmodStats` が起動時に 1 回 open して各ティックで再利用するよう変更。既存の `drainEvictions(devPath)` / `readStats(devPath)` は `reconcileEvictionsLocked` 等の呼び出し元のため保持。
+- [ ] **T-04** `planReplaceAdmit` が複数 range 持つ ino の旧チャンクを 1 個しか解放しない (latent arena リーク) — `admit_arena.go:138-151`。ループが `oldChunk` を上書きするため最後にマッチしたエントリの chunk しか返らない。D-01 range-list 拡張で同一 ino の複数エントリが `admits` に入ると残りのチャンクがリーク。現在の不変条件 (replaceAdmit の ino 単位 dedup + prewarm の重複なし) により今は発現しない。**修正方針**: `oldChunk arenaChunkPair / hasOldChunk bool` → `freed []arenaChunkPair` に変更して `append` に。回帰テスト「同一 ino の 2 エントリを filter → 両方返る」を追加。**受け入れ条件**: planReplaceAdmit が複数 match を全て freed に積む。目安 0.5 日
+- [ ] **T-05** `arenaChunkPair.offset/size` が `uint32` で arena 4 GiB 超に対応できない (latent truncation) — `admit_arena.go:242-245`。現状 128 MiB arena (max offset ≈ 0x8000000) では uint32 で安全だが、将来 arena を 4 GiB 超に拡張すると無音でオフセットが切り捨てられる。**修正方針**: `offset uint64, size uint64` に変更。FreeArenaChunk API も合わせて変更。今は low priority だが D-01 完全実装前に直すのが安全。
+
 ### K. upstream 貢献 (`w4a §9`)
 
 根拠 doc: [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
@@ -216,14 +227,21 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 「今日〜明日で何を触るか」目線での並び:
 
-**2026-10-05 更新 — 最優先は S 系 (キャッシュの正しさ)**:
+**2026-10-06 更新 — T-01/T-02/T-03/S-08/S-09 完了**:
 
-1. **S-06** 実機検証 (今回入れた変更がまず動くこと)
-2. **S-01** 差分 invalidate (小さく、性能への効果が最大)
-3. **S-02** バイト容量上限 + victim 選択 (hit 率比較の前提)
-4. **S-03** page cache hit を policy に供給
-5. **S-04** evict 反映の遅れ
-6. **S-05** 再計測 → Meetup 資料の数字を確定
+残り:
+1. **S-06** 実機検証 (S-01〜S-04 のビルドだけ通した変更を動かす)
+2. **T-04** `planReplaceAdmit` 複数 range ino の latent arena リーク (D-01 完全実装前に直す)
+3. **T-05** `arenaChunkPair` uint32 offset 型 (latent、低優先)
+
+完了済 (2026-10-06):
+- ✅ T-01 `pruneAdmitsTo` arena リーク
+- ✅ T-02 `dropAdmitsLocked` 戻り値の意味ズレ
+- ✅ T-03 fd per-call overhead
+- ✅ S-08 ebpf-fsync ~90ms 固定オーバーヘッド (commit c75247f)
+- ✅ S-09 nocache tiny ファイル miss 率 ~18% (修正適用済)
+
+S-01〜S-05/S-07 は実装済 ✅ 参照。
 
 以下は旧リスト (A/B/C 系は完了済):
 
