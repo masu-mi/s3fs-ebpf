@@ -1257,6 +1257,8 @@ func backendFlags(fs *flag.FlagSet) func() (objstore.Backend, error) {
 	ssl := fs.Bool("ssl", false, "[s3] Use HTTPS")
 	cacheDir := fs.String("cache-dir", envOr("S3FS_CACHE_DIR", ""),
 		"local staging directory (enables use_cache-equivalent short-circuit; both backends)")
+	diskCacheCapacity := fs.Int64("disk-cache-capacity", envInt64("S3FS_DISK_CACHE_CAPACITY", 0),
+		"disk cache size cap in bytes (0 = unlimited, S-07)")
 	// GOOGLE_APPLICATION_CREDENTIALS is honored by the GCS SDK's ADC
 	// chain — don't pre-read it here or an unset flag with a set env
 	// would bypass metadata-server / gcloud login fallbacks.
@@ -1272,18 +1274,20 @@ func backendFlags(fs *flag.FlagSet) func() (objstore.Backend, error) {
 		switch *backend {
 		case objstore.KindS3:
 			b, err = s3.New(s3.Config{
-				Endpoint:  *endpoint,
-				Bucket:    *bucket,
-				AccessKey: *access,
-				SecretKey: *secret,
-				UseSSL:    *ssl,
-				CacheDir:  *cacheDir,
+				Endpoint:      *endpoint,
+				Bucket:        *bucket,
+				AccessKey:     *access,
+				SecretKey:     *secret,
+				UseSSL:        *ssl,
+				CacheDir:      *cacheDir,
+				MaxCacheBytes: *diskCacheCapacity,
 			})
 		case objstore.KindGCS:
 			b, err = gcs.New(context.Background(), gcs.Config{
 				Bucket:          *bucket,
 				CredentialsFile: *gcsCreds,
 				CacheDir:        *cacheDir,
+				MaxCacheBytes:   *diskCacheCapacity,
 			})
 		default:
 			return nil, fmt.Errorf("unknown --backend %q (want %s or %s)",
@@ -1299,6 +1303,16 @@ func backendFlags(fs *flag.FlagSet) func() (objstore.Backend, error) {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt64(key string, fallback int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		var n int64
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
