@@ -2353,8 +2353,31 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 	}
 	if (dirty)
 		return 0;
+
+	/*
+	 * S-09 fix — two-part invalidation for reliable nocache behaviour:
+	 *
+	 * 1. Drop admit from kmod hash AND push to the evict log so the
+	 *    daemon's reconcileEvictionsLocked picks it up before the next
+	 *    admit_replace.  Without the evict_log_push the daemon still
+	 *    holds the entry in its `admits` snapshot and will re-send it on
+	 *    the next push (e.g. on a miss for a different ino), re-admitting
+	 *    the file before the blocked .read_folio wakes — visible as an
+	 *    arena hit instead of a miss for tiny files.
+	 *
+	 * 2. Use invalidate_inode_pages2 instead of invalidate_mapping_pages.
+	 *    invalidate_mapping_pages uses folio_trylock and silently skips
+	 *    folios that are locked or have elevated refcounts — common for
+	 *    small (single-folio) files that were recently accessed.
+	 *    invalidate_inode_pages2 waits for the lock and forcibly drops all
+	 *    clean folios, so the next read_iter reaches .read_folio rather
+	 *    than being served directly from the page cache.
+	 */
 	admit_drop_all_ranges(inode->i_ino, NULL);
-	invalidate_mapping_pages(inode->i_mapping, 0, -1);
+	evict_log_push(inode->i_ino);
+	if (invalidate_inode_pages2(inode->i_mapping) != 0)
+		/* Dirty folios present — harmless, dirty-file path is skipped above */
+		invalidate_mapping_pages(inode->i_mapping, 0, -1);
 	return 0;
 }
 
