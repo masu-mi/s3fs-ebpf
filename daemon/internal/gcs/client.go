@@ -29,6 +29,8 @@ type Config struct {
 	// CacheDir enables the same local staging short-circuit as the
 	// S3 backend. Empty disables caching.
 	CacheDir string
+	// MaxCacheBytes caps the disk cache size (S-07). 0 = unlimited.
+	MaxCacheBytes int64
 }
 
 type Client struct {
@@ -52,7 +54,7 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcs: init client: %w", err)
 	}
-	cache, err := objstore.NewDiskCache(cfg.CacheDir, objstore.KindGCS, cfg.Bucket)
+	cache, err := objstore.NewDiskCache(cfg.CacheDir, objstore.KindGCS, cfg.Bucket, cfg.MaxCacheBytes)
 	if err != nil {
 		return nil, err
 	}

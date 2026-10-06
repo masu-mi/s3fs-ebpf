@@ -114,6 +114,13 @@ struct {
 extern __u32 s3fs_kfunc_echo(__u32 v) __ksym;
 
 /*
+ * S-03: dispatch the active policy's on_hit hook for an ino.
+ * Registered for BPF_PROG_TYPE_TRACING so fentry programs may call it.
+ * Body lives in kmod/tree_traversal.c → s3fs_policy_ops_eval_hit().
+ */
+extern int s3fs_kfunc_policy_hit(__u64 ino) __ksym;
+
+/*
  * Upstream arena allocator. Signature from vmlinux BTF:
  *   bpf_arena_alloc_pages(map, addr_hint, page_cnt, node_id, flags)
  * The allocator inserts pages into BOTH the user_vm and kern_vm PTEs;
@@ -299,6 +306,12 @@ int BPF_PROG(s3fs_fp_read_iter,
 	offp = bpf_map_lookup_elem(&s3fs_inode_index, &ino);
 	if (offp) {
 		bump_counter(S3FS_STAT_READ_ITER_HITS);
+		/* S-03: notify policy of this access. Covers page-cache hits
+		 * that bypass .read_folio (and therefore miss the on_hit call
+		 * in s3fs_ebpf_read_folio). Harmless double-dispatch on the
+		 * arena-fill path — all current policies are idempotent or
+		 * cap-bounded on repeated on_hit for the same ino. */
+		s3fs_kfunc_policy_hit(ino);
 		return 0;
 	}
 

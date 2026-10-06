@@ -66,7 +66,7 @@
   - `s3fs_kfunc_softcap()` は実行時の値を返す。件数上限 (旧 softcap) は module param / ioctl で可変にして残す (既定 8 = デモ値)
 
   **受け入れ条件**: どの policy でも `adm` のバイト総量が上限以下。bench-hitrate の全行の hit 率が `opt` 以下になる
-- [ ] **S-03** page cache hit を policy に供給 (`as §4 P5, §6.3`) — 既存の `fentry/generic_file_read_iter` (全 read で発火) から per-ino のアクセスを policy に渡す。手段は共有 map か `on_access` 相当の hook。頻度系 policy (W-TinyLFU / freq2bit) が page cache hit を数えられるようにする。**受け入れ条件**: page cache 経由の繰り返し read で policy の頻度カウンタが増える。目安 1〜2 日
+- [x] ✅ **S-03** page cache hit を policy に供給 — 実装済。`kmod/tree_traversal.c` に `s3fs_kfunc_policy_hit(u64 ino)` KFunc を追加 (`BPF_PROG_TYPE_TRACING` に register)、`bpf/s3fs_fastpath.bpf.c` の `fentry/generic_file_read_iter` hit パス (`offp != NULL`) から呼び出す。page cache 経由の繰り返し read でも policy の `on_hit` が dispatch される。`.read_folio` (arena-hit) で既に `on_hit` を呼んでいるパスでの二重呼び出しはどの policy も idempotent / cap-bounded なので許容。BPF オブジェクト再生成 + kmod ビルド + Go テスト全通過。実機検証は S-06。
 - [x] ✅ **S-04** evict 反映の遅れ — 実装済 (8db7c82、push 直前に drain)。 (`as §4 P6`) — daemon の drain は 2 秒周期で、その間の全置換で evict 済み ino が再送・復活する。kmod が直近の evict 済み ino を覚えて再送を弾くか、ADMIT_ARENA ioctl の戻りで evict 結果を即時に返す。目安 0.5〜1 日
 - [ ] **S-05** 再計測 (S-01〜S-03 の後) — 計測後に `hr` / `br` / `mo` の数字を差し替える。目安 0.5 日 + 実機
   - `bench-hitrate.sh`: 3 seed 以上、`opt` / `adm_*` を併記、中央値とばらつき
@@ -78,7 +78,7 @@
   - 非 sleepable struct_ops のロード
   - evict 時の page cache 破棄
   - `nocache=1`
-- [ ] **S-07** disk cache (A 層, `--cache-dir`) の上限管理 (`as §6.3`) — 現状は無制限。P1 寄りだが S-02 と同じ容量設計に揃える
+- [x] ✅ **S-07** disk cache (A 層, `--cache-dir`) の上限管理 — 実装済。`DiskCache.maxBytes` フィールドを追加、`NewDiskCache` に `maxBytes int64` (0=unlimited) を追加、`Write` 前に `evictIfNeeded` (dir scan → mtime 昇順で古い順に削除) を呼ぶ。`s3.Config` / `gcs.Config` に `MaxCacheBytes` を追加、daemon に `--disk-cache-capacity` フラグ + `S3FS_DISK_CACHE_CAPACITY` env を追加。`TestDiskCache_Eviction` / `TestDiskCache_EvictionDisabled` で動作を pin。
 
 ---
 

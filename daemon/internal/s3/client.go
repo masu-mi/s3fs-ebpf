@@ -27,6 +27,8 @@ type Config struct {
 	// caching. Analogous to s3fs-fuse's -o use_cache=<dir> (bench
 	// §0.5 caveat).
 	CacheDir string
+	// MaxCacheBytes caps the disk cache size (S-07). 0 = unlimited.
+	MaxCacheBytes int64
 }
 
 type Client struct {
@@ -51,7 +53,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3: init minio client: %w", err)
 	}
-	cache, err := objstore.NewDiskCache(cfg.CacheDir, objstore.KindS3, cfg.Bucket)
+	cache, err := objstore.NewDiskCache(cfg.CacheDir, objstore.KindS3, cfg.Bucket, cfg.MaxCacheBytes)
 	if err != nil {
 		return nil, err
 	}
