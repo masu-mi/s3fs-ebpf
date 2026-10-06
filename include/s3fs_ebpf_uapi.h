@@ -346,4 +346,21 @@ struct s3fs_rename_event {
 #define S3FS_IOC_POP_RENAME \
 	_IOR(S3FS_IOC_MAGIC, 0x0C, struct s3fs_rename_event)
 
+/*
+ * S3FS_IOC_POP_FLUSH_WAIT — blocking variant of POP_FLUSH for the
+ * fsync path (S-08).
+ *
+ * Blocks until a flush event with FLUSH_FLAG_WAIT is available, then
+ * pops and returns it. Returns -ERESTARTSYS on signal interruption, or
+ * -ENODEV when the module is being unloaded. The daemon runs one
+ * goroutine blocked here so fsync() callers are serviced immediately
+ * instead of waiting up to one POP_FLUSH ticker period (~100 ms).
+ *
+ * Non-WAIT events (close/release path) are unaffected; they remain on
+ * the regular POP_FLUSH queue and are handled by the coalesced 100 ms
+ * ticker in runFlushLoop.
+ */
+#define S3FS_IOC_POP_FLUSH_WAIT \
+	_IOR(S3FS_IOC_MAGIC, 0x0D, struct s3fs_flush_event)
+
 #endif /* _S3FS_EBPF_UAPI_H */

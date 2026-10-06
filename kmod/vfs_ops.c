@@ -1373,6 +1373,15 @@ struct s3fs_flush_item {
 static LIST_HEAD(s3fs_flush_queue);
 static DEFINE_SPINLOCK(s3fs_flush_lock);
 
+/* Separate queue + wait-queue for FLUSH_FLAG_WAIT events (S-08).
+ * These are fsync()-triggered; the daemon goroutine blocks on
+ * S3FS_IOC_POP_FLUSH_WAIT so they are picked up with near-zero latency
+ * instead of waiting up to 100 ms for the ticker-based flush poll. */
+static LIST_HEAD(s3fs_flush_wait_queue);
+static DEFINE_SPINLOCK(s3fs_flush_wait_lock);
+static DECLARE_WAIT_QUEUE_HEAD(s3fs_flush_wait_wq);
+static bool s3fs_flush_wait_shutdown;
+
 /*
  * Flush waiter — one per fsync() blocked on daemon PUT completion.
  * .release path does NOT register one (fire-and-forget for close(2)),
@@ -1496,9 +1505,16 @@ static void flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 	f->name_len = name_len;
 	f->flags = flags;
 	memcpy(f->name, name, name_len);
-	spin_lock(&s3fs_flush_lock);
-	list_add_tail(&f->link, &s3fs_flush_queue);
-	spin_unlock(&s3fs_flush_lock);
+	if (flags & S3FS_FLUSH_FLAG_WAIT) {
+		spin_lock(&s3fs_flush_wait_lock);
+		list_add_tail(&f->link, &s3fs_flush_wait_queue);
+		spin_unlock(&s3fs_flush_wait_lock);
+		wake_up_interruptible(&s3fs_flush_wait_wq);
+	} else {
+		spin_lock(&s3fs_flush_lock);
+		list_add_tail(&f->link, &s3fs_flush_queue);
+		spin_unlock(&s3fs_flush_lock);
+	}
 }
 
 /* Pop one item into *out; returns true if queue had something.
@@ -1522,7 +1538,8 @@ static bool flush_dequeue(struct s3fs_flush_item *out)
 }
 
 /* Called from unregister / put_super to drop any queued events so
- * they don't linger past a daemon restart. */
+ * they don't linger past a daemon restart. Also wakes any goroutine
+ * blocked in s3fs_ebpf_flush_pop_wait so it exits cleanly. */
 static void flush_queue_drain(void)
 {
 	struct s3fs_flush_item *f, *tmp;
@@ -1533,6 +1550,15 @@ static void flush_queue_drain(void)
 		kfree(f);
 	}
 	spin_unlock(&s3fs_flush_lock);
+
+	WRITE_ONCE(s3fs_flush_wait_shutdown, true);
+	spin_lock(&s3fs_flush_wait_lock);
+	list_for_each_entry_safe(f, tmp, &s3fs_flush_wait_queue, link) {
+		list_del(&f->link);
+		kfree(f);
+	}
+	spin_unlock(&s3fs_flush_wait_lock);
+	wake_up_all(&s3fs_flush_wait_wq);
 }
 
 int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
@@ -1549,6 +1575,53 @@ int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
 	out->flags      = item.flags;
 	memcpy(out->name, item.name, item.name_len);
 	out->name[item.name_len] = '\0';
+	return 0;
+}
+
+/*
+ * Blocking variant of flush_pop for WAIT-flagged events (S-08).
+ * Waits up to 200 ms per call; returns:
+ *   0        — item dequeued into *out
+ *  -EAGAIN   — timeout (no item arrived); caller should re-check ctx
+ *  -EINTR    — interrupted by signal
+ *  -ENODEV   — shutdown in progress (flush_queue_drain called)
+ */
+int s3fs_ebpf_flush_pop_wait(struct s3fs_flush_event *out)
+{
+	struct s3fs_flush_item *f;
+	long ret;
+
+again:
+	ret = wait_event_interruptible_timeout(s3fs_flush_wait_wq,
+		!list_empty(&s3fs_flush_wait_queue) ||
+		READ_ONCE(s3fs_flush_wait_shutdown),
+		msecs_to_jiffies(200));
+	if (ret < 0)
+		return -EINTR;
+	if (ret == 0)
+		return -EAGAIN;
+
+	spin_lock(&s3fs_flush_wait_lock);
+	if (list_empty(&s3fs_flush_wait_queue)) {
+		spin_unlock(&s3fs_flush_wait_lock);
+		if (READ_ONCE(s3fs_flush_wait_shutdown))
+			return -ENODEV;
+		goto again;
+	}
+	f = list_first_entry(&s3fs_flush_wait_queue,
+			     struct s3fs_flush_item, link);
+	list_del(&f->link);
+	spin_unlock(&s3fs_flush_wait_lock);
+
+	memset(out, 0, sizeof(*out));
+	out->ino        = f->ino;
+	out->parent_ino = f->parent_ino;
+	out->size       = f->size;
+	out->name_len   = f->name_len;
+	out->flags      = f->flags;
+	memcpy(out->name, f->name, f->name_len);
+	out->name[f->name_len] = '\0';
+	kfree(f);
 	return 0;
 }
 

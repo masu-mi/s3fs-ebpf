@@ -67,6 +67,8 @@ const (
 	s3fsIocStats           = (3 << 30) | (uint32(unsafe.Sizeof(statsArg{})) << 16) | (0xE3 << 8) | 0x08
 	s3fsIocDrainEvictions  = (3 << 30) | (uint32(unsafe.Sizeof(drainEvictionsArg{})) << 16) | (0xE3 << 8) | 0x09
 	s3fsIocSignalFlush     = (1 << 30) | (uint32(unsafe.Sizeof(signalAdmitArg{})) << 16) | (0xE3 << 8) | 0x0A
+	// S-08: blocking variant for WAIT-flagged (fsync) flush events.
+	s3fsIocPopFlushWait = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x0D
 )
 
 // signalFlush notifies kmod that a flush PUT completed with `err`.
@@ -148,6 +150,53 @@ func popFlush(devFd int, out *flushEvent) error {
 		return errno
 	}
 	return nil
+}
+
+// popFlushWait blocks up to 200 ms for a WAIT-flagged flush event.
+// Returns nil on success, unix.EAGAIN on timeout, unix.EINTR on signal,
+// unix.ENODEV on kmod shutdown. The dev fd must be R/W.
+func popFlushWait(devFd int, out *flushEvent) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
+		uintptr(devFd), uintptr(s3fsIocPopFlushWait),
+		uintptr(unsafe.Pointer(out)))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// runFlushWaitLoop handles WAIT-flagged (fsync path) flush events by
+// blocking on S3FS_IOC_POP_FLUSH_WAIT instead of the 100 ms ticker.
+// This eliminates the up-to-100 ms queuing latency for fsync callers
+// (S-08). Exits cleanly on ctx cancellation or kmod shutdown.
+func runFlushWaitLoop(ctx context.Context, devPath string,
+	progs *fpebpf.Programs, s3c objstore.Backend) {
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[flush-wait] open %s: %v\n", devPath, err)
+		return
+	}
+	defer f.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		var ev flushEvent
+		if err := popFlushWait(int(f.Fd()), &ev); err != nil {
+			if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) {
+				continue
+			}
+			if errors.Is(err, unix.ENODEV) {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "[flush-wait] pop_wait: %v\n", err)
+			return
+		}
+		handleFlush(ctx, int(f.Fd()), devPath, progs, s3c, &ev)
+	}
 }
 
 // readDirty copies up to len(buf) bytes for `ino` into buf and

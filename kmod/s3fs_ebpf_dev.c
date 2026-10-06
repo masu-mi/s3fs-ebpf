@@ -292,6 +292,24 @@ static long s3fs_dev_pop_flush(void __user *uarg)
 }
 
 /*
+ * S3FS_IOC_POP_FLUSH_WAIT — blocking variant for WAIT-flagged flush
+ * events (S-08). Returns 0 with event copied out; -EAGAIN on timeout
+ * (200 ms); -EINTR on signal; -ENODEV on shutdown.
+ */
+static long s3fs_dev_pop_flush_wait(void __user *uarg)
+{
+	struct s3fs_flush_event ev;
+	int err;
+
+	err = s3fs_ebpf_flush_pop_wait(&ev);
+	if (err)
+		return err;
+	if (copy_to_user(uarg, &ev, sizeof(ev)))
+		return -EFAULT;
+	return 0;
+}
+
+/*
  * S3FS_IOC_POP_DELETE — daemon drains queued delete events (E-02).
  * Symmetric with POP_FLUSH: -EAGAIN on empty, 0 with event copied
  * out on success.
@@ -372,6 +390,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_sync_entries(uarg);
 	case S3FS_IOC_POP_FLUSH:
 		return s3fs_dev_pop_flush(uarg);
+	case S3FS_IOC_POP_FLUSH_WAIT:
+		return s3fs_dev_pop_flush_wait(uarg);
 	case S3FS_IOC_READ_DIRTY:
 		return s3fs_dev_read_dirty(uarg);
 	case S3FS_IOC_MARK_DIRTY: {
