@@ -810,6 +810,9 @@ func runFastpath(args []string) int {
 	// S3. Runs even without --s3 so the queue doesn't grow unbounded
 	// (in offline mode it just logs and drops each event).
 	go runFlushLoop(ctx, *dev, progs, s3c, 100*time.Millisecond)
+	// S-08: blocking goroutine for fsync-triggered (WAIT-flagged) flush
+	// events — eliminates the up-to-100 ms ticker latency for fsync.
+	go runFlushWaitLoop(ctx, *dev, progs, s3c)
 	// E-02: drain kmod delete queue and issue S3 DELETE for each.
 	// Runs on the same interval as flush; symmetric shape.
 	go runDeleteLoop(ctx, *dev, s3c, 100*time.Millisecond)

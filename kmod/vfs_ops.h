@@ -70,6 +70,7 @@ int s3fs_ebpf_signal_admit(u64 ino, int err);
  * negative errno on failure.
  */
 int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
+int  s3fs_ebpf_flush_pop_wait(struct s3fs_flush_event *out);
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
 int  s3fs_ebpf_mark_dirty(u64 ino);
 int  s3fs_ebpf_delete_pop(struct s3fs_delete_event *out);
