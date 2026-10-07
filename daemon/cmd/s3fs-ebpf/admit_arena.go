@@ -110,45 +110,51 @@ func replaceAdmit(devPath string, entry admitEntry, progs *fpebpf.Programs) erro
 	if progs != nil {
 		arenaBase = progs.Arena().BaseAddr()
 	}
-	next, oldChunk, hasOldChunk := planReplaceAdmit(admits, entry, arenaBase)
+	next, freed := planReplaceAdmit(admits, entry, arenaBase)
 	admits = next
 	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
-	if hasOldChunk && progs != nil {
-		progs.FreeArenaChunk(oldChunk.offset, oldChunk.size)
+	if progs != nil {
+		for _, r := range freed {
+			progs.FreeArenaChunk(r.offset, r.size)
+		}
 	}
 	return admitArena(devPath, admits)
 }
 
 // planReplaceAdmit is the pure-function core of replaceAdmit: it
 // filters any prior entry sharing entry.Ino out of `admits`, appends
-// the fresh entry, and reports the evicted entry's arena range so
-// the caller can return it to the free-list. Split out so the dedup
+// the fresh entry, and reports all evicted entries' arena ranges so
+// the caller can return them to the free-list. Split out so the dedup
 // invariant can be unit-tested without an eBPF loader or the
 // /dev/s3fs_ebpf ioctl.
+//
+// T-04: returns freed []arenaChunkPair (all matches) rather than a
+// single oldChunk. With D-01 range-list, the same ino can have
+// multiple entries in admits; the prior single-value return discarded
+// all but the last match's chunk, leaking arena bytes.
 //
 // arenaBase==0 or e.Uaddr < arenaBase suppresses the chunk report —
 // used in offline mode and as a defensive guard against garbage
 // uaddrs. The returned slice shares backing storage with `admits`
 // (in-place filter), matching the previous implementation.
 func planReplaceAdmit(admits []admitEntry, entry admitEntry, arenaBase uint64) (
-	next []admitEntry, oldChunk arenaChunkPair, hasOldChunk bool,
+	next []admitEntry, freed []arenaChunkPair,
 ) {
 	filtered := admits[:0]
 	for _, e := range admits {
 		if e.Ino == entry.Ino {
 			if arenaBase != 0 && e.Uaddr >= arenaBase {
-				oldChunk = arenaChunkPair{
+				freed = append(freed, arenaChunkPair{
 					offset: uint32(e.Uaddr - arenaBase),
 					size:   uint32(e.Size),
-				}
-				hasOldChunk = true
+				})
 			}
 			continue
 		}
 		filtered = append(filtered, e)
 	}
 	next = append(filtered, entry)
-	return next, oldChunk, hasOldChunk
+	return next, freed
 }
 
 // refreshAdmits re-pushes the current snapshot to kmod without any

@@ -24,7 +24,7 @@ func TestPlanReplaceAdmit_ReplacesExistingIno(t *testing.T) {
 	}
 	fresh := admitEntry{Ino: 42, Uaddr: arenaBase + 200, Size: 50}
 
-	next, oldChunk, hasOldChunk := planReplaceAdmit(admits, fresh, arenaBase)
+	next, freed := planReplaceAdmit(admits, fresh, arenaBase)
 
 	if got, want := len(next), 1; got != want {
 		t.Fatalf("len(next) = %d, want %d (dedup should keep one entry per ino)", got, want)
@@ -32,12 +32,12 @@ func TestPlanReplaceAdmit_ReplacesExistingIno(t *testing.T) {
 	if !reflect.DeepEqual(next[0], fresh) {
 		t.Errorf("next[0] = %+v, want %+v (fresh entry must win)", next[0], fresh)
 	}
-	if !hasOldChunk {
-		t.Fatal("hasOldChunk = false, want true (old arena chunk must be reported for free-list)")
+	if len(freed) != 1 {
+		t.Fatalf("len(freed) = %d, want 1 (old arena chunk must be reported for free-list)", len(freed))
 	}
 	wantChunk := arenaChunkPair{offset: 0, size: 100}
-	if oldChunk != wantChunk {
-		t.Errorf("oldChunk = %+v, want %+v", oldChunk, wantChunk)
+	if freed[0] != wantChunk {
+		t.Errorf("freed[0] = %+v, want %+v", freed[0], wantChunk)
 	}
 }
 
@@ -51,7 +51,7 @@ func TestPlanReplaceAdmit_AppendsWhenAbsent(t *testing.T) {
 	}
 	fresh := admitEntry{Ino: 42, Uaddr: arenaBase + 100, Size: 50}
 
-	next, _, hasOldChunk := planReplaceAdmit(admits, fresh, arenaBase)
+	next, freed := planReplaceAdmit(admits, fresh, arenaBase)
 
 	if got, want := len(next), 2; got != want {
 		t.Fatalf("len(next) = %d, want %d", got, want)
@@ -59,8 +59,8 @@ func TestPlanReplaceAdmit_AppendsWhenAbsent(t *testing.T) {
 	if next[0].Ino != 7 || next[1] != fresh {
 		t.Errorf("next = %+v, want prior entry preserved + fresh appended", next)
 	}
-	if hasOldChunk {
-		t.Error("hasOldChunk = true, want false (no prior entry to free)")
+	if len(freed) != 0 {
+		t.Errorf("freed = %v, want empty (no prior entry to free)", freed)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestPlanReplaceAdmit_LeavesOtherInosUntouched(t *testing.T) {
 	}
 	fresh := admitEntry{Ino: 42, Uaddr: arenaBase + 500, Size: 30}
 
-	next, oldChunk, hasOldChunk := planReplaceAdmit(admits, fresh, arenaBase)
+	next, freed := planReplaceAdmit(admits, fresh, arenaBase)
 
 	if got, want := len(next), 3; got != want {
 		t.Fatalf("len(next) = %d, want %d (7 + 99 kept, 42 replaced)", got, want)
@@ -93,9 +93,8 @@ func TestPlanReplaceAdmit_LeavesOtherInosUntouched(t *testing.T) {
 	if e, ok := seenInos[42]; !ok || e != fresh {
 		t.Errorf("ino=42 = %+v, want %+v", e, fresh)
 	}
-	if !hasOldChunk || oldChunk != (arenaChunkPair{offset: 100, size: 60}) {
-		t.Errorf("oldChunk = %+v hasOldChunk=%v, want offset=100 size=60",
-			oldChunk, hasOldChunk)
+	if len(freed) != 1 || freed[0] != (arenaChunkPair{offset: 100, size: 60}) {
+		t.Errorf("freed = %+v, want [{offset:100 size:60}]", freed)
 	}
 }
 
@@ -109,33 +108,30 @@ func TestPlanReplaceAdmit_ArenaBaseZeroSkipsFree(t *testing.T) {
 	}
 	fresh := admitEntry{Ino: 42, Uaddr: 0x100200, Size: 50}
 
-	next, _, hasOldChunk := planReplaceAdmit(admits, fresh, 0)
+	next, freed := planReplaceAdmit(admits, fresh, 0)
 
 	if got, want := len(next), 1; got != want {
 		t.Fatalf("len(next) = %d, want %d", got, want)
 	}
-	if hasOldChunk {
-		t.Error("hasOldChunk = true, want false when arenaBase is 0 (offline mode)")
+	if len(freed) != 0 {
+		t.Errorf("freed = %v, want empty when arenaBase is 0 (offline mode)", freed)
 	}
 }
 
-// TestPlanReplaceAdmit_DedupCollapsesPriorDuplicates codifies the
-// recovery path: if a prior version of the code (pre-fix) left
-// multiple entries for the same ino, one replaceAdmit call should
-// collapse them all rather than leaving stragglers. Only the first
-// duplicate's arena chunk is reported today — subsequent stragglers
-// leak, which is an accepted limitation because the fix prevents
-// them from being created in the first place. This test locks the
-// current behavior so future refactors don't silently change it.
-func TestPlanReplaceAdmit_DedupCollapsesPriorDuplicates(t *testing.T) {
+// TestPlanReplaceAdmit_MultiRangeFreesAllChunks is the T-04 regression
+// test: when the same ino has multiple entries (D-01 range-list), all
+// prior chunks must be returned — not just the last one the loop saw.
+// Prior code used a single `oldChunk` value and overwrote it on each
+// iteration, leaking all but the last match.
+func TestPlanReplaceAdmit_MultiRangeFreesAllChunks(t *testing.T) {
 	const arenaBase uint64 = 0x100000
 	admits := []admitEntry{
-		{Ino: 42, Uaddr: arenaBase + 0, Size: 100},
-		{Ino: 42, Uaddr: arenaBase + 200, Size: 60},
+		{Ino: 42, Uaddr: arenaBase + 0, Size: 100, Offset: 0},
+		{Ino: 42, Uaddr: arenaBase + 200, Size: 60, Offset: 4096},
 	}
-	fresh := admitEntry{Ino: 42, Uaddr: arenaBase + 500, Size: 30}
+	fresh := admitEntry{Ino: 42, Uaddr: arenaBase + 500, Size: 30, Offset: 8192}
 
-	next, _, hasOldChunk := planReplaceAdmit(admits, fresh, arenaBase)
+	next, freed := planReplaceAdmit(admits, fresh, arenaBase)
 
 	if got, want := len(next), 1; got != want {
 		t.Fatalf("len(next) = %d, want %d (all prior entries for ino=42 collapse)", got, want)
@@ -143,8 +139,18 @@ func TestPlanReplaceAdmit_DedupCollapsesPriorDuplicates(t *testing.T) {
 	if next[0] != fresh {
 		t.Errorf("next[0] = %+v, want %+v", next[0], fresh)
 	}
-	if !hasOldChunk {
-		t.Error("hasOldChunk = false, want true (at least the first duplicate is reported)")
+	if got, want := len(freed), 2; got != want {
+		t.Fatalf("len(freed) = %d, want %d (one chunk per prior entry)", got, want)
+	}
+	chunks := map[uint32]uint32{}
+	for _, r := range freed {
+		chunks[r.offset] = r.size
+	}
+	if sz, ok := chunks[0]; !ok || sz != 100 {
+		t.Errorf("missing chunk offset=0 size=100; freed=%v", freed)
+	}
+	if sz, ok := chunks[200]; !ok || sz != 60 {
+		t.Errorf("missing chunk offset=200 size=60; freed=%v", freed)
 	}
 }
 
