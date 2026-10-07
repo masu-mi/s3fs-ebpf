@@ -5,35 +5,34 @@
 ## 発表テーマと方針
 
 - **ターゲット**: eBPFミートアップ参加者（BPF全般に興味あり、S3FSの詳細は不要）
-- **中心テーマ**: KFuncとstruct_opsを使ってBPFの制約を越える実装パターン
-- **FSの話は**: 「KFuncが必要になった動機」として1スライドで紹介に留める
-- **性能評価**: インパクトがあるのでさらっと1スライド紹介（3行表）
+- **中心テーマ**: `bpf_arena` / `KFunc` / `struct_ops` の3技術を動機・実装例・実測込みで紹介し、「自分のユースケースでも使えそう」を持ち帰ってもらう
+- **FSの話は**: 動機の1スライドのみ。各技術の説明はFS文脈を最小化して技術単体で理解できるように
+- **性能評価**: nocache 3× を軸に「キャッシュの差ではなく構造の差」を示す
 - **枠**: 20min
 
 ---
 
-## ネタ候補と採否
+## ネタ採否
 
-### 採用するネタ
+### 採用
 
-| # | ネタ | 説明 | 時間目安 |
-|---|---|---|---|
-| A | 動機とシステム概要 | 「S3をFSとして使いたい」 + kmod/BPF/daemonの3層を1スライド | 2min |
-| B | BPFの限界 — verifierの壁 | arena linked-list walk (`s3fs_deep_walk_reject`) が拒否される実例で「eBPFの限界」を示す | 3min |
-| C | KFunc実装 3ステップ | `__bpf_kfunc` / `BTF_KFUNCS_START` / `register_btf_kfunc_id_set`。prog typeごとに登録が必要な点も。Bと同じ walk を KFunc `s3fs_kfunc_arena_list_walk` で通す | 3min |
-| D | struct_ops — ポリシーをホットスワップ | vtable `s3fs_policy_ops` を1回の `BPF_LINK_UPDATE` でアトミックに入れ替え。fmod_retとの比較表 | 3min |
-| E | Layer 0 KFuncs — BPFからkernel状態を読む | `admit_count`/`softcap`/`evictions_total`/`time_ns`/`ino_size` を公開しpolicy BPFが利用 (`policy_pressure_ops`, `policy_time_decay_ops`, `policy_size_aware_ops`) | 3min |
-| F | 性能数字 | open+read+close ~870×、close までの write latency 17× (durable 比較ではない)。hit率は出さない | 2min |
-| G | まとめ/takeaway | "KFuncはBPFのverifier制限を安全に抜ける窓口" 1枚 | 2min |
+| # | ネタ | 時間目安 |
+|---|---|---|
+| A | 動機とシステム概要 | 2min |
+| B | `bpf_arena` — カーネル/ユーザーのゼロコピー shared memory | 3min |
+| C | verifierの壁 | 2min |
+| D | KFunc実装 3ステップ | 3min |
+| E | `struct_ops` — vtableをBPFでホットスワップ | 3min |
+| F | 性能数字 — nocache 3× で構造差を示す | 3min |
+| G | takeaway: 3技術の使いどころ | 2min |
 
-### 省くネタ
+### 省く
 
 | ネタ | 理由 |
 |---|---|
-| arenaの詳細 (BPF_MAP_TYPE_ARENA, GUP) | FSの読み込みパスの話になりFS寄りすぎる |
+| Layer 0 KFuncs の詳細 (5種API一覧) | struct_ops の例コード内に1行で組み込む。独立セクション不要 |
 | CEL/Lua policy (Layer 1) | eBPFではない |
 | VFS/kmodの実装詳細 | 趣旨からズレる |
-| fmod_retの詳細実装 | struct_opsとの比較表1枚で十分 |
 | W-TinyLFU/S3-FIFOのアルゴリズム詳細 | eBPFの話でなくキャッシュアルゴリズムの話 |
 
 ---
@@ -42,82 +41,243 @@
 
 ### 1. Intro (2min)
 
-- 「S3をローカルFSとして使いたい」
-- 構成: kmod (VFS) + BPF fast path + Go daemon
-- 今日の話: このシステムで使ったeBPF機能3つ
+- 「S3をローカルFSとして使いたい」「FUSEは毎回ユーザー空間往復が起きる」
+- 構成: kmod (VFS) + BPF fast path + Go daemon の3層
+- **今日の話: このシステムで使ったeBPF技術3つ — `bpf_arena` / KFunc / `struct_ops`**
+  - どれも「カーネルに踏み込む窓口」。S3FSに限らず使える
 
-### 2. BPFの限界 — verifierの壁 (3min)
+### 2. `bpf_arena` — ゼロコピー shared memory (3min)
 
-- arena linked-list walkのコードを見せる (`bpf/s3fs_fastpath.bpf.c` の `s3fs_deep_walk_reject`)
-- verifier拒否の実際のメッセージ: `BPF program is too large. Processed 1000001 insn` / `processed 1000001 insns (limit 1000000) ... total_states 9664`
-  - 原因: `n = n->next` の load 結果が `scalar()` (範囲不明) になり、verifier はループを抜ける条件を証明できない → 状態を展開し続けて 1M insn 上限 (`BPF_COMPLEXITY_LIMIT_INSNS`) に到達
-  - 再現: `sudo ./bin/s3fs-ebpf dev verifier-demo` (6.12 / 6.18 で確認)
-- → これを安全に越える手段がKFunc
+#### 何者か
 
-### 3. KFunc実装 3ステップ (3min)
+`BPF_MAP_TYPE_ARENA` (Linux 6.9+) は、カーネルとユーザー空間が **同じ仮想アドレスで** 読み書きできる連続メモリ領域。通常の BPF map は「カーネル側の値をユーザーが lookup でコピーして取り出す」が、arena はコピー不要。
 
-- `__bpf_kfunc` アノテーション (`__bpf_kfunc_start_defs()` で囲む)
-- `BTF_KFUNCS_START` / `BTF_ID_FLAGS`（6.11+ は `BTF_SET8_START` だと `-EINVAL`。flag 例: `KF_SLEEPABLE`）
-- `register_btf_kfunc_id_set`（prog typeごと: TRACING/SYSCALL/STRUCT_OPS）。fmod_ret 用の hook は別 API `register_btf_fmodret_id_set`
-- コード例: **`s3fs_kfunc_arena_list_walk`** (`kmod/tree_traversal.c`) — §2 で拒否されたのと同じ walk
-  - BPF 側 (`bpf/kfunc_walk.bpf.c`) は KFunc 呼出 1 回の直線コード → verifier は即通す
-  - ループは kmod の C: 安全性は `copy_from_user` (壊れた `next` は -EFAULT)、停止性は `max_nodes` (循環は -ELOOP) + `fatal_signal_pending`/`cond_resched`
-  - `copy_from_user` は sleep しうるので `KF_SLEEPABLE` + SYSCALL prog (`SEC("syscall")` は sleepable) に登録
-  - `verifier-demo` の後半がこれを実行する (100k ノード、sum 一致を検証)
-- 補足用: `s3fs_kfunc_echo` (2v+1) は最小のラウンドトリップ検証。`s3fs_kfunc_traverse_stub` は 0 を返すだけの stub なので「解決策」として見せない
+```
+カーネル (BPF/kmod) ←→ 同一 VA ←→ ユーザー (daemon mmap)
+                    ↑ copy ゼロ
+```
 
-### 4. struct_ops — ポリシーをvtableで差し替える (3min)
+#### 使い方の最小例
 
-- `struct s3fs_policy_ops { on_admit, on_evict, on_pressure, on_hit }`
-- BPF側: vtable を `SEC(".struct_ops.link")` で定義 (`BPF_F_LINK`)。各 method は `SEC("struct_ops/...")`。kmod が `rcu_read_lock()` 内から呼ぶので sleepable (`struct_ops.s/`) にはしない
-- kmod側: RCUで1ポインタスワップ (`kmod/policy_struct_ops.c` の reg/unreg/update)
-- hot swap: daemon は既存 link に `BPF_LINK_UPDATE` (new_map_fd + `BPF_F_REPLACE`) を 1 回 → kernel が `.update` を呼ぶ (`policyprog.SwapFrom`)。cilium/ebpf v0.22 の struct_ops link `Update` は未対応なので raw syscall で実装
-- fmod_ret比較: tracing link は `BPF_LINK_UPDATE` 非対応 → 「新 N 本 attach → 旧 N 本 close」で、その間は新旧が同じ hook で両方走る / struct_ops は 1 syscall でアトミック
+```c
+// ユーザー空間 (daemon)
+int arena_fd = bpf_map_create(BPF_MAP_TYPE_ARENA, NULL, 0, 0, 4096, NULL);
+void *base = mmap(NULL, 4096 * PAGE_SIZE, PROT_READ|PROT_WRITE,
+                  MAP_SHARED, arena_fd, 0);
+struct s3fs_admit_entry *e = base + offset;
+e->size   = file_size;
+e->uaddr  = (u64)file_data_ptr;   // daemon 側の mmap アドレス
+```
 
-### 5. Layer 0 KFuncs — BPFからkmod状態を読む (3min)
+```c
+// BPF プログラム側 (arena pointer は map 経由で受け取る)
+struct s3fs_admit_entry *e = bpf_map_lookup_elem(&admit_map, &ino);
+// e->uaddr は daemon の mmap と同じ VA — copy_to_user せず pin_user_pages_remote でページ pin
+```
 
-- KFuncが公開するもの: `admit_count` / `softcap` / `evictions_total` / `time_ns` / `ino_size` (TRACING と STRUCT_OPS の両方に登録)
-- `policy_pressure_ops`: admit_count/softcapでSIEVEのstrictnessを動的切替 (ratio ≥ 1.5 で grace を飛ばす)
-- `policy_time_decay_ops`: time_nsでtime-based eviction (最後の on_hit から 5s 超で evict)
-- `policy_size_aware_ops`: ino_size で小さいファイルを優遇
-- 「BPFから外部状態をread-onlyで安全に参照できる窓口」— ただし `ino_size` は admit hash の spinlock を取るので、lock-free なのは他の 4 つ
+- S3FSでの使い方: daemon が S3 からフェッチしたデータを arena に書き込む → kmod が `pin_user_pages_remote` でそのページを page cache に昇格 → read syscall が FUSE upcall なしに返る
 
-### 6. 性能 (2min)
+#### 注意点・制限
 
-スライドに出す 3 行 (2026-10-05 実測):
+- arena は `bpf_arena_alloc_pages` / `bpf_arena_free_pages` で BPF 側管理。`kfree` 不可
+- 6.9 時点では BPF verifier が arena ポインタに strict な型チェックを行うため、ポインタをキャストする場所に注意
+- **128 MiB が現実的な上限** (demand-paged なので RSS は実データ分のみ)
 
-| 指標 | s3fs-ebpf | s3fs-fuse | 差 |
-|---|---|---|---|
-| open+read+close, warm (microbench p50) | 3.0 µs | 1.69 ms (raw) / 0.53 ms (cache) | **554×** vs raw / **175×** vs cache |
-| 100 MiB write, close まで (non-durable) | 47.4 ms ± 2.6 | 347.5 ms ± 18.4 (raw) | **7.3×** |
-| 100 MiB write, fsync まで (durable) | 297.8 ms ± 15.4 | 347.5 ms ± 18.4 (raw) | **1.2×** |
+### 3. verifierの壁 (2min)
 
-- **read 554×** は「arena + page cache 有り ebpf (A+C)」対「キャッシュ無し fuse-raw」の比。構造差 (caching 無し同士) は bench-3way.sh の `ebpf-nocache` 対 `fuse-raw` で big.bin +11%、tiny ファイルで -57% (要 nocache バグ修正後に再測)
-- **write 7.3×** は non-durable 比較 (close-and-forget)。スライドには「非同期 flush」と明記
-- **durable write (100 MiB) で 1.2× 速い**: fsync で daemon PUT 完了まで block。小ファイル (1 MiB) では ebpf-fsync が fuse-raw より 5× 遅い (daemon PUT の固定オーバーヘッド ~90 ms、要修正)
-- fuse-cache (use_cache + kernel_cache 有効) との比較: cat wall-clock **2.2×** 速い、microbench **175×** 速い (`docs/journal/benchmark-results.md` §7 参照)
+- arena 上の linked-list walk を BPF 単体で書くと即死:
 
-### 7. まとめ (2min)
+```c
+// bpf/s3fs_fastpath.bpf.c — s3fs_deep_walk_reject (再現用コード)
+struct node *n = root;
+while (n) {          // n->next の load 結果が scalar() → verifier が
+    sum += n->val;   // ループ終了を証明できず状態を 1M insn 展開して爆発
+    n = n->next;
+}
+```
 
-- KFunc = verifier安全性を保ちながらkernelロジックをBPFに公開する窓口
-- struct_ops = 複数hookを1vtableで管理 + アトミックスワップ
-- Layer 0 KFunc = BPF policyがkmod状態を参照する境界面
-- 「eBPFは書けないこともKFuncに逃がせば書ける」
+```
+BPF program is too large. Processed 1000001 insn
+(limit 1000000)  total_states 9664
+```
+
+- 再現: `sudo ./bin/s3fs-ebpf dev verifier-demo`
+- 原因: `n->next` の型が `scalar()` (範囲不明ポインタ) になり、ループ終了条件が証明不能。1M insn 上限 (`BPF_COMPLEXITY_LIMIT_INSNS`) に到達
+- → ループを **KFunc** に逃がす
+
+### 4. KFunc — verifierを安全に越える窓口 (3min)
+
+#### 3ステップで登録
+
+```c
+// kmod/tree_traversal.c
+
+// Step 1: アノテーション
+__bpf_kfunc_start_defs();
+
+__bpf_kfunc long s3fs_kfunc_arena_list_walk(
+        u64 head_uaddr, u32 max_nodes, u64 *sum_out)
+{
+    // 普通の C ループ — verifier の外なのでループ数制限なし
+    struct node __user *n = (void __user *)head_uaddr;
+    for (u32 i = 0; i < max_nodes && n; i++) {
+        struct node tmp;
+        if (copy_from_user(&tmp, n, sizeof(tmp)))  // 壊れた next は -EFAULT
+            return -EFAULT;
+        *sum_out += tmp.val;
+        n = (void __user *)tmp.next;
+    }
+    return 0;
+}
+__bpf_kfunc_end_defs();
+
+// Step 2: BTF に登録
+BTF_KFUNCS_START(s3fs_kfunc_walk_ids)
+BTF_ID_FLAGS(func, s3fs_kfunc_arena_list_walk, KF_SLEEPABLE)  // copy_from_user は sleep しうる
+BTF_KFUNCS_END(s3fs_kfunc_walk_ids)
+static const struct btf_kfunc_id_set s3fs_kfunc_walk_set = {
+    .owner = THIS_MODULE,
+    .set   = &s3fs_kfunc_walk_ids,
+};
+
+// Step 3: prog type ごとに登録 (6.11+: BTF_SET8_START でないと -EINVAL)
+register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &s3fs_kfunc_walk_set);
+```
+
+```c
+// BPF 側 (bpf/kfunc_walk.bpf.c) — KFunc 呼出1行で verifier が即通す
+SEC("syscall")
+int walk_arena(struct pt_regs *ctx) {
+    u64 sum = 0;
+    long r = s3fs_kfunc_arena_list_walk(head_uaddr, 100000, &sum);
+    // ...
+}
+```
+
+- `verifier-demo` の後半が 100k ノード walk → sum 一致を検証
+- **`KF_SLEEPABLE`** を付けると `SEC("syscall")` (sleepable) prog にのみ登録が必要。TRACING / STRUCT_OPS に同じ KFunc を公開したい場合は `register_btf_kfunc_id_set` を prog type ごとに呼ぶ
+- `fmod_ret` 用は別 API `register_btf_fmodret_id_set`
+
+### 5. `struct_ops` — vtableをBPFでホットスワップ (3min)
+
+#### 概念
+
+カーネルモジュールが定義した `struct xxx_ops` の実装を、**BPF プログラムがそのまま提供できる**仕組み。`tcp_congestion_ops` の BPF 版が原型。ここでは `s3fs_policy_ops` を定義してキャッシュポリシーを差し替える。
+
+```c
+// kmod/policy_struct_ops.h
+struct s3fs_policy_ops {
+    int (*on_admit)   (u64 count, u64 arena_used_hint);
+    int (*on_evict)   (u64 ino);
+    int (*on_pressure)(u64 count, u64 threshold);
+    int (*on_hit)     (u64 ino);
+};
+```
+
+#### BPF 側の実装例 — SIEVE ポリシー
+
+```c
+// bpf/policy_sieve_ops.bpf.c
+SEC("struct_ops/on_admit")       // kmod が rcu_read_lock() 内から呼ぶので sleepable にしない
+int BPF_PROG(sieve_on_admit, u64 count, u64 arena_used_hint) {
+    u64 cap = s3fs_kfunc_softcap();   // Layer 0 KFunc でkmod状態を参照
+    return (count < cap) ? 0 : -ENOSPC;
+}
+
+SEC("struct_ops/on_hit")
+int BPF_PROG(sieve_on_hit, u64 ino) {
+    bpf_map_update_elem(&visited, &ino, &(u8){1}, BPF_ANY);
+    return 0;
+}
+
+SEC(".struct_ops.link")          // BPF_F_LINK — link として管理
+struct s3fs_policy_ops sieve_policy = {
+    .on_admit = (void *)sieve_on_admit,
+    .on_hit   = (void *)sieve_on_hit,
+};
+```
+
+#### アトミックなホットスワップ
+
+```go
+// daemon/internal/policyprog/loader.go — SwapFrom
+// cilium/ebpf v0.22 は struct_ops link の Update 未対応 → raw syscall
+syscall.Syscall(SYS_BPF, BPF_LINK_UPDATE, uintptr(unsafe.Pointer(&attr)), ...)
+// attr.link_id    = 既存 link の fd
+// attr.new_map_fd = 新 struct_ops map の fd
+// attr.flags      = BPF_F_REPLACE
+```
+
+- kmod 側: `rcu_dereference(policy_ops)` → vtable 呼び出し → 1 syscall でポインタがアトミックにスワップ
+- **fmod_ret との違い**: tracing link は `BPF_LINK_UPDATE` 非対応 → 「新 N 本 attach → 旧 N 本 close」でその間は新旧が同時走る。`struct_ops` は 1 syscall でアトミック
+- デモ: `curl -X POST localhost:8080/policy/reload -d builtin:policy_sieve_ops` → dmesg に `s3fs_ebpf: policy struct_ops updated (hot swap)`
+
+### 6. 性能 — キャッシュを揃えても消えない構造差 (3min)
+
+#### 公平な比較のために: ebpf-nocache
+
+「ebpf が速いのはキャッシュが効いているからでは？」という反論に答えるため、**両方キャッシュ無効**の条件を用意した。
+
+- **fuse-raw**: `-o use_cache` 無し、毎回 S3 GET
+- **ebpf-nocache**: `kmod nocache=1` + daemon `--cache-dir` 無し。open ごとに page cache と admit を破棄、毎回 S3 GET を強制
+
+同じ条件で測ると：
+
+| 指標 | fuse-raw | ebpf-nocache | 差 |
+|---|---:|---:|---:|
+| open+read+close p50 (S-09修正後) | 1.69 ms | **558 µs** | **3× 速い** |
+
+差の正体は `/dev/fuse` queue + open ごとの getattr upcall がないこと。**キャッシュではなくトランスポート構造の差**なので fuse-raw がどう最適化しても消えない。
+
+#### キャッシュ有り同士: ebpf-A+C vs fuse-cache
+
+fuse を `-o use_cache + kernel_cache` で最大限最適化した状態でも差が残る:
+
+| 指標 | fuse-cache | ebpf-A+C | 差 |
+|---|---:|---:|---:|
+| warm cat (1 MiB) | 1.5 ms | **0.7 ms** | 2.1× |
+| open+read+close p50 | 526 µs | **3.0 µs** | **175×** |
+| CPU cycles/op | 431k | **331k** | 1.3× 少ない |
+| IPC | 0.79 | **1.03** | パイプライン stall 少ない |
+
+open+read+close の 175× は **open ごとの FUSE getattr upcall**（fuse-cache でも消えない）が原因。`ls` や小ファイル大量アクセスのワークロードで直撃する。
+
+#### write (durable, S-08修正後)
+
+| Size | fuse-raw | ebpf-fsync |
+|---|---:|---:|
+| 1 MiB (fsync まで) | 19.5 ms | min ≈ 19.7 ms |
+
+S-08 (100ms ポーリングを `blocking ioctl` に修正) 後、1 MiB durable write は **fuse-raw と同オーダー**に収束。
+
+### 7. takeaway (2min)
+
+| 技術 | 一言 | どこで使える？ |
+|---|---|---|
+| `bpf_arena` | カーネル/ユーザーのゼロコピー shared memory | hot path のデータをコピーなしで渡したい、ポリシーの判定結果をカーネルに即時反映したい |
+| KFunc | verifier の壁を安全に越える逃がし先 | unbounded loop、ポインタ walk、sleepable ops が必要な処理 |
+| `struct_ops` | vtableをBPFで実装 + アトミックスワップ | 差し替え可能なアルゴリズム (スケジューラ、輻輳制御、ポリシー)、再起動なしの切り替え |
+
+- **「3つとも カーネルに踏み込む窓口」** — FS に限らず、ネットワーク・スケジューラ・セキュリティポリシーにも同じパターンが使える
+- KFunc の壁: prog type ごとに `register_btf_kfunc_id_set` が必要。`BPF_PROG_TYPE_TRACING` と `STRUCT_OPS` は別エントリ
+- `struct_ops` の壁: cilium/ebpf などのライブラリが `BPF_LINK_UPDATE` 未対応の場合がある → raw syscall が必要なケースあり
+- コード: `kmod/tree_traversal.c` (KFunc)、`kmod/policy_struct_ops.c` + `bpf/policy_sieve_ops.bpf.c` (struct_ops)
 
 ---
 
 ## スライド補足メモ
 
-- **最大のインパクトは「2→3」の流れ**: verifierに弾かれるコードを先に見せ、KFuncで解決する展開が聴衆のフックになる。`verifier-demo` 1 コマンドで「拒否 → 同じ walk を KFunc で 100k ノード走査・sum 一致」まで見せられる
-- **セクション4/5のdemo候補**: curl ワンライナー (`POST /policy/reload -d builtin:policy_sieve_ops`) でポリシーをライブスワップ。レスポンスと dmesg (`policy struct_ops updated (hot swap)`) で `BPF_LINK_UPDATE` 経由を示せる。`/metrics` には hit 率そのものは無いので、`s3fs_ebpf_read_miss_upcalls_total` / `s3fs_ebpf_folio_hits_total` / `s3fs_ebpf_policy_evictions_total` / `s3fs_ebpf_admits_current` の変化を見せる
-- **性能表の注意事項**: ~870× は s3fs-fuse のキャッシュ無効構成 (毎回 MinIO へ HTTP GET) との比較。fuse `use_cache + kernel_cache` 有効時は、cat (wall clock) で 2.05〜2.45×、open+read+close の microbench で 245× (差の大半は open ごとの FUSE upcall)。質問が来たら指標を区別して答える
+- **最大のフック「2→3」の流れ**: verifier に弾かれる walk を先に見せ、KFunc で解決する展開。`verifier-demo` 1 コマンドで「拒否 → 同じ walk を KFunc で 100k ノード走査・sum 一致」まで示せる
+- **性能スライドのポイント**: 大きい数字 (175×、554×) ではなく **nocache 3×** を先に出す。「キャッシュを揃えても 3× 差が残る = 構造の差」を確立してから、キャッシュ有りの倍率に進む。そうしないと「キャッシュの比較では？」という質問で詰まる
+- **struct_ops demo**: `curl -X POST localhost:8080/policy/reload -d builtin:policy_sieve_ops` でライブスワップ。`/metrics` の `s3fs_ebpf_read_miss_upcalls_total` / `s3fs_ebpf_folio_hits_total` / `s3fs_ebpf_policy_evictions_total` の変化を見せる
+- **bpf_arena の「FS 依存に見える」問題の対処**: §2 ではコード例の `s3fs_admit_entry` を `struct cached_item` に変名してもよい。本質は「同じ VA をカーネルとユーザーが共有する map」で、S3FS でなくても使える
 - **コード引用元**:
   - `bpf/s3fs_fastpath.bpf.c` (`s3fs_deep_walk_reject`)
   - `kmod/tree_traversal.c` (`BTF_KFUNCS_START`, `s3fs_kfunc_arena_list_walk`)
   - `bpf/kfunc_walk.bpf.c` (KFunc 呼出側)
-  - `daemon/internal/policyprog/loader.go` (`SwapFrom` / `BPF_LINK_UPDATE`)
   - `kmod/policy_struct_ops.c` (reg/unreg/update)
-  - `bpf/policy_pressure_ops.bpf.c` (Layer 0 KFunc利用例)
+  - `bpf/policy_sieve_ops.bpf.c` (struct_ops 実装例)
+  - `daemon/internal/policyprog/loader.go` (`SwapFrom` / `BPF_LINK_UPDATE`)
 
 ---
 
