@@ -99,9 +99,13 @@ type Programs struct {
 	// eviction returns to. AdmitContent searches this list first
 	// (first-fit) before extending cacheNextOff. Turns the arena
 	// from a monotonic high-water buffer into a reusable pool.
+	//
+	// T-05: offsets and sizes use uint64 so the API is safe for arenas
+	// larger than 4 GiB. Current arena is 128 MiB, but keeping the
+	// arithmetic in uint64 prevents silent truncation if the limit grows.
 	cacheMu      sync.Mutex
-	cacheKnown   map[uint64]uint32
-	cacheNextOff uint32
+	cacheKnown   map[uint64]uint64
+	cacheNextOff uint64
 	arenaFree    []arenaChunk
 }
 
@@ -109,9 +113,10 @@ type Programs struct {
 // arena that used to hold admit content and is now available for
 // reuse. offset is the arena byte offset (matches AdmitContent's
 // return value); size is the chunk length.
+// T-05: both fields are uint64 to match AdmitContent / FreeArenaChunk.
 type arenaChunk struct {
-	offset uint32
-	size   uint32
+	offset uint64
+	size   uint64
 }
 
 // Load pulls the bpf2go collection into the kernel and returns a handle.
@@ -142,7 +147,7 @@ func Load() (*Programs, error) {
 		return nil, fmt.Errorf("mmap arena: %w", err)
 	}
 
-	p := &Programs{arena: a, cacheKnown: make(map[uint64]uint32)}
+	p := &Programs{arena: a, cacheKnown: make(map[uint64]uint64)}
 	opts := &ebpf.CollectionOptions{
 		MapReplacements: map[string]*ebpf.Map{
 			"s3fs_arena": arenaMap,
@@ -330,10 +335,10 @@ func (p *Programs) WarmCache(stub InodeStub) (uint32, error) {
 	defer p.cacheMu.Unlock()
 
 	if existing, ok := p.cacheKnown[stub.Ino]; ok {
-		return existing, nil
+		return uint32(existing), nil
 	}
 
-	arenaSize := p.arena.Size()
+	arenaSize := uint64(p.arena.Size())
 	nextOff := p.cacheNextOff
 	if nextOff+stubSize > arenaSize {
 		return 0, ErrCacheFull
@@ -349,14 +354,16 @@ func (p *Programs) WarmCache(stub InodeStub) (uint32, error) {
 		return 0, fmt.Errorf("arena write ino=%d: %w", stub.Ino, err)
 	}
 
-	off := nextOff
-	if err := p.Objs.S3fsInodeIndex.Update(&stub.Ino, &off, 0); err != nil {
+	// S3fsInodeIndex is a __u32 BPF map; the value must fit in 32 bits.
+	// The arena is bounded at 128 MiB so the cast is safe.
+	off32 := uint32(nextOff)
+	if err := p.Objs.S3fsInodeIndex.Update(&stub.Ino, &off32, 0); err != nil {
 		return 0, fmt.Errorf("inode_index update ino=%d: %w", stub.Ino, err)
 	}
 
-	p.cacheKnown[stub.Ino] = off
+	p.cacheKnown[stub.Ino] = nextOff
 	p.cacheNextOff = nextOff + stubSize
-	return off, nil
+	return off32, nil
 }
 
 // ErrCacheFull signals the arena has no more slots for InodeStubs.
@@ -374,18 +381,18 @@ var ErrCacheFull = errors.New("arena cache full")
 // Chunks larger than `len(data)` are split — the used prefix goes to
 // the caller, the tail returns to the free-list. This lets 100 MiB+
 // blobs evict-and-refit at chunk granularity without arena bloat.
-func (p *Programs) AdmitContent(data []byte) (uint32, error) {
+func (p *Programs) AdmitContent(data []byte) (uint64, error) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 
-	arenaSize := p.arena.Size()
-	need := uint32(len(data))
+	arenaSize := uint64(p.arena.Size())
+	need := uint64(len(data))
 
 	// (1) First-fit in free-list. Pick the smallest chunk that
 	// still fits so we don't fragment large runs when a tiny admit
 	// arrives.
 	bestIdx := -1
-	var bestSize uint32
+	var bestSize uint64
 	for i, c := range p.arenaFree {
 		if c.size < need {
 			continue
@@ -420,7 +427,7 @@ func (p *Programs) AdmitContent(data []byte) (uint32, error) {
 
 	// (2) Bump allocator.
 	nextOff := p.cacheNextOff
-	if uint64(nextOff)+uint64(need) > uint64(arenaSize) {
+	if nextOff+need > arenaSize {
 		return 0, ErrCacheFull
 	}
 	if need > 0 {
@@ -443,7 +450,7 @@ func (p *Programs) AdmitContent(data []byte) (uint32, error) {
 // back to cacheNextOff. This keeps long-running daemons from
 // fragmenting into hundreds of tiny chunks even under sustained
 // evict/admit churn.
-func (p *Programs) FreeArenaChunk(offset, size uint32) {
+func (p *Programs) FreeArenaChunk(offset, size uint64) {
 	if size == 0 {
 		return
 	}
@@ -458,7 +465,7 @@ func (p *Programs) FreeArenaChunk(offset, size uint32) {
 // bump allocator (returning the reduced list and the new nextOff).
 // Pure function so the merge invariant can be unit-tested without a
 // live arena. Called under Programs.cacheMu.
-func coalesceArenaFree(free []arenaChunk, nextOff uint32) ([]arenaChunk, uint32) {
+func coalesceArenaFree(free []arenaChunk, nextOff uint64) ([]arenaChunk, uint64) {
 	if len(free) == 0 {
 		return free, nextOff
 	}
@@ -493,7 +500,7 @@ func (p *Programs) ArenaFreeStats() (bytes uint64, chunks int) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 	for _, c := range p.arenaFree {
-		bytes += uint64(c.size)
+		bytes += c.size
 	}
 	return bytes, len(p.arenaFree)
 }

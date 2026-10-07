@@ -448,12 +448,12 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		metrics.Global.FlushErrors.Add(1)
 		return
 	}
-	if hi := uint64(off) + uint64(len(buf)); hi > metrics.Global.ArenaUsedBytes.Load() {
+	if hi := off + uint64(len(buf)); hi > metrics.Global.ArenaUsedBytes.Load() {
 		metrics.Global.ArenaUsedBytes.Store(hi)
 	}
 	if err := replaceAdmit(devPath, admitEntry{
 		Ino:   ev.Ino,
-		Uaddr: progs.Arena().BaseAddr() + uint64(off),
+		Uaddr: progs.Arena().BaseAddr() + off,
 		Size:  uint64(len(buf)),
 	}, progs); err != nil {
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d admit arena: %v\n",

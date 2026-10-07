@@ -142,7 +142,7 @@ func TestPlanReplaceAdmit_MultiRangeFreesAllChunks(t *testing.T) {
 	if got, want := len(freed), 2; got != want {
 		t.Fatalf("len(freed) = %d, want %d (one chunk per prior entry)", got, want)
 	}
-	chunks := map[uint32]uint32{}
+	chunks := map[uint64]uint64{}
 	for _, r := range freed {
 		chunks[r.offset] = r.size
 	}
@@ -301,7 +301,7 @@ func TestPlanPruneAdmits_FreesArenaChunksForDropped(t *testing.T) {
 		t.Fatalf("len(freed) = %d, want %d (one chunk per dropped ino)", got, want)
 	}
 	// Check both dropped inos' chunks are present (order not guaranteed).
-	chunks := map[uint32]uint32{}
+	chunks := map[uint64]uint64{}
 	for _, r := range freed {
 		chunks[r.offset] = r.size
 	}
