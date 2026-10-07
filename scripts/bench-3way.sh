@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# scripts/bench-3way.sh — 3 バージョン間の fair comparison。
+# scripts/bench-3way.sh — 最大 5 バージョン間の fair comparison。
 #
 #   s3fs-fuse (raw):    毎回 S3 access、キャッシュ無効。max FUSE overhead。
 #   s3fs-fuse (cache):  -o use_cache=<dir> -o kernel_cache -o max_stat_cache_size で
 #                       ローカルディスク staging + kernel page cache 有効。
 #   s3fs-ebpf (A+C):    daemon --cache-dir + kmod .read_folio (VFS page cache 経由)。
+#   mount-s3:           Mountpoint for Amazon S3 [I-01、mount-s3 未インストール時は skip]
 #   s3fs-ebpf (nocache): fuse-raw の対照群。kmod nocache=1 で open ごとに
 #                       page cache + arena admit を捨て、daemon は --cache-dir
 #                       無しで再起動 → open+read のたびに upcall + S3 GET。
@@ -12,8 +13,14 @@
 #                       経由で取り直す」形で、差は transport と metadata
 #                       (getattr/open upcall の有無) だけになる。
 #
-# 3 者を hyperfine warm/cold + microbench + perf stat + big-file cat で並べ、
-# 最後に同じ計測を ebpf-nocache で取る (NOCACHE=0 で skip)。
+# セクション:
+#   1. hyperfine warm cat + big cat
+#   1c. cold cat drop_caches=1 (page cache のみ, inode 保持) [I-02]
+#   1d. cold-cache isolation (arena 生存 + page cache 落とし) [I-03]
+#   2. microbench read syscall-level
+#   3. perf stat CPU
+#   4. ebpf-nocache (NOCACHE=0 で skip)
+#
 # 結果は $OUT_DIR/3way-*.md に出力。docs/journal/benchmark-results.md §7 で解釈。
 
 set -euo pipefail
@@ -25,8 +32,10 @@ OUT_DIR=${OUT_DIR:-/tmp/bench-3way}
 MP_EBPF=/mnt/s3demo
 MP_FUSE_RAW=/mnt/s3fuse            # raw、キャッシュ無効
 MP_FUSE_CACHE=/mnt/s3fuse-cache    # cache 有効
+MP_MOUNT_S3=/mnt/s3-mountpoint     # I-01
 FUSE_CACHE_DIR=/tmp/s3fs-fuse-cache
 EBPF_CACHE_DIR=/tmp/s3fs-ebpf-cache
+MOUNT_S3_CACHE_DIR=${MOUNT_S3_CACHE_DIR:-/tmp/mount-s3-cache}  # I-01
 FILE=${FILE:-hello.txt}
 BIG_FILE=${BIG_FILE:-big.bin}
 WARMUP=${WARMUP:-5}
@@ -57,6 +66,7 @@ start_fuse_raw() {
 start_fuse_cache() {
 	log "mount fuse-cache at $MP_FUSE_CACHE (use_cache + kernel_cache)"
 	fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"
+	cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true  # prime kernel_cache
 }
 
 start_ebpf() {
@@ -66,10 +76,27 @@ start_ebpf() {
 		--cache-dir="$EBPF_CACHE_DIR" --sample-every=60s
 }
 
+# I-01: Mountpoint for Amazon S3, conditional.
+MOUNT_S3_STARTED=0
+start_mount_s3() {
+	if ! mount_s3_available; then
+		log "mount-s3 not found — skipping I-01 arm (install mountpoint-s3 to enable)"
+		return
+	fi
+	log "mount mount-s3 at $MP_MOUNT_S3"
+	mount_s3_mount "$MP_MOUNT_S3" "$MOUNT_S3_CACHE_DIR" || {
+		log "mount-s3 mount failed — skipping I-01 arm"
+		return
+	}
+	MOUNT_S3_STARTED=1
+	cat "$MP_MOUNT_S3/$FILE" >/dev/null 2>&1 || true
+}
+
 stop_all() {
 	log "stopping"
 	ebpf_stop "$MP_EBPF"
 	umount_hard "$MP_FUSE_CACHE"
+	if [ "$MOUNT_S3_STARTED" -eq 1 ]; then umount_hard "$MP_MOUNT_S3"; fi
 	# leave MP_FUSE_RAW mounted for the next bench-latency run
 }
 trap stop_all EXIT
@@ -77,38 +104,95 @@ trap stop_all EXIT
 # --- 1. warm cat --------------------------------------------------
 run_hf_warm() {
 	log "hyperfine warm cat ($RUNS runs)"
-	# Prime kernel_cache on fuse-cache so 2nd+ reads hit it.
-	cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true
+	local extra=()
+	[ "$MOUNT_S3_STARTED" -eq 1 ] && extra+=(--command-name 'mount-s3' "cat $MP_MOUNT_S3/$FILE")
 	hyperfine --warmup "$WARMUP" --min-runs "$RUNS" --shell=none \
 		--export-markdown "$OUT_DIR/3way-cat.md" \
 		--command-name 'fuse-raw'    "cat $MP_FUSE_RAW/$FILE" \
 		--command-name 'fuse-cache'  "cat $MP_FUSE_CACHE/$FILE" \
-		--command-name 'ebpf-A+C'    "cat $MP_EBPF/$FILE" >&2
+		--command-name 'ebpf-A+C'    "cat $MP_EBPF/$FILE" \
+		"${extra[@]}" >&2
 }
 
 # --- 2. cat 1 MiB --------------------------------------------------
 run_hf_big() {
 	log "hyperfine cat 1 MiB"
 	cat "$MP_FUSE_CACHE/$BIG_FILE" >/dev/null 2>&1 || true
+	local extra=()
+	[ "$MOUNT_S3_STARTED" -eq 1 ] && extra+=(--command-name 'mount-s3' "cat $MP_MOUNT_S3/$BIG_FILE")
 	hyperfine --warmup 2 --min-runs 20 --shell=none \
 		--export-markdown "$OUT_DIR/3way-big.md" \
 		--command-name 'fuse-raw'    "cat $MP_FUSE_RAW/$BIG_FILE" \
 		--command-name 'fuse-cache'  "cat $MP_FUSE_CACHE/$BIG_FILE" \
-		--command-name 'ebpf-A+C'    "cat $MP_EBPF/$BIG_FILE" >&2
+		--command-name 'ebpf-A+C'    "cat $MP_EBPF/$BIG_FILE" \
+		"${extra[@]}" >&2
+}
+
+# --- 2b. cold cat drop_caches=1 (page cache only) [I-02] -----------
+# drop_caches=1 は page cache のみ破棄。dentry/inode は残るため path
+# lookup のノイズが消え、純粋な「page cache の有無」が測れる。
+# s3fs-ebpf の arena は BPF arena (kernel memory) なので page cache と
+# 独立して生存し、cold 後でも folio 補充できる。
+run_hf_cold1() {
+	log "hyperfine cold cat drop_caches=1 [I-02]"
+	local extra=()
+	[ "$MOUNT_S3_STARTED" -eq 1 ] && extra+=(--command-name 'mount-s3' "cat $MP_MOUNT_S3/$FILE")
+	hyperfine --warmup 1 --min-runs 30 --shell=none \
+		--prepare 'sudo sysctl -q -w vm.drop_caches=1' \
+		--export-markdown "$OUT_DIR/3way-cat-cold1.md" \
+		--command-name 'fuse-raw'    "cat $MP_FUSE_RAW/$FILE" \
+		--command-name 'fuse-cache'  "cat $MP_FUSE_CACHE/$FILE" \
+		--command-name 'ebpf-A+C'    "cat $MP_EBPF/$FILE" \
+		"${extra[@]}" >&2 || true
+}
+
+# --- 2c. cold-cache isolation [I-03] --------------------------------
+# daemon + kmod 生存 (admit table 保持)、page cache だけ落とした状態。
+# fuse-raw: page cache なし + 毎回 upcall → S3。
+# fuse-cache: kernel_cache 破棄 → fuse daemon の disk cache から staging。
+# ebpf-A+C: arena 生存 → .read_folio が arena から folio を補充 (upcall 0)。
+# upcall delta = 0 なら ebpf が page cache の外で完結していることの証明。
+run_cold_isolate() {
+	log "cold-cache isolation: arena warm, page cache cold [I-03]"
+	local u_before u_after
+	u_before=$(curl -s localhost:9600/metrics \
+		| awk '$1=="s3fs_ebpf_read_miss_upcalls_total"{print $2}' || echo 0)
+	sudo sysctl -q -w vm.drop_caches=1
+	local extra=()
+	[ "$MOUNT_S3_STARTED" -eq 1 ] && extra+=(--command-name 'mount-s3' "cat $MP_MOUNT_S3/$FILE")
+	hyperfine --warmup 1 --min-runs 30 --shell=none \
+		--prepare 'sudo sysctl -q -w vm.drop_caches=1' \
+		--export-markdown "$OUT_DIR/3way-cold-isolate.md" \
+		--command-name 'fuse-raw'    "cat $MP_FUSE_RAW/$FILE" \
+		--command-name 'fuse-cache'  "cat $MP_FUSE_CACHE/$FILE" \
+		--command-name 'ebpf-A+C'    "cat $MP_EBPF/$FILE" \
+		"${extra[@]}" >&2 || true
+	u_after=$(curl -s localhost:9600/metrics \
+		| awk '$1=="s3fs_ebpf_read_miss_upcalls_total"{print $2}' || echo 0)
+	{
+		echo "## cold-cache isolation [I-03]"
+		echo
+		echo "daemon+kmod alive (arena intact); drop_caches=1 between runs."
+		echo "upcalls delta = $((u_after - u_before))"
+		echo "(0 = arena served all folios without S3 round-trip)"
+		echo
+		cat "$OUT_DIR/3way-cold-isolate.md"
+	} > "$OUT_DIR/3way-cold-isolate-report.md"
+	cat "$OUT_DIR/3way-cold-isolate-report.md" >&2
 }
 
 # --- 3. microbench read (syscall latency) -------------------------
 run_micro() {
 	log "microbench read syscall-level ($MICRO_ITERS iters)"
 	BIN="$S3FS_BIN"
-	# fuse-cache prime
-	cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true
 	{
 		echo '## microbench read (syscall-level)'
 		echo '```'
 		"$BIN" dev microbench --op=read --path="$MP_FUSE_RAW/$FILE"   --iters="$MICRO_ITERS" --label='fuse-raw   '
 		"$BIN" dev microbench --op=read --path="$MP_FUSE_CACHE/$FILE" --iters="$MICRO_ITERS" --label='fuse-cache '
 		"$BIN" dev microbench --op=read --path="$MP_EBPF/$FILE"       --iters="$MICRO_ITERS" --label='ebpf-A+C   '
+		[ "$MOUNT_S3_STARTED" -eq 1 ] && \
+			"$BIN" dev microbench --op=read --path="$MP_MOUNT_S3/$FILE" --iters="$MICRO_ITERS" --label='mount-s3   '
 		echo '```'
 	} > "$OUT_DIR/3way-micro.md"
 	cat "$OUT_DIR/3way-micro.md" >&2
@@ -132,7 +216,6 @@ perf_cat() {
 
 run_perf() {
 	log "perf stat CPU consumption ($PERF_ITERS cats each)"
-	cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true
 	{
 		echo '## perf stat 3-way (per cat)'
 		echo '```'
@@ -140,6 +223,7 @@ run_perf() {
 		perf_cat "$MP_FUSE_RAW"   'fuse-raw'
 		perf_cat "$MP_FUSE_CACHE" 'fuse-cache'
 		perf_cat "$MP_EBPF"       'ebpf-A+C'
+		[ "$MOUNT_S3_STARTED" -eq 1 ] && perf_cat "$MP_MOUNT_S3" 'mount-s3'
 		echo '```'
 	} > "$OUT_DIR/3way-perf.md"
 	cat "$OUT_DIR/3way-perf.md" >&2
@@ -189,9 +273,12 @@ check_prereq
 start_fuse_raw
 start_fuse_cache
 start_ebpf
+start_mount_s3  # I-01 (no-op if mount-s3 not installed)
 
 run_hf_warm
 run_hf_big
+run_hf_cold1        # I-02
+run_cold_isolate    # I-03
 run_micro
 run_perf
 if [ "$NOCACHE" = 1 ]; then
