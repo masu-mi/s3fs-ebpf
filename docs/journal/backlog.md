@@ -189,8 +189,8 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 - [x] ✅ **T-02** `dropAdmitsLocked` 戻り値の意味ズレ — 修正済。`dropped` カウンタを別途管理し `len(freedRanges)` ではなく実際に削除した ino 数を返すよう変更。回帰テスト `TestDropAdmitsLocked_ReturnsDroppedCount` を追加。
 - [x] ✅ **T-03** `drainEvictions` / `readStats` がポーリング毎に fd open/close — 修正済。`drainEvictionsOn(devFd int)` / `readStatsOn(devFd int)` を追加し、`drainEvictionsLoop` / `sampleKmodStats` が起動時に 1 回 open して各ティックで再利用するよう変更。既存の `drainEvictions(devPath)` / `readStats(devPath)` は `reconcileEvictionsLocked` 等の呼び出し元のため保持。
-- [ ] **T-04** `planReplaceAdmit` が複数 range 持つ ino の旧チャンクを 1 個しか解放しない (latent arena リーク) — `admit_arena.go:138-151`。ループが `oldChunk` を上書きするため最後にマッチしたエントリの chunk しか返らない。D-01 range-list 拡張で同一 ino の複数エントリが `admits` に入ると残りのチャンクがリーク。現在の不変条件 (replaceAdmit の ino 単位 dedup + prewarm の重複なし) により今は発現しない。**修正方針**: `oldChunk arenaChunkPair / hasOldChunk bool` → `freed []arenaChunkPair` に変更して `append` に。回帰テスト「同一 ino の 2 エントリを filter → 両方返る」を追加。**受け入れ条件**: planReplaceAdmit が複数 match を全て freed に積む。目安 0.5 日
-- [ ] **T-05** `arenaChunkPair.offset/size` が `uint32` で arena 4 GiB 超に対応できない (latent truncation) — `admit_arena.go:242-245`。現状 128 MiB arena (max offset ≈ 0x8000000) では uint32 で安全だが、将来 arena を 4 GiB 超に拡張すると無音でオフセットが切り捨てられる。**修正方針**: `offset uint64, size uint64` に変更。FreeArenaChunk API も合わせて変更。今は low priority だが D-01 完全実装前に直すのが安全。
+- [x] ✅ **T-04** `planReplaceAdmit` が複数 range 持つ ino の旧チャンクを 1 個しか解放しない (latent arena リーク) — 修正済 (commit cda8595)。`freed []arenaChunkPair` を返す形に変更し全マッチを `append`。`TestPlanReplaceAdmit_MultiRangeFreesAllChunks` で回帰テスト追加。
+- [x] ✅ **T-05** `arenaChunkPair.offset/size` が `uint32` で arena 4 GiB 超に対応できない (latent truncation) — 修正済 (commit 2ab0c57)。`arenaChunkPair`, `arenaChunk`, `cacheNextOff`, `FreeArenaChunk`, `AdmitContent` を uint64 に昇格。BPF map (`s3fs_inode_index`) の value 型 `__u32` 制約は WarmCache の call site で `uint32(nextOff)` キャストを保持しコメントを追記。
 
 ### K. upstream 貢献 (`w4a §9`)
 
@@ -227,19 +227,19 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 「今日〜明日で何を触るか」目線での並び:
 
-**2026-10-06 更新 — T-01/T-02/T-03/S-08/S-09 完了**:
+**2026-10-07 更新 — T-04/T-05/S-09 完了**:
 
 残り:
 1. **S-06** 実機検証 (S-01〜S-04 のビルドだけ通した変更を動かす)
-2. **T-04** `planReplaceAdmit` 複数 range ino の latent arena リーク (D-01 完全実装前に直す)
-3. **T-05** `arenaChunkPair` uint32 offset 型 (latent、低優先)
 
-完了済 (2026-10-06):
+完了済 (2026-10-06〜07):
 - ✅ T-01 `pruneAdmitsTo` arena リーク
 - ✅ T-02 `dropAdmitsLocked` 戻り値の意味ズレ
 - ✅ T-03 fd per-call overhead
+- ✅ T-04 `planReplaceAdmit` 複数 range arena リーク (commit cda8595)
+- ✅ T-05 `arenaChunkPair` uint32 → uint64 昇格 (commit 2ab0c57)
 - ✅ S-08 ebpf-fsync ~90ms 固定オーバーヘッド (commit c75247f)
-- ✅ S-09 nocache tiny ファイル miss 率 ~18% (修正適用済)
+- ✅ S-09 nocache tiny ファイル miss 率 ~18% (commit a6a6757)
 
 S-01〜S-05/S-07 は実装済 ✅ 参照。
 
