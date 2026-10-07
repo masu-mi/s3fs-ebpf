@@ -169,6 +169,33 @@ fuse_mount_cache() {
 	fuse_mount "$mp" -o use_cache="$dir" -o kernel_cache -o max_stat_cache_size=100000
 }
 
+# --- Mountpoint for Amazon S3 (I-01) -----------------------------------------
+
+# mount_s3_available — true if mount-s3 is in PATH.
+mount_s3_available() { command -v mount-s3 >/dev/null 2>&1; }
+
+# mount_s3_mount <mp> <cache-dir> — mount $S3_BUCKET with Mountpoint for
+# Amazon S3.  Credentials come from $MOUNT_S3_ACCESS_KEY /
+# $MOUNT_S3_SECRET_KEY (defaults to MinIO admin creds).  Endpoint from
+# $S3_URL.  Requires mount-s3 ≥ 1.0 (AWS Mountpoint).
+mount_s3_mount() {
+	local mp=$1 cache_dir=$2
+	umount_hard "$mp"
+	sudo mkdir -p "$mp" "$cache_dir"
+	sudo env \
+		AWS_ACCESS_KEY_ID="${MOUNT_S3_ACCESS_KEY:-minioadmin}" \
+		AWS_SECRET_ACCESS_KEY="${MOUNT_S3_SECRET_KEY:-minioadmin}" \
+		mount-s3 "$S3_BUCKET" "$mp" \
+			--endpoint-url "$S3_URL" \
+			--allow-other \
+			--cache "$cache_dir" \
+			--region us-east-1 \
+		|| return 1
+}
+
+# mount_s3_umount <mp>
+mount_s3_umount() { umount_hard "$1"; }
+
 # --- misc ---------------------------------------------------------------------
 
 # perf_bin — newest concrete perf (Ubuntu's /usr/bin/perf wrapper fails on

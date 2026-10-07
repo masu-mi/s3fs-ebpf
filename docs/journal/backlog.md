@@ -166,10 +166,10 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 ### I. bench 追試 (`br §6.2`, `be §4`)
 
-- [ ] **I-01** Mountpoint for Amazon S3 (`mount-s3`) を三巴に追加
-- [ ] **I-02** `drop_caches=1` で純 read-cold の比較 (現状 `drop_caches=3` は inode 全部飛ばして path lookup が支配的)
-- [ ] **I-03** cold-cache 分離 (daemon 生存 + kmod 生存で page cache だけ落とす vs 全部落とす)
-- [ ] **I-04** fuse-cache を bench-latency にも追加 (現状 bench-3way のみ)
+- [x] ✅ **I-01** Mountpoint for Amazon S3 (`mount-s3`) を三巴に追加 — 実装済。`scripts/lib/bench.sh` に `mount_s3_available` / `mount_s3_mount` / `mount_s3_umount` ヘルパーを追加。`bench-latency.sh` / `bench-3way.sh` に `MOUNT_S3_STARTED` フラグ付き条件 arm を追加 (mount-s3 未インストール時は skip with warning)。
+- [x] ✅ **I-02** `drop_caches=1` で純 read-cold の比較 — 実装済。`bench-latency.sh` §1c / `bench-3way.sh` §2b に `--prepare 'sudo sysctl -q -w vm.drop_caches=1'` セクションを追加。コメントに「dentry/inode は残るため path lookup ノイズが消える」を明記。
+- [x] ✅ **I-03** cold-cache 分離 — 実装済。`bench-latency.sh` §1d / `bench-3way.sh` §2c に cold-cache isolation セクションを追加。upcalls before/after delta を出力し「0 = arena が page cache 非依存で folio 補充」を検証できるようにした。
+- [x] ✅ **I-04** fuse-cache を bench-latency にも追加 — 実装済。`bench-latency.sh` に `FUSE_CACHE_STARTED` フラグ付き `start_fuse_cache` を追加、全 6 セクション (hyperfine warm stat/cat/cold, microbench, perf, fio, large file) に fuse-cache arm を追加。
 - [x] ✅ **I-05** latency histogram を Prometheus に export — 完 (次 commit)。`daemon/internal/metrics/histogram.go` に hand-rolled Prometheus histogram を追加、`ReadMissLatency` が handleReadMiss の全 return path (成功 + ENOENT/EIO/ENODATA) を timing。Grafana dashboard に p50/p95/p99 timeseries + heatmap の 2 panel 追加。client_golang 全面移行は未 (P-J-01 参照)
 
 ### J. metric / observability 深化 (`be §4-3, §4-4`)
