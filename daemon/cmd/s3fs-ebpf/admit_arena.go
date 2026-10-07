@@ -145,8 +145,8 @@ func planReplaceAdmit(admits []admitEntry, entry admitEntry, arenaBase uint64) (
 		if e.Ino == entry.Ino {
 			if arenaBase != 0 && e.Uaddr >= arenaBase {
 				freed = append(freed, arenaChunkPair{
-					offset: uint32(e.Uaddr - arenaBase),
-					size:   uint32(e.Size),
+					offset: e.Uaddr - arenaBase,
+					size:   e.Size,
 				})
 			}
 			continue
@@ -224,8 +224,8 @@ func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 			dropped++
 			if progs != nil && arenaBase != 0 && e.Uaddr >= arenaBase {
 				freedRanges = append(freedRanges, arenaChunkPair{
-					offset: uint32(e.Uaddr - arenaBase),
-					size:   uint32(e.Size),
+					offset: e.Uaddr - arenaBase,
+					size:   e.Size,
 				})
 			}
 			continue
@@ -245,9 +245,11 @@ func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 // arenaChunkPair is dropAdmits's per-eviction bookkeeping — a
 // tiny value type so the "compute-then-free" split doesn't need to
 // hold admitMu while calling into progs.FreeArenaChunk.
+// T-05: uint64 so offsets > 4 GiB are handled correctly if the arena
+// is ever extended; current arena is 128 MiB so this is defensive.
 type arenaChunkPair struct {
-	offset uint32
-	size   uint32
+	offset uint64
+	size   uint64
 }
 
 // planPruneAdmits is the pure-function core of pruneAdmitsTo: given the
@@ -269,8 +271,8 @@ func planPruneAdmits(
 		}
 		if arenaBase != 0 && e.Uaddr >= arenaBase {
 			freed = append(freed, arenaChunkPair{
-				offset: uint32(e.Uaddr - arenaBase),
-				size:   uint32(e.Size),
+				offset: e.Uaddr - arenaBase,
+				size:   e.Size,
 			})
 		}
 	}
@@ -553,10 +555,10 @@ func handleReadMiss(ctx context.Context, devPath string,
 		_ = signalAdmit(devPath, ev.Ino, -12 /* -ENOMEM */)
 		return
 	}
-	uaddr := progs.Arena().BaseAddr() + uint64(off)
+	uaddr := progs.Arena().BaseAddr() + off
 	// Track high-water arena usage. AdmitContent returns the offset
 	// where it wrote; assume monotonic (§4.5 note on arena gc未実装).
-	if hi := uint64(off) + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
+	if hi := off + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
 		metrics.Global.ArenaUsedBytes.Store(hi)
 	}
 

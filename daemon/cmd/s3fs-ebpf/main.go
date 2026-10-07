@@ -974,14 +974,14 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 			entry.Ino, err)
 		return admitEntry{}, false
 	}
-	if hi := uint64(cOff) + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
+	if hi := cOff + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
 		metrics.Global.ArenaUsedBytes.Store(hi)
 	}
 	fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d uaddr=0x%x\n",
-		entry.Ino, len(body), cOff, progs.Arena().BaseAddr()+uint64(cOff))
+		entry.Ino, len(body), cOff, progs.Arena().BaseAddr()+cOff)
 	return admitEntry{
 		Ino:   entry.Ino,
-		Uaddr: progs.Arena().BaseAddr() + uint64(cOff),
+		Uaddr: progs.Arena().BaseAddr() + cOff,
 		Size:  uint64(len(body)),
 	}, true
 }
