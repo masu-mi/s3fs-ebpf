@@ -72,12 +72,13 @@
   - ✅ `bench-hitrate.sh`: 3 seed × 10 policy (seed 42/1337/7)、`opt`/`adm_*` 併記、中央値とばらつき。`hr §"Result (2026-10-05)"` 参照。
   - ✅ `bench-write.sh`: `ebpf-fsync` 行取得済み。`br §8.2` 参照。
   - ✅ `bench-3way.sh`: `ebpf-nocache` 行取得済み。`br §7.7` 参照。
-- [ ] **S-06** 実機検証 (6.12) — 今回のレビューでビルドだけ通した変更を、実機で確認する。目安 0.5 日
-  - `verifier-demo` の KFunc 後半 (`s3fs_kfunc_arena_list_walk`)
-  - `POST /policy/reload` が `BPF_LINK_UPDATE` 経由になること (dmesg `updated (hot swap)`)
-  - 非 sleepable struct_ops のロード
-  - evict 時の page cache 破棄
-  - `nocache=1`
+- [x] ✅ **S-06** 実機検証 (6.12) — 実施済 (2026-10-07)。
+  - ✅ `verifier-demo` KFunc 後半 (`s3fs_kfunc_arena_list_walk`): 100,000 ノード walk、sum=5000050000 一致
+  - ✅ `POST /policy/reload` が `BPF_LINK_UPDATE` 経由: dmesg `s3fs_ebpf: policy struct_ops updated (hot swap)` 確認
+  - ✅ 非 sleepable struct_ops: SIEVE / S3-FIFO / W-TinyLFU-full いずれも verifier 通過・ロード成功
+  - ✅ evict 時の page cache 破棄: 30/30 evict 後の cat が miss 経路を通ることを確認
+  - ✅ `nocache=1`: 3x cat で delta_miss=3 (毎 open で S-09 evict_log_push + invalidate_inode_pages2 が動作)
+  - ✅ S-01 差分 invalidate: hitrate_20 の miss upcall 後も hitrate_0/1 の page cache 保持 (re-read で upcall なし)
 - [x] ✅ **S-08** ebpf-fsync の固定オーバーヘッド (~90 ms) — 修正済 (commit c75247f、2026-10-06)。根本原因: daemon の flush ioctl が PUT 完了を非同期でポーリング (100ms 周期 ticker) していた。修正: `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え、kmod が flush event を受け取り次第即 wake。**結果**: 1 MiB ebpf-fsync min=19.7ms → fuse-raw (19.5ms) と同オーダーに達した。`br §8.4` 参照。
 - [x] ✅ **S-09** ebpf-nocache の tiny ファイル miss rate が低い (~18%) — 修正済 (2026-10-06)。根本原因 2 点: (1) kmod の `admit_drop_all_ranges` が evict_log に通知しないため daemon が re-push して admit が復活; (2) `invalidate_mapping_pages` が trylock で active folio を skip。修正: `s3fs_ebpf_file_open` nocache パスに `evict_log_push(ino)` + `invalidate_inode_pages2()` fallback を追加。**結果**: tiny ファイルの microbench miss 率が ~18% → ≈100% に改善、p50 = 558µs (vs fuse-raw 1.7ms で 3× 速い)。`br §7.7` 参照。
 - [x] ✅ **S-07** disk cache (A 層, `--cache-dir`) の上限管理 — 実装済。`DiskCache.maxBytes` フィールドを追加、`NewDiskCache` に `maxBytes int64` (0=unlimited) を追加、`Write` 前に `evictIfNeeded` (dir scan → mtime 昇順で古い順に削除) を呼ぶ。`s3.Config` / `gcs.Config` に `MaxCacheBytes` を追加、daemon に `--disk-cache-capacity` フラグ + `S3FS_DISK_CACHE_CAPACITY` env を追加。`TestDiskCache_Eviction` / `TestDiskCache_EvictionDisabled` で動作を pin。
@@ -227,10 +228,9 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 「今日〜明日で何を触るか」目線での並び:
 
-**2026-10-07 更新 — T-04/T-05/S-09 完了**:
+**2026-10-07 更新 — S-06/T-04/T-05/S-09 完了**:
 
-残り:
-1. **S-06** 実機検証 (S-01〜S-04 のビルドだけ通した変更を動かす)
+残り: なし (P0/P1 の全タスク完了)
 
 完了済 (2026-10-06〜07):
 - ✅ T-01 `pruneAdmitsTo` arena リーク
