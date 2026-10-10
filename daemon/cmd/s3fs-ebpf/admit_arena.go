@@ -29,6 +29,15 @@ type admitEntry struct {
 	Offset uint64
 }
 
+// updateArenaHighWater advances the ArenaUsedBytes gauge when `off+size`
+// exceeds the current high-water mark. Called after every AdmitContent so
+// /metrics reflects the furthest byte written into the arena.
+func updateArenaHighWater(off uint64, size int) {
+	if hi := off + uint64(size); hi > metrics.Global.ArenaUsedBytes.Load() {
+		metrics.Global.ArenaUsedBytes.Store(hi)
+	}
+}
+
 // admitTable is the daemon-side source of truth for what kmod
 // currently has admitted. The kmod ioctl semantics are "replace the
 // whole table"; every mutation therefore has to send the full
@@ -61,6 +70,37 @@ func setAdmitProgs(p *fpebpf.Programs) {
 	admitMu.Lock()
 	admitProgs = p
 	admitMu.Unlock()
+}
+
+// sharedDevFile holds the single /dev/s3fs_ebpf fd opened by openSharedDev.
+// All admit/signal ioctls reuse this fd instead of opening per-call (V-01).
+// Nil until openSharedDev is called; fallback to per-call open when nil
+// so tests without a real device still compile and run.
+var sharedDevFile *os.File
+
+// openSharedDev opens devPath once and stores it for all ioctl helpers.
+// The caller (runFastpath) is responsible for closing it on exit.
+func openSharedDev(devPath string) (*os.File, error) {
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", devPath, err)
+	}
+	sharedDevFile = f
+	return f, nil
+}
+
+// devFileOrOpen returns sharedDevFile when available, otherwise opens
+// devPath for a single call (offline mode / test fallback). The returned
+// close func must be called; it is a no-op when the shared fd was used.
+func devFileOrOpen(devPath string) (f *os.File, close func(), err error) {
+	if sharedDevFile != nil {
+		return sharedDevFile, func() {}, nil
+	}
+	f, err = os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open %s: %w", devPath, err)
+	}
+	return f, func() { f.Close() }, nil
 }
 
 // reconcileEvictionsLocked pulls kmod's evict log and drops those inos
@@ -335,11 +375,11 @@ var admitArena = admitArenaIoctl
 // The ioctl must be issued from a process whose mm holds the uaddr
 // mappings (kmod calls get_task_mm(current) internally).
 func admitArenaIoctl(devPath string, entries []admitEntry) error {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, closeFn, err := devFileOrOpen(devPath)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", devPath, err)
+		return err
 	}
-	defer f.Close()
+	defer closeFn()
 	return admitArenaOn(f, entries)
 }
 
@@ -381,11 +421,11 @@ type signalAdmitArg struct {
 const s3fsIocSignalAdmit = (1 << 30) | (uint32(unsafe.Sizeof(signalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
 
 func signalAdmit(devPath string, ino uint64, errCode int32) error {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	f, closeFn, err := devFileOrOpen(devPath)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", devPath, err)
+		return err
 	}
-	defer f.Close()
+	defer closeFn()
 	arg := signalAdmitArg{Ino: ino, Err: errCode}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
 		f.Fd(), uintptr(s3fsIocSignalAdmit),
@@ -395,10 +435,20 @@ func signalAdmit(devPath string, ino uint64, errCode int32) error {
 	return nil
 }
 
+// readMissWorkers is the maximum number of concurrent handleReadMiss
+// goroutines. Bounded to prevent unbounded goroutine growth under
+// bursty kmod .read events (V-06). 16 workers overlap S3 round-trips
+// without overwhelming the S3 client or the arena allocator.
+const readMissWorkers = 16
+
 // runReadMissLoop reads /dev/s3fs_ebpf and services each event by
 // fetching the object from S3, admitting it, and signaling the
 // blocked kmod .read. Terminates when the device read returns EOF or
 // ctx is done.
+//
+// V-06: goroutine spawning is bounded by a semaphore channel with
+// readMissWorkers slots. A full semaphore back-pressures new events;
+// kmod's per-ino wait queue serializes them so no event is lost.
 func runReadMissLoop(ctx context.Context, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend) {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
@@ -428,6 +478,8 @@ func runReadMissLoop(ctx context.Context, devPath string,
 	}()
 	defer close(loopExit)
 
+	sem := make(chan struct{}, readMissWorkers)
+
 	var buf [24]byte // sizeof(readMissEvent)
 	for {
 		n, err := f.Read(buf[:])
@@ -448,7 +500,11 @@ func runReadMissLoop(ctx context.Context, devPath string,
 		}
 		fmt.Printf("[upcall] miss ino=%d offset=%d count=%d\n",
 			ev.Ino, ev.Offset, ev.Count)
-		go handleReadMiss(ctx, devPath, progs, s3c, ev)
+		sem <- struct{}{}
+		go func(ev readMissEvent) {
+			defer func() { <-sem }()
+			handleReadMiss(ctx, devPath, progs, s3c, ev)
+		}(ev)
 	}
 }
 
@@ -556,11 +612,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 		return
 	}
 	uaddr := progs.Arena().BaseAddr() + off
-	// Track high-water arena usage. AdmitContent returns the offset
-	// where it wrote; assume monotonic (§4.5 note on arena gc未実装).
-	if hi := off + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
-		metrics.Global.ArenaUsedBytes.Store(hi)
-	}
+	updateArenaHighWater(off, len(body))
 
 	if err := replaceAdmit(devPath, admitEntry{
 		Ino:    ev.Ino,
@@ -574,11 +626,11 @@ func handleReadMiss(ctx context.Context, devPath string,
 		return
 	}
 	if chunkOffset > 0 {
-		fmt.Printf("[upcall] ino=%d %s admitted range [%d,%d) → uaddr=0x%x (partial)\n",
-			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)), uaddr)
+		fmt.Printf("[upcall] ino=%d %s admitted range [%d,%d) (partial)\n",
+			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
 	} else {
-		fmt.Printf("[upcall] ino=%d %s admitted %d bytes → uaddr=0x%x\n",
-			ev.Ino, entry.Name, len(body), uaddr)
+		fmt.Printf("[upcall] ino=%d %s admitted %d bytes\n",
+			ev.Ino, entry.Name, len(body))
 	}
 	_ = signalAdmit(devPath, ev.Ino, 0)
 }

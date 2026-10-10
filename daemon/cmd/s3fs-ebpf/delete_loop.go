@@ -8,7 +8,6 @@ import (
 	"time"
 	"unsafe"
 
-	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"golang.org/x/sys/unix"
 )
@@ -81,12 +80,7 @@ func drainDeletes(ctx context.Context, devFd int, s3c objstore.Backend) {
 
 func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	name := string(ev.Name[:ev.NameLen])
-	// G-01: sync-mirrored entry has the full S3Key; otherwise
-	// rebuild from parent_ino + basename. Same shape as handleFlush.
-	s3key := resolveKeyPath(ev.ParentIno, name)
-	if e := fpebpf.LookupByIno(ev.Ino); e != nil && e.S3Key != "" {
-		s3key = e.S3Key
-	}
+	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
 	if s3c == nil {
 		fmt.Printf("[delete] drop ino=%d name=%s (no S3 backend)\n",
 			ev.Ino, name)
@@ -170,15 +164,8 @@ func drainRenames(ctx context.Context, devFd int, s3c objstore.Backend) {
 func handleRename(ctx context.Context, s3c objstore.Backend, ev *renameEvent) {
 	oldName := string(ev.OldName[:ev.OldNameLen])
 	newName := string(ev.NewName[:ev.NewNameLen])
-	// G-01: derive both keys from their respective parent inos so
-	// cross-dir renames (moving foo.txt from sub1/ into sub2/)
-	// produce distinct old/new keys instead of colliding on
-	// basename.
-	oldKey := resolveKeyPath(ev.OldParentIno, oldName)
+	oldKey := resolveEventS3Key(ev.Ino, ev.OldParentIno, oldName)
 	newKey := resolveKeyPath(ev.NewParentIno, newName)
-	if e := fpebpf.LookupByIno(ev.Ino); e != nil && e.S3Key != "" {
-		oldKey = e.S3Key
-	}
 	if s3c == nil {
 		fmt.Printf("[rename] drop ino=%d %s→%s (no S3 backend)\n",
 			ev.Ino, oldKey, newKey)

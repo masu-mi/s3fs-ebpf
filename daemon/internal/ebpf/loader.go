@@ -330,15 +330,15 @@ const stubSize = 32
 // ErrCacheFull can drop the entry — the fentry hook keeps emitting
 // misses and counters keep incrementing, which is the honest signal
 // that the cache is undersized.
-func (p *Programs) WarmCache(stub InodeStub) (uint32, error) {
+func (p *Programs) WarmCache(stub InodeStub) (uint64, error) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 
 	if existing, ok := p.cacheKnown[stub.Ino]; ok {
-		return uint32(existing), nil
+		return existing, nil
 	}
 
-	arenaSize := uint64(p.arena.Size())
+	arenaSize := p.arena.Size()
 	nextOff := p.cacheNextOff
 	if nextOff+stubSize > arenaSize {
 		return 0, ErrCacheFull
@@ -354,8 +354,8 @@ func (p *Programs) WarmCache(stub InodeStub) (uint32, error) {
 		return 0, fmt.Errorf("arena write ino=%d: %w", stub.Ino, err)
 	}
 
-	// S3fsInodeIndex is a __u32 BPF map; the value must fit in 32 bits.
-	// The arena is bounded at 128 MiB so the cast is safe.
+	// S3fsInodeIndex is a __u32 BPF map; cast is safe since the arena is
+	// bounded at 128 MiB (well within uint32 range).
 	off32 := uint32(nextOff)
 	if err := p.Objs.S3fsInodeIndex.Update(&stub.Ino, &off32, 0); err != nil {
 		return 0, fmt.Errorf("inode_index update ino=%d: %w", stub.Ino, err)
@@ -363,7 +363,7 @@ func (p *Programs) WarmCache(stub InodeStub) (uint32, error) {
 
 	p.cacheKnown[stub.Ino] = nextOff
 	p.cacheNextOff = nextOff + stubSize
-	return off32, nil
+	return nextOff, nil
 }
 
 // ErrCacheFull signals the arena has no more slots for InodeStubs.
@@ -385,28 +385,19 @@ func (p *Programs) AdmitContent(data []byte) (uint64, error) {
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
 
-	arenaSize := uint64(p.arena.Size())
+	arenaSize := p.arena.Size()
 	need := uint64(len(data))
 
-	// (1) First-fit in free-list. Pick the smallest chunk that
-	// still fits so we don't fragment large runs when a tiny admit
-	// arrives.
-	bestIdx := -1
-	var bestSize uint64
-	for i, c := range p.arenaFree {
-		if c.size < need {
-			continue
-		}
-		if bestIdx == -1 || c.size < bestSize {
-			bestIdx = i
-			bestSize = c.size
-		}
-	}
-	if bestIdx != -1 {
-		chunk := p.arenaFree[bestIdx]
-		// Remove selected chunk. Order doesn't matter.
-		p.arenaFree[bestIdx] = p.arenaFree[len(p.arenaFree)-1]
-		p.arenaFree = p.arenaFree[:len(p.arenaFree)-1]
+	// (1) Best-fit in free-list. arenaFree is sorted ascending by size
+	// (V-04), so sort.Search finds the first (= smallest) fitting chunk
+	// in O(log n) instead of the prior O(n) linear scan.
+	i := sort.Search(len(p.arenaFree), func(j int) bool {
+		return p.arenaFree[j].size >= need
+	})
+	if i < len(p.arenaFree) {
+		chunk := p.arenaFree[i]
+		// Remove by shifting; preserves the size-sorted invariant.
+		p.arenaFree = append(p.arenaFree[:i], p.arenaFree[i+1:]...)
 		if len(data) > 0 {
 			if _, err := p.arena.WriteAt(data, int64(chunk.offset)); err != nil {
 				return 0, fmt.Errorf("arena write reuse: %w", err)
@@ -416,7 +407,7 @@ func (p *Programs) AdmitContent(data []byte) (uint64, error) {
 		// existing chunk (unlikely but not disallowed by the allocator
 		// order); H-03 coalesce catches it.
 		if chunk.size > need {
-			p.arenaFree = append(p.arenaFree, arenaChunk{
+			p.arenaFree = insertArenaFreeBySize(p.arenaFree, arenaChunk{
 				offset: chunk.offset + need,
 				size:   chunk.size - need,
 			})
@@ -456,8 +447,22 @@ func (p *Programs) FreeArenaChunk(offset, size uint64) {
 	}
 	p.cacheMu.Lock()
 	defer p.cacheMu.Unlock()
-	p.arenaFree = append(p.arenaFree, arenaChunk{offset: offset, size: size})
+	// V-05: binary-insert maintains size-sorted order without a full
+	// sort.Slice call (previously: append + coalesceArenaFree sorted).
+	p.arenaFree = insertArenaFreeBySize(p.arenaFree, arenaChunk{offset: offset, size: size})
 	p.arenaFree, p.cacheNextOff = coalesceArenaFree(p.arenaFree, p.cacheNextOff)
+}
+
+// insertArenaFreeBySize inserts c into free at the position that maintains
+// ascending size order. Called by FreeArenaChunk and AdmitContent (split
+// tail) so arenaFree stays sorted for O(log n) search in AdmitContent
+// without a full sort.Slice on every insertion (V-04/V-05).
+func insertArenaFreeBySize(free []arenaChunk, c arenaChunk) []arenaChunk {
+	i := sort.Search(len(free), func(j int) bool { return free[j].size >= c.size })
+	free = append(free, arenaChunk{})
+	copy(free[i+1:], free[i:])
+	free[i] = c
+	return free
 }
 
 // coalesceArenaFree sorts `free` by offset, merges adjacent chunks,
@@ -465,6 +470,11 @@ func (p *Programs) FreeArenaChunk(offset, size uint64) {
 // bump allocator (returning the reduced list and the new nextOff).
 // Pure function so the merge invariant can be unit-tested without a
 // live arena. Called under Programs.cacheMu.
+//
+// The free-list is normally maintained sorted by size (V-04/V-05), so
+// this function sorts by offset for the merge pass, then restores size
+// order before returning. The extra sort is acceptable because coalesce
+// is called infrequently (only on eviction or split) and n is small.
 func coalesceArenaFree(free []arenaChunk, nextOff uint64) ([]arenaChunk, uint64) {
 	if len(free) == 0 {
 		return free, nextOff
@@ -490,6 +500,8 @@ func coalesceArenaFree(free []arenaChunk, nextOff uint64) ([]arenaChunk, uint64)
 			merged = merged[:len(merged)-1]
 		}
 	}
+	// Restore size order so AdmitContent's sort.Search invariant holds.
+	sort.Slice(merged, func(i, j int) bool { return merged[i].size < merged[j].size })
 	return merged, nextOff
 }
 

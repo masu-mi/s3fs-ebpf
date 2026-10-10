@@ -36,6 +36,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/gcs"
@@ -376,6 +378,9 @@ func runFastpath(args []string) int {
 		"how often to re-list the bucket and push the entry table to kmod (0 disables)")
 	metricsAddr := fs.String("metrics-addr", ":9600",
 		"address for the Prometheus scrape endpoint (empty to disable)")
+	metricsToken := fs.String("metrics-token", envOr("S3FS_METRICS_TOKEN", ""),
+		"shared-secret Bearer token required for POST /policy/reload and /policy/eval. "+
+			"Empty disables auth (dev default). Set S3FS_METRICS_TOKEN env to avoid shell history.")
 	policyPath := fs.String("policy", "",
 		"path to a CEL policy file (see policies/default.cel). Empty disables the policy engine (default prewarm=all).")
 	policyBPF := fs.String("policy-bpf", "",
@@ -437,11 +442,9 @@ func runFastpath(args []string) int {
 		return 1
 	}
 	if *inoState != "" {
-		inoMu.Lock()
-		n := len(inoByKey)
-		inoMu.Unlock()
+		n, next := inoAlloc.CountMappings()
 		fmt.Printf("[ino-state] %s: %d mappings loaded (nextIno=%d)\n",
-			*inoState, n, nextIno)
+			*inoState, n, next)
 	}
 
 	// Load policy engine (Week 4 (d) P-01 spike: prewarm hook only).
@@ -497,6 +500,13 @@ func runFastpath(args []string) int {
 		}
 		fmt.Printf("[allowlist] %s: %d approved user .bpf.o hashes (builtin bypasses)\n",
 			allowlist.Path(), allowlist.Size())
+	}
+
+	// Warn early when a file: policy will be loaded without any SHA256
+	// verification. Operators who meant to enforce the allowlist get
+	// immediate feedback instead of a silent permissive-mode surprise.
+	if allowlist == nil && policyBPFEffective != "" && !strings.HasPrefix(policyBPFEffective, "builtin:") {
+		fmt.Fprintln(os.Stderr, "[policy-bpf] WARN: --policy-allowlist not set; file: loads are not SHA256-verified (dev mode)")
 	}
 
 	// verifyIfUser gates the SHA256 check to `file:`-style loads.
@@ -557,6 +567,7 @@ func runFastpath(args []string) int {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
 				return
 			}
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 			body, _ := io.ReadAll(r.Body)
 			target := string(body)
 			target = strings.TrimSpace(target)
@@ -623,13 +634,29 @@ func runFastpath(args []string) int {
 	// succeed even before the first admit/sync happens. Failure to
 	// bind is non-fatal — logged and daemon continues.
 	if *metricsAddr != "" {
-		go func(addr string) {
+		if *metricsToken == "" {
+			fmt.Fprintln(os.Stderr, "[metrics] WARN: --metrics-token not set; /policy/reload and /policy/eval are unauthenticated")
+		}
+		go func(addr, token string) {
 			fmt.Printf("[metrics] serving on %s/metrics\n", addr)
-			if err := metrics.Serve(addr); err != nil {
+			if err := metrics.Serve(addr, token); err != nil {
 				fmt.Fprintf(os.Stderr, "[metrics] serve %s: %v\n", addr, err)
 			}
-		}(*metricsAddr)
+		}(*metricsAddr, *metricsToken)
 	}
+
+	// V-01: open /dev/s3fs_ebpf once and share the fd across all admit /
+	// signal ioctls. Previously admitArenaIoctl and signalAdmit reopened
+	// the device on every call, adding an open/close pair per upcall.
+	devF, err := openSharedDev(*dev)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open dev: %v\n", err)
+		return 1
+	}
+	defer func() {
+		sharedDevFile = nil
+		devF.Close()
+	}()
 
 	progs, err := fpebpf.Load()
 	if err != nil {
@@ -680,11 +707,11 @@ func runFastpath(args []string) int {
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("[fastpath] attached fentry/vfs_getattr_nosec; arena base=0x%x size=%d\n",
-		progs.Arena().BaseAddr(), progs.Arena().Size())
+	fmt.Printf("[fastpath] attached fentry/vfs_getattr_nosec; arena size=%d\n",
+		progs.Arena().Size())
 	// arena capacity is fixed for the lifetime of the daemon; publish
 	// once so the dashboard's usage% panel has a denominator.
-	metrics.Global.ArenaCapacityBytes.Store(uint64(progs.Arena().Size()))
+	metrics.Global.ArenaCapacityBytes.Store(progs.Arena().Size())
 	if s3c != nil {
 		prefixStr := ""
 		if p, ok := s3c.(*objstore.Prefixed); ok {
@@ -744,12 +771,10 @@ func runFastpath(args []string) int {
 		<-ctx.Done()
 		reader.Close()
 	}()
-	go sampleCounters(ctx, progs, *sampleEvery)
-	go sampleKmodStats(ctx, *dev, 5*time.Second)
+	// W-03: one goroutine samples all three stats sources (BPF counters,
+	// kmod ioctl, arena free-list) on a single ticker.
+	go runStatsLoop(ctx, progs, *dev, *sampleEvery)
 	go drainEvictionsLoop(ctx, *dev, progs, 2*time.Second)
-	// D-02 arena free-list gauge sampler — separate goroutine so
-	// /metrics stays fresh regardless of evict cadence.
-	go sampleArenaFree(ctx, progs, 5*time.Second)
 	// Periodic bucket sync: keep kmod's entry table + daemon mirror
 	// aligned with S3 without re-mounting. New keys become visible
 	// via `ls`, deleted keys stop resolving. When admit state is
@@ -858,6 +883,11 @@ func runFastpath(args []string) int {
 	return 0
 }
 
+// prewarmWorkers is the concurrency limit for parallel S3 fetches during
+// prewarm. 8 matches typical S3 client concurrency limits and avoids
+// overwhelming small MinIO test instances (V-03).
+const prewarmWorkers = 8
+
 // prewarm populates the arena + inode_index from the kmod entry table
 // so the first stat on each demo object hits fast_hits, and when S3
 // is available copies each object's body into the arena and returns
@@ -866,16 +896,38 @@ func runFastpath(args []string) int {
 //
 // Without S3 we still warm the stat cache but skip content admission —
 // kmod's kmalloc scratch buffer covers `cat` at reduced fidelity.
+//
+// V-03: entries are prewarmed in parallel (up to prewarmWorkers) to
+// overlap S3 round-trips. AdmitContent is serialized inside fpebpf so
+// arena offset assignment is still safe under concurrency.
 func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend, pol *policy.Engine) []admitEntry {
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	live := fpebpf.Snapshot()
+
+	type result struct {
+		ad admitEntry
+		ok bool
+	}
+	results := make([]result, len(live))
+
+	g, gCtx := errgroup.WithContext(timedCtx)
+	g.SetLimit(prewarmWorkers)
+	for i, entry := range live {
+		i, entry := i, entry
+		g.Go(func() error {
+			ad, ok := prewarmEntry(gCtx, progs, s3c, pol, entry)
+			results[i] = result{ad, ok}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
 	admits := make([]admitEntry, 0, len(live))
-	for _, entry := range live {
-		ad, ok := prewarmEntry(timedCtx, progs, s3c, pol, entry)
-		if ok {
-			admits = append(admits, ad)
+	for _, r := range results {
+		if r.ok {
+			admits = append(admits, r.ad)
 		}
 	}
 	return admits
@@ -977,8 +1029,8 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 	if hi := cOff + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
 		metrics.Global.ArenaUsedBytes.Store(hi)
 	}
-	fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d uaddr=0x%x\n",
-		entry.Ino, len(body), cOff, progs.Arena().BaseAddr()+cOff)
+	fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d\n",
+		entry.Ino, len(body), cOff)
 	return admitEntry{
 		Ino:   entry.Ino,
 		Uaddr: progs.Arena().BaseAddr() + cOff,
@@ -1061,7 +1113,23 @@ func samplePolicyStats(ctx context.Context, mu *sync.Mutex, cur **policyprog.Pro
 	}
 }
 
-func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Duration) {
+// runStatsLoop consolidates the three independent per-source sampling
+// goroutines (BPF counters, kmod ioctl stats, arena free-list) into a
+// single ticker loop (W-03). All three sources are sampled on every
+// tick at the sampleEvery interval. Opening the device fd once
+// (T-03 pattern) is handled inside the loop.
+func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, every time.Duration) {
+	// Open the device fd once for kmod-stats ioctls. Failure is
+	// non-fatal (kmod stats will be zero in /metrics) so the daemon
+	// starts even without a real device (tests / offline mode).
+	var devFd int = -1
+	if f, err := os.OpenFile(devPath, os.O_RDWR, 0); err == nil {
+		defer f.Close()
+		devFd = int(f.Fd())
+	} else {
+		fmt.Fprintf(os.Stderr, "[stats] open %s: %v (kmod stats disabled)\n", devPath, err)
+	}
+
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -1069,7 +1137,30 @@ func sampleCounters(ctx context.Context, progs *fpebpf.Programs, every time.Dura
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			// Source 1: BPF per-CPU counter map.
 			printCounters(progs, "sample")
+
+			// Source 2: kmod-side ioctl stats.
+			if devFd >= 0 {
+				if vals, err := readStatsOn(devFd); err == nil {
+					if len(vals) >= 1 {
+						metrics.Global.PolicyEvictionsTotal.Store(vals[0])
+					}
+					if len(vals) >= 2 {
+						metrics.Global.FolioHits.Store(vals[1])
+					}
+					if len(vals) >= 3 {
+						metrics.Global.AdmitInvalidations.Store(vals[2])
+					}
+				}
+			}
+
+			// Source 3: arena free-list gauge.
+			if progs != nil {
+				bytes, chunks := progs.ArenaFreeStats()
+				metrics.Global.ArenaFreeBytes.Store(bytes)
+				metrics.Global.ArenaFreeChunks.Store(uint64(chunks))
+			}
 		}
 	}
 }
@@ -1114,64 +1205,6 @@ func drainEvictionsLoop(ctx context.Context, devPath string, progs *fpebpf.Progr
 	}
 }
 
-// sampleKmodStats polls S3FS_IOC_STATS on a ticker so metrics.Global
-// mirrors kmod-side counters (currently just PolicyEvictionsTotal).
-// Independent from sampleCounters (BPF map) and samplePolicyStats
-// (policy program map) because the source of truth is different.
-func sampleKmodStats(ctx context.Context, devPath string, every time.Duration) {
-	// T-03: open once and reuse the fd across ticks.
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[stats] open %s: %v\n", devPath, err)
-		return
-	}
-	defer f.Close()
-
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			vals, err := readStatsOn(int(f.Fd()))
-			if err != nil {
-				continue
-			}
-			if len(vals) >= 1 {
-				metrics.Global.PolicyEvictionsTotal.Store(vals[0])
-			}
-			if len(vals) >= 2 {
-				metrics.Global.FolioHits.Store(vals[1])
-			}
-			if len(vals) >= 3 {
-				metrics.Global.AdmitInvalidations.Store(vals[2])
-			}
-		}
-	}
-}
-
-// sampleArenaFree keeps arena_free_bytes / arena_free_chunks
-// gauges up to date. Runs on a separate goroutine because the
-// free-list update runs from drainEvictionsLoop (evict-triggered)
-// but /metrics needs a steady-state view.
-func sampleArenaFree(ctx context.Context, progs *fpebpf.Programs, every time.Duration) {
-	if progs == nil {
-		return
-	}
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			bytes, chunks := progs.ArenaFreeStats()
-			metrics.Global.ArenaFreeBytes.Store(bytes)
-			metrics.Global.ArenaFreeChunks.Store(uint64(chunks))
-		}
-	}
-}
 
 func printCounters(progs *fpebpf.Programs, label string) {
 	c, err := progs.ReadCounters()

@@ -102,28 +102,53 @@ var ReloadHandler http.HandlerFunc
 // inactive.
 var EvalHandler http.HandlerFunc
 
+// makeAuthWrap returns a middleware factory that enforces Bearer token auth.
+// When token is empty the returned wrapper is a no-op so unauthenticated
+// deployments (no --metrics-token flag) continue to work unchanged.
+func makeAuthWrap(token string) func(http.HandlerFunc) http.HandlerFunc {
+	if token == "" {
+		return func(h http.HandlerFunc) http.HandlerFunc { return h }
+	}
+	want := "Bearer " + token
+	return func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != want {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			h(w, r)
+		}
+	}
+}
+
 // Serve starts the metrics HTTP endpoint. Blocks until the server exits.
 // Callers should invoke this on a goroutine.
-func Serve(addr string) error {
+//
+// When token is non-empty, /policy/reload and /policy/eval require the
+// caller to present "Authorization: Bearer <token>". /metrics and /healthz
+// remain unauthenticated so Prometheus can scrape without credentials.
+func Serve(addr, token string) error {
+	authWrap := makeAuthWrap(token)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", handle)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
-	mux.HandleFunc("/policy/reload", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/policy/reload", authWrap(func(w http.ResponseWriter, r *http.Request) {
 		if ReloadHandler == nil {
 			http.Error(w, "policy engine not active", http.StatusServiceUnavailable)
 			return
 		}
 		ReloadHandler(w, r)
-	})
-	mux.HandleFunc("/policy/eval", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/policy/eval", authWrap(func(w http.ResponseWriter, r *http.Request) {
 		if EvalHandler == nil {
 			http.Error(w, "policy engine not active", http.StatusServiceUnavailable)
 			return
 		}
 		EvalHandler(w, r)
-	})
+	}))
 	return http.ListenAndServe(addr, mux)
 }
 

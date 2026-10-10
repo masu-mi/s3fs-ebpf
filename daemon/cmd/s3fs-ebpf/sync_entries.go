@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -69,123 +70,115 @@ const (
 	inoRootReserved = 100 // ino 1 is the mount root, keep 100+ for entries
 )
 
-var (
-	inoMu     sync.Mutex
-	inoByKey  = map[string]uint64{} // S3Key → ino, populated first-seen
-	nextIno   = uint64(inoRootReserved)
-	seededIno bool
+// InoAllocator is the S3Key → ino mapping. Previously spread across
+// package globals; collected here (W-02) so the state is named,
+// testable, and can be zero'd cleanly between test cases.
+//
+// Convention for pathByIno: dirIno → "sub1/nested" (no trailing '/'),
+// fileIno → "sub1/nested/foo.txt". Root is not stored (empty prefix).
+// Synthetic dir keys use the "dir:" prefix in byKey; pathByIno drops
+// it so callers see the actual S3-side path.
+type InoAllocator struct {
+	mu        sync.Mutex
+	byKey     map[string]uint64 // S3Key → ino, populated first-seen
+	pathByIno map[uint64]string // G-01 reverse map
+	nextIno   uint64
+	seeded    bool
 
-	// G-01: reverse map so write-path handlers can reconstruct the
-	// full S3 key from a flush/delete/rename event's parent_ino +
-	// basename. Populated alongside assignIno / registerIno.
-	// Convention: pathByIno[dirIno] = "sub1/nested" (no trailing '/'),
-	// pathByIno[fileIno] = "sub1/nested/foo.txt". Root is not stored
-	// (empty prefix). Synthetic dir keys use the "dir:" allocator
-	// prefix in inoByKey; pathByIno drops the "dir:" so callers get
-	// the actual S3 path.
-	pathByIno = map[uint64]string{}
+	// H-02: persistence path. Non-empty → flush on every registerIno and
+	// once per sync round (V-02 debounce via dirty flag).
+	statePath string
+	dirty     atomic.Uint32
+}
 
-	// H-02: persistence for the S3Key → ino mapping. When
-	// inoStatePath is non-empty, assignIno / registerIno flush the
-	// full map atomically after every mutation so an application
-	// caching (pid, ino) across daemon restarts still resolves the
-	// same file. Empty path disables persistence (default — matches
-	// legacy behavior).
-	inoStatePath string
-)
+func newInoAllocator() InoAllocator {
+	return InoAllocator{
+		byKey:     map[string]uint64{},
+		pathByIno: map[uint64]string{},
+		nextIno:   uint64(inoRootReserved),
+	}
+}
 
-// seedInoAllocator maps bootstrap S3 keys to their well-known inos so
-// that a fresh sync against a bucket that happens to contain those
-// keys stays compatible with existing docs / kmod bootstrap.
-func seedInoAllocator() {
-	inoMu.Lock()
-	defer inoMu.Unlock()
-	if seededIno {
+// inoAlloc is the process-wide allocator singleton.
+var inoAlloc = newInoAllocator()
+
+// seed maps bootstrap S3 keys to their well-known inos so that a fresh
+// sync against a bucket that happens to contain those keys stays
+// compatible with existing docs / kmod bootstrap.
+func (a *InoAllocator) seed() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.seeded {
 		return
 	}
 	for _, e := range fpebpf.Bootstrap() {
-		inoByKey[e.S3Key] = e.Ino
-		if e.Ino >= nextIno {
-			nextIno = e.Ino + 1
+		a.byKey[e.S3Key] = e.Ino
+		if e.Ino >= a.nextIno {
+			a.nextIno = e.Ino + 1
 		}
 	}
-	seededIno = true
+	a.seeded = true
 }
 
-// assignIno returns the ino for `s3Key`, allocating a new one on
-// first sight. Deterministic within a daemon process; when H-02
-// persistence is enabled (SetInoStatePath), also stable across
-// restarts. G-01: pathByIno picks up the reverse mapping, stripping
-// the "dir:" prefix so synthetic dir entries surface their real
-// S3-side path.
-func assignIno(s3Key string) uint64 {
-	inoMu.Lock()
-	if ino, ok := inoByKey[s3Key]; ok {
-		inoMu.Unlock()
+// assignIno returns the ino for s3Key, allocating a new one on first
+// sight. Deterministic within a daemon process; when H-02 persistence
+// is enabled (SetStatePath), also stable across restarts.
+func (a *InoAllocator) assignIno(s3Key string) uint64 {
+	a.mu.Lock()
+	if ino, ok := a.byKey[s3Key]; ok {
+		a.mu.Unlock()
 		return ino
 	}
-	ino := nextIno
-	nextIno++
-	inoByKey[s3Key] = ino
-	pathByIno[ino] = trimDirPrefix(s3Key)
-	inoMu.Unlock()
-	saveInoState()
+	ino := a.nextIno
+	a.nextIno++
+	a.byKey[s3Key] = ino
+	a.pathByIno[ino] = trimDirPrefix(s3Key)
+	a.mu.Unlock()
+	// Mark dirty; the sync round that called us will flush once at the
+	// end via flush rather than writing on every new key (V-02).
+	a.dirty.Store(1)
 	return ino
 }
 
-// registerIno pins a specific `ino` to `s3Key`, overriding whatever
-// the allocator would have picked. Called by the flush loop after a
-// PUT for a locally-created file (kmod-picked ino) so the next sync
-// round emits the same ino and iterate_shared unifies the two views.
-func registerIno(s3Key string, ino uint64) {
-	inoMu.Lock()
-	prev, hadPrev := inoByKey[s3Key]
-	inoByKey[s3Key] = ino
-	pathByIno[ino] = trimDirPrefix(s3Key)
-	if ino >= nextIno {
-		nextIno = ino + 1
+// registerIno pins a specific ino to s3Key, overriding whatever the
+// allocator would have picked. Called by the flush loop after a PUT for
+// a locally-created file (kmod-picked ino) so the next sync round
+// emits the same ino and iterate_shared unifies the two views.
+func (a *InoAllocator) registerIno(s3Key string, ino uint64) {
+	a.mu.Lock()
+	prev, hadPrev := a.byKey[s3Key]
+	a.byKey[s3Key] = ino
+	a.pathByIno[ino] = trimDirPrefix(s3Key)
+	if ino >= a.nextIno {
+		a.nextIno = ino + 1
 	}
-	inoMu.Unlock()
+	a.mu.Unlock()
 	if !hadPrev || prev != ino {
-		saveInoState()
+		a.save()
 	}
-}
-
-// trimDirPrefix strips the "dir:" tag assignIno applies to
-// synthetic directory keys so callers of pathByIno see the real
-// S3-side path.
-func trimDirPrefix(s3Key string) string {
-	if len(s3Key) > 4 && s3Key[:4] == "dir:" {
-		return s3Key[4:]
-	}
-	return s3Key
 }
 
 // resolveKeyPath rebuilds a full S3 key from a parent ino + basename.
 // Returns basename alone when parentIno resolves to root (or is 0).
-// Used by flush / delete / rename handlers to translate kmod-side
-// events into S3 keys.
-func resolveKeyPath(parentIno uint64, name string) string {
+func (a *InoAllocator) resolveKeyPath(parentIno uint64, name string) string {
 	if parentIno == 0 || parentIno == kmodRootIno {
 		return name
 	}
-	inoMu.Lock()
-	prefix, ok := pathByIno[parentIno]
-	inoMu.Unlock()
+	a.mu.Lock()
+	prefix, ok := a.pathByIno[parentIno]
+	a.mu.Unlock()
 	if !ok || prefix == "" {
 		return name
 	}
 	return prefix + "/" + name
 }
 
-// SetInoStatePath enables H-02 persistence. If `p` names an existing
-// file it is loaded into the ino table (inoByKey merges, nextIno
-// advances past any observed ino) before the sync loop starts.
-// Subsequent mutations flush the whole table atomically via tmp+rename.
-// Called from main.go once during startup; passing "" is a no-op and
+// SetStatePath enables H-02 persistence. If p names an existing file it
+// is loaded into the ino table (byKey merges, nextIno advances past any
+// observed ino) before the sync loop starts. Passing "" is a no-op and
 // leaves the allocator in-memory only.
-func SetInoStatePath(p string) error {
-	inoStatePath = p
+func (a *InoAllocator) SetStatePath(p string) error {
+	a.statePath = p
 	if p == "" {
 		return nil
 	}
@@ -193,68 +186,103 @@ func SetInoStatePath(p string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("ino state mkdir %s: %w", dir, err)
 	}
-	return loadInoState()
+	return a.load()
+}
+
+// CountMappings returns the current number of S3Key → ino entries and
+// the next ino that would be allocated. Used by the startup log line.
+func (a *InoAllocator) CountMappings() (n int, next uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.byKey), a.nextIno
 }
 
 type inoStateFile struct {
 	InoByKey map[string]uint64 `json:"ino_by_key"`
 }
 
-// loadInoState reads inoStatePath (best-effort — missing file is not
-// an error, it's the first-run case) and merges its contents into the
-// live allocator. Advances nextIno past any observed ino.
-func loadInoState() error {
-	data, err := os.ReadFile(inoStatePath)
+func (a *InoAllocator) load() error {
+	data, err := os.ReadFile(a.statePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return fmt.Errorf("ino state read %s: %w", inoStatePath, err)
+		return fmt.Errorf("ino state read %s: %w", a.statePath, err)
 	}
 	var st inoStateFile
 	if err := json.Unmarshal(data, &st); err != nil {
-		return fmt.Errorf("ino state parse %s: %w", inoStatePath, err)
+		return fmt.Errorf("ino state parse %s: %w", a.statePath, err)
 	}
-	inoMu.Lock()
-	defer inoMu.Unlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for k, v := range st.InoByKey {
-		inoByKey[k] = v
-		pathByIno[v] = trimDirPrefix(k) // G-01: rehydrate reverse map too
-		if v >= nextIno {
-			nextIno = v + 1
+		a.byKey[k] = v
+		a.pathByIno[v] = trimDirPrefix(k)
+		if v >= a.nextIno {
+			a.nextIno = v + 1
 		}
 	}
 	return nil
 }
 
-// saveInoState writes inoStatePath atomically (tmp + rename) after
-// every ino table mutation. No-op when persistence is disabled.
-// Failure is logged and swallowed — a lost persist round beats a
-// crashing daemon.
-func saveInoState() {
-	if inoStatePath == "" {
+// save writes statePath atomically (tmp + rename). No-op when persistence
+// is disabled. Failure is logged and swallowed.
+func (a *InoAllocator) save() {
+	if a.statePath == "" {
 		return
 	}
-	inoMu.Lock()
-	snap := inoStateFile{InoByKey: make(map[string]uint64, len(inoByKey))}
-	for k, v := range inoByKey {
+	a.mu.Lock()
+	snap := inoStateFile{InoByKey: make(map[string]uint64, len(a.byKey))}
+	for k, v := range a.byKey {
 		snap.InoByKey[k] = v
 	}
-	inoMu.Unlock()
+	a.mu.Unlock()
 	data, err := json.Marshal(&snap)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ino-state] marshal: %v\n", err)
 		return
 	}
-	tmp := inoStatePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	tmp := a.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "[ino-state] write %s: %v\n", tmp, err)
 		return
 	}
-	if err := os.Rename(tmp, inoStatePath); err != nil {
+	if err := os.Rename(tmp, a.statePath); err != nil {
 		fmt.Fprintf(os.Stderr, "[ino-state] rename %s: %v\n", tmp, err)
 	}
 }
+
+// flush writes the ino table to disk if the dirty flag is set. Called
+// once per sync round so that a burst of assignIno calls results in
+// exactly one disk write instead of N (V-02).
+func (a *InoAllocator) flush() {
+	if a.dirty.CompareAndSwap(1, 0) {
+		a.save()
+	}
+}
+
+// trimDirPrefix strips the "dir:" tag assignIno applies to synthetic
+// directory keys so callers of pathByIno see the real S3-side path.
+func trimDirPrefix(s3Key string) string {
+	if len(s3Key) > 4 && s3Key[:4] == "dir:" {
+		return s3Key[4:]
+	}
+	return s3Key
+}
+
+// -- package-level wrapper functions for callers outside this block --------
+// These keep all call sites unchanged while the allocator state lives in
+// the InoAllocator struct (W-02).
+
+func seedInoAllocator()                        { inoAlloc.seed() }
+func assignIno(s3Key string) uint64            { return inoAlloc.assignIno(s3Key) }
+func registerIno(s3Key string, ino uint64)     { inoAlloc.registerIno(s3Key, ino) }
+func resolveKeyPath(parentIno uint64, name string) string {
+	return inoAlloc.resolveKeyPath(parentIno, name)
+}
+func SetInoStatePath(p string) error { return inoAlloc.SetStatePath(p) }
+func flushInoState()                 { inoAlloc.flush() }
+func saveInoState()                  { inoAlloc.save() }
 
 // -- sync loop --------------------------------------------------------
 
@@ -346,6 +374,22 @@ func buildEntriesFromS3(ctx context.Context, s3c objstore.Backend) ([]fpebpf.Ent
 // safety net in kmod but is a code smell if the daemon depends on it).
 const kmodRootIno = uint64(1)
 
+// resolveEventS3Key returns the S3 key for a VFS event (flush / delete /
+// rename). Priority order:
+//  1. The dyn-table entry's S3Key when it is already known (sync-promoted
+//     file with a full prefix path).
+//  2. resolveKeyPath(parentIno, name) — reconstructed from the parent ino
+//     reverse map (G-01). Falls back to just name for root-level files.
+//
+// Called identically from handleFlush, handleDelete, and handleRename so
+// that all three callers share one definition of "how an event becomes a key."
+func resolveEventS3Key(ino, parentIno uint64, name string) string {
+	if e := fpebpf.LookupByIno(ino); e != nil && e.S3Key != "" {
+		return e.S3Key
+	}
+	return resolveKeyPath(parentIno, name)
+}
+
 // splitPath breaks a POSIX-style path into non-empty components.
 // path.Split only peels off the last element; we want every segment.
 // A leading '/' or repeated separators are silently absorbed.
@@ -422,6 +466,9 @@ func syncEntriesOnce(ctx context.Context, devPath string, s3c objstore.Backend) 
 	fpebpf.Replace(fresh)
 	metrics.Global.SyncRounds.Add(1)
 	metrics.Global.SyncEntriesCurrent.Store(uint64(len(fresh)))
+	// V-02: flush the ino state once per sync round instead of on every
+	// assignIno call. Batches N new keys from a single List into 1 write.
+	flushInoState()
 	return fresh, nil
 }
 

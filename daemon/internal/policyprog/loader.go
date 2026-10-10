@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -272,7 +273,20 @@ func Resolve(arg, repoRoot string) (string, error) {
 	switch {
 	case len(arg) > len(builtinPrefix) && arg[:len(builtinPrefix)] == builtinPrefix:
 		name := arg[len(builtinPrefix):]
-		path := filepath.Join(repoRoot, "bpf", name+".bpf.o")
+		// Reject path-traversal attempts (e.g. "builtin:../../etc/evil").
+		// filepath.Join cleans ".." components, so without this check a
+		// crafted name could escape the bpf/ directory entirely.
+		if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
+			return "", fmt.Errorf("policyprog: invalid builtin name %q (path separators not allowed)", name)
+		}
+		path := filepath.Clean(filepath.Join(repoRoot, "bpf", name+".bpf.o"))
+		// Belt-and-suspenders containment check — the name guard above
+		// should catch all cases, but verify the resolved path stays under
+		// bpf/ before handing it to the loader.
+		bpfDir := filepath.Clean(filepath.Join(repoRoot, "bpf"))
+		if !strings.HasPrefix(path, bpfDir+string(filepath.Separator)) {
+			return "", fmt.Errorf("policyprog: builtin %q resolves outside bpf/ (%s)", name, path)
+		}
 		if _, err := os.Stat(path); err != nil {
 			return "", fmt.Errorf("policyprog: builtin %q not found at %s", name, path)
 		}
