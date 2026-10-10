@@ -2,6 +2,7 @@ package objstore
 
 import (
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -64,6 +65,71 @@ func TestDiskCache_Eviction(t *testing.T) {
 	}
 	if _, ok := cache.Read("c"); !ok {
 		t.Error("key c should be present after being written")
+	}
+}
+
+// TestDiskCache_UsedBytesTracking pins V2-01: the in-memory usedBytes
+// counter must stay in sync with the on-disk total so evictIfNeeded can
+// skip os.ReadDir on every Write when under the cap.
+func TestDiskCache_UsedBytesTracking(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewDiskCache(dir, KindS3, "bucket", 1024)
+	if err != nil {
+		t.Fatalf("NewDiskCache: %v", err)
+	}
+	if cache.usedBytes == nil {
+		t.Fatal("usedBytes must be non-nil when maxBytes > 0")
+	}
+	if got := atomic.LoadInt64(cache.usedBytes); got != 0 {
+		t.Errorf("initial usedBytes = %d, want 0", got)
+	}
+
+	payload := []byte("hello") // 5 bytes
+	cache.Write("key1", payload)
+	if got := atomic.LoadInt64(cache.usedBytes); got != 5 {
+		t.Errorf("after Write(5 B), usedBytes = %d, want 5", got)
+	}
+	cache.Write("key2", payload)
+	if got := atomic.LoadInt64(cache.usedBytes); got != 10 {
+		t.Errorf("after 2nd Write(5 B), usedBytes = %d, want 10", got)
+	}
+
+	cache.Invalidate("key1")
+	if got := atomic.LoadInt64(cache.usedBytes); got != 5 {
+		t.Errorf("after Invalidate(key1), usedBytes = %d, want 5", got)
+	}
+
+	// Overwriting an existing key must replace the old size, not add.
+	cache.Write("key2", []byte("hi")) // 2 bytes, overwrites 5 bytes
+	if got := atomic.LoadInt64(cache.usedBytes); got != 2 {
+		t.Errorf("after overwrite Write(2 B over 5 B), usedBytes = %d, want 2", got)
+	}
+}
+
+// TestDiskCache_UsedBytesSeededFromDisk pins V2-01: when a cache
+// directory already contains files (daemon restart), NewDiskCache must
+// seed usedBytes from the actual disk contents so the fast path
+// doesn't skip a needed eviction on the first Write.
+func TestDiskCache_UsedBytesSeededFromDisk(t *testing.T) {
+	dir := t.TempDir()
+	// First instance: write 20 bytes across two keys.
+	c1, err := NewDiskCache(dir, KindS3, "bucket", 100)
+	if err != nil {
+		t.Fatalf("NewDiskCache (first): %v", err)
+	}
+	c1.Write("a", make([]byte, 10))
+	c1.Write("b", make([]byte, 10))
+
+	// Second instance simulates a daemon restart with the same dir.
+	c2, err := NewDiskCache(dir, KindS3, "bucket", 100)
+	if err != nil {
+		t.Fatalf("NewDiskCache (restart): %v", err)
+	}
+	if c2.usedBytes == nil {
+		t.Fatal("usedBytes must be non-nil when maxBytes > 0")
+	}
+	if got := atomic.LoadInt64(c2.usedBytes); got != 20 {
+		t.Errorf("after restart, usedBytes = %d, want 20 (seeded from disk)", got)
 	}
 }
 

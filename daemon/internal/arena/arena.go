@@ -127,11 +127,11 @@ func (a *Arena) ReadAt(p []byte, off int64) (int, error) {
 }
 
 // Size returns the mmap'd region size in bytes.
-func (a *Arena) Size() uint32 {
+func (a *Arena) Size() uint64 {
 	if a == nil {
 		return 0
 	}
-	return uint32(len(a.mem))
+	return uint64(len(a.mem))
 }
 
 // BaseAddr returns the user-VM start address of the mmap'd arena. BPF

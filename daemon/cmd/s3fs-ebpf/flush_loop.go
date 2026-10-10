@@ -271,7 +271,7 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 			// SIGINT durably PUTs the last write instead of dropping
 			// it on the floor. Bounded so a stuck S3 doesn't hang
 			// shutdown forever.
-			drainFlushOnShutdown(int(f.Fd()), devPath, progs, s3c, coal,
+			drainFlushOnShutdown(int(f.Fd()), devPath, progs, s3c,
 				shutdownDrainBudget)
 			return
 		case <-t.C:
@@ -286,11 +286,12 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 var shutdownDrainBudget = 10 * time.Second
 
 // drainFlushOnShutdown reads any events still on the kmod flush
-// queue and pushes them through the coalescer, bounded by `budget`.
-// Uses a background ctx so a canceled parent doesn't short-circuit
-// the PUTs we are actively trying to complete.
+// queue and services them synchronously, bounded by `budget`. Uses a
+// background ctx so a canceled parent doesn't short-circuit the PUTs
+// we are actively trying to complete. coal.Shutdown() (deferred by
+// the caller) drains the debounce layer after this returns.
 func drainFlushOnShutdown(devFd int, devPath string, progs *fpebpf.Programs,
-	s3c objstore.Backend, coal *coalescer, budget time.Duration) {
+	s3c objstore.Backend, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	ctx := context.Background()
 	drained := 0
@@ -316,11 +317,6 @@ func drainFlushOnShutdown(devFd int, devPath string, progs *fpebpf.Programs,
 			return
 		}
 	}
-	// coal.Shutdown() (deferred by runFlushLoop) fires any debounced
-	// events queued before ctx.Done. Our synchronous drain above
-	// covered everything sitting on the kmod side; coalescer flush
-	// covers the last debounce-window items.
-	_ = coal
 	if drained > 0 {
 		fmt.Fprintf(os.Stderr, "[flush] shutdown drained %d event(s) from kmod queue\n", drained)
 	}
@@ -378,17 +374,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	}()
 	name := string(ev.Name[:ev.NameLen])
 
-	// G-01 key resolution:
-	//   1. sync-mirrored entry (dyn table) already carries the full
-	//      S3Key with any subdir prefix — use it verbatim.
-	//   2. local file that hasn't been sync-promoted yet — rebuild
-	//      the key by joining resolveKeyPath(parent_ino) + basename.
-	//      For root-level touches this collapses to just basename,
-	//      preserving the flat-bucket behavior benches rely on.
-	s3key := resolveKeyPath(ev.ParentIno, name)
-	if e := fpebpf.LookupByIno(ev.Ino); e != nil && e.S3Key != "" {
-		s3key = e.S3Key
-	}
+	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
 
 	if s3c == nil {
 		fmt.Printf("[flush] drop ino=%d name=%s (no S3 backend)\n",
@@ -448,9 +434,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		metrics.Global.FlushErrors.Add(1)
 		return
 	}
-	if hi := off + uint64(len(buf)); hi > metrics.Global.ArenaUsedBytes.Load() {
-		metrics.Global.ArenaUsedBytes.Store(hi)
-	}
+	updateArenaHighWater(off, len(buf))
 	if err := replaceAdmit(devPath, admitEntry{
 		Ino:   ev.Ino,
 		Uaddr: progs.Arena().BaseAddr() + off,

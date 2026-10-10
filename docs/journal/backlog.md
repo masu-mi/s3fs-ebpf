@@ -21,8 +21,8 @@
 | M4 | Week 4 (e) bench 一式 | ✅ 完成 | — |
 | M5 | 性能可視化 (Grafana + Prometheus) | ✅ 完成 | — |
 | M6 | Week 4 (d) policy engine 設計 | ✅ doc 完成 | `pe §6 Q1-Q10` を spike で決定 → 実装 |
-| M7 | Week 4 (d) policy engine 実装 | ⏳ 未着手 | M6 の Q 回答後、CEL + built-in eBPF policy の spike |
-| M8 | Meetup 登壇 | ⏳ 準備中 | narrative は `../user/motivation.md` + `benchmark-results.md` で揃っている、demo 台本のみ |
+| M7 | Week 4 (d) policy engine 実装 | ✅ 完成 | P-01〜P-15 全完了 (CEL Layer1 / eBPF Layer2/3 / KFunc / struct_ops hot swap / hit-rate bench) |
+| M8 | Meetup 登壇 | ✅ demo 台本完成・本番待ち | L-01 demo-scenario.md 完成、narrative + bench 数値揃い済み |
 | M9 | Week 5+ 分散 / multi-tenant / ML | ⏸ scope 外 | 現行 architecture の限界を洗い出してから (§B/C の項目参照) |
 
 ---
@@ -82,6 +82,17 @@
 - [x] ✅ **S-08** ebpf-fsync の固定オーバーヘッド (~90 ms) — 修正済 (commit c75247f、2026-10-06)。根本原因: daemon の flush ioctl が PUT 完了を非同期でポーリング (100ms 周期 ticker) していた。修正: `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え、kmod が flush event を受け取り次第即 wake。**結果**: 1 MiB ebpf-fsync min=19.7ms → fuse-raw (19.5ms) と同オーダーに達した。`br §8.4` 参照。
 - [x] ✅ **S-09** ebpf-nocache の tiny ファイル miss rate が低い (~18%) — 修正済 (2026-10-06)。根本原因 2 点: (1) kmod の `admit_drop_all_ranges` が evict_log に通知しないため daemon が re-push して admit が復活; (2) `invalidate_mapping_pages` が trylock で active folio を skip。修正: `s3fs_ebpf_file_open` nocache パスに `evict_log_push(ino)` + `invalidate_inode_pages2()` fallback を追加。**結果**: tiny ファイルの microbench miss 率が ~18% → ≈100% に改善、p50 = 558µs (vs fuse-raw 1.7ms で 3× 速い)。`br §7.7` 参照。
 - [x] ✅ **S-07** disk cache (A 層, `--cache-dir`) の上限管理 — 実装済。`DiskCache.maxBytes` フィールドを追加、`NewDiskCache` に `maxBytes int64` (0=unlimited) を追加、`Write` 前に `evictIfNeeded` (dir scan → mtime 昇順で古い順に削除) を呼ぶ。`s3.Config` / `gcs.Config` に `MaxCacheBytes` を追加、daemon に `--disk-cache-capacity` フラグ + `S3FS_DISK_CACHE_CAPACITY` env を追加。`TestDiskCache_Eviction` / `TestDiskCache_EvictionDisabled` で動作を pin。
+
+### Q. セキュリティ / コード品質 クイック修正 (2026-10-10 レビュー)
+
+「30 分〜1 時間で終わり、放置するとセキュリティ or 可読性で刺さる」もの。
+
+- [x] ✅ **Q-01** `io.ReadAll` にボディサイズ上限なし (`main.go:567`) — `http.MaxBytesReader(w, r.Body, 1<<20)` を追加。完了 (2026-10-10)
+- [x] ✅ **Q-02** allowlist nil 時のサイレント全許可 — `--policy-allowlist` 未指定かつ `file:` policy 使用時に stderr WARN を出力。完了 (2026-10-10)
+- [x] ✅ **Q-03** ino state / disk cache ファイルが `0o644` — `0o600` に変更 (`sync_entries.go`, `objstore/cache.go`)。完了 (2026-10-10)
+- [x] ✅ **Q-04** S3 key 解決ロジック 3 重コピー — `resolveEventS3Key(ino, parentIno, name)` ヘルパーを `sync_entries.go` に追加、3 箇所を置換。完了 (2026-10-10)
+- [x] ✅ **Q-05** arena 高水位追跡スニペット 2 重コピー — `updateArenaHighWater(off, size)` ヘルパーを `admit_arena.go` に追加、2 箇所を置換。完了 (2026-10-10)
+- [x] ✅ **Q-06** `drainFlushOnShutdown` の `coal` 引数未使用 — シグネチャと `_ = coal` を除去。完了 (2026-10-10)
 
 ### T. コードレビュー起票 (2026-10-06)
 
@@ -193,6 +204,29 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **T-04** `planReplaceAdmit` が複数 range 持つ ino の旧チャンクを 1 個しか解放しない (latent arena リーク) — 修正済 (commit cda8595)。`freed []arenaChunkPair` を返す形に変更し全マッチを `append`。`TestPlanReplaceAdmit_MultiRangeFreesAllChunks` で回帰テスト追加。
 - [x] ✅ **T-05** `arenaChunkPair.offset/size` が `uint32` で arena 4 GiB 超に対応できない (latent truncation) — 修正済 (commit 2ab0c57)。`arenaChunkPair`, `arenaChunk`, `cacheNextOff`, `FreeArenaChunk`, `AdmitContent` を uint64 に昇格。BPF map (`s3fs_inode_index`) の value 型 `__u32` 制約は WarmCache の call site で `uint32(nextOff)` キャストを保持しコメントを追記。
 
+### Q. セキュリティ強化 (P1 — 2026-10-10 レビュー)
+
+設計上の判断が必要で Q-01〜06 より工数がかかるもの。
+
+- [x] ✅ **Q-07** `/policy/reload` と `/policy/eval` に認証なし — `--metrics-token` フラグ (env `S3FS_METRICS_TOKEN`) を追加。セットされた場合 `Authorization: Bearer <token>` を要求するミドルウェアを `metrics.Serve` に組み込み。`/metrics` / `/healthz` は認証不要のまま。起動時に token 未設定の場合は WARN を出力。実装: `metrics/exporter.go` + `main.go`。完了 2026-10-10。
+- [x] ✅ **Q-08** `builtin:` プレフィックスが allowlist SHA256 検証を完全バイパス — `Resolve` に name バリデーション (`/`, `\`, `..` を拒否) とパス containment チェック (解決パスが `bpf/` 以下であることを検証) を追加。実装: `policyprog/loader.go`。完了 2026-10-10。
+- [x] ✅ **Q-09** アリーナベースアドレスを stdout に出力 — fastpath 起動ログ・prewarm ログ・upcall ログから `uaddr=0x...` / `arena base=0x...` を除去。dev subcommand (`[B]` ログ) は残す。実装: `main.go` + `admit_arena.go`。完了 2026-10-10。
+
+### V. 性能改善 (P1 — 2026-10-10 レビュー)
+
+- [x] ✅ **V-01** `admitArenaIoctl` / `signalAdmit` が呼び出し毎にデバイス fd を開閉 — `openSharedDev` / `devFileOrOpen` を追加し `runFastpath` 起動時に 1 回だけ open。`admitArenaIoctl` / `signalAdmit` は shared fd を利用し、nil 時のみ per-call open (テスト fallback)。実装: `admit_arena.go` + `main.go`。完了 2026-10-10。
+- [x] ✅ **V-02** `saveInoState` が `assignIno` のたびに JSON 書き込み — `assignIno` を dirty flag セットのみに変更し、`syncEntriesOnce` の末尾で `flushInoState()` を 1 回呼ぶ方式に変更。`registerIno` (rename 時のみ) は即時保存を維持。実装: `sync_entries.go`。完了 2026-10-10。
+- [x] ✅ **V-03** プリウォームが逐次実行 — `prewarm` を `errgroup.WithContext` + `SetLimit(8)` で並列化。arena/BPF 操作は `Programs.cacheMu` 内で直列化済み。実装: `main.go`。完了 2026-10-10。
+- [x] ✅ **V-04** `AdmitContent` の free-list が O(n) 線形 best-fit スキャン — `arenaFree` をサイズ昇順ソート済みスライスとして管理し、`sort.Search` で O(log n) best-fit ルックアップに変更。実装: `ebpf/loader.go`。完了 2026-10-10。
+- [x] ✅ **V-05** `coalesceArenaFree` が毎回 `sort.Slice` — `insertArenaFreeBySize` ヘルパーで binary-insert し、挿入時はサイズ順を維持 (sort.Slice 不要)。coalesce は offset 順ソート→マージ→サイズ順復元の 2 sort だが頻度は低い。実装: `ebpf/loader.go`。完了 2026-10-10。
+- [x] ✅ **V-06** 読み取りミス goroutine が上限なし — `sem := make(chan struct{}, 16)` セマフォで spawn を `readMissWorkers=16` に制限。実装: `admit_arena.go`。完了 2026-10-10。
+
+### W. リファクタリング / 設計改善 (P1 — 2026-10-10 レビュー)
+
+- [x] ✅ **W-01** `WarmCache` 戻り値が `uint32`、`AdmitContent` は `uint64` の型不統一 — `WarmCache` 戻り値を `uint64` に変更。`arena.Size()` も `uint32` → `uint64` に昇格し不要な型変換を除去。実装: `ebpf/loader.go` + `arena/arena.go` + `main.go`。完了 2026-10-10。
+- [x] ✅ **W-02** ino アロケーター (`inoByKey` / `pathByIno` / `nextIno`) がパッケージグローバル — `InoAllocator` 型に集約し `inoAlloc` 変数として管理。全メソッドを型のレシーバに移し、外部 API はパッケージレベルの thin wrapper を維持。`CountMappings()` を追加して `main.go` の直接アクセスを排除。テストは `inoAlloc = newInoAllocator()` でリセット。実装: `sync_entries.go` + `sync_entries_test.go` + `main.go`。完了 2026-10-10。
+- [x] ✅ **W-03** 3 つの stats サンプリング goroutine が独立ティッカーで走る — `sampleCounters` / `sampleKmodStats` / `sampleArenaFree` を `runStatsLoop` に統合。1 つのティッカーで 3 ソースをまとめてサンプリング。device fd は内部で 1 回 open (T-03 パターン)。`samplePolicyStats` は条件付き起動のため別 goroutine のまま。実装: `main.go`。完了 2026-10-10。
+
 ### K. upstream 貢献 (`w4a §9`)
 
 根拠 doc: [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
@@ -201,6 +235,10 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
   当てれば kmod 側で BTF-derived struct redefine 不要になる。
 - [ ] **K-02** arena kern_vm range 用の generic-context fault handler 追加提案 — 詳細 [`../dev-notes/ebpf-ecosystem-gaps.md §1.2`](../dev-notes/ebpf-ecosystem-gaps.md#12-改善案)
   当てれば A′ (kern_vm 直 deref) 経路が復活、B の GUP overhead が消える (数百ns オーダー改善見込み)。
+
+### V2. 性能改善 polish (P2 — Meetup 後)
+
+- [x] ✅ **V2-01** `DiskCache.evictIfNeeded` が書き込みごとに `os.ReadDir` — `*int64` アトミックカウンタ `usedBytes` を `DiskCache` に追加。`NewDiskCache` が既存ディレクトリを 1 回 scan して初期値を設定。`Write` は成功後に `atomic.AddInt64` で加算、`Invalidate` は削除前に減算。`evictIfNeeded` は fast path (カウンタ + newBytes ≤ cap → I/O ゼロ return) と slow path (ReadDir + 再同期 + 最古から削除) に分離。`TestDiskCache_UsedBytesTracking` / `TestDiskCache_UsedBytesSeededFromDisk` で pin。完了 2026-10-10。
 
 ### L. narrative / docs
 
@@ -228,9 +266,28 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 「今日〜明日で何を触るか」目線での並び:
 
+**2026-10-10 更新 — コードベース全体レビューにより新規課題を追加**:
+
+P0 新着 (Q-01〜Q-06 — セキュリティ/コード品質クイック修正):
+
+1. **Q-03** ino state / disk cache ファイルパーミッション (`0o644` → `0o600`) — 30 分
+2. **Q-01** `io.ReadAll` ボディサイズ上限 — 30 分
+3. **Q-02** allowlist nil 時の WARN 出力 — 30 分
+4. **Q-04** S3 key 解決ロジック 3 重コピー解消 — 1 時間
+5. **Q-05** arena 高水位追跡スニペット 2 重コピー解消 — 30 分
+6. **Q-06** `drainFlushOnShutdown` 未使用 `coal` 引数除去 — 30 分
+
+P1 新着 (Q-07〜09, V-01〜06, W-01〜03) → **全完了 2026-10-10**:
+
+- ✅ セキュリティ: Q-07 エンドポイント認証 / Q-08 builtin: バイパス強化 / Q-09 アリーナアドレスログ削除
+- ✅ 性能: V-01 admit fd 再利用 / V-02 saveInoState debounce / V-03 並列プリウォーム / V-04 free-list O(log n) 化 / V-05 coalesce sort 削減 / V-06 goroutine pool
+- ✅ リファクタリング: W-01 WarmCache 型統一 / W-02 InoAllocator 型集約 / W-03 stats サンプラ統合
+
+P2: V2-01 DiskCache サイズ追跡改善 ✅ 完了 2026-10-10
+
 **2026-10-07 更新 — S-06/T-04/T-05/S-09 完了**:
 
-残り: なし (P0/P1 の全タスク完了)
+残り: なし (P0/P1 の全タスク完了、新規課題は上記)
 
 完了済 (2026-10-06〜07):
 - ✅ T-01 `pruneAdmitsTo` arena リーク

@@ -107,6 +107,68 @@ func TestCoalesceArenaFree_UnsortedInput(t *testing.T) {
 	}
 }
 
+// TestInsertArenaFreeBySize_MaintainsSizeOrder pins V-05: every
+// insertArenaFreeBySize call must leave the free-list sorted ascending
+// by size so AdmitContent's sort.Search (V-04) finds the best-fit
+// chunk in O(log n) without a full scan.
+func TestInsertArenaFreeBySize_MaintainsSizeOrder(t *testing.T) {
+	var free []arenaChunk
+	inserts := []arenaChunk{
+		{offset: 500, size: 75},
+		{offset: 100, size: 200},
+		{offset: 0, size: 10},
+		{offset: 300, size: 200}, // duplicate size — stable insert
+		{offset: 900, size: 50},
+	}
+	for _, c := range inserts {
+		free = insertArenaFreeBySize(free, c)
+		for i := 1; i < len(free); i++ {
+			if free[i].size < free[i-1].size {
+				t.Errorf("not size-sorted after inserting %+v: %v", c, free)
+				break
+			}
+		}
+	}
+}
+
+// TestCoalesceArenaFree_OutputIsSizeSorted pins V-04: coalesceArenaFree
+// must always return a size-sorted slice so AdmitContent's sort.Search
+// invariant holds after every eviction-triggered coalesce.
+func TestCoalesceArenaFree_OutputIsSizeSorted(t *testing.T) {
+	cases := []struct {
+		name    string
+		free    []arenaChunk
+		nextOff uint64
+	}{
+		{
+			name:    "two distinct sizes after merge",
+			free:    []arenaChunk{{offset: 0, size: 100}, {offset: 100, size: 100}, {offset: 200, size: 50}, {offset: 500, size: 40}},
+			nextOff: 10_000,
+		},
+		{
+			name:    "tail folded into bump",
+			free:    []arenaChunk{{offset: 900, size: 100}, {offset: 100, size: 200}},
+			nextOff: 1000,
+		},
+		{
+			name:    "all chunks merge into one",
+			free:    []arenaChunk{{offset: 400, size: 100}, {offset: 0, size: 200}, {offset: 200, size: 100}, {offset: 300, size: 100}},
+			nextOff: 10_000,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := coalesceArenaFree(tc.free, tc.nextOff)
+			for i := 1; i < len(got); i++ {
+				if got[i].size < got[i-1].size {
+					t.Errorf("not size-sorted at [%d]: %+v", i, got)
+					break
+				}
+			}
+		})
+	}
+}
+
 func equalChunks(a, b []arenaChunk) bool {
 	if len(a) != len(b) {
 		return false
