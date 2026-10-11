@@ -163,12 +163,14 @@ run_one() {
 	# (daemon upcall + re-admit). This is the true cache miss, whereas
 	# fast_path_hits/slow_path_misses count fentry hits on the BPF-side
 	# inode_index which stays populated even after admit eviction.
-	local b_miss b_reload b_evict b_admits
+	local b_miss b_reload b_evict b_admits b_folio_hits b_read_iter_hits
 	b_miss=$(read_counter s3fs_ebpf_read_miss_upcalls_total)
 	b_reload=$(read_counter s3fs_ebpf_read_miss_errors_total)
 	b_evict=$(read_counter s3fs_ebpf_policy_evictions_total)
 	b_admits=$(read_counter s3fs_ebpf_admits_current)
-	log "$pol: baseline miss=$b_miss err=$b_reload evict=$b_evict admits_current=$b_admits"
+	b_folio_hits=$(read_counter s3fs_ebpf_folio_hits_total)
+	b_read_iter_hits=$(read_counter s3fs_ebpf_read_iter_hits_total)
+	log "$pol: baseline miss=$b_miss err=$b_reload evict=$b_evict admits_current=$b_admits folio=$b_folio_hits iter=$b_read_iter_hits"
 	# Effective cache size: admit-set samples taken at every interleave
 	# point and at the end of the workload.
 	local adm_sum=0 adm_n=0 adm_max=0 adm
@@ -183,14 +185,15 @@ run_one() {
 	}
 
 	log "$pol: running $N_ACCESS accesses (with in-workload eval every $INTERLEAVE)"
-	local start_ns end_ns i=0
+	local start_ns end_ns i=0 errs=0
 	start_ns=$(date +%s%N)
 	while read -r idx; do
-		# `cat` triggers open+getattr+read → fast_hits (fentry on
-		# simple_getattr) if in admit, slow_misses otherwise. Errors
-		# ignored: after eviction the first re-cat blocks on upcall,
-		# but doesn't fail.
-		sudo cat "$MOUNT/hitrate_${idx}.txt" >/dev/null 2>&1 || true
+		# `cat` triggers open+getattr+read → folio_hit if in arena,
+		# upcall miss otherwise. Track non-zero exit so U-01 errs
+		# column shows real failures, not misses miscounted as hits.
+		if ! sudo cat "$MOUNT/hitrate_${idx}.txt" >/dev/null 2>&1; then
+			errs=$((errs + 1))
+		fi
 		i=$((i + 1))
 		# Interleave policy eval rounds so per-hit signal (CMS bump,
 		# visited bit, freq counter) has a chance to influence
@@ -209,30 +212,39 @@ run_one() {
 	log "$pol: workload done, settling ${POST}s for counter mirror"
 	sleep "$POST"
 
-	local f_miss f_reload f_evict
+	local f_miss f_reload f_evict f_folio_hits f_read_iter_hits
 	f_miss=$(read_counter s3fs_ebpf_read_miss_upcalls_total)
 	# shellcheck disable=SC2034  # kept for symmetry with b_reload
 	f_reload=$(read_counter s3fs_ebpf_read_miss_errors_total)
 	f_evict=$(read_counter s3fs_ebpf_policy_evictions_total)
+	f_folio_hits=$(read_counter s3fs_ebpf_folio_hits_total)
+	f_read_iter_hits=$(read_counter s3fs_ebpf_read_iter_hits_total)
 
-	local d_miss d_evict d_hits total rate ms_per
+	local d_miss d_evict d_folio_hits d_read_iter_hits d_page_cache_hits total rate_arena rate_total ms_per
 	d_miss=$((f_miss - b_miss))
 	d_evict=$((f_evict - b_evict))
-	d_hits=$((N_ACCESS - d_miss))
+	d_folio_hits=$((f_folio_hits - b_folio_hits))
+	d_read_iter_hits=$((f_read_iter_hits - b_read_iter_hits))
+	# page-cache approx: iter_hits that were neither arena hits nor upcall misses.
+	# Can be slightly negative due to counter-read races; floor at 0.
+	d_page_cache_hits=$(( d_read_iter_hits - d_folio_hits - d_miss ))
+	[ "$d_page_cache_hits" -lt 0 ] && d_page_cache_hits=0
 	total=$N_ACCESS
 	if [ "$total" -gt 0 ]; then
-		rate=$(awk "BEGIN{printf \"%.2f\", 100*$d_hits/$total}")
+		rate_arena=$(awk "BEGIN{printf \"%.2f\", 100*$d_folio_hits/$total}")
+		rate_total=$(awk "BEGIN{printf \"%.2f\", 100*($d_folio_hits+$d_page_cache_hits)/$total}")
 	else
-		rate="-"
+		rate_arena="-"
+		rate_total="-"
 	fi
 	ms_per=$(awk "BEGIN{printf \"%.2f\", ($end_ns-$start_ns)/1000000/$N_ACCESS}")
 
 	local adm_mean
 	adm_mean=$(awk "BEGIN{printf \"%.1f\", $adm_sum/($adm_n>0?$adm_n:1)}")
 
-	# One line per policy — the comparison table.
-	printf 'RESULT policy=%-14s  hits=%5d  misses=%5d  rate=%6s%%  evictions=%5d  adm_mean=%5s  adm_max=%3d  ms/access=%s\n' \
-		"$pol" "$d_hits" "$d_miss" "$rate" "$d_evict" "$adm_mean" "$adm_max" "$ms_per" | tee -a "$OUT/summary.txt"
+	# folio=arena hits; pc=page-cache approx; rate_arena=folio/N; rate_total=(folio+pc)/N.
+	printf 'RESULT policy=%-14s  folio=%5d  pc=%5d  miss=%5d  err=%3d  rate_arena=%6s%%  rate_total=%6s%%  evictions=%5d  adm_mean=%5s  adm_max=%3d  ms/access=%s\n' \
+		"$pol" "$d_folio_hits" "$d_page_cache_hits" "$d_miss" "$errs" "$rate_arena" "$rate_total" "$d_evict" "$adm_mean" "$adm_max" "$ms_per" | tee -a "$OUT/summary.txt"
 }
 
 # Reference bounds on the exact trace the live runs used. trace-replay

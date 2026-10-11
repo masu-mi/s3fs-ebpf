@@ -69,22 +69,25 @@ run_stat() {
 		--allow_file_create=0 --size=1 --bs=1 2>&1 \
 		| awk -v L="$label" -v J="$jobs" '
 			/IOPS=/ {
-				# read: IOPS=15.4M, BW=...
 				match($0, /IOPS=[^,]+/); iops=substr($0, RSTART+5, RLENGTH-5)
 			}
-			/clat \(nsec\)/ {
-				match($0, /avg=[0-9.]+/); avg=substr($0, RSTART+4, RLENGTH-4)
+			/clat \((nsec|usec|msec)\)/ {
+				match($0, /avg=[0-9.]+/); raw=substr($0, RSTART+4, RLENGTH-4)
+				unit = ($0 ~ /usec/) ? 1000 : ($0 ~ /msec/) ? 1000000 : 1
+				avg = raw * unit
 			}
-			END { printf "%-11s %3d %10s %10s\n", L, J, iops, avg }
+			END { printf "%-11s %3d %10s %10.0f\n", L, J, iops, avg }
 		'
 }
 
 # ------------------------------------------------------------------
 # fio read sweep on the same $FILE, with numjobs threads. Small file
-# so this reduces to "many threads doing tiny reads on a shared fd";
-# for ebpf that hits the .read_folio → arena path repeatedly and
-# stresses the folio lock, for fuse-raw it forces a FUSE daemon
-# round-trip per read.
+# so this reduces to "many threads doing tiny reads on a shared fd".
+# Page cache is dropped before each run (U-05) so both ebpf and
+# fuse-raw hit their respective kernel paths from a cold page cache:
+# ebpf → .read_folio → arena, fuse-raw → FUSE upcall per read.
+# This isolates the arena/FUSE I/O path rather than measuring OS
+# page-cache syscall overhead.
 # ------------------------------------------------------------------
 run_read() {
 	local mp=$1 label=$2 jobs=$3
@@ -96,11 +99,13 @@ run_read() {
 			/IOPS=/ {
 				match($0, /IOPS=[^,]+/); iops=substr($0, RSTART+5, RLENGTH-5)
 			}
-			/clat \(nsec\)/ && !seen {
-				match($0, /avg=[0-9.]+/); avg=substr($0, RSTART+4, RLENGTH-4)
+			/clat \((nsec|usec|msec)\)/ && !seen {
+				match($0, /avg=[0-9.]+/); raw=substr($0, RSTART+4, RLENGTH-4)
+				unit = ($0 ~ /usec/) ? 1000 : ($0 ~ /msec/) ? 1000000 : 1
+				avg = raw * unit
 				seen = 1
 			}
-			END { printf "%-11s %3d %10s %10s\n", L, J, iops, avg }
+			END { printf "%-11s %3d %10s %10.0f\n", L, J, iops, avg }
 		'
 }
 
@@ -115,7 +120,7 @@ echo "" > "$OUT_DIR/stat.md"
 	echo '## fio filestat parallel scale (stat, small file)'
 	echo
 	echo '```'
-	printf "%-11s %3s %10s %10s\n" "label" "job" "IOPS" "clat_ns"
+	printf "%-11s %3s %10s %10s\n" "label" "job" "IOPS" "clat_ns(norm)"
 	for jobs in $JOBS_LIST; do
 		log "stat numjobs=$jobs"
 		run_stat "$MP_EBPF"       'ebpf'       "$jobs"
@@ -130,11 +135,14 @@ cat "$OUT_DIR/stat.md" >&2
 	echo '## fio psync read scale (single small file, shared)'
 	echo
 	echo '```'
-	printf "%-11s %3s %10s %10s\n" "label" "job" "IOPS" "clat_ns"
+	printf "%-11s %3s %10s %10s\n" "label" "job" "IOPS" "clat_ns(norm)"
 	for jobs in $JOBS_LIST; do
 		log "read numjobs=$jobs"
+		sync; sudo sysctl -q -w vm.drop_caches=1
 		run_read "$MP_EBPF"       'ebpf'       "$jobs"
+		sync; sudo sysctl -q -w vm.drop_caches=1
 		run_read "$MP_FUSE_RAW"   'fuse-raw'   "$jobs"
+		sync; sudo sysctl -q -w vm.drop_caches=1
 		run_read "$MP_FUSE_CACHE" 'fuse-cache' "$jobs"
 	done
 	echo '```'

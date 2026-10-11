@@ -74,9 +74,13 @@ trap stop_all EXIT
 # ------------------------------------------------------------------
 run_size() {
 	local label=$1 sizebytes=$2 sizehuman=$3
-	local target_ebpf="$MP_EBPF/w-${label}.bin"
-	local target_fuse_raw="$MP_FUSE_RAW/w-${label}.bin"
-	local target_fuse_cache="$MP_FUSE_CACHE/w-${label}.bin"
+	# Each backend gets a distinct S3 key so overwrite races don't hide
+	# durability failures. ebpf (fire-and-forget) and ebpf-fsync (blocking)
+	# are also separated so the ebpf verify is meaningful on its own.
+	local target_fuse_raw="$MP_FUSE_RAW/w-${label}-fuse-raw.bin"
+	local target_fuse_cache="$MP_FUSE_CACHE/w-${label}-fuse-cache.bin"
+	local target_ebpf="$MP_EBPF/w-${label}-ebpf.bin"
+	local target_ebpf_fsync="$MP_EBPF/w-${label}-fsync.bin"
 	local payload="/tmp/w-${label}.bin"
 
 	log "prep $sizehuman payload"
@@ -85,27 +89,43 @@ run_size() {
 	log "seed targets ($sizehuman)"
 	# Use dd conv=notrunc so write-back overwrites the whole file in
 	# place — matches the common "log rotation" style workload.
-	sudo dd if="$payload" of="$target_ebpf"       bs="$sizebytes" count=1 conv=notrunc 2>/dev/null
 	sudo dd if="$payload" of="$target_fuse_raw"   bs="$sizebytes" count=1 conv=notrunc 2>/dev/null
 	sudo dd if="$payload" of="$target_fuse_cache" bs="$sizebytes" count=1 conv=notrunc 2>/dev/null
+	sudo dd if="$payload" of="$target_ebpf"       bs="$sizebytes" count=1 conv=notrunc 2>/dev/null
+	sudo dd if="$payload" of="$target_ebpf_fsync" bs="$sizebytes" count=1 conv=notrunc 2>/dev/null
 
 	log "hyperfine dd overwrite ($sizehuman, $RUNS runs)"
-	# --show-output=0 keeps stderr clean; each dd emits a stats line.
 	hyperfine --warmup "$WARMUP" --min-runs "$RUNS" --shell=none \
 		--export-markdown "$OUT_DIR/w-${label}.md" \
 		--command-name "fuse-raw"   "sudo dd if=$payload of=$target_fuse_raw   bs=$sizebytes count=1 conv=notrunc" \
 		--command-name "fuse-cache" "sudo dd if=$payload of=$target_fuse_cache bs=$sizebytes count=1 conv=notrunc" \
 		--command-name "ebpf"       "sudo dd if=$payload of=$target_ebpf       bs=$sizebytes count=1 conv=notrunc" \
-		--command-name "ebpf-fsync" "sudo dd if=$payload of=$target_ebpf       bs=$sizebytes count=1 conv=notrunc,fsync" \
+		--command-name "ebpf-fsync" "sudo dd if=$payload of=$target_ebpf_fsync bs=$sizebytes count=1 conv=notrunc,fsync" \
 		>&2 || true
 
-	log "verify byte-for-byte roundtrip via S3"
-	local from_s3="/tmp/w-${label}.from-s3"
-	mc_cat "w-${label}.bin" > "$from_s3" 2>/dev/null || true
-	if diff -q "$payload" "$from_s3" >/dev/null 2>&1; then
-		log "s3 body MATCH for w-${label}.bin"
+	log "verify byte-for-byte S3 roundtrip per backend"
+	# fuse backends are synchronous (close-to-durable); check immediately.
+	for backend_key in "fuse-raw:w-${label}-fuse-raw.bin" \
+	                   "fuse-cache:w-${label}-fuse-cache.bin" \
+	                   "ebpf-fsync:w-${label}-fsync.bin"; do
+		local bname="${backend_key%%:*}" bkey="${backend_key##*:}"
+		local from_s3="/tmp/w-${label}-${bname}.from-s3"
+		mc_cat "$bkey" > "$from_s3" 2>/dev/null || true
+		if diff -q "$payload" "$from_s3" >/dev/null 2>&1; then
+			log "s3 MATCH  $bname ($bkey)"
+		else
+			log "s3 MISMATCH $bname ($bkey)"
+		fi
+	done
+	# ebpf (fire-and-forget): PUT is async, allow coalescer+network time.
+	log "waiting 5s for ebpf fire-and-forget PUT to land..."
+	sleep 5
+	local from_s3_ebpf="/tmp/w-${label}-ebpf.from-s3"
+	mc_cat "w-${label}-ebpf.bin" > "$from_s3_ebpf" 2>/dev/null || true
+	if diff -q "$payload" "$from_s3_ebpf" >/dev/null 2>&1; then
+		log "s3 MATCH  ebpf (w-${label}-ebpf.bin) — PUT completed within 5s"
 	else
-		log "s3 body MISMATCH for w-${label}.bin"
+		log "s3 MISMATCH ebpf (w-${label}-ebpf.bin) — fire-and-forget PUT not yet durable"
 	fi
 }
 

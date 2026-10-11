@@ -63,6 +63,28 @@ func TestSIEVECapOne(t *testing.T) {
 	}
 }
 
+// TestWriteInvalidatesEntry verifies that a write to an admitted ino
+// removes it from the cache so the next read is a miss, for every policy.
+func TestWriteInvalidatesEntry(t *testing.T) {
+	ev := []Event{
+		{Ino: 1, Op: OpRead},  // miss — ino 1 admitted
+		{Ino: 1, Op: OpWrite}, // invalidate ino 1
+		{Ino: 1, Op: OpRead},  // miss — ino 1 must be re-admitted
+	}
+	policies := []Policy{
+		NewLRU(8),
+		NewSIEVE(8),
+		NewNoEvict(),
+		NewOPT(8, ev),
+	}
+	for _, p := range policies {
+		r := Replay(p, ev)
+		if r.Hits != 0 || r.Misses != 2 {
+			t.Fatalf("%s: hits=%d misses=%d, want 0/2", p.Name(), r.Hits, r.Misses)
+		}
+	}
+}
+
 func TestOPTIgnoresWrites(t *testing.T) {
 	ev := []Event{
 		{Ino: 1, Op: OpRead}, {Ino: 9, Op: OpWrite},

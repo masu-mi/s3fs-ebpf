@@ -10,11 +10,16 @@ import "math"
 type Policy interface {
 	Name() string
 
-	// Access records one workload event and returns whether it was
+	// Access records one read event and returns whether it was
 	// a cache hit (true) or a miss that admitted a new item (false).
 	// The simulator is responsible for the admit-then-evict cycle
 	// when the cache fills up.
 	Access(ino uint64) bool
+
+	// Invalidate removes ino from the cache (write semantics). A
+	// subsequent Access for the same ino will be a miss. No-ops if
+	// ino is not currently admitted.
+	Invalidate(ino uint64)
 
 	// Size reports the current admit hash size (for debug / stats).
 	Size() int
@@ -30,18 +35,22 @@ type Result struct {
 }
 
 // Replay runs `events` against `p` and returns hits/misses tally.
-// One line = one policy behavior over the trace; caller loops for
-// multi-policy comparison.
+// Read events drive Access; write events call Invalidate so the next
+// read of the same ino counts as a miss. Only reads count toward
+// Accesses (and therefore Rate).
 func Replay(p Policy, events []Event) Result {
-	r := Result{Policy: p.Name(), Accesses: len(events)}
+	r := Result{Policy: p.Name()}
 	for _, e := range events {
-		if e.Op != OpRead {
-			continue // write / delete: simulator scope for now is read
-		}
-		if p.Access(e.Ino) {
-			r.Hits++
-		} else {
-			r.Misses++
+		switch e.Op {
+		case OpRead:
+			r.Accesses++
+			if p.Access(e.Ino) {
+				r.Hits++
+			} else {
+				r.Misses++
+			}
+		case OpWrite:
+			p.Invalidate(e.Ino)
 		}
 	}
 	if r.Accesses > 0 {
@@ -156,6 +165,27 @@ func (l *lruSim) Access(ino uint64) bool {
 	return false
 }
 
+func (l *lruSim) Invalidate(ino uint64) {
+	if l.items == nil {
+		return
+	}
+	n, ok := l.items[ino]
+	if !ok {
+		return
+	}
+	delete(l.items, ino)
+	if n.prev != nil {
+		n.prev.next = n.next
+	} else {
+		l.order.head = n.next
+	}
+	if n.next != nil {
+		n.next.prev = n.prev
+	} else {
+		l.order.tail = n.prev
+	}
+}
+
 func (l *lruSim) Size() int { return len(l.items) }
 
 // NewSIEVE returns a SIEVE implementation matching
@@ -259,6 +289,28 @@ func (s *sieveSim) unlink(n *lruNode) {
 	}
 }
 
+func (s *sieveSim) Invalidate(ino uint64) {
+	if s.items == nil {
+		return
+	}
+	e, ok := s.items[ino]
+	if !ok {
+		return
+	}
+	// Advance hand past the evicted node to avoid a dangling pointer.
+	if s.hand == e.node {
+		s.hand = e.node.prev
+		if s.hand == nil {
+			s.hand = s.order.tail
+		}
+		if s.hand == e.node {
+			s.hand = nil
+		}
+	}
+	delete(s.items, ino)
+	s.unlink(e.node)
+}
+
 func (s *sieveSim) Size() int { return len(s.items) }
 
 // NewOPT returns Belady's offline-optimal policy (MIN) for `events`:
@@ -322,6 +374,8 @@ func (o *optSim) Access(ino uint64) bool {
 	return false
 }
 
+func (o *optSim) Invalidate(ino uint64) { delete(o.items, ino) }
+
 func (o *optSim) Size() int { return len(o.items) }
 
 // NewNoEvict returns an unbounded cache: every re-read hits. It is the
@@ -341,5 +395,7 @@ func (n *noEvictSim) Access(ino uint64) bool {
 	n.items[ino] = struct{}{}
 	return false
 }
+
+func (n *noEvictSim) Invalidate(ino uint64) { delete(n.items, ino) }
 
 func (n *noEvictSim) Size() int { return len(n.items) }

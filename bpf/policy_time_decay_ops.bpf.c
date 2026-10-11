@@ -110,11 +110,18 @@ int BPF_PROG(time_decay_evict, __u64 ino)
 	__u64 now = s3fs_kfunc_time_ns();
 
 	if (!last) {
-		/* First sight — seed with now so a brand-new admit doesn't
-		 * get evicted before its first read has a chance to fire. */
-		bpf_map_update_elem(&time_decay_last_hit, &ino, &now, BPF_ANY);
+		/* First sight — store sentinel 0 meaning "no on_hit yet".
+		 * on_hit will overwrite with a real timestamp (always > 0 since
+		 * the clock is already running at boot). This prevents the bench
+		 * convergence loop (4 eval rounds × 3 s = 12 s > DECAY_NS = 5 s)
+		 * from evicting all items before the workload starts. */
+		__u64 zero = 0;
+		bpf_map_update_elem(&time_decay_last_hit, &ino, &zero, BPF_ANY);
 		return 0;
 	}
+	/* Sentinel 0 = on_hit has never fired → infinite grace. */
+	if (!*last)
+		return 0;
 	if (now - *last > DECAY_NS)
 		return 1;
 	return 0;

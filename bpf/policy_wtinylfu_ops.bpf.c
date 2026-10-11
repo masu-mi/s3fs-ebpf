@@ -32,10 +32,11 @@
 //   - on_hit bumps all 4 slots (up to 15). Estimator = min across the
 //     4 hashes.
 //   - on_evict: cms_estimate(ino) < EVICT_THRESHOLD → vote evict.
-//   - Periodic aging: every AGE_INTERVAL admit rounds, halve every
-//     CMS counter via bpf_loop(). This mimics TinyLFU's "reset by
-//     half" step which keeps the sketch from saturating on hot items
-//     and drowning out late-arriving warm items.
+//   - Periodic aging (X-03): every AGE_INTERVAL_HITS on_hit calls,
+//     halve every CMS counter via bpf_loop(). Driven by actual hit
+//     count rather than admit rounds so bench forced evals and daemon
+//     sync cycles do not trigger spurious aging on cold-cache workloads.
+//     Mimics TinyLFU's "reset by half" step.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -60,8 +61,8 @@ struct s3fs_policy_ops {
 #define CMS_W_MASK     (CMS_W - 1)
 #define CMS_D          4U     /* rows */
 #define CMS_MAX        15U    /* 4-bit counter saturation */
-#define EVICT_THRESHOLD 2U    /* on_evict votes when estimate < this */
-#define AGE_INTERVAL   4U     /* halve CMS every N on_admit calls */
+#define EVICT_THRESHOLD 1U    /* evict only est==0 (never hit); est≥1 = keep */
+#define AGE_INTERVAL_HITS 512U /* halve CMS every N on_hit calls (X-03) */
 
 /* One flat array — index by row*W + slot. u8 wastes 4 bits per entry
  * but avoids bit-packing headaches in the verifier. */
@@ -73,9 +74,10 @@ struct {
 } wtinylfu_cms SEC(".maps");
 
 enum {
-	PSTAT_INVOCATIONS = 0,
+	PSTAT_INVOCATIONS = 0,  /* on_admit call count */
 	PSTAT_LAST_COUNT  = 1,
 	PSTAT_LAST_HINT   = 2,
+	PSTAT_HITS        = 3,  /* cumulative on_hit calls; drives aging (X-03) */
 	PSTAT_MAX,
 };
 
@@ -168,13 +170,8 @@ int BPF_PROG(wtinylfu_admit, __u64 count, __u64 hint)
 
 	k = PSTAT_INVOCATIONS;
 	sp = bpf_map_lookup_elem(&policy_stats, &k);
-	if (sp) {
-		__u64 inv = __sync_fetch_and_add(sp, 1) + 1;
-		/* AGE_INTERVAL is a power of two, so this is a cheap
-		 * bitmask check for "every Nth call". */
-		if ((inv & (AGE_INTERVAL - 1)) == 0)
-			cms_age();
-	}
+	if (sp)
+		__sync_fetch_and_add(sp, 1);
 	k = PSTAT_LAST_COUNT;
 	sp = bpf_map_lookup_elem(&policy_stats, &k);
 	if (sp)
@@ -192,10 +189,9 @@ int BPF_PROG(wtinylfu_evict, __u64 ino)
 {
 	__u32 est = cms_estimate(ino);
 
-	/* First-sight items have est=0; grace them once so a brand-new
-	 * admit doesn't get kicked before it has any hits. */
-	if (est == 0)
-		return 0;
+	/* Evict only items with est==0 (never accessed since admitted).
+	 * Items with est≥1 (at least one on_hit) are kept. This eliminates
+	 * the est=1 eviction valley present when EVICT_THRESHOLD was 2. */
 	if (est < EVICT_THRESHOLD)
 		return 1;
 	return 0;
@@ -210,7 +206,22 @@ int BPF_PROG(wtinylfu_pressure, __u64 count, __u64 threshold)
 SEC("struct_ops/on_hit")
 int BPF_PROG(wtinylfu_hit, __u64 ino)
 {
+	__u32 k;
+	__u64 *sp;
+
 	cms_bump(ino);
+
+	/* X-03: age CMS every AGE_INTERVAL_HITS total hits so aging is
+	 * proportional to access frequency, not admit-round count. Bench
+	 * forced evals and daemon sync cycles no longer trigger spurious
+	 * aging that evicts warm items. */
+	k = PSTAT_HITS;
+	sp = bpf_map_lookup_elem(&policy_stats, &k);
+	if (sp) {
+		__u64 hits = __sync_fetch_and_add(sp, 1) + 1;
+		if ((hits & (AGE_INTERVAL_HITS - 1)) == 0)
+			cms_age();
+	}
 	return 0;
 }
 

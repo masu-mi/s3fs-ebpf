@@ -32,9 +32,21 @@ below supersede all earlier numbers.**
 - Convergence: 4 explicit `POST /policy/eval` calls, 3 s apart,
   drive multi-round eviction cascades without needing bucket-side
   churn.
-- Miss metric: `s3fs_ebpf_read_miss_upcalls_total` (kmod-side
-  `admit_snapshot()` miss → path-C upcall). Rate =
-  `(N_ACCESS - Δmisses) / N_ACCESS`.
+- **Output columns** (U-01/U-02, 2026-10-11):
+  - `folio` — Δ`s3fs_ebpf_folio_hits_total`: kmod `.read_folio` arena
+    hits. The true policy signal — only fires when the ino is in the
+    admit set and its folio is in the BPF arena.
+  - `pc` — page-cache approx: Δread_iter_hits − folio − miss, floored
+    at 0. Counts re-reads served from the kernel page cache after a
+    prior arena admission (not filtered by the policy).
+  - `miss` — Δ`s3fs_ebpf_read_miss_upcalls_total`: upcall misses (ino
+    not in admit set → path-C daemon upcall).
+  - `err` — count of `cat` calls that returned non-zero. Non-zero means
+    the file couldn't be read at all (distinct from a cache miss, which
+    still serves the data via upcall). Should stay 0 on a healthy stack.
+  - `rate_arena` = folio / N_ACCESS: the policy-controlled hit rate.
+  - `rate_total` = (folio + pc) / N_ACCESS: total read-serve rate
+    including page-cache assists.
 - `adm_mean` / `adm_max` sampled at every `INTERLEAVE=25` accesses;
   all rows show 8.9 / 9 confirming capacity is enforced (never above
   softcap+1 during the first prewarm sync).

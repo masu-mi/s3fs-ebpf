@@ -69,8 +69,10 @@ start_ebpf() {
 
 stop_all() {
 	log "stopping"
-	sudo pkill -9 -f 'bench-parallel-reader' 2>/dev/null || true
-	sudo pkill -9 -f 'bench-parallel-writer' 2>/dev/null || true
+	# Kill background workers by job PID; pkill is not used because the
+	# subshells run as 'bash -c "..."' and don't have a distinctive
+	# process name to match against.
+	jobs -p | xargs -r sudo kill -9 2>/dev/null || true
 	ebpf_stop "$MP_EBPF"
 	umount_hard "$MP_FUSE_CACHE"
 	umount_hard "$MP_FUSE_RAW"
@@ -90,6 +92,7 @@ spawn_readers() {
 	local i
 	for i in $(seq 1 "$count"); do
 		timeout --kill-after=5s "${duration}s" sudo -n bash -c "
+			# bench-parallel-reader
 			set +e
 			end=\$((\$(date +%s) + $duration))
 			cnt=0
@@ -109,11 +112,12 @@ spawn_writers() {
 	local i
 	for i in $(seq 1 "$count"); do
 		timeout --kill-after=5s "${duration}s" sudo -n bash -c "
+			# bench-parallel-writer
 			set +e
 			end=\$((\$(date +%s) + $duration))
 			cnt=0
 			while [ \$(date +%s) -lt \$end ]; do
-				timeout 2s dd if=/dev/zero of=$mp/w-parallel-$i.txt bs=64 count=1 conv=notrunc 2>/dev/null && cnt=\$((cnt+1))
+				timeout 2s dd if=/dev/zero of=$mp/w-parallel-${mp##*/}-$i.txt bs=64 count=1 conv=notrunc 2>/dev/null && cnt=\$((cnt+1))
 			done
 			echo \"writer $mp #$i: \$cnt ops\"
 		" > "$OUT_DIR/writer-${mp##*/}-$i.log" 2>&1 &
