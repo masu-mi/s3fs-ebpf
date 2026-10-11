@@ -257,10 +257,10 @@ syscall.Syscall(SYS_BPF, BPF_LINK_UPDATE, uintptr(unsafe.Pointer(&attr)), ...)
 
 | 指標 | fuse-raw | ebpf-nocache | 差 |
 |---|---:|---:|---:|
-| open+read+close p50 (S-09修正後) | 1.69 ms | **558 µs** | **3× 速い** |
+| open+read+close p50 (2026-10-11、同一 run) | 1.691 ms | **526 µs** | **3.2× 速い** |
 
-差の候補は `/dev/fuse` queue + open ごとの getattr upcall がないこと。**キャッシュ条件を揃えても残る差**であることは言えるが、内訳は未測定 — ebpf-nocache も miss ごとに daemon へ upcall + S3 GET しており、S3 クライアント実装 (Go daemon vs s3fs-fuse/libcurl、open 時の HEAD の有無) の差も含む。perf stat の CPU 時間差は 12% しかなく (§7.7.3、S-09 前)、1.1 ms の差の大半は待ち時間側。「fuse-raw がどう最適化しても消えない」とは言わない。
-- 注: 1.69 ms (2026-10-05 run) と 558 µs (2026-10-06、S-09 修正後) は **別 run**。同一 run で取り直すまでは「約 3×」と丸める
+差の候補は `/dev/fuse` queue + open ごとの getattr upcall がないこと。**キャッシュ条件を揃えても残る差**であることは言えるが、内訳は未測定 — ebpf-nocache も miss ごとに daemon へ upcall + S3 GET しており、S3 クライアント実装 (Go daemon vs s3fs-fuse/libcurl、open 時の HEAD の有無) の差も含む。perf stat の CPU 時間差は 8% (10-11: 187 vs 203 µs)、1.2 ms の差の大半は待ち時間側。「fuse-raw がどう最適化しても消えない」とは言わない。
+- 注: 1.691 ms と 526 µs は **2026-10-11 の同一 run** (`bench-3way.sh` microbench §7.3 と §7.7.2)。「約 3×」は 3.22× が実測値
 
 #### キャッシュ有り同士: ebpf-A+C vs fuse-cache
 
@@ -268,13 +268,13 @@ fuse を `-o use_cache + kernel_cache` で最大限最適化した状態でも�
 
 | 指標 | fuse-cache | ebpf-A+C | 差 |
 |---|---:|---:|---:|
-| warm cat (1 MiB) | 1.5 ms | **0.7 ms** | 2.1× |
-| open+read+close p50 | 526 µs | **3.0 µs** | **175×** |
-| CPU cycles/op | 431k | **331k** | 1.3× 少ない |
-| IPC | 0.79 | **1.03** | (補足のみ。下記注) |
+| warm cat (1 MiB) | 1.6 ms | **730 µs** | 2.1× |
+| open+read+close p50 (同一 run) | 519 µs | **3.075 µs** | **169×** |
+| CPU cycles/op | 441k | **328k** | 1.3× 少ない |
+| IPC | 0.78 | **1.05** | (補足のみ。下記注) |
 
-open+read+close の 175× は **open ごとの FUSE upcall**（fuse-cache でも消えない）が主因と見ている (推定。opcode 別の upcall 数は未計測)。`ls` や小ファイル大量アクセスのワークロードで直撃する。
-- cycles/IPC は `cat` 200 回を `perf stat` で包んだプロセス全体の値で、fork/exec が支配的。「パイプライン stall が少ない」の根拠には弱いので、スライドでは CPU 時間差 (121 vs 159 µs) までに留める
+open+read+close の 169× は **open ごとの FUSE upcall**（fuse-cache でも消えない）が主因と見ている (推定。opcode 別の upcall 数は未計測)。`ls` や小ファイル大量アクセスのワークロードで直撃する。
+- cycles/IPC は `cat` 200 回を `perf stat` で包んだプロセス全体の値で、fork/exec が支配的。「パイプライン stall が少ない」の根拠には弱いので、スライドでは CPU 時間差 (118 vs 163 µs) までに留める
 - 逆に **open 済み fd の hot read は差が無い** (§10.2 fio psync: 1 job で ebpf 1199k / fuse-raw 1165k / fuse-cache 1143k IOPS)。「read が速い」ではなく「open を含むアクセスが速い」と言う
 
 #### write (durable, S-08修正後)
@@ -393,14 +393,15 @@ ctx->ret = n ? -1 : cnt;         // n != NULL なら予算切れで抜けた
 
 ### 数字の扱い (本文に注記済み)
 
-- **nocache 3×**: 1.689 ms (10-05 run) と 558 µs (10-06 run) は別 run。内訳 (FUSE upcall / S3 クライアント差 / HEAD の有無) も未分解。「構造の差なので fuse-raw がどう最適化しても消えない」は言いすぎなので削除
+- **nocache 3×**: ✅ **2026-10-11 の同一 run で確定** — fuse-raw 1.691 ms / ebpf-nocache 526 µs = 3.22×。内訳 (FUSE upcall / S3 クライアント差 / HEAD の有無) は未分解
+- **ebpf-A+C vs fuse-cache ~169×**: ✅ **同一 run** — fuse-cache 519 µs / ebpf-A+C 3.075 µs = 168.8×
 - **IPC / cycles**: `cat` プロセス全体 (fork/exec 込み) の値。パイプラインの議論には使わない
-- **write**: ebpf-fsync の min と fuse-raw の mean を並べていた。統計量を揃える
+- **write**: ebpf-fsync の min と fuse-raw の mean を並べていた。統計量を揃える (bench-write.sh 再実行で解消予定)
 - **hot read (open 済み fd)** は 3 者同等 (§10.2)。「open を含むアクセス」が速い、と限定して言う
 
 ### 発表前に追加で測ると良いもの (優先順)
 
-1. `bench-3way.sh` を 1 回通しで回し、fuse-raw / ebpf-nocache / fuse-cache / ebpf-A+C の microbench を **同一 run・複数回の中央値** で取り直す (3× と 175× の両方が同一 run 由来になる)
+1. ✅ `bench-3way.sh` 同一 run — 2026-10-11 に実施。3.2× と 169× が同一 run 由来で確定
 2. 3× の内訳: microbench 中の MinIO リクエスト数 / op (GET と HEAD を分けて) と、FUSE opcode 別 upcall 数 (`bpftrace` で `fuse_simple_request` などを数える)。HEAD の有無で差の大半が説明できるなら「FUSE 構造の差」とは言えない
 3. `bench-write.sh` を S-08 後のコードで 3 サイズ再計測 (mean ± σ)
 4. (任意) I-01 で追加した mount-s3 arm の実測 — 「他の FUSE 実装なら？」への回答材料

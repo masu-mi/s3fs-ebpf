@@ -255,37 +255,49 @@ s3fs-fuse      | cache-miss/op=1548.41  miss%=11.45
 
 計測条件は §1 と同じ (hyperfine warm/big + microbench read + perf stat)、`bench-3way.sh` で自動化。
 
-### 7.1 hyperfine warm cat — hello.txt (旧: 2026-09-xx、新: 2026-10-05)
+### 7.1 hyperfine warm cat — hello.txt (旧: 2026-09-xx、2026-10-05、新: 2026-10-11)
 
-| variant | 旧 mean | 新 mean |
-|---------|--------:|--------:|
-| fuse-raw | 6.3 ms ± 4.6 | 2.7 ms ± 0.7 |
-| fuse-cache | 1.9 ms ± 0.9 | 1.3 ms ± 0.1 |
-| ebpf-A+C | 757 µs ± 116 | **0.6 ms ± 0.0** |
+| variant | 旧 mean | 10-05 mean | **10-11 mean** |
+|---------|--------:|-----------:|---------------:|
+| fuse-raw | 6.3 ms ± 4.6 | 2.7 ms ± 0.7 | **2.9 ms ± 0.5** |
+| fuse-cache | 1.9 ms ± 0.9 | 1.3 ms ± 0.1 | **1.4 ms ± 0.2** |
+| ebpf-A+C | 757 µs ± 116 | 0.6 ms ± 0.0 | **609 µs ± 73** |
 
-新: fuse-cache vs raw **2.1×**、ebpf-A+C vs fuse-cache **2.2×**、vs raw **4.5×**
+10-11: fuse-cache vs raw **2.1×**、ebpf-A+C vs fuse-cache **2.3×**、vs raw **4.7×**
 
-### 7.2 hyperfine cat 1 MiB — big.bin (旧: 2026-09-xx、新: 2026-10-05)
+### 7.2 hyperfine cat 1 MiB — big.bin (旧: 2026-09-xx、2026-10-05、新: 2026-10-11)
 
-| variant | 旧 mean | 新 mean |
-|---------|--------:|--------:|
-| fuse-raw | 8.8 ms | 4.5 ms ± 0.5 |
-| fuse-cache | 1.9 ms | 1.5 ms ± 0.1 |
-| ebpf-A+C | 937 µs | **0.7 ms ± 0.1** |
+| variant | 旧 mean | 10-05 mean | **10-11 mean** |
+|---------|--------:|-----------:|---------------:|
+| fuse-raw | 8.8 ms | 4.5 ms ± 0.5 | **4.6 ms ± 0.5** |
+| fuse-cache | 1.9 ms | 1.5 ms ± 0.1 | **1.6 ms ± 0.3** |
+| ebpf-A+C | 937 µs | 0.7 ms ± 0.1 | **730 µs ± 68** |
 
-新: fuse-cache vs raw **3.0×**、ebpf-A+C vs fuse-cache **2.1×**、vs raw **6.4×**
+10-11: fuse-cache vs raw **2.9×**、ebpf-A+C vs fuse-cache **2.1×**、vs raw **6.3×**
 
-### 7.3 microbench read (open+read+close per iter, 20k iters、2026-10-05)
+### 7.3 microbench read (open+read+close per iter, 20k iters)
 
+**2026-10-05 run**:
 ```
 fuse-raw    | p50=1.689 ms   ops/s=  565
 fuse-cache  | p50=0.526 ms   ops/s=1 857      (3.2× faster than raw)
 ebpf-A+C    | p50=3.047 μs   ops/s=303 959    (175× faster than fuse-cache, 554× vs raw)
 ```
 
+**2026-10-11 run (ebpf-nocache と同一 run — 3× 比較の根拠)**:
+```
+fuse-raw    | p50=1.691 ms   ops/s=  564
+fuse-cache  | p50=0.519 ms   ops/s=1 878      (3.3× faster than raw)
+ebpf-A+C    | p50=3.075 μs   ops/s=308 104    (169× faster than fuse-cache, 550× vs raw)
+```
+
+ebpf-nocache p50=526 µs も同一 run → fuse-raw 1.691 ms / ebpf-nocache 526 µs = **3.22×** (同一 run 由来)。
+
 旧 (10k iters): fuse-raw p50=5.012 ms / fuse-cache p50=1.244 ms / ebpf-A+C p50=5.075 µs (245× vs fuse-cache)。比率傾向は同じで、新 run はシステム全体がより warm。
 
-### 7.4 perf stat (200 cats/op、2026-10-05)
+### 7.4 perf stat (200 cats/op)
+
+**2026-10-05**:
 
 | メトリック | fuse-raw | fuse-cache | ebpf-A+C |
 |---|---:|---:|---:|
@@ -296,7 +308,18 @@ ebpf-A+C    | p50=3.047 μs   ops/s=303 959    (175× faster than fuse-cache, 55
 | cache-miss / op | 6808 | 4897 | **2775** |
 | cache miss % | 39.4 | 31.1 | **23.7** |
 
-ebpf-A+C の優位 (旧値との比較): CPU 時間 192→121 µs (-37%)、IPC 0.70→1.03 (+47%)、cache-miss/op 624→2775。絶対値は新環境で変動しているが、3 者間の相対順位 (ebpf < fuse-cache < fuse-raw) は保たれている。
+**2026-10-11**:
+
+| メトリック | fuse-raw | fuse-cache | ebpf-A+C |
+|---|---:|---:|---:|
+| task-clock / op | 203 µs | 163 µs | **118 µs** |
+| cycles / op | 516k | 441k | **328k** |
+| IPC | 0.66 | 0.78 | **1.05** |
+| cache-refs / op | 17242 | 15654 | **10601** |
+| cache-miss / op | 6933 | 4944 | **2834** |
+| cache miss % | 40.2 | 31.6 | **26.7** |
+
+3 者間の相対順位 (ebpf < fuse-cache < fuse-raw) は両 run で保たれている。ebpf-A+C の IPC が 1.03→1.05 と依然 1.0 超。
 
 ### 7.5 解釈
 
@@ -306,14 +329,13 @@ ebpf-A+C の優位 (旧値との比較): CPU 時間 192→121 µs (-37%)、IPC 0
 - perf: cache-miss は raw の 2191 → cache の 864 と大幅減、ただし cycles/op は 12% 減にとどまる
 
 **ebpf-A+C の追加優位**:
-- **warm cat で fuse-cache の 2.45× 速い** — `.read_iter = generic_file_read_iter` で 2 回目以降のブロックが完全に page cache 直ヒット (kmod に落ちない)、`.read_folio` の initial fill も arena → GUP でユーザ空間を介さない
-- **read syscall (open+read+close ループ) で fuse-cache の 245× 速い** — open ごとの FUSE getattr upcall が無い。VFS の直パス
-- **CPU: cycles/op が fuse-cache の 87% 相当** — さらに IPC (0.70 vs 0.61) も上、パイプライン stall が少ない
-- **cache-miss は fuse-cache とほぼ同じ (624 vs 864)** — L1/L2 の効き自体は近い、差は L3 と TLB 領域と推測
+- **warm cat で fuse-cache の 2.1〜2.3× 速い** (10-05: 2.45×、10-11: 2.34×) — `.read_iter = generic_file_read_iter` で 2 回目以降のブロックが完全に page cache 直ヒット (kmod に落ちない)
+- **read syscall (open+read+close ループ) で fuse-cache の ~169× 速い** (10-11 同一 run: 519µs / 3.075µs = 168.8×) — open ごとの FUSE getattr upcall が無い。VFS の直パス
+- **CPU: cycles/op が fuse-cache の 74% 相当** (328k/441k、10-11) — さらに IPC 1.05 vs 0.78、パイプライン stall が少ない
 
-**結論 (Meetup narrative 更新)**:
+**結論 (Meetup narrative 更新、2026-10-11 同一 run で確定)**:
 
-現行 s3fs-fuse を最大限最適化 (`use_cache + kernel_cache`) しても、s3fs-ebpf B (A+C) は依然 **2.05〜2.45× 速い**。これは FUSE アーキテクチャの根本にある「open のたびに userspace daemon に問い合わせる」構造的コストを、s3fs-ebpf が **kmod + BPF fentry + admit table + page cache** で回避できているため。
+現行 s3fs-fuse を最大限最適化 (`use_cache + kernel_cache`) しても、s3fs-ebpf B (A+C) は依然 **2.1〜2.3× 速い** (warm cat)、**~169× 速い** (open+read+close)。ebpf-nocache と fuse-raw の 3.2× 差 (同一 run) は「キャッシュを揃えても残る構造差」として確認された。
 
 ### 7.6 まだ残る caveat
 
@@ -327,16 +349,21 @@ ebpf-A+C の優位 (旧値との比較): CPU 時間 192→121 µs (-37%)、IPC 0
 
 #### 7.7.1 hyperfine cat (fuse-raw vs ebpf-nocache)
 
+**2026-10-05 (S-09 修正前、bug 有り)**:
+
 | ファイル | fuse-raw | ebpf-nocache | 差 |
 |---------|--------:|-------------:|---:|
 | big.bin (1 MiB) | 4.5 ± 0.4 ms | 5.0 ± 0.4 ms | 1.11× 遅い |
-| hello.txt (tiny) | 2.7 ± 0.3 ms | 1.2 ± 0.4 ms | **2.3× 速い** |
+| hello.txt (tiny) | 2.7 ± 0.3 ms | 1.2 ± 0.4 ms | **2.3× 速い** (bug: 82% が arena hit) |
 
-big.bin では nocache が S3 GET 経由で fuse-raw とほぼ同等 (+11%)。tiny ファイルで nocache が速いのは **不審**:  
-- microbench 20k iter で `read_miss_upcalls = 3671` (18%) — 82% が cache ヒット
-- microbench p50 = 3.5 µs (ebpf-A+C の 3.0 µs とほぼ同じ)
+**2026-10-11 (S-09 修正後、fuse-raw / ebpf-nocache 同一 run)**:
 
-nocache=1 が tiny ファイルでキャッシュを完全には無効化していない可能性がある (admit hash の削除は行われるが arena データが残り、admit 再登録後に arena hit する経路が残っている疑い)。詳細は §バグリスト参照。
+| ファイル | fuse-raw | ebpf-nocache | 差 |
+|---------|--------:|-------------:|---:|
+| big.bin (1 MiB) | 4.5 ± 0.8 ms | 3.4 ± 0.3 ms | **1.3× 速い** |
+| hello.txt (tiny) | 2.7 ± 0.3 ms | 1.3 ± 0.2 ms | **2.0× 速い** |
+
+big.bin の 1.3× 差は確認。tiny ファイルの 2× 差は S-09 修正後でも残る (S3 クライアント実装差 / HEAD の有無等)。
 
 #### 7.7.2 microbench read (ebpf-nocache、20k iters)
 
@@ -350,16 +377,30 @@ ebpf-nocache | p50=3.542 µs   ops/s=213 034   (読み=18% miss のみ → 残�
 ```
 ebpf-nocache | p50=558 µs   ops/s=1 733   total=11.5 s / 20k iters   (≈100% S3 miss)
 ```
-558 µs × 20k = 11.16 s ≈ 実測 11.5 s で整合。miss rate はほぼ 100% に改善した。fuse-raw の p50=1.689 ms と比べ **3× 速い** — FUSE upcall overhead (getattr + /dev/fuse queue) が消えた分。
+この run の fuse-raw p50=1.689 ms は **別 run** (10-05) から引用。
+
+**2026-10-11 (S-09 修正後、fuse-raw と同一 run — 3× 比較の根拠)**:
+```
+ebpf-nocache | p50=526 µs   ops/s=1 872   total=10.7 s / 20k iters   (≈100% S3 miss)
+fuse-raw     | p50=1.691 ms  (同一 run §7.3)
+```
+1.691 ms / 526 µs = **3.22×** — 同一 run で確定。Meetup の「約 3×」は `3.22×` が実測値。
 
 #### 7.7.3 perf stat (ebpf-nocache、per cat)
 
+**2026-10-05 (S-09 修正前)**:
 ```
 task-clock=34.28 ms per-op=171.4 µs  cycles/op=418 490  IPC=0.82
 cache-refs/op=15 772  cache-miss/op=4782  miss%=30.3
 ```
 
-(2026-10-05 計測、S-09 修正前)。fuse-raw (195 µs、IPC=0.70) と比べ CPU 時間は 12% 少なく、cache-miss% が 39% → 30% に改善。S-09 修正後は miss rate が上がるため latency は増えるが (558 µs/op)、FUSE overhead 分は依然差が残る。
+**2026-10-11 (S-09 修正後)**:
+```
+task-clock=37.32 ms per-op=186.6 µs  cycles/op=460 436  IPC=0.74
+cache-refs/op=16 795  cache-miss/op=5301  miss%=31.6
+```
+
+S-09 修正後は S3 GET が増えるため CPU 時間が 171 → 187 µs に増加。fuse-raw (10-11: 203 µs) と比べ 8% 少ない。IPC は 0.74 vs 0.66 で nocache 優位。
 
 #### 7.7.4 S-09 fix まとめ (2026-10-06)
 
