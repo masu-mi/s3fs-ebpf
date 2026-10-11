@@ -448,7 +448,7 @@ S-09 修正後は S3 GET が増えるため CPU 時間が 171 → 187 µs に増
 | 10 MiB  |  **18.5 ms ± 2.0** | 217.2 ms ± 7.5  | 240.8 ms ± 24.3 | 11.73× | 13.00× |
 | 100 MiB |  **88 ms ± 32**    | 1516 ms ± 315   | 1232 ms ± 96    | 17.18× | 13.96× |
 
-### 8.2 結果 (2026-10-05、ebpf-fsync 追加、現行)
+### 8.2 結果 (2026-10-05、ebpf-fsync 追加、S-08 前)
 
 | Size    | ebpf (non-durable) | fuse-raw    | fuse-cache   | ebpf-fsync (durable) |
 |:--------|-------------------:|------------:|-------------:|---------------------:|
@@ -458,40 +458,33 @@ S-09 修正後は S3 GET が増えるため CPU 時間が 171 → 187 µs に増
 
 byte-for-byte roundtrip (`diff`) は全 3 サイズで MATCH。
 
-### 8.3 解釈
+### 8.3 S-08 後の全サイズ再計測 (2026-10-11、RUNS=10)
 
-**ebpf (non-durable) は 3–8× 速い。** close-to-close の比較で fuse-raw 比 3.2× (1 MiB) → 8.0× (10 MiB) → 7.3× (100 MiB)。Meetup 用には「フラッシュが非同期なので速い」と説明する。
+**修正内容** (commit c75247f): `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え。旧実装は 100ms ticker loop でポーリングしており、1 MiB と 10 MiB の `ebpf-fsync` がいずれも ~100ms になっていた。
 
-**durable 比較 (ebpf-fsync vs fuse-raw) は 100 MiB でのみ逆転 (+17%)。** 1 MiB では 5× 遅い。
+| Size    | ebpf (non-durable) | fuse-raw     | fuse-cache    | ebpf-fsync (durable) | fsync vs raw |
+|:--------|-------------------:|-------------:|--------------:|---------------------:|-------------:|
+| 1 MiB   |  **5.2 ± 0.2 ms** | 18.2 ± 1.5 ms | 16.8 ± 2.1 ms | **14.2 ± 0.8 ms**   | **1.28× 速い** |
+| 10 MiB  |  **8.9 ± 0.3 ms** | 74.5 ± 3.7 ms | 70.5 ± 3.2 ms | **43.9 ± 4.2 ms**   | **1.70× 速い** |
+| 100 MiB | **44.3 ± 1.1 ms** | 359.4 ± 10.7 ms | 312.7 ± 11.6 ms | **208.8 ± 25.3 ms** | **1.72× 速い** |
 
-**ebpf-fsync の 1 MiB と 10 MiB がほぼ同値 (99.8 ms ≈ 99.7 ms)。** モデル:
+byte-for-byte roundtrip (S3 mc_cat との diff) は全 3 サイズで MATCH。
 
-```
-ebpf-fsync 時間 ≈ write 時間 + PUT 固定オーバーヘッド (~90ms) + 転送時間
-  1 MiB:   6.1 + 90 + 1 MiB/~500 MB/s = 6.1 + 90 + 2 ≈ 98 ms  → 実測 99.8 ms ✓
- 10 MiB:   9.6 + 90 + 20             ≈ 120 ms → 実測 99.7 ms (転送オーバーラップ?)
-100 MiB:  47.4 + 90 + 200            ≈ 337 ms → 実測 297.8 ms (ebpf write 中に PUT 開始か)
-```
+ebpf-fsync が fuse-raw より **全サイズで速い** — S-08 前は 1 MiB が 5× 遅かったので大幅改善。
 
-fuse-raw の PUT 固定オーバーヘッドは ~4 ms (1 MiB / 19.5 ms から推定)。daemon の PUT 固定コストが fuse-raw より ~20× 大きい原因は要調査 (HTTP 接続確立コスト、goroutine wake-up レイテンシ)。詳細は §バグリスト参照。
+**ebpf (non-durable) は 3.5〜8.1× 速い。** fuse-raw 比: 3.5× (1 MiB) → 8.4× (10 MiB) → 8.1× (100 MiB)。Meetup 用には「フラッシュが非同期なので速い。durable でも fuse-raw より速い」と説明できる。
 
-**fuse-cache vs fuse-raw の差は ~6% 固定 (サイズ非依存)。** write 系では `kernel_cache` の恩恵は小さい。
+**ebpf-fsync 100 MiB の caveat**: min=63.6 ms (outlier、coalescer か kernel buffer)、mean=208.8 ms ± 25.3 ms (CV=12%)。平均は信頼できるが最小値は過楽観。
 
-2026-09-25 との絶対値差 (1 MiB: 10.8 → 6.1 ms、100 MiB: 88 → 47 ms) は MinIO + kernel のウォームアップ差と推定。比率傾向は同じ (sub-linear)。
+**fuse-cache vs fuse-raw の差は ~7% 固定** (write 系では `kernel_cache` の恩恵は小さい)。
 
-### 8.4 S-08 fix 後 (2026-10-06)
+### 8.4 S-08 fix 後 spot check (2026-10-06)
 
-**修正内容** (commit c75247f): `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え。旧実装は 100ms ticker loop でポーリングしており、1 MiB と 10 MiB の `ebpf-fsync` がいずれも ~100ms になっていた。修正後は kmod が flush event エンキュー直後に wake するため固定オーバーヘッドが消える。
+**参考値** (§8.3 で全サイズ置き換え済み):
 
-**確認値 (hyperfine、warm state)**:
-
-| Size  | ebpf-fsync 旧 (S-08 前) | ebpf-fsync 新 (S-08 後) | fuse-raw |
-|:------|------------------------:|------------------------:|---------:|
-| 1 MiB | 99.8 ± 1.6 ms           | min ≈ **19.7 ms**        | 19.5 ± 2.2 ms |
-
-1 MiB の ebpf-fsync min が fuse-raw mean (19.5 ms) と同オーダーになり、受け入れ条件を達成。10 MiB / 100 MiB の詳細は次回 `bench-write.sh` 全体再実行時に更新予定。
-
-**残差**: S-08 修正後も ebpf-fsync の mean は fuse-raw と完全に一致しない可能性がある (daemon goroutine wake-up 分散、HTTP keep-alive 初回接続)。本質的な PUT コストは同等になったと見なして良い。
+| Size  | ebpf-fsync 旧 (S-08 前) | ebpf-fsync (S-08 後、10-06 spot) | ebpf-fsync (S-08 後、10-11 mean) | fuse-raw |
+|:------|------------------------:|----------------------------------:|---------------------------------:|---------:|
+| 1 MiB | 99.8 ± 1.6 ms           | min ≈ 19.7 ms                     | **14.2 ± 0.8 ms**               | 18.2 ± 1.5 ms |
 
 ---
 

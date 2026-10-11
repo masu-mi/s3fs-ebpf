@@ -277,13 +277,17 @@ open+read+close の 169× は **open ごとの FUSE upcall**（fuse-cache でも
 - cycles/IPC は `cat` 200 回を `perf stat` で包んだプロセス全体の値で、fork/exec が支配的。「パイプライン stall が少ない」の根拠には弱いので、スライドでは CPU 時間差 (118 vs 163 µs) までに留める
 - 逆に **open 済み fd の hot read は差が無い** (§10.2 fio psync: 1 job で ebpf 1199k / fuse-raw 1165k / fuse-cache 1143k IOPS)。「read が速い」ではなく「open を含むアクセスが速い」と言う
 
-#### write (durable, S-08修正後)
+#### write (durable, S-08修正後、2026-10-11 全サイズ mean ± σ)
 
-| Size | fuse-raw | ebpf-fsync |
-|---|---:|---:|
-| 1 MiB (fsync まで) | 19.5 ± 2.2 ms (mean) | min ≈ 19.7 ms |
+| Size | fuse-raw | ebpf-fsync | 差 |
+|---|---:|---:|---:|
+| 1 MiB | 18.2 ± 1.5 ms | **14.2 ± 0.8 ms** | **1.28× 速い** |
+| 10 MiB | 74.5 ± 3.7 ms | **43.9 ± 4.2 ms** | **1.70× 速い** |
+| 100 MiB | 359.4 ± 10.7 ms | **208.8 ± 25.3 ms** | **1.72× 速い** |
 
-S-08 (100ms ポーリングを `blocking ioctl` に修正) 後、1 MiB durable write は **fuse-raw と同オーダー**に収束。ただし ebpf-fsync は min、fuse-raw は mean で、統計量が揃っていない。10 MiB / 100 MiB は S-08 後未計測。発表前に `bench-write.sh` を回して mean ± σ で揃えるか、「同オーダー」以上の主張はしない
+S-08 前は 1 MiB で 5× 遅かった (99.8 ms)。修正後は全サイズで ebpf-fsync が fuse-raw より速い。「durable write でも fuse-raw より速い」と言える。
+- 100 MiB の min=63.6 ms は outlier (coalescer か kernel buffer)。mean=208.8 ms を使う
+- `br §8.3` 参照
 
 ### 7. takeaway (2min)
 
@@ -396,12 +400,12 @@ ctx->ret = n ? -1 : cnt;         // n != NULL なら予算切れで抜けた
 - **nocache 3×**: ✅ **2026-10-11 の同一 run で確定** — fuse-raw 1.691 ms / ebpf-nocache 526 µs = 3.22×。内訳 (FUSE upcall / S3 クライアント差 / HEAD の有無) は未分解
 - **ebpf-A+C vs fuse-cache ~169×**: ✅ **同一 run** — fuse-cache 519 µs / ebpf-A+C 3.075 µs = 168.8×
 - **IPC / cycles**: `cat` プロセス全体 (fork/exec 込み) の値。パイプラインの議論には使わない
-- **write**: ebpf-fsync の min と fuse-raw の mean を並べていた。統計量を揃える (bench-write.sh 再実行で解消予定)
+- **write**: ✅ 2026-10-11 に bench-write.sh を RUNS=10 で再実行。ebpf-fsync の mean ± σ と fuse-raw の mean ± σ が揃い、全サイズで ebpf-fsync 優位と確定
 - **hot read (open 済み fd)** は 3 者同等 (§10.2)。「open を含むアクセス」が速い、と限定して言う
 
 ### 発表前に追加で測ると良いもの (優先順)
 
 1. ✅ `bench-3way.sh` 同一 run — 2026-10-11 に実施。3.2× と 169× が同一 run 由来で確定
 2. 3× の内訳: microbench 中の MinIO リクエスト数 / op (GET と HEAD を分けて) と、FUSE opcode 別 upcall 数 (`bpftrace` で `fuse_simple_request` などを数える)。HEAD の有無で差の大半が説明できるなら「FUSE 構造の差」とは言えない
-3. `bench-write.sh` を S-08 後のコードで 3 サイズ再計測 (mean ± σ)
+3. ✅ `bench-write.sh` S-08 後・3 サイズ再計測 — 2026-10-11 実施。ebpf-fsync が全サイズで fuse-raw より速いと確定
 4. (任意) I-01 で追加した mount-s3 arm の実測 — 「他の FUSE 実装なら？」への回答材料
