@@ -573,3 +573,66 @@ fuse-cache   64      4978k    7556.90
 - **read (small file, shared)**: 8 jobs 以降 ~5M IOPS で頭打ち。全 3 mount がほぼ hot page cache だけを叩いているので、上限は kernel の page cache 側 (folio_lock 争奪) にある
 - **write と違って read は fuse-cache が ebpf に肉薄する**: hot state で FUSE daemon への upcall が発生しない fuse-cache は、ebpf と同じ「page cache 直読」経路になる。ebpf の優位性は cold-path / write / consistency 制御に集約される
 - **caveat**: `bench-scale.sh` 初回は parallel-cat wrapper が hang した (bash `wait` が cat の child を捉えきれず do_wait 停止)。fio psync に置換した (single-file shared reads で FUSE daemon の scale 特性を測る目的は同じ)。docs 上は fio 版を採用
+
+---
+
+## § 11. FUSE upcall 内訳 / mount-s3 比較 (2026-10-11)
+
+`/tmp/measure-breakdown.sh` で計測。MinIO GET/HEAD 差分 + bpftrace fuse probe + mount-s3 microbench を 1 スクリプトにまとめて実行。
+
+### 11.1 MinIO S3 リクエスト数 (fuse-raw vs ebpf-nocache, 1000 iters)
+
+| label | GET / op | HEAD / op | total / op |
+|---|---:|---:|---:|
+| fuse-raw | 0.00 | 0.00 | 0.00 |
+| ebpf-nocache | 0.00 | 0.00 | 0.00 |
+
+**両方とも 0** — microbench は warmup=1000 の後に 1000 iter を計測するが、warmup 終了時点で kernel page cache が温まっており、その後の iter は page cache ヒットで S3 I/O を発行しない。
+
+つまり **fuse-raw の p50=1.691 ms は S3 I/O を一切含まない**。1.69ms の全体は `/dev/fuse` IPC のオーバーヘッドのみ。
+
+### 11.2 FUSE upcall 内訳 (bpftrace、fuse-raw 2000 iter = 1000 warmup + 1000 測定)
+
+bpftrace で 7 本の probe を同時に張り、microbench 実行中のカウントを取得:
+
+```
+fuse_dev_do_read  (upcalls 総計): 8029  → 4.01 / op
+  fuse_file_read_iter:  4000  (2.00 / op)
+  fuse_flush:           2000  (1.00 / op)
+  fuse_file_release:    2000  (1.00 / op)
+  fuse_do_getattr:         3  (≈0 / op、初期化のみ)
+  fuse_do_open:            0
+  fuse_lookup:             0
+```
+
+- 1 open+read+close = `read_iter` × 2 (data + EOF) + `flush` × 1 + `release` × 1 ≈ **4 upcall**
+- getattr/open/lookup は kernel_cache 無しの fuse-raw でもほぼゼロ (warmup 後の inode はキャッシュ済み)
+- p50=1.691ms / 4 = **423 µs/upcall** — `/dev/fuse` を経由した 1 往復の平均コスト
+
+**結論**: fuse-raw の 3.22× 差 = 4 upcall × 423 µs/upcall = 1.69ms。ebpf-nocache も miss ごとに daemon upcall するが、`/dev/fuse` IPC ではなく共有メモリ経由のため open/flush/release が不要。構造上の IPC 往復数の差が 3× の主因。
+
+### 11.3 mount-s3 cross-impl microbench (2026-10-11、5000 iters)
+
+AWS Mountpoint for S3 v1.24.0 を MinIO endpoint に向けて `--cache /tmp/mount-s3-cache` 付きで計測。
+
+```
+impl          iters  warmup  total         ops/s   p50        p95       p99       max
+fuse-raw      5000   1000    9.067s          551   1.697 ms   2.423 ms  2.875 ms  21.1 ms
+ebpf-nocache  5000   1000    2.705s        1,848     527 µs     685 µs    901 µs   5.9 ms
+mount-s3      5000   1000    545–562 ms  8,896–9,167  110 µs   140 µs    165 µs   695 µs
+```
+
+(mount-s3 は別 run と同一 run の 2 回測定、共に 9000 ops/s 前後で安定)
+
+**相対比較** (p50、warmup 後):
+
+| 対象 | fuse-raw に対して | ebpf-nocache に対して |
+|---|---:|---:|
+| ebpf-nocache | 3.2× 速い | — |
+| mount-s3 (--cache) | **15× 速い** | **4.8× 速い** |
+
+**注意点**:
+- mount-s3 は `--cache <dir>` 付きで計測 — kernel page cache + ローカル SSD キャッシュが効いている (fuse-raw/ebpf-nocache は nocache 条件)
+- キャッシュを揃えた比較 (fuse-cache 519µs vs mount-s3 110µs) でも mount-s3 は **4.7× 速い**
+- mount-s3 が速い理由は S3 GET を VFS 経由で非同期 prefetch + 専用バッファキャッシュを持つため (libfuse ではなく独自 fuse カーネル I/F)
+- **ebpf-A+C p50=3.075µs** は mount-s3 よりさらに **36×** 速い (キャッシュ有り同士の比較)
