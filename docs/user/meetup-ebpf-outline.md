@@ -259,8 +259,22 @@ syscall.Syscall(SYS_BPF, BPF_LINK_UPDATE, uintptr(unsafe.Pointer(&attr)), ...)
 |---|---:|---:|---:|
 | open+read+close p50 (2026-10-11、同一 run) | 1.691 ms | **526 µs** | **3.2× 速い** |
 
-差の候補は `/dev/fuse` queue + open ごとの getattr upcall がないこと。**キャッシュ条件を揃えても残る差**であることは言えるが、内訳は未測定 — ebpf-nocache も miss ごとに daemon へ upcall + S3 GET しており、S3 クライアント実装 (Go daemon vs s3fs-fuse/libcurl、open 時の HEAD の有無) の差も含む。perf stat の CPU 時間差は 8% (10-11: 187 vs 203 µs)、1.2 ms の差の大半は待ち時間側。「fuse-raw がどう最適化しても消えない」とは言わない。
-- 注: 1.691 ms と 526 µs は **2026-10-11 の同一 run** (`bench-3way.sh` microbench §7.3 と §7.7.2)。「約 3×」は 3.22× が実測値
+**2026-10-11 bpftrace 計測で内訳が判明**:
+
+| upcall 種別 | 回数/op |
+|---|---:|
+| fuse_file_read_iter | 2.00 |
+| fuse_flush | 1.00 |
+| fuse_file_release | 1.00 |
+| fuse_do_getattr / open / lookup | ≈0 (warmup 後) |
+| **合計 upcall** | **4.01** |
+
+- 1 open+read+close で `/dev/fuse` を **4 往復**する
+- p50=1.691ms / 4 = **423 µs/upcall** — これが fuse-raw の「最小単位コスト」
+- **S3 I/O は 0**: warmup 後は kernel page cache がヒットするため GET/HEAD は発行されない。つまり fuse-raw の 1.69ms は S3 なしで発生する純粋な IPC コスト
+- ebpf-nocache も miss ごとに daemon upcall するが `/dev/fuse` 経由ではなく共有メモリ。open/flush/release の往復が不要 → 1.2ms 分の差 = 構造上の IPC 削減
+- 「fuse-raw がどう最適化しても消えない」とは言わない。S3 クライアント実装の差も含む。だが「キャッシュを揃えても残る差」かつ「その差の主因は FUSE IPC 回数 (4 vs ≈1)」とは言える
+- 注: 1.691 ms と 526 µs は **2026-10-11 の同一 run** (`bench-3way.sh` microbench §7.3 と §7.7.2)。「約 3×」は 3.22× が実測値。詳細 `benchmark-results.md §11.1/§11.2`
 
 #### キャッシュ有り同士: ebpf-A+C vs fuse-cache
 
@@ -273,7 +287,7 @@ fuse を `-o use_cache + kernel_cache` で最大限最適化した状態でも�
 | CPU cycles/op | 441k | **328k** | 1.3× 少ない |
 | IPC | 0.78 | **1.05** | (補足のみ。下記注) |
 
-open+read+close の 169× は **open ごとの FUSE upcall**（fuse-cache でも消えない）が主因と見ている (推定。opcode 別の upcall 数は未計測)。`ls` や小ファイル大量アクセスのワークロードで直撃する。
+open+read+close の 169× は **open ごとの FUSE upcall**（fuse-cache でも消えない）が主因。2026-10-11 の bpftrace 計測 (§11.2) で fuse-raw 4.01 upcall/op (423µs/upcall) と確認。fuse-cache でも read_iter/flush/release の upcall は残るため同構造。`ls` や小ファイル大量アクセスのワークロードで直撃する。
 - cycles/IPC は `cat` 200 回を `perf stat` で包んだプロセス全体の値で、fork/exec が支配的。「パイプライン stall が少ない」の根拠には弱いので、スライドでは CPU 時間差 (118 vs 163 µs) までに留める
 - 逆に **open 済み fd の hot read は差が無い** (§10.2 fio psync: 1 job で ebpf 1199k / fuse-raw 1165k / fuse-cache 1143k IOPS)。「read が速い」ではなく「open を含むアクセスが速い」と言う
 
@@ -288,6 +302,20 @@ open+read+close の 169× は **open ごとの FUSE upcall**（fuse-cache でも
 S-08 前は 1 MiB で 5× 遅かった (99.8 ms)。修正後は全サイズで ebpf-fsync が fuse-raw より速い。「durable write でも fuse-raw より速い」と言える。
 - 100 MiB の min=63.6 ms は outlier (coalescer か kernel buffer)。mean=208.8 ms を使う
 - `br §8.3` 参照
+
+#### (参考) mount-s3 との比較 (2026-10-11、--cache あり)
+
+AWS Mountpoint for S3 v1.24.0 を MinIO endpoint に接続して計測 (`benchmark-results.md §11.3`):
+
+| impl | p50 | ops/s |
+|---|---:|---:|
+| fuse-raw (nocache) | 1,697 µs | 551 |
+| ebpf-nocache | 527 µs | 1,848 |
+| mount-s3 (--cache) | **110 µs** | 8,896 |
+| fuse-cache | 519 µs | 1,878 |
+| **ebpf-A+C** | **3.1 µs** | **308,104** |
+
+mount-s3 は独自 prefetch + ローカル SSD キャッシュで nocache 条件の ebpf-nocache より **4.8× 速い**。キャッシュ有り同士 (fuse-cache 519µs vs mount-s3 110µs) でも **4.7×**。ただし ebpf-A+C (3.1µs) には mount-s3 も 36× 届かない。スライドでは「他の S3 FUSE 実装との位置づけ」として触れる程度。
 
 ### 7. takeaway (2min)
 
@@ -406,6 +434,6 @@ ctx->ret = n ? -1 : cnt;         // n != NULL なら予算切れで抜けた
 ### 発表前に追加で測ると良いもの (優先順)
 
 1. ✅ `bench-3way.sh` 同一 run — 2026-10-11 に実施。3.2× と 169× が同一 run 由来で確定
-2. 3× の内訳: microbench 中の MinIO リクエスト数 / op (GET と HEAD を分けて) と、FUSE opcode 別 upcall 数 (`bpftrace` で `fuse_simple_request` などを数える)。HEAD の有無で差の大半が説明できるなら「FUSE 構造の差」とは言えない
+2. ✅ 3× の内訳 — 2026-10-11 bpftrace 計測で確定。fuse-raw: 4.01 upcall/op × 423µs/upcall = 1.69ms。S3 GET delta=0 (page cache warm)。差の主因は `/dev/fuse` IPC 往復回数 (4 vs ≈1)。詳細 `benchmark-results.md §11.1/§11.2`
 3. ✅ `bench-write.sh` S-08 後・3 サイズ再計測 — 2026-10-11 実施。ebpf-fsync が全サイズで fuse-raw より速いと確定
-4. (任意) I-01 で追加した mount-s3 arm の実測 — 「他の FUSE 実装なら？」への回答材料
+4. ✅ I-01 で追加した mount-s3 の実測 — 2026-10-11 実施。p50=110µs (--cache)。fuse-cache 比 4.7× 速い。ebpf-A+C 比 36× 遅い。詳細 `benchmark-results.md §11.3`
