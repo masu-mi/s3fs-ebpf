@@ -141,6 +141,60 @@ Layer 0 KFunc (P-08) の shape を demo する 3 policy:
   SMALL_THRESHOLD=4KB 未満 / 以上を bias。全 file が 44 B なので
   SIEVE 相当挙動。mixed size workload では BIG_MISS_CAP grace が効く。
 
+## Result (2026-10-11, seed=42、U-01/U-02 + X-01〜X-07 修正後)
+
+単一 seed=42 の再計測。bench スクリプトと全 policy 実装に修正が入ったため、
+2026-10-05 の 3-seed 集計とは独立した参照値として記録する。
+
+```
+policy              folio   pc   miss  err  rate_arena  rate_total  evictions  adm_mean  adm_max  ms/access
+------------------  -----  ---   ----  ---  ----------  ----------  ---------  --------  -------  ---------
+pressure_ops            2  284    114    0       1.00%     143.00%        114       8.9        9       6.02
+size_aware_ops          3  279    118    0       1.50%     141.00%        118       8.9        9       6.10
+wtinylfu_full_ops       0  271    129    0       0.00%     135.50%        129       8.9        9       6.07
+freq2bit_ops            0  270    130    0       0.00%     135.00%        130       8.9        9       6.18
+lru_ops                 0  270    130    0       0.00%     135.00%        130       8.9        9       6.19
+sieve_ops               2  268    130    0       1.00%     135.00%        130       8.9        9       6.16
+observe                 0  267    133    0       0.00%     133.50%        133       8.9        9       6.68
+s3fifo_ops              0  267    133    0       0.00%     133.50%        133       8.9        9       6.28
+wtinylfu_ops            0  267    133    0       0.00%     133.50%        133       8.9        9       6.21
+time_decay_ops          0  267    133    0       0.00%     133.50%        133       8.9        9       6.12
+```
+
+Trace-replay reference (seed=42, cold start):
+
+| policy   | hits | misses | rate  |
+|----------|-----:|-------:|------:|
+| lru      | 81   | 119    | 40.5% |
+| sieve    | 92   | 108    | 46.0% |
+| opt      | 122  | 78     | 61.0% |
+| noevict  | 171  | 29     | 85.5% |
+
+### 2026-10-05 からの変化
+
+**policy ランキングが逆転した。** 2026-10-05 では s3fifo_ops がトップ (39.5 %)
+だったが、今回は observe と同点最下位 (miss=133)。反対に pressure_ops と
+size_aware_ops が最上位に浮上した (miss=114, 118)。
+
+原因: X-01〜X-07 policy 意味論バグ修正の影響。とくに:
+
+- **X-03** (CMS aging を admit round 駆動 → on_hit 累計駆動に変更) で
+  `wtinylfu_ops` / `wtinylfu_full_ops` の spurious aging が解消。
+  今回 `wtinylfu_ops` が miss=133 に落ちたのは、aging 閾値
+  (AGE_INTERVAL_HITS=512) がこのショートワークロード (200 アクセス) では
+  ほぼ発火しないため、CMS が rank signal として機能しにくい状況になった。
+- **X-01** (admit_replace 2-phase 化) で s3fifo の ghost list 構築タイミングが
+  変わり、ショートワークロードでは ghost re-admit の恩恵が出にくくなった。
+- **X-06** (time_decay first-sight シード 0 化) は今回も miss=133 で不変。
+
+**`rate_arena` が全 policy でほぼゼロ** (folio=0〜3)。44 B ファイルは
+prewarm → eval → 15 s settle の間にカーネル page cache に温まるため、
+実ワークロードでは `.read_folio` (arena path) より `.read_iter` (page cache)
+が先に serve する。`miss` カウントが policy 評価の主要指標となる。
+
+**3-seed 再集計は未取得**。上記は seed=42 単発のため variance は不明。
+`bench-hitrate-multi.sh` による多 seed 再計測が meetup 発表前に必要。
+
 ## Reading the numbers
 
 All rates are medians over 3 seeds. Because every policy holds 8–9 files
