@@ -3,7 +3,7 @@
  * s3fs-ebpf: Fast Path + Week 2 arena round-trip.
  *
  * Programs:
- *   fentry/vfs_getattr        -- Fast Path observer: filters by
+ *   fentry/vfs_getattr_nosec  -- Fast Path observer: filters by
  *                                super_block::s_magic, looks the inode
  *                                up in s3fs_inode_index, and either
  *                                bumps a per-CPU hit counter or emits a

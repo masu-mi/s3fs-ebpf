@@ -91,7 +91,7 @@ T_WITHOUT=$( { time cat "$MP_EBPF/$BIG_FILE" > /dev/null; } 2>&1 )
 sleep 0.5  # let goroutines flush log lines
 
 UPCALLS_WITHOUT=$(count_upcalls "$DAEMON_LOG")
-PROMOTES_WITHOUT=$(grep -c 'pattern-aware full admit' "$DAEMON_LOG" 2>/dev/null || true)
+PROMOTES_WITHOUT=$(grep -c 'PROMOTE_SIGNAL=pattern-aware' "$DAEMON_LOG" 2>/dev/null || true)
 log "upcalls=$UPCALLS_WITHOUT  promotes=$PROMOTES_WITHOUT"
 LOG_WITHOUT="$DAEMON_LOG"
 stop_ebpf
@@ -105,7 +105,7 @@ T_WITH=$( { time cat "$MP_EBPF/$BIG_FILE" > /dev/null; } 2>&1 )
 sleep 0.5
 
 UPCALLS_WITH=$(count_upcalls "$DAEMON_LOG")
-PROMOTES_WITH=$(grep -c 'pattern-aware full admit' "$DAEMON_LOG" 2>/dev/null || true)
+PROMOTES_WITH=$(grep -c 'PROMOTE_SIGNAL=pattern-aware' "$DAEMON_LOG" 2>/dev/null || true)
 log "upcalls=$UPCALLS_WITH  promotes=$PROMOTES_WITH"
 LOG_WITH="$DAEMON_LOG"
 stop_ebpf

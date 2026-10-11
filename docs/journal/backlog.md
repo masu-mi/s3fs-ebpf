@@ -94,6 +94,19 @@
 - [x] ✅ **Q-05** arena 高水位追跡スニペット 2 重コピー — `updateArenaHighWater(off, size)` ヘルパーを `admit_arena.go` に追加、2 箇所を置換。完了 (2026-10-10)
 - [x] ✅ **Q-06** `drainFlushOnShutdown` の `coal` 引数未使用 — シグネチャと `_ = coal` を除去。完了 (2026-10-10)
 
+### U. ベンチ計測の妥当性 (2026-10-11 レビュー)
+
+性能数値を meetup / docs/journal に残す前に修正したいもの。放置すると過去計測値がそのまま誤解釈されて "どの policy が勝ったか" 等の判断が歪む。
+
+- [x] ✅ **U-01** `bench-hitrate.sh` が失敗した `cat` を hit に計上している (`scripts/bench-hitrate.sh:193, :221`) — `cat` の exit code を捕捉して `err` 列に集計 (成功・失敗を分離)。hit 計算を `N_ACCESS - d_miss` から `s3fs_ebpf_folio_hits_total` デルタ (`folio` 列) + page-cache 近似値 (`pc` 列) ベースに変更。完了 (2026-10-11)
+- [x] ✅ **U-02** `bench-hitrate.sh` の `rate` ラベルが policy と直接関係ない page cache 保持を含む (`scripts/bench-hitrate.sh:218-227`) — 列を `rate_arena` (folio_hits / N_ACCESS) と `rate_total` ((folio+pc) / N_ACCESS) に分割。`hr §"Output columns"` に各列の定義を明記。完了 (2026-10-11)
+- [x] ✅ **U-03** `bench-write.sh` が最後のコマンドの書き込みしか S3 で検証していない (`scripts/bench-write.sh:93-109`) — backend ごとに別 S3 key (`w-${label}-{fuse-raw,fuse-cache,ebpf,fsync}.bin`) に分離し、fuse/ebpf-fsync は即時 diff、ebpf fire-and-forget は sleep 5 後に検証する構造に変更。完了 (2026-10-11)
+- [x] ✅ **U-04** `bench-scale.sh` の clat extraction が unit mismatch で沈黙失敗 (`scripts/bench-scale.sh:75, :99`) — awk pattern を `/clat \((nsec|usec|msec)\)/` に拡張し usec→×1000 / msec→×1000000 で nsec 統一出力に変更。列ヘッダも `clat_ns(norm)` に更新。完了 (2026-10-11)
+- [x] ✅ **U-05** `bench-scale.sh run_read` の "scale" 比較が page cache と FUSE 往復の混合 — 修正済 (2026-10-11)。各 `run_read` 呼び出しの直前に `sync; sudo sysctl -q -w vm.drop_caches=1` を追加し、page cache をゼロから計測。ebpf は `.read_folio → arena` 経路、fuse-raw は FUSE upcall 経路をそれぞれ cold page cache から測定する。関数コメントも修正内容に合わせて更新。
+- [x] ✅ **U-06** `bench-parallel.sh` の `pkill` パターンがどのプロセスにもマッチしない — `stop_all` の pkill を `jobs -p | xargs -r sudo kill -9` に置き換え。完了 (2026-10-11)
+- [x] ✅ **U-07** `bench-parallel.sh` の writer が backend 間で同じ S3 key に書き込む — writer path を `w-parallel-${mp##*/}-$i.txt` (MP basename 含む) に変更し backend 間の S3 key 衝突を解消。完了 (2026-10-11)
+- [x] ✅ **U-08** `bench-read-pattern-policy.sh` の promote 検出がログ文字列依存で脆い — daemon ログに `PROMOTE_SIGNAL=pattern-aware` 安定マーカーを追加 (`admit_arena.go:585`)、スクリプトの grep 対象を変更。完了 (2026-10-11)
+
 ### T. コードレビュー起票 (2026-10-06)
 
 - [x] ✅ **T-01** `pruneAdmitsTo` が arena チャンクを解放しない (arena リーク) — 修正済。`planPruneAdmits` pure 関数を切り出し `pruneAdmitsTo` がそれを呼んで `admitProgs.FreeArenaChunk` に freed ranges を渡すよう変更。回帰テスト 3 件 (`TestPlanPruneAdmits_FreesArenaChunksForDropped` / `_ArenaBaseZeroSkipsFree` / `_KeepAllProducesNoDelta`) を追加。
@@ -227,6 +240,22 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **W-02** ino アロケーター (`inoByKey` / `pathByIno` / `nextIno`) がパッケージグローバル — `InoAllocator` 型に集約し `inoAlloc` 変数として管理。全メソッドを型のレシーバに移し、外部 API はパッケージレベルの thin wrapper を維持。`CountMappings()` を追加して `main.go` の直接アクセスを排除。テストは `inoAlloc = newInoAllocator()` でリセット。実装: `sync_entries.go` + `sync_entries_test.go` + `main.go`。完了 2026-10-10。
 - [x] ✅ **W-03** 3 つの stats サンプリング goroutine が独立ティッカーで走る — `sampleCounters` / `sampleKmodStats` / `sampleArenaFree` を `runStatsLoop` に統合。1 つのティッカーで 3 ソースをまとめてサンプリング。device fd は内部で 1 回 open (T-03 パターン)。`samplePolicyStats` は条件付き起動のため別 goroutine のまま。実装: `main.go`。完了 2026-10-10。
 
+### X. ポリシー実装の意味論問題 (2026-10-11 レビュー)
+
+「現在の bench workload (全ファイル 44 B 単一レンジ) では顕在化しないが、D-01 大ファイル partial admit を混ぜると policy ランキングが歪む」クラスの semantic bug。設計判断が要るので P1。
+
+- [x] ✅ **X-01** `s3fs_ebpf_admit_replace` が range 単位で `on_evict(ino)` を呼ぶため、マルチレンジ ino で stateful policy の state が 1 ラウンド内で N 回 mutate する — 修正済 (2026-10-11)。`kmod/vfs_ops.c` の eviction ブロックを 2 フェーズに再構成: Phase 1 で unique ino ごとに `on_evict` を 1 回だけ呼んでスコアをテーブルに保存、Phase 2 でそのテーブルを参照して cand[] を構築 (capacity mode では同一 ino の 2 エントリ目は skip)。X-05 (live_bytes の ino 重複カウント → cand 単一化で解消) も同時に対処済み。
+- [x] ✅ **X-02** `wtinylfu_ops` (scoped) の "grace" 条件が反直感的 — `EVICT_THRESHOLD` を 2 → 1 に変更し `est==0 grace` チェックを除去。est=0 (未アクセス) のみ evict、est≥1 (1 hit 以上) は keep で谷を解消。完了 (2026-10-11)
+- [x] ✅ **X-03** CMS aging が bench harness の INTERLEAVE と相互作用して warm 項目を落とす — 修正済 (2026-10-11)。`AGE_INTERVAL` (admit round ベース) を廃止し `AGE_INTERVAL_HITS=512` (on_hit 累計ベース) に置き換え。`on_admit` の aging trigger を除去し `on_hit` で PSTAT_HITS カウンタを加算・512 ヒットごとに `cms_age()` を発火。bench forced eval や daemon sync round では aging が起きなくなり、warm 項目が spurious evict される問題を解消。`bpf/policy_wtinylfu_ops.bpf.c` の enum に `PSTAT_HITS=3` を追加 (BPF map size は PSTAT_MAX 自動更新)。
+- [x] ✅ **X-04** `s3fs_victim_cmp` のタイブレーク "oldest first" は実質 non-deterministic — 修正済 (2026-10-11)。`setAdmits` で `initial` を `Ino` 昇順ソートしてから `admits` に格納 (`daemon/cmd/s3fs-ebpf/admit_arena.go`)。ino はシーケンシャル割り当てのため昇順 = 割り当て順 = 最古優先。kmod の `s3fs_victim_cmp` idx タイブレーク (最小 = 最古) が設計通り機能し、score=0 同士の eviction が run 間で再現性のある結果を返す。UAPI 変更なし。
+- [x] ✅ **X-05** `admit_replace` capacity モードの `live_bytes` 計算で同一 ino の複数 range を重複カウント — X-01 修正 (cand[] を ino 単位に dedup) で解消済み。cand[] に 1 ino = 1 エントリしか入らないため `admit_evict_ino` が返す `freed` (全 range 合計) による live_bytes デクリメントが正確に行われる。完了 (2026-10-11、X-01 と同 commit)
+- [x] ✅ **X-06** `policy_time_decay_ops` が bench-hitrate.sh の convergence loop で全 ino を自食いする — `on_evict` の first-sight シードを `0` (sentinel "未 hit") に変更し、on_hit 未発火の間は `!*last → return 0` で無期限 grace を付与。on_hit は non-zero の実 timestamp を書くため判定と衝突しない。完了 (2026-10-11)
+- [x] ✅ **X-07** `trace.Replay` が write event を silently drop — `Policy` interface に `Invalidate(ino uint64)` を追加し LRU/SIEVE/OPT/noEvict に実装。`Replay` を `switch e.Op` に書き換えて OpWrite で `p.Invalidate` を呼ぶよう変更。Accesses は read のみカウント。`TestWriteInvalidatesEntry` (全 4 policy で read→write→read = 0 hits / 2 misses) を追加。完了 (2026-10-11)
+
+**X-01〜X-05 の共通受け入れ条件**: D-01 の `big.bin` / `10m.bin` / `100m.bin` を含む bench-hitrate.sh を回し、修正前後で各 policy の `rate_arena` 差分を journal に記録。マルチレンジ ino が混ざった workload で X-01 修正により SIEVE / wtinylfu の rate が有意に変動することを示す。
+**X-06 の受け入れ条件**: time_decay の hit rate が `start_stack` 期間変動 (3s → 15s) に不感となり、他 policy と同じ workload-driven な挙動を示す。
+**X-07 の受け入れ条件**: write を含む合成 trace (reads 100 + writes 20 を交互) で `trace-replay` を回し、write の次の read が miss (reads 100 の中で write 対象 ino が miss にシフト) として現れることを示す。
+
 ### K. upstream 貢献 (`w4a §9`)
 
 根拠 doc: [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
@@ -265,6 +294,29 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 ## 7. 優先度 view (次 N 個)
 
 「今日〜明日で何を触るか」目線での並び:
+
+**2026-10-11 更新 — ベンチ妥当性 / ポリシー意味論レビューにより新規課題を追加**:
+
+P0 新着 (U-01〜U-08 — ベンチ計測の妥当性):
+
+1. **U-01** `bench-hitrate.sh` の rate 計算が失敗を hit に計上 — 0.5 日 (meetup 数値を再掲する前に優先)
+2. **U-02** `bench-hitrate.sh` の rate が page cache 保持を含んでいる — 1 日
+3. **U-03** `bench-write.sh` が最後のコマンドの書き込みしか S3 検証していない — 0.5 日
+4. **U-04** `bench-scale.sh` の clat extraction が unit mismatch で沈黙失敗 — 0.5 日
+5. ✅ **U-05** `bench-scale.sh run_read` が page cache と FUSE 往復の混合比較 — 完了 (2026-10-11)
+6. **U-06** `bench-parallel.sh` の pkill パターンが dead code — 15 分
+7. **U-07** `bench-parallel.sh` の writer が backend 間で同じ S3 key に書き込む — 15 分
+8. **U-08** `bench-read-pattern-policy.sh` の promote 検出がログ文字列依存で脆い — 0.5 日
+
+P1 新着 (X-01〜X-07 — ポリシー実装の意味論問題、D-01 大ファイル benchとセット):
+
+- X-01 マルチレンジ ino で stateful policy の state mutation が壊れる — 1〜2 日
+- X-02 wtinylfu scoped の "grace" 条件が est=1 で evict する谷 — 0.5 日
+- ✅ X-03 CMS aging と bench harness INTERLEAVE の相互作用で warm 項目が落ちる — 完了 (2026-10-11)
+- ✅ X-04 `s3fs_victim_cmp` の "oldest first" が実質 non-deterministic — 完了 (2026-10-11)
+- X-05 capacity モードの `live_bytes` 重複カウント — 0.5 日
+- X-06 time_decay が bench convergence 中に全 ino 自食い (DECAY_NS 5s < 12s harness) — 0.5 日
+- X-07 trace sim が write を silently drop、`Invalidate` 相当メソッド欠落 — 1 日
 
 **2026-10-10 更新 — コードベース全体レビューにより新規課題を追加**:
 

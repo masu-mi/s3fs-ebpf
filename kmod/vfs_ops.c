@@ -777,6 +777,14 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		struct s3fs_victim *cand = NULL;
 		u64 live_bytes = 0;
 		u32 ncand = 0;
+		/* X-01: call on_evict exactly once per unique ino. Inos with
+		 * multiple ranges (D-01 partial admit) must not have their
+		 * policy state mutated N times — stateful policies (SIEVE
+		 * visited bit, wtinylfu CMS, time_decay last_hit) would
+		 * accumulate incorrect state per extra call. */
+		u64 *eval_inos = NULL;
+		int *eval_scores = NULL;
+		u32 eval_count = 0;
 
 		if (cap_bytes) {
 			for (i = 0; i < count; i++)
@@ -788,22 +796,78 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			}
 		}
 
-		for (i = 0; i < count; i++) {
-			int fr_vote = s3fs_policy_on_evict(entries[i].ino);
-			int so_vote = s3fs_policy_ops_eval_evict(entries[i].ino);
-			int score = max3(fr_vote, so_vote, 0);
+		eval_inos   = kcalloc(count, sizeof(*eval_inos),   GFP_KERNEL);
+		eval_scores = kcalloc(count, sizeof(*eval_scores), GFP_KERNEL);
+		if (!eval_inos || !eval_scores) {
+			pr_warn_ratelimited("s3fs_ebpf: on_evict dedup alloc failed, skipping eviction\n");
+			kfree(eval_inos);
+			kfree(eval_scores);
+			kfree(cand);
+			return 0;
+		}
 
-			if (fr_vote != 0)
-				fmodret_votes++;
-			if (so_vote != 0)
-				structops_votes++;
+		/* Phase 1: collect unique inos and call on_evict once each. */
+		for (i = 0; i < count; i++) {
+			u64 ino = entries[i].ino;
+			u32 j;
+
+			for (j = 0; j < eval_count; j++) {
+				if (eval_inos[j] == ino)
+					break;
+			}
+			if (j < eval_count)
+				continue; /* already evaluated */
+
+			{
+				int fr_vote = s3fs_policy_on_evict(ino);
+				int so_vote = s3fs_policy_ops_eval_evict(ino);
+				int score   = max3(fr_vote, so_vote, 0);
+
+				eval_inos[eval_count]   = ino;
+				eval_scores[eval_count] = score;
+				eval_count++;
+
+				if (fr_vote != 0)
+					fmodret_votes++;
+				if (so_vote != 0)
+					structops_votes++;
+			}
+		}
+
+		/* Phase 2: build cand[] / drive legacy eviction using per-ino
+		 * scores. In capacity mode each ino appears at most once in
+		 * cand[] (first-range entry); admit_evict_ino frees all ranges
+		 * of the ino in one shot so live_bytes decrements correctly. */
+		for (i = 0; i < count; i++) {
+			u64 ino = entries[i].ino;
+			int score = 0;
+			u32 j;
+
+			for (j = 0; j < eval_count; j++) {
+				if (eval_inos[j] == ino) {
+					score = eval_scores[j];
+					break;
+				}
+			}
 
 			if (cap_bytes) {
-				/* Capacity mode: rank now, evict below. */
 				if (cand) {
-					cand[ncand].score = score;
-					cand[ncand].idx = i;
-					ncand++;
+					/* Skip duplicate ino entries — admit_evict_ino
+					 * is ino-granular, not range-granular. */
+					u32 k;
+					bool already = false;
+
+					for (k = 0; k < ncand; k++) {
+						if (entries[cand[k].idx].ino == ino) {
+							already = true;
+							break;
+						}
+					}
+					if (!already) {
+						cand[ncand].score = score;
+						cand[ncand].idx   = i;
+						ncand++;
+					}
 				}
 				continue;
 			}
@@ -811,11 +875,14 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			/* Legacy mode: any vote evicts, once over softcap. */
 			if (count <= softcap || !score)
 				continue;
-			if (pending_exists(entries[i].ino))
+			if (pending_exists(ino))
 				continue;
-			if (admit_evict_ino(entries[i].ino, NULL))
+			if (admit_evict_ino(ino, NULL))
 				evicted++;
 		}
+
+		kfree(eval_inos);
+		kfree(eval_scores);
 
 		if (cand) {
 			u32 k;
@@ -828,7 +895,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				if (pending_exists(ino))
 					continue;
 				if (!admit_evict_ino(ino, &freed))
-					continue; /* other range of an ino already evicted */
+					continue; /* ino already evicted (shouldn't happen with dedup) */
 				evicted++;
 				live_bytes -= min(freed, live_bytes);
 			}

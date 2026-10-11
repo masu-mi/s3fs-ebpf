@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"time"
 	"unsafe"
@@ -121,9 +122,16 @@ func reconcileEvictionsLocked(devPath string) {
 
 // setAdmits stores the initial (prewarm) admit list and pushes it to
 // kmod. Any prior state is dropped.
+//
+// X-04: sort by Ino ascending before storing so kmod receives entries
+// in assignment order (lower ino ≈ earlier assigned ≈ oldest). kmod's
+// s3fs_victim_cmp breaks score ties by idx (smallest = oldest); without
+// this sort the prewarm list arrives in Go map iteration order (random)
+// making eviction non-deterministic across runs.
 func setAdmits(devPath string, initial []admitEntry) error {
 	admitMu.Lock()
 	defer admitMu.Unlock()
+	sort.Slice(initial, func(i, j int) bool { return initial[i].Ino < initial[j].Ino })
 	admits = append(admits[:0], initial...)
 	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
 	return admitArena(devPath, admits)
@@ -582,7 +590,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	if !useFullAdmit && patternAwareAdmitEnabled && progs != nil {
 		if pat, ok := progs.ReadAccessPattern(ev.Ino); ok && pat.SeqRatio() >= seqAdmitRatioThreshold {
 			useFullAdmit = true
-			fmt.Printf("[upcall] ino=%d %s seq_ratio=%.2f → pattern-aware full admit (%d bytes)\n",
+			fmt.Printf("[upcall] ino=%d %s seq_ratio=%.2f PROMOTE_SIGNAL=pattern-aware full admit (%d bytes)\n",
 				ev.Ino, entry.Name, pat.SeqRatio(), fullSize)
 		}
 	}
