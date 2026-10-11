@@ -513,65 +513,65 @@ arena capacity を 4096 pages (16 MiB) → 32768 pages (128 MiB) に bump し、
 
 `scripts/bench-scale.sh` = fio filestat (stat) + fio psync (read) を numjobs sweep。ebpf の mutex 経路と FUSE daemon の single-threaded 経路のスケール限界を可視化。
 
-### 10.1 stat sweep (fio filestat、aggregate IOPS)
+### 10.1 stat sweep (fio filestat、aggregate IOPS) — 再計測 2026-10-11 (U-04/U-05 修正後)
 
 ```
-label       job       IOPS    clat_ns
-ebpf          1      4029k   11709.00
-fuse-raw      1      3993k   11981.00
-fuse-cache    1      4027k    9426.00
-ebpf          2      8009k   14988.00
-fuse-raw      2      7975k   10114.50
-fuse-cache    2      7984k    9043.50
-ebpf          4      16.0M    7503.50
-fuse-raw      4      16.2M    7345.00
-fuse-cache    4      16.1M    8432.75
-ebpf          8      22.3M    4815.25
-fuse-raw      8      22.4M    6223.62
-fuse-cache    8      22.2M    7030.25
-ebpf         16      22.4M    4721.25
-fuse-raw     16      22.2M    4643.12
-fuse-cache   16      22.1M    5163.75
-ebpf         32      22.3M    3958.69
-fuse-raw     32      22.2M    4276.50
-fuse-cache   32      22.3M    4718.69
-ebpf         64      23.0M    3874.64
-fuse-raw     64      23.0M    4538.08
-fuse-cache   64      23.0M    3925.95
+label       job       IOPS clat_ns(norm)
+ebpf          1      6409k       5674
+fuse-raw      1      6430k       6516
+fuse-cache    1      6456k       6843
+ebpf          2      12.3M       4748
+fuse-raw      2      12.2M       6789
+fuse-cache    2      12.4M       5786
+ebpf          4      23.0M       3934
+fuse-raw      4      23.1M       4191
+fuse-cache    4      23.0M       5104
+ebpf          8      22.1M       3860
+fuse-raw      8      21.8M       3469
+fuse-cache    8      21.9M       4478
+ebpf         16      21.7M       2587
+fuse-raw     16      21.9M       3062
+fuse-cache   16      20.9M       2736
+ebpf         32      21.0M       2042
+fuse-raw     32      20.9M       2403
+fuse-cache   32      21.1M       2091
+ebpf         64      21.0M       2009
+fuse-raw     64      21.1M       2141
+fuse-cache   64      21.5M       2213
 ```
 
-### 10.2 read sweep (fio psync、shared small file)
+### 10.2 read sweep (fio psync、shared small file) — 再計測 2026-10-11 (U-04/U-05 修正後)
 
 ```
-label       job       IOPS    clat_ns
-ebpf          1      1199k     408.46
-fuse-raw      1      1165k     404.03
-fuse-cache    1      1143k     422.69
-ebpf          2      2098k     512.87
-fuse-raw      2      2067k     510.32
-fuse-cache    2      2008k     532.78
-ebpf          4      4016k     558.33
-fuse-raw      4      4035k     538.24
-fuse-cache    4      3927k     561.99
-ebpf          8      5116k     953.17
-fuse-raw      8      4912k     974.51
-fuse-cache    8      5079k     934.10
-ebpf         16      5091k    1813.04
-fuse-raw     16      4931k    1874.77
-fuse-cache   16      4851k    1841.53
-ebpf         32      5176k    3754.56
-fuse-raw     32      4769k    3938.82
-fuse-cache   32      4880k    3925.63
-ebpf         64      5374k    7159.07
-fuse-raw     64      5343k    6919.38
-fuse-cache   64      4978k    7556.90
+label       job       IOPS clat_ns(norm)
+ebpf          1      1495k        374
+fuse-raw      1      1616k        313
+fuse-cache    1      1642k        304
+ebpf          2      2526k        487
+fuse-raw      2      3082k        338
+fuse-cache    2      3020k        345
+ebpf          4      4779k        511
+fuse-raw      4      5571k        381
+fuse-cache    4      5497k        389
+ebpf          8      4886k       1006
+fuse-raw      8      5603k        766
+fuse-cache    8      5609k        767
+ebpf         16      4817k       2051
+fuse-raw     16      5584k       1566
+fuse-cache   16      5185k       1742
+ebpf         32      4500k       4412
+fuse-raw     32      5182k       3482
+fuse-cache   32      5225k       3427
+ebpf         64      4638k       8672
+fuse-raw     64      5320k       6743
+fuse-cache   64      5336k       6717
 ```
 
 ### 10.3 解釈
 
-- **stat**: 3 mount ともほぼ同一。8 jobs で ~22M IOPS のプラトー = **VFS/syscall 側の共通上限**。64 jobs で ebpf の clat 3874ns、fuse-raw 4538ns、fuse-cache 3926ns。s3fs-ebpf は syscall boundary から先が短い (in-kernel fast path) ぶん clat のバラツキも小さい
-- **read (small file, shared)**: 8 jobs 以降 ~5M IOPS で頭打ち。全 3 mount がほぼ hot page cache だけを叩いているので、上限は kernel の page cache 側 (folio_lock 争奪) にある
-- **write と違って read は fuse-cache が ebpf に肉薄する**: hot state で FUSE daemon への upcall が発生しない fuse-cache は、ebpf と同じ「page cache 直読」経路になる。ebpf の優位性は cold-path / write / consistency 制御に集約される
+- **stat**: 3 mount ともほぼ同一。4 jobs で ~23M IOPS のプラトー = **VFS/syscall 側の共通上限**。64 jobs の clat は ebpf 2009ns、fuse-raw 2141ns、fuse-cache 2213ns。s3fs-ebpf は syscall boundary から先が短い (in-kernel fast path) ぶん高負荷時の clat が小さい
+- **read (small file、drop_caches=1 でバックエンド間 cold isolation)**: 全 jobs で **fuse-raw/fuse-cache が ebpf を上回る** (64 jobs: fuse-raw 5320k vs ebpf 4638k)。U-05 で page cache 混在が解消され、ebpf の arena read path が cold state から正確に計測されるようになった結果。ebpf は warm state での cat 10× 優位 (§9) とは逆の特性 — per-folio の arena アドレス解決が fuse の page cache 直読より重い
+- **write と違って read は fuse-cache が ebpf に肉薄 (cold でも上回る)**: fuse-cache は page cache に温まると ebpf と同じ kernel path、cold でも drop_caches 直後に fuse lookup → page fill と進むため ebpf の arena ルックアップより軽い。ebpf の優位性は cold-path latency (§7.7)・write・consistency 制御に集約される
 - **caveat**: `bench-scale.sh` 初回は parallel-cat wrapper が hang した (bash `wait` が cat の child を捉えきれず do_wait 停止)。fio psync に置換した (single-file shared reads で FUSE daemon の scale 特性を測る目的は同じ)。docs 上は fio 版を採用
 
 ---
