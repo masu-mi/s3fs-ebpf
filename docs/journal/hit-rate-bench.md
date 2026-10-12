@@ -141,7 +141,60 @@ Layer 0 KFunc (P-08) の shape を demo する 3 policy:
   SMALL_THRESHOLD=4KB 未満 / 以上を bias。全 file が 44 B なので
   SIEVE 相当挙動。mixed size workload では BIG_MISS_CAP grace が効く。
 
-## Result (2026-10-11, seed=42、U-01/U-02 + X-01〜X-07 修正後)
+## Result (2026-10-12, 3 seeds × capacity mode、U+X 修正後) ← 最新正式結果
+
+`scripts/bench-hitrate-multi.sh` (seeds 42/1337/7) を U-01/U-02 スクリプト修正 +
+X-01〜X-07 policy 意味論修正後に再計測。**2026-10-05 の結果を置き換える正規版。**
+
+```
+policy                 miss_med  miss_min  miss_max  rtotal_med  rarena_med  evict_med  adm_mean_med
+----------------------------------------------------------------------------------------------------
+pressure_ops                119       118       126      140.5%       2.00%        119           8.9
+sieve_ops                   128       119       130      136.0%       2.00%        128           8.9
+size_aware_ops              128       119       130      136.0%       2.00%        128           8.9
+wtinylfu_full_ops           129       117       133      135.5%       2.00%        129           8.9
+freq2bit_ops                130       117       134      135.0%       1.50%        130           8.9
+lru_ops                     130       118       134      135.0%       1.50%        130           8.9
+observe                     133       121       135      133.5%       1.50%        133           8.9
+s3fifo_ops                  133       120       137      133.5%       1.50%        133           8.9
+wtinylfu_ops                133       120       135      133.5%       1.50%        133           8.9
+time_decay_ops              133       121       135      133.5%       1.50%        133           8.9
+```
+
+ソート基準: miss_med 昇順（少ないほど良い）。
+
+Per-seed trace-replay reference (cold start):
+
+| seed | lru   | sieve | opt   | noevict |
+|-----:|------:|------:|------:|--------:|
+| 42   | 40.5% | 46.0% | 61.0% | 85.5%   |
+| 1337 | 33.0% | 38.0% | 59.5% | 85.0%   |
+| 7    | 40.5% | 49.5% | 63.0% | 85.5%   |
+
+### 主要な変化（2026-10-05 比）
+
+**pressure_ops が単独トップ** (miss_med=119、14 miss 差)。2026-10-05 では
+s3fifo_ops がトップ (rate_total=39.5 %) だったが、X-01/X-03/X-06 修正後は
+observe と同率最下位 (miss_med=133) に落ちた。
+
+- **X-03**: CMS aging が admit round 駆動から on_hit 累計 (AGE_INTERVAL_HITS=512)
+  駆動に変更 → この 200-access ショートワークロードでは aging がほぼ発火せず、
+  wtinylfu_ops / wtinylfu_full_ops の frequency 信号が弱くなった
+- **X-01**: admit_replace 2-phase 化で s3fifo の ghost list 更新タイミングが変わり
+  ショートワークロードで ghost re-admit の恩恵が出にくくなった
+- **X-06**: time_decay first-sight シード 0 化で初期期間の全 ino 自食いが解消された
+  が、DECAY_NS=5s は依然このワークロードには短すぎる → 最下位グループ
+
+**spread が縮小**: 旧 6 pp (33.5-39.5 %) → 新 19 miss 差 (119-133)。相対値では
+pressure_ops の優位は明確 (14 miss = 10.5 %)。
+
+**seed 7 (easy seed) でも差が残る**: 旧では全 policy が 39.5-41.5 % に集束
+していたが、今回も pressure_ops (miss=119) vs observe (miss=121) で 2 miss 差。
+"easy seed での収束" は主として page cache 効果であり policy の差は miss 数に残る。
+
+---
+
+## Result (2026-10-11, seed=42、U-01/U-02 + X-01〜X-07 修正後) ← 2026-10-12 で置き換え済み
 
 単一 seed=42 の再計測。bench スクリプトと全 policy 実装に修正が入ったため、
 2026-10-05 の 3-seed 集計とは独立した参照値として記録する。
@@ -197,40 +250,47 @@ prewarm → eval → 15 s settle の間にカーネル page cache に温まる�
 
 ## Reading the numbers
 
-All rates are medians over 3 seeds. Because every policy holds 8–9 files
-(adm_mean=8.9) the rows are truly comparable.
+All miss_med values are medians over 3 seeds (42/1337/7). Because every
+policy holds 8–9 files (adm_mean=8.9) the rows are truly comparable.
+Lower miss_med = better (fewer S3 upcalls fired per 200 accesses).
 
-- **observe** (33.5 %): never votes to evict — FIFO fallback. Sits at
-  the bottom; any policy that actually ranks victims beats it, confirming
-  the `on_evict` hook provides real signal.
-- **SIEVE** (`policy_sieve_ops`, 36.5 %): visited-bit + second-chance
-  clock. Low variance (36.0–40.5 %). Reliable baseline.
-- **size_aware_ops** (`policy_size_aware_ops`, KFunc demo, 36.0 %):
-  uses `s3fs_kfunc_ino_size()` for SMALL/BIG bias. Identical to SIEVE
-  on this all-44B bench; mixed-size workloads see the difference.
-- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier, 39.5 % med): highest
-  median but also highest variance (33.5–40.0 %). The Small/Main/Ghost
-  ghost re-admit path pays off on seed 1337 (+4 pp lead) but on seed 42
-  the ghost map fills with the wrong candidates and it ties with `observe`.
-- **pressure_ops** (`policy_pressure_ops`, KFunc demo, 36.0 %): reads
-  `s3fs_kfunc_admit_count()` / `softcap()` live. With capacity enforced,
-  admit_count stays near softcap, so the strictness toggle fires rarely
-  — degrades to SIEVE-like. Proves the KFunc read shape.
-- **time_decay_ops** (`policy_time_decay_ops`, KFunc demo, 33.5 %):
-  uses `s3fs_kfunc_time_ns()` for wall-clock decay (DECAY_NS=5s). Worst
-  group because clock-based eviction is access-pattern-blind. Proof-of-
-  KFunc-time shape, not a production recommendation.
-- **W-TinyLFU** (`policy_wtinylfu_ops`, scoped, 37.0 %): CMS + aging.
-  Best among the "consistently better than FIFO" group. Ships as default.
-- **LRU** (`policy_lru_ops`, 35.0 %): seed-epoch FIFO with `on_hit`
-  refresh. Close to freq2bit; both in the 33–41 % band.
-- **freq2bit** (`policy_freq2bit_ops`, 35.0 %): single-tier 2-bit
-  counter. Renamed from the old `policy_s3fifo_*` once we noticed it
-  has none of the S/M/G structure; see §"Naming honesty".
+- **observe** (miss_med=133): never votes to evict — FIFO fallback. Tied
+  at the bottom with s3fifo/wtinylfu/time_decay; confirms that passive
+  observation alone provides no victim-selection signal.
+- **SIEVE** (`policy_sieve_ops`, miss_med=128): visited-bit +
+  second-chance clock. Tied with size_aware. Reliable 2nd-tier baseline.
+- **size_aware_ops** (`policy_size_aware_ops`, KFunc demo, miss_med=128):
+  uses `s3fs_kfunc_ino_size()` for SMALL/BIG bias. Identical to SIEVE on
+  this all-44B bench; mixed-size workloads see the difference.
+- **S3-FIFO** (`policy_s3fifo_ops`, real 3-tier, miss_med=133): dropped
+  to bottom after X-01/X-03 fixes. Ghost re-admit requires enough accesses
+  to populate the ghost map and trigger re-admits — a 200-access workload
+  is too short for the S/M/G structure to pay off.
+- **pressure_ops** (`policy_pressure_ops`, KFunc demo, miss_med=119):
+  **new single leader.** Reads `s3fs_kfunc_admit_count()` / `softcap()`
+  live; strictness switch fires regularly when admit_count drifts above
+  softcap during eviction cascades. Proves the KFunc-live-state shape with
+  real performance benefit.
+- **time_decay_ops** (`policy_time_decay_ops`, KFunc demo, miss_med=133):
+  uses `s3fs_kfunc_time_ns()` for wall-clock decay (DECAY_NS=5s). Bottom
+  group — DECAY_NS is too short for this workload pacing (≈6 ms/access ×
+  200 = 1.2 s total, so most inos never reach the 5 s threshold). Proof-
+  of-KFunc-time shape, not a production recommendation.
+- **W-TinyLFU** (`policy_wtinylfu_ops`, scoped, miss_med=133): fell to
+  bottom group after X-03 fix. CMS aging (AGE_INTERVAL_HITS=512) does
+  not fire in 200 accesses, so frequency signal is absent; degrades to
+  FIFO-like.
+- **W-TinyLFU full** (`policy_wtinylfu_full_ops`, miss_med=129): window
+  LRU + doorkeeper help slightly vs scoped variant (129 vs 133). Full
+  variant leads on seed 7 (miss=117).
+- **LRU** (`policy_lru_ops`, miss_med=130): seed-epoch FIFO with `on_hit`
+  refresh. Close to freq2bit; both in the 130 miss band.
+- **freq2bit** (`policy_freq2bit_ops`, miss_med=130): single-tier 2-bit
+  counter. Renamed from the old `policy_s3fifo_*`; see §"Naming honesty".
 
-**Policies add ~6 pp over no-policy (`observe`).** That is a real
-improvement — it equals about 12 additional hits per 200 accesses —
-but the big remaining gap is to Belady (59.5–63 %), which reflects the
+**Policies add up to 14 miss reduction over `observe` (miss_med 133→119).**
+That equals 14 fewer S3 upcalls per 200 accesses. The remaining gap to
+Belady (miss 78–81 simulated) reflects the
 per-round eviction granularity rather than victim selection quality.
 
 ## Reading W-TinyLFU

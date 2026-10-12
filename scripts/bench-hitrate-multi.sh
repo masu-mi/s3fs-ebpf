@@ -24,31 +24,40 @@ for s in $SEEDS; do
     seed_outs+=("$OUT/summary.txt")
 done
 
-# Aggregate: for each policy compute median rate across seeds.
+# Aggregate: for each policy compute median miss/rate_total across seeds.
+# Parses the U-02 RESULT format:
+#   RESULT policy=X  folio=N  pc=N  miss=N  err=N  rate_arena=R%  rate_total=R%  evictions=N  adm_mean=N  adm_max=N  ms/access=N
 python3 - "${seed_outs[@]}" <<'PY'
 import sys, re, statistics
 
 files = sys.argv[1:]
-# policy -> list of (rate, evictions, adm_mean, adm_max)
+# policy -> list of (miss, rate_total, rate_arena, evictions, adm_mean, adm_max)
 data = {}
 for f in files:
     with open(f) as fh:
         for line in fh:
-            m = re.search(r'policy=(\S+)\s+hits=\s*\d+\s+misses=\s*\d+\s+rate=\s*([\d.]+)%\s+evictions=\s*(\d+)\s+adm_mean=\s*([\d.]+)\s+adm_max=\s*(\d+)', line)
+            m = re.search(
+                r'policy=(\S+)\s+folio=\s*\d+\s+pc=\s*\d+\s+miss=\s*(\d+)\s+err=\s*\d+'
+                r'\s+rate_arena=\s*([\d.]+)%\s+rate_total=\s*([\d.]+)%'
+                r'\s+evictions=\s*(\d+)\s+adm_mean=\s*([\d.]+)\s+adm_max=\s*(\d+)', line)
             if m:
-                pol, rate, evict, amean, amax = m.groups()
-                data.setdefault(pol, []).append((float(rate), int(evict), float(amean), int(amax)))
+                pol, miss, r_arena, r_total, evict, amean, amax = m.groups()
+                data.setdefault(pol, []).append(
+                    (int(miss), float(r_total), float(r_arena), int(evict), float(amean), int(amax)))
 
-print(f"{'policy':<22} {'rate_med':>8} {'rate_min':>8} {'rate_max':>8} {'evict_med':>10} {'adm_mean_med':>12} {'adm_max_med':>12}")
-print("-" * 90)
-for pol, rows in sorted(data.items(), key=lambda x: -statistics.median(r[0] for r in x[1])):
-    rates = [r[0] for r in rows]
-    evicts = [r[1] for r in rows]
-    ameans = [r[2] for r in rows]
-    amaxs  = [r[3] for r in rows]
-    med_r  = statistics.median(rates)
-    med_e  = statistics.median(evicts)
-    med_am = statistics.median(ameans)
-    med_ax = statistics.median(amaxs)
-    print(f"{pol:<22} {med_r:>7.1f}%  {min(rates):>7.1f}%  {max(rates):>7.1f}%  {med_e:>10.0f}  {med_am:>12.1f}  {med_ax:>12.0f}")
+# Sort by median miss ascending (fewer misses = better)
+print(f"{'policy':<22} {'miss_med':>8} {'miss_min':>8} {'miss_max':>8} {'rtotal_med':>10} {'rarena_med':>10} {'evict_med':>10} {'adm_mean_med':>12}")
+print("-" * 100)
+for pol, rows in sorted(data.items(), key=lambda x: statistics.median(r[0] for r in x[1])):
+    misses     = [r[0] for r in rows]
+    r_totals   = [r[1] for r in rows]
+    r_arenas   = [r[2] for r in rows]
+    evicts     = [r[3] for r in rows]
+    ameans     = [r[4] for r in rows]
+    med_miss   = statistics.median(misses)
+    med_rt     = statistics.median(r_totals)
+    med_ra     = statistics.median(r_arenas)
+    med_e      = statistics.median(evicts)
+    med_am     = statistics.median(ameans)
+    print(f"{pol:<22} {med_miss:>8.0f}  {min(misses):>8}  {max(misses):>8}  {med_rt:>9.1f}%  {med_ra:>9.2f}%  {med_e:>10.0f}  {med_am:>12.1f}")
 PY
