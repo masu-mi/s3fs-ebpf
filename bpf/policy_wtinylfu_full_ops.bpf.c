@@ -120,6 +120,19 @@ struct {
 	__uint(max_entries, PSTAT_MAX);
 } policy_stats SEC(".maps");
 
+/* Z-05: runtime-configurable aging/doorkeeper-reset intervals.
+ * Slot 0 = age_interval (per-admit rounds, default AGE_INTERVAL=4).
+ * Slot 1 = dk_reset_interval (per-admit rounds, default DK_RESET_INTERVAL=16).
+ * 0 = use default. Daemon writes via SetConfigU64("wtinylfu_full_config", ...). */
+enum { WFCFG_AGE_INTERVAL = 0, WFCFG_DK_RESET_INTERVAL = 1, WFCFG_MAX };
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, WFCFG_MAX);
+} wtinylfu_full_config SEC(".maps");
+
 /* Row hash seeds — same for CMS + DK, ranged via masks. */
 static const __u32 seeds[CMS_D] = {
 	0x9e3779b1U,
@@ -240,15 +253,28 @@ SEC("struct_ops/on_admit")
 int BPF_PROG(wtinylfu_full_admit, __u64 count, __u64 hint)
 {
 	__u32 k;
-	__u64 *sp;
+	__u64 *sp, *cp;
+	__u64 age_iv, dk_iv;
+
+	/* Z-05: read configured intervals; fall back to hardcoded defaults.
+	 * Explicit non-zero guards satisfy the BPF verifier for modulo. */
+	k = WFCFG_AGE_INTERVAL;
+	cp = bpf_map_lookup_elem(&wtinylfu_full_config, &k);
+	age_iv = (cp && *cp) ? *cp : AGE_INTERVAL;
+	if (!age_iv) age_iv = AGE_INTERVAL;
+
+	k = WFCFG_DK_RESET_INTERVAL;
+	cp = bpf_map_lookup_elem(&wtinylfu_full_config, &k);
+	dk_iv = (cp && *cp) ? *cp : DK_RESET_INTERVAL;
+	if (!dk_iv) dk_iv = DK_RESET_INTERVAL;
 
 	k = PSTAT_INVOCATIONS;
 	sp = bpf_map_lookup_elem(&policy_stats, &k);
 	if (sp) {
 		__u64 inv = __sync_fetch_and_add(sp, 1) + 1;
-		if ((inv & (AGE_INTERVAL - 1)) == 0)
+		if (inv % age_iv == 0)
 			age_cms();
-		if ((inv & (DK_RESET_INTERVAL - 1)) == 0)
+		if (inv % dk_iv == 0)
 			reset_dk();
 	}
 	k = PSTAT_LAST_COUNT;

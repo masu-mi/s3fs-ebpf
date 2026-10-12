@@ -256,6 +256,49 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 **X-06 の受け入れ条件**: time_decay の hit rate が `start_stack` 期間変動 (3s → 15s) に不感となり、他 policy と同じ workload-driven な挙動を示す。
 **X-07 の受け入れ条件**: write を含む合成 trace (reads 100 + writes 20 を交互) で `trace-replay` を回し、write の次の read が miss (reads 100 の中で write 対象 ino が miss にシフト) として現れることを示す。
 
+### Y. ベンチ計測の妥当性 Phase 2 (2026-10-12 レビュー) — P0
+
+U-01〜U-08 + X-01〜X-07 を適用した 2026-10-12 の 3-seed 再計測 (`hr §"Result (2026-10-05)"` を置き換えた新表) をレビューした結果、ベンチの**定義壊れと系統誤差**が残っている。Meetup 用の数値として引用する前に修正する。
+
+- [x] **Y-01** `bench-hitrate.sh` の `rate_arena/rate_total` 定義が壊れている — `read_iter_hits` は `generic_file_read_iter` 1 回ごと加算 (`cat` 1 回 ≈ 2 回 fire)、`miss` は `.read_folio` ベースで `cat` 1 回ごと最大 1 回。`rate_total = (folio + pc) / N_ACCESS` の分子は per-read_iter、分母は per-cat なので **2× 不整合**。結果 `rate_total 133–143%` と Belady opt (61%) を超えて 100% を越える。主指標を `hit = 1 − miss/N_ACCESS` (旧 2026-10-05 定義) に戻し、`folio/pc` は内訳列として並置。`hr §"Output columns"` と `scripts/bench-hitrate.sh:234-239` を修正。目安 0.5 日 **→ 2026-10-12 完了**: `rate_total` を `hit_rate = 1 - miss/N_ACCESS` に置換、`pc` 列はアノテーション扱いで保持
+- [x] **Y-02** X-04 `Ino 昇順ソート` + `s3fs_victim_cmp` idx tiebreak が Zipf 分布と相関し systematic bias を作る — bucket List は辞書順なので `hitrate_0 → ino 100, hitrate_1 → 101, hitrate_10 → 102, …, hitrate_19 → 110, hitrate_2 → 111, …` と ino 分布が非自明に歪む。Zipf hot (index 0, 1, 2) が低 ino、warm (3–9) が高 ino に散り、"evict lowest idx first" が偶然 warm を保護する**幸運**で成立している。もし `hitrate_000.txt` 形式でシードすれば observe の hit 率は 0 近傍まで落ちる。`s3fs_victim_cmp` の score=0 tiebreak を (a) `last_hit_ns` ベース (`s3fs_kfunc_time_ns()` を参照、BPF 側で export)、または (b) `hash(ino) ^ round_seed` のランダム化に変更。X-04 の "determinism" は seed 固定で保つ。目安 1〜2 日 **→ 2026-10-12 完了**: `s3fs_victim` 構造体に `tiebreak = hash_32(ino ^ ino>>32, 32)` フィールドを追加、`s3fs_victim_cmp` を `hash(ino)` tiebreak に変更 (`kmod/vfs_ops.c`)
+- [x] **Y-03** `bench-hitrate.sh` の N_ACCESS=200 がポリシーの時間/頻度ベース signal を測るには短すぎる — 200 × ~2 iter/access = 400 on_hit で `AGE_INTERVAL_HITS=512` (X-03) 未満 → W-TinyLFU scoped/full の aging が一度も発火しない。同構造で S3-FIFO ghost promotion も 200 access では populate しきれず、`time_decay` DECAY_NS=5s も 1.2s ワークロードを越えない。結果「ランキング逆転」は policy 良否ではなく**ベンチ長の過少**を反映している。N_ACCESS=2000+、Zipf α={0.5, 0.7, 0.9, 1.3} の sweep に拡張。`scripts/bench-hitrate.sh:41-42` のデフォルト見直し + `bench-hitrate-multi.sh` の α sweep 対応。目安 0.5 日 (計測) + 0.5 日 (sweep) **→ 2026-10-12 完了**: N_ACCESS デフォルト 200→2000 (`bench-hitrate.sh:41`)、`bench-hitrate-multi.sh` を ALPHAS 変数対応に書き直し (α × seed の全組み合わせを集計、hit_rate カラム対応)
+- [x] **Y-04** ゼロパディング無しの bucket seed が Y-02 bias を**偶然 decorrelate** して worst case を隠している — `scripts/bench-hitrate.sh:81-85` の `hitrate_<i>.txt` を `hitrate_<i:03d>.txt` 形式に変更して worst case (Zipf index と ino 分布が完全一致) を再現。`hr` に "ゼロパディング前後での observe rate 比較" を記録して Y-02 fix の受け入れ条件とする。目安 0.25 日 **→ 2026-10-12 完了**: `seed_bucket` / `cat` パスを `printf '%03d'` 形式に変更 (`scripts/bench-hitrate.sh`)
+- [ ] **Y-05** D-01 multi-range workload bench (`big.bin` / `10m.bin` / `100m.bin` 混在) が未作成 — X-01〜X-05 共通受け入れ条件が未検証のまま。`scripts/bench-hitrate-multi.sh` に `MIXED=1` オプションを追加し、大ファイル + 44B tiny を混ぜた Zipf access で各 policy の `rate_arena` 差分を記録する。目安 1 日
+- [x] **Y-06** `read_iter_hits` ダブルカウント検証 — `.read_folio` fast path (`s3fs_folio_hits` 加算) と `generic_file_read_iter` fentry (`S3FS_STAT_READ_ITER_HITS` 加算) が同一 cat の初回 read で両方 fire している疑い。U-01 の `d_page_cache_hits = d_read_iter_hits - d_folio - d_miss` が初回 cat の read_folio-hit を "iter + folio" の両方で数えるため `pc` が過大。kmod 側で "read_iter_hit without preceding read_folio" を数える別カウンタ (`s3fs_pc_only_hits`) を追加するか、`pc` 列を削除 (Y-01 と連動)。目安 0.5 日 **→ 2026-10-12 完了**: `S3FS_STAT_READ_ITER_HITS_POS0` カウンタを追加 (ki_pos==0 の read_iter hit のみ計上)。`iter_mult = iter_hits/pos0_hits ≈ 2` でダブルカウントを定量化。`pc` 計算を pos0 ベースに修正。Prometheus 経由で `s3fs_ebpf_read_iter_pos0_hits_total` を公開
+- [x] **Y-07** `pressure_ops` 単独トップ (miss_med=119) の原因が未解明 — 容量モードで admit_count ≈ softcap に張り付くはずで、本来 SIEVE lenient 相当に落ちるはず。にもかかわらず SIEVE (128) を 9 miss 上回る理由として、X-01 Phase 1 eval 中の瞬間値が softcap×1.5 を越え strict モードが数回だけ発火している可能性 (仮説)。`bpf/policy_pressure_ops.bpf.c` に `pstat_strict_triggered` カウンタを追加、dmesg or /metrics で発火回数を可視化。目安 0.5 日 **→ 2026-10-12 完了 (Z-04 と同時実施)**: `PSTAT_STRICT_TRIGGERED`/`PSTAT_LENIENT_TRIGGERED` カウンタを追加、Prometheus に `s3fs_ebpf_policy_pressure_strict_total`/`lenient_total` として公開
+
+**Y-01〜Y-06 の共通受け入れ条件**: ゼロパディング bucket (Y-04 適用) で `observe` の miss_med が Y-02 fix 前 → fix 後で有意に変動する (fix 前は miss ≈ opt - softcap で最悪ケース、fix 後は policy 選択で spread が広がる)。各 policy の `hit_rate = 1 − miss/N_ACCESS` を Belady opt と直接比較可能にする (gap が 20pp → より小さい値に縮まることを示す)。
+
+### Z. ポリシー実装の時定数ハードコード (2026-10-12 レビュー) — P1
+
+X-02〜X-06 で policy 実装の意味論バグは修正したが、**時定数 (aging interval / decay / threshold)** がハードコードのままなのでワークロード長/形状に適応できない。bench 側 (Y) と policy 側 (Z) の両方で tuning 可能にする。
+
+- [x] **Z-01** W-TinyLFU `AGE_INTERVAL_HITS=512` ハードコード (`bpf/policy_wtinylfu_ops.bpf.c:65`) — short bench で aging 発火せず、long production では過剰 aging で warm 項目が落ちる両方の問題。ratio-based (`age_interval = max(cms_sum / N_SLOTS * 4, 32)`) または CMS 平均が CMS_MAX/2 を越えたら age する dynamic aging に変更。`wtinylfu_full_ops` も同様。目安 1 日 **→ 2026-10-12 完了**: `wtinylfu_config[0]` ARRAY map + `--wtinylfu-age-interval` フラグ。BPF 側は modulo ベースに変更
+- [x] **Z-02** `time_decay` DECAY_NS=5s ハードコード (`bpf/policy_time_decay_ops.bpf.c`) — bench と production で全く違う値が必要。`/sys/module/s3fs_kfunc/parameters/decay_ns` module param、または BPF array (`policy_params[0] = decay_ns`) で runtime 変更可能に。目安 0.5 日 **→ 2026-10-12 完了**: `time_decay_config[0]` ARRAY map + `--time-decay-ns` フラグ
+- [ ] **Z-03** S3-FIFO ghost list `max_entries=1024` ハードコード (`bpf/policy_s3fifo_ops.bpf.c`) — 200 access では ghost が populate しきれず promotion が発火しない。ghost LRU 容量をワークロード size proportional (`cap_bytes / FILE_BYTES_HINT * 4`) にするか、ghost expiry を時間ベースに。目安 0.5 日 **(低優先: 実コードは 8192、Y-03 で N_ACCESS 拡大済のため実害なし。次回 N_FILES 拡大時に再評価)**
+- [x] **Z-04** `pressure_ops` の strict/lenient 発火条件が実測で見えない (Y-07 と連動) — `pstat_strict_triggered` / `pstat_lenient_triggered` カウンタを `bpf/policy_pressure_ops.bpf.c` に追加、/metrics に export、Grafana panel で切替頻度を可視化。目安 0.25 日 **→ 2026-10-12 完了 (Y-07 と同時実施)**
+- [x] **Z-05** `wtinylfu_full` doorkeeper reset interval がハードコードで small working set に不利 — reset frequency を dynamic (cache saturation ratio ベース、`live_bytes / cap_bytes` が 0.9 を越えたら reset) に。`bpf/policy_wtinylfu_full_ops.bpf.c` の `DK_RESET_INTERVAL` を condition-driven に。目安 0.5 日 **→ 2026-10-12 完了**: `wtinylfu_full_config[0,1]` ARRAY map + `--wtinylfu-full-age-interval` / `--wtinylfu-full-dk-reset-interval` フラグ
+
+**Z 系の受け入れ条件**: Y-03 で N_ACCESS=200/2000/10000 の 3 点を同じ bench で測り、Z-01/Z-02/Z-03 で tuning 可能になった時定数が各ワークロード長で異なる最適値を取ることを示す (short bench で aging 発火、long bench で過剰 aging なし)。
+
+### AA. FUSE 比 cold-path 性能改善 (2026-10-12 レビュー) — P1/P2
+
+主要指標 (warm cat 2.3×, open+read+close 169×, write durable 1.7×) は fuse-cache 比で十分な優位。残る劣後ポイントは **並列 read の cold scale** (`br §10.2`) と **mount-s3 cached 比の瞬間 latency** (`br §11.3`)。
+
+- [ ] **AA-01** 並列 read cold scale で ebpf が fuse-raw に 1.1〜1.2× 劣後 (`br §10.2`、U-05 修正後に顕在化) — 64 jobs で fuse-raw 5320k vs ebpf 4638k。原因: `.read_folio` 内の `admit_snapshot` (spinlock + hash walk) + GUP + kmap のオーバーヘッド。改善案:
+  - (a) `admit_snapshot` を RCU-indexed admit hash に移行 (`kmod/vfs_ops.c` の `s3fs_admits_lock` を rcu_read_lock に置換、admit entry は RCU-protected)
+  - (b) `.read_iter` を kmod で持ち、admit hit 時に `generic_file_read_iter` を bypass して arena から直 `copy_to_iter` (page cache 経由せず)
+  - (c) GUP cost の削減 — K-02 (upstream arena fault handler) が入れば kern_vm 直 deref で消える
+  目安 2〜3 日 (a) / 3〜5 日 (b) / 不確定 (c)
+- [x] **AA-02** `--pattern-aware-admit` (R-01-eval-scenario) を default on 化 — 10 MiB+ cold read で 3× latency 短縮を実測済 (bench-read-pattern-policy.sh)。`daemon/cmd/s3fs-ebpf/main.go:397` の `patternAdmit` のデフォルトを `true` に。`bench-latency.sh` にも組み込む。目安 0.25 日 **→ 2026-10-12 完了**: `main.go:397` の default を `false` → `true` に変更
+- [ ] **AA-03** `.read_iter` の kmod 直実装 — AA-01(b) と同体。admit hit 時に arena → iter の直 copy、page cache を bypass することで microbench open+read+close p50 が 3.075µs → 2µs 以下を狙う (mount-s3 比のさらなる優位)。目安 3〜5 日 (大改修なので要設計)
+- [ ] **AA-04** daemon の async read prefetch — fentry/generic_file_read_iter の seq_ratio 情報を使って daemon が先読み admit を発行、mount-s3 的な cold-miss 低減。`admit_arena.go` の pattern-aware admit を "trigger on upcall" から "trigger on seq pattern detected" に拡張。目安 1〜2 日
+- [ ] **AA-05** `--disk-cache-capacity` の adaptive sizing — 固定上限から watermark + LRU 自動 evict に変更して mount-s3 の SSD staging との機能面バランスを揃える。`objstore/cache.go` の `DiskCache.evictIfNeeded` を watermark-based に拡張 (high=90%/low=70% で slow path 発火)。目安 1 日
+- [ ] **AA-06** mount-s3 を bench-parallel / bench-scale にも追加 — 現状 bench-latency / bench-3way のみ (I-01)。並列 read / write / 大 blob の各軸で mount-s3 の優位/劣後を定量化し、narrative の 4 象限 (cold-path / warm-path / write / parallel) を揃える。目安 0.5 日
+
+**AA 系の受け入れ条件**: 64 jobs read で ebpf ≥ fuse-raw (AA-01)、cold read 10 MiB で ebpf が 3× 高速 (AA-02 default on)、microbench p50 ≤ 2µs (AA-03 達成時)、mount-s3 を含む 4-way bench が全軸で揃う (AA-06)。
+
 ### K. upstream 貢献 (`w4a §9`)
 
 根拠 doc: [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
@@ -294,6 +337,37 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 ## 7. 優先度 view (次 N 個)
 
 「今日〜明日で何を触るか」目線での並び:
+
+**2026-10-12 更新 — 2026-10-12 の 3-seed 再計測レビューにより新規課題を追加**:
+
+P0 新着 (Y-01〜Y-07 — ベンチ計測の妥当性 Phase 2):
+
+1. **Y-01** `rate_arena/rate_total` 定義壊れ (iter_hits 2× / rate_total > 100% / Belady 超え) — 0.5 日 (**最優先**、meetup 数値を引用する前に修正)
+2. **Y-02** X-04 ino 昇順 tiebreak と Zipf 分布の systematic bias — 1〜2 日 (policy spread が正しく出る前提)
+3. **Y-04** ゼロパディング無し bucket seed で Y-02 bias が偶然隠蔽 — 0.25 日 (Y-02 の受け入れ条件)
+4. **Y-03** N_ACCESS=200 がポリシー時定数より短く aging/ghost/decay が発火せず — 0.5 日 (計測) + 0.5 日 (sweep)
+5. **Y-06** `read_iter_hits` ダブルカウント検証 — 0.5 日 (Y-01 と連動)
+6. **Y-07** `pressure_ops` 単独トップの原因未解明 — 0.5 日 (Z-04 と連動)
+7. **Y-05** D-01 multi-range workload bench (X-01〜X-05 共通受け入れ条件未検証) — 1 日
+
+P1 新着 (Z-01〜Z-05 — ポリシー実装の時定数ハードコード):
+
+- Z-01 W-TinyLFU `AGE_INTERVAL_HITS=512` ハードコード (dynamic aging 化) — 1 日
+- Z-02 `time_decay` DECAY_NS=5s ハードコード (module param 化) — 0.5 日
+- Z-03 S3-FIFO ghost `max_entries=1024` ハードコード (workload proportional 化) — 0.5 日
+- Z-04 `pressure_ops` strict/lenient 発火カウンタ追加 (Y-07 と連動) — 0.25 日
+- Z-05 `wtinylfu_full` doorkeeper reset を condition-driven に — 0.5 日
+
+P1/P2 新着 (AA-01〜AA-06 — FUSE 比 cold-path 性能改善):
+
+- AA-01 並列 read cold scale 劣後 (fuse-raw 比 1.1〜1.2× 遅い) — RCU-indexed admit hash or `.read_iter` 直実装 — 2〜5 日
+- AA-02 `--pattern-aware-admit` default on — 0.25 日 (**低リスク高効果**、先行実施推奨)
+- AA-03 `.read_iter` kmod 直実装 (mount-s3 比のさらなる優位) — 3〜5 日
+- AA-04 daemon async read prefetch — 1〜2 日
+- AA-05 `--disk-cache-capacity` adaptive sizing (watermark) — 1 日
+- AA-06 mount-s3 を bench-parallel/scale にも追加 — 0.5 日
+
+**推奨順**: ~~AA-02~~ ~~Y-01~~ ~~Y-02~~ ~~Y-03~~ ~~Y-04~~ ~~Y-06~~ ~~Y-07~~ ~~Z-01~~ ~~Z-02~~ ~~Z-04~~ ~~Z-05~~ (2026-10-12 完了) → **次**: Y-05 (multi-range D-01 workload bench) → AA-01 (cold scale 改善) → Z-03 (S3-FIFO ghost cap、低優先)
 
 **2026-10-11 更新 — ベンチ妥当性 / ポリシー意味論レビューにより新規課題を追加**:
 

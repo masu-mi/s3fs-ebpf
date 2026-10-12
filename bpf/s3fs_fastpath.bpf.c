@@ -306,6 +306,11 @@ int BPF_PROG(s3fs_fp_read_iter,
 	offp = bpf_map_lookup_elem(&s3fs_inode_index, &ino);
 	if (offp) {
 		bump_counter(S3FS_STAT_READ_ITER_HITS);
+		/* Y-06: count first reads (pos==0) separately so bench tooling
+		 * can detect the ~2× multiplier from data+EOF read_iter calls
+		 * and compute a correct page-cache hit approximation. */
+		if (pos == 0)
+			bump_counter(S3FS_STAT_READ_ITER_HITS_POS0);
 		/* S-03: notify policy of this access. Covers page-cache hits
 		 * that bypass .read_folio (and therefore miss the on_hit call
 		 * in s3fs_ebpf_read_folio). Harmless double-dispatch on the

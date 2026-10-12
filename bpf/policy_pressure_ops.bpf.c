@@ -49,13 +49,18 @@ struct {
 } pressure_visited SEC(".maps");
 
 enum {
-	PSTAT_INVOCATIONS   = 0,
-	PSTAT_LAST_COUNT    = 1,
-	PSTAT_LAST_HINT     = 2,
+	PSTAT_INVOCATIONS        = 0,
+	PSTAT_LAST_COUNT         = 1,
+	PSTAT_LAST_HINT          = 2,
 	/* Aggregate KFunc reads — smoke-verifies that the Layer 0
 	 * calls actually fired. Not paper-precise semantics. */
-	PSTAT_LAST_ADMITS   = 3,
-	PSTAT_LAST_SOFTCAP  = 4,
+	PSTAT_LAST_ADMITS        = 3,
+	PSTAT_LAST_SOFTCAP       = 4,
+	/* Z-04: strict/lenient branch fire counters for Y-07 diagnosis.
+	 * STRICT: visited=1 AND high-pressure → skip second chance, evict.
+	 * LENIENT: visited=1 AND normal pressure → clear + keep (standard SIEVE). */
+	PSTAT_STRICT_TRIGGERED   = 5,
+	PSTAT_LENIENT_TRIGGERED  = 6,
 	PSTAT_MAX,
 };
 
@@ -122,6 +127,8 @@ int BPF_PROG(pressure_evict, __u64 ino)
 	__u8 *vp = bpf_map_lookup_elem(&pressure_visited, &ino);
 	__u8 one = 1, zero = 0;
 	int aggressive = is_high_pressure();
+	__u32 k;
+	__u64 *sp;
 
 	if (!vp) {
 		bpf_map_update_elem(&pressure_visited, &ino, &one, BPF_ANY);
@@ -135,10 +142,18 @@ int BPF_PROG(pressure_evict, __u64 ino)
 			 * bump from on_hit before the next round, so this
 			 * isn't a pure FIFO. */
 			bpf_map_update_elem(&pressure_visited, &ino, &zero, BPF_ANY);
+			k = PSTAT_STRICT_TRIGGERED;
+			sp = bpf_map_lookup_elem(&policy_stats, &k);
+			if (sp)
+				__sync_fetch_and_add(sp, 1);
 			return 1;
 		}
 		/* Normal SIEVE: clear + keep. */
 		bpf_map_update_elem(&pressure_visited, &ino, &zero, BPF_ANY);
+		k = PSTAT_LENIENT_TRIGGERED;
+		sp = bpf_map_lookup_elem(&policy_stats, &k);
+		if (sp)
+			__sync_fetch_and_add(sp, 1);
 		return 0;
 	}
 	/* visited=0 → always evict, regardless of pressure. */

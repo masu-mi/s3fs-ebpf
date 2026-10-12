@@ -62,7 +62,7 @@ struct s3fs_policy_ops {
 #define CMS_D          4U     /* rows */
 #define CMS_MAX        15U    /* 4-bit counter saturation */
 #define EVICT_THRESHOLD 1U    /* evict only est==0 (never hit); est≥1 = keep */
-#define AGE_INTERVAL_HITS 512U /* halve CMS every N on_hit calls (X-03) */
+#define AGE_INTERVAL_HITS_DEFAULT 512U /* default; overridable via wtinylfu_config[0] (Z-01) */
 
 /* One flat array — index by row*W + slot. u8 wastes 4 bits per entry
  * but avoids bit-packing headaches in the verifier. */
@@ -87,6 +87,18 @@ struct {
 	__type(value, __u64);
 	__uint(max_entries, PSTAT_MAX);
 } policy_stats SEC(".maps");
+
+/* Z-01: runtime-configurable age interval. Slot 0 holds age_interval_hits.
+ * Default (0 or unset) → fall back to AGE_INTERVAL_HITS_DEFAULT.
+ * Daemon writes via policyprog.SetWTinyLFUAgeInterval() after load. */
+enum { WCFG_AGE_INTERVAL = 0, WCFG_MAX };
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, WCFG_MAX);
+} wtinylfu_config SEC(".maps");
 
 /* Row hash seeds — FNV-32 basis + offsets. Any 4 distinct large odd
  * numbers work; these mix ino bits differently per row. */
@@ -208,18 +220,26 @@ int BPF_PROG(wtinylfu_hit, __u64 ino)
 {
 	__u32 k;
 	__u64 *sp;
+	__u64 age_interval;
 
 	cms_bump(ino);
 
-	/* X-03: age CMS every AGE_INTERVAL_HITS total hits so aging is
-	 * proportional to access frequency, not admit-round count. Bench
-	 * forced evals and daemon sync cycles no longer trigger spurious
-	 * aging that evicts warm items. */
+	/* Z-01: read age_interval from config map; fall back to default if
+	 * not set (0 is the BPF ARRAY zero-value before daemon init).
+	 * Explicit non-zero guard satisfies the BPF verifier for division. */
+	k = WCFG_AGE_INTERVAL;
+	sp = bpf_map_lookup_elem(&wtinylfu_config, &k);
+	age_interval = (sp && *sp) ? *sp : AGE_INTERVAL_HITS_DEFAULT;
+	if (!age_interval)
+		age_interval = AGE_INTERVAL_HITS_DEFAULT;
+
+	/* X-03: age CMS every age_interval total hits so aging is
+	 * proportional to access frequency, not admit-round count. */
 	k = PSTAT_HITS;
 	sp = bpf_map_lookup_elem(&policy_stats, &k);
 	if (sp) {
 		__u64 hits = __sync_fetch_and_add(sp, 1) + 1;
-		if ((hits & (AGE_INTERVAL_HITS - 1)) == 0)
+		if (hits % age_interval == 0)
 			cms_age();
 	}
 	return 0;

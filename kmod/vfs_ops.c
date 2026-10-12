@@ -26,6 +26,7 @@
 #include <linux/completion.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/hash.h>
 #include <linux/hashtable.h>
 #include <linux/highmem.h>
 #include <linux/jiffies.h>
@@ -589,18 +590,20 @@ static bool admit_evict_ino(u64 ino, u64 *freed)
 }
 
 struct s3fs_victim {
-	int score; /* policy on_evict return value, clamped >= 0 */
-	u32 idx;   /* position in the pushed snapshot (daemon keeps admission order) */
+	int score;     /* policy on_evict return value, clamped >= 0 */
+	u32 idx;       /* position in the pushed snapshot */
+	u32 tiebreak;  /* hash_32(ino,32): decorrelates from ino/Zipf distribution (Y-02) */
 };
 
-/* Highest score first; ties (incl. all score-0 keeps) oldest first. */
+/* Highest score first; ties broken by tiebreak (ino hash) to avoid
+ * systematic bias when scores are uniform (e.g. all score-0 on cold start). */
 static int s3fs_victim_cmp(const void *a, const void *b)
 {
 	const struct s3fs_victim *x = a, *y = b;
 
 	if (x->score != y->score)
 		return x->score > y->score ? -1 : 1;
-	return x->idx < y->idx ? -1 : (x->idx > y->idx);
+	return x->tiebreak < y->tiebreak ? -1 : (x->tiebreak > y->tiebreak);
 }
 
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
@@ -864,8 +867,9 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 						}
 					}
 					if (!already) {
-						cand[ncand].score = score;
-						cand[ncand].idx   = i;
+						cand[ncand].score    = score;
+						cand[ncand].idx      = i;
+						cand[ncand].tiebreak = hash_32((u32)ino ^ (u32)(ino >> 32), 32);
 						ncand++;
 					}
 				}

@@ -18,12 +18,13 @@ import (
 // StatSlot indices mirror `enum s3fs_stat_slot` in
 // include/s3fs_shared_types.h. Keep in sync.
 const (
-	StatFastHits        uint32 = 0
-	StatSlowMisses      uint32 = 1
-	StatUnknownFS       uint32 = 2
-	StatReadIterHits    uint32 = 3
-	StatReadIterMisses  uint32 = 4
-	StatSlotMax         uint32 = 5
+	StatFastHits            uint32 = 0
+	StatSlowMisses          uint32 = 1
+	StatUnknownFS           uint32 = 2
+	StatReadIterHits        uint32 = 3
+	StatReadIterMisses      uint32 = 4
+	StatReadIterHitsPos0    uint32 = 5 // Y-06: read_iter hit where ki_pos==0 (first read per open)
+	StatSlotMax             uint32 = 6
 )
 
 // MissOp mirrors `enum s3fs_miss_op`.

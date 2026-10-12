@@ -62,11 +62,12 @@ enum s3fs_miss_op {
 
 /* Per-CPU counter slots (indices into s3fs_counters map). */
 enum s3fs_stat_slot {
-	S3FS_STAT_FAST_HITS        = 0,
-	S3FS_STAT_SLOW_MISSES      = 1,
-	S3FS_STAT_UNKNOWN_FS       = 2,
-	S3FS_STAT_READ_ITER_HITS   = 3, /* read_folio path served from inode_index */
-	S3FS_STAT_READ_ITER_MISSES = 4, /* generic_file_read_iter: ino not in index */
+	S3FS_STAT_FAST_HITS             = 0,
+	S3FS_STAT_SLOW_MISSES           = 1,
+	S3FS_STAT_UNKNOWN_FS            = 2,
+	S3FS_STAT_READ_ITER_HITS        = 3, /* generic_file_read_iter: ino in index (all reads) */
+	S3FS_STAT_READ_ITER_MISSES      = 4, /* generic_file_read_iter: ino not in index */
+	S3FS_STAT_READ_ITER_HITS_POS0   = 5, /* read_iter hit where ki_pos==0 (first read per open); Y-06 */
 	S3FS_STAT_SLOT_MAX,
 };
 
