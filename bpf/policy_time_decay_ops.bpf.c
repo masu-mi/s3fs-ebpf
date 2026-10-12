@@ -59,11 +59,20 @@ struct {
 } policy_stats SEC(".maps");
 
 /* Time an item is allowed to sit unaccessed before it's a candidate
- * for eviction. 5 s is arbitrary — long enough that our bench's
- * ~30 s workload keeps hot items alive, short enough that "stale"
- * items visibly evict during the run. Tune per-workload in
- * production (or take it via a config map). */
-#define DECAY_NS  (5ULL * 1000ULL * 1000ULL * 1000ULL)
+ * for eviction. 5 s is the default; overridable at startup via
+ * time_decay_config[0] (Z-02). Set to e.g. 1 s for short benches. */
+#define DECAY_NS_DEFAULT  (5ULL * 1000ULL * 1000ULL * 1000ULL)
+
+/* Z-02: runtime-configurable decay window.
+ * Slot 0 = decay_ns. 0 (BPF zero-init) → fall back to DECAY_NS_DEFAULT. */
+enum { TDCFG_DECAY_NS = 0, TDCFG_MAX };
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, TDCFG_MAX);
+} time_decay_config SEC(".maps");
 
 SEC("struct_ops/on_admit")
 int BPF_PROG(time_decay_admit, __u64 count, __u64 hint)
@@ -108,13 +117,21 @@ int BPF_PROG(time_decay_evict, __u64 ino)
 {
 	__u64 *last = bpf_map_lookup_elem(&time_decay_last_hit, &ino);
 	__u64 now = s3fs_kfunc_time_ns();
+	__u32 k;
+	__u64 *cp, decay_ns;
+
+	/* Z-02: read configured decay window; fall back to default. */
+	k = TDCFG_DECAY_NS;
+	cp = bpf_map_lookup_elem(&time_decay_config, &k);
+	decay_ns = (cp && *cp) ? *cp : DECAY_NS_DEFAULT;
+	if (!decay_ns)
+		decay_ns = DECAY_NS_DEFAULT;
 
 	if (!last) {
 		/* First sight — store sentinel 0 meaning "no on_hit yet".
 		 * on_hit will overwrite with a real timestamp (always > 0 since
 		 * the clock is already running at boot). This prevents the bench
-		 * convergence loop (4 eval rounds × 3 s = 12 s > DECAY_NS = 5 s)
-		 * from evicting all items before the workload starts. */
+		 * convergence loop from evicting all items before the workload. */
 		__u64 zero = 0;
 		bpf_map_update_elem(&time_decay_last_hit, &ino, &zero, BPF_ANY);
 		return 0;
@@ -122,7 +139,7 @@ int BPF_PROG(time_decay_evict, __u64 ino)
 	/* Sentinel 0 = on_hit has never fired → infinite grace. */
 	if (!*last)
 		return 0;
-	if (now - *last > DECAY_NS)
+	if (now - *last > decay_ns)
 		return 1;
 	return 0;
 }

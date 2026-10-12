@@ -394,10 +394,25 @@ func runFastpath(args []string) int {
 		"[R-01] disable fentry/generic_file_read_iter hook. "+
 			"Use for overhead measurement only; disables read pattern tracking and "+
 			"is incompatible with --pattern-aware-admit.")
-	patternAdmit := fs.Bool("pattern-aware-admit", false,
+	patternAdmit := fs.Bool("pattern-aware-admit", true,
 		"[R-01] use s3fs_read_pattern_map sequential signal to promote large-file "+
 			"read-miss upcalls to full-file GETs, reducing S3 round-trips. "+
 			"Requires fentry/generic_file_read_iter (incompatible with --no-read-iter-hook).")
+	wtinylFUAgeInterval := fs.Uint64("wtinylfu-age-interval", 512,
+		"[Z-01] W-TinyLFU CMS aging interval: halve all CMS counters every N on_hit calls. "+
+			"Lower values age faster (suit short bench runs); higher values age slower "+
+			"(suit long live workloads). Written to wtinylfu_config[0] after policy load; "+
+			"silently ignored for non-wtinylfu policies.")
+	timeDecayNS := fs.Uint64("time-decay-ns", 5_000_000_000,
+		"[Z-02] time_decay policy: evict items unaccessed for this many nanoseconds. "+
+			"Default 5 s (5000000000). Set to e.g. 1000000000 (1 s) for short bench runs. "+
+			"Written to time_decay_config[0] after policy load; silently ignored for other policies.")
+	wtinylFUFullAgeInterval := fs.Uint64("wtinylfu-full-age-interval", 4,
+		"[Z-05] W-TinyLFU full: halve CMS every N on_admit calls (default 4). "+
+			"Written to wtinylfu_full_config[0]; silently ignored for other policies.")
+	wtinylFUFullDKResetInterval := fs.Uint64("wtinylfu-full-dk-reset-interval", 16,
+		"[Z-05] W-TinyLFU full: reset doorkeeper every N on_admit calls (default 16). "+
+			"Written to wtinylfu_full_config[1]; silently ignored for other policies.")
 	inoState := fs.String("ino-state", envOr("S3FS_INO_STATE", ""),
 		"[H-02] path to persist the S3Key → ino allocator table (JSON). "+
 			"When set, the map is loaded at startup and atomically re-written after every "+
@@ -554,6 +569,37 @@ func runFastpath(args []string) int {
 		}()
 		fmt.Printf("[policy-bpf] loaded %s (%d links attached, struct_ops=%v)\n",
 			bpfPath, polProg.AttachedCount(), polProg.IsStruct)
+		// Z-01: write the configured age interval into wtinylfu_config[0].
+		// No-op for policies that don't declare the map.
+		if *wtinylFUAgeInterval != 512 {
+			if err := polProg.SetConfigU64("wtinylfu_config", 0, *wtinylFUAgeInterval); err != nil {
+				fmt.Fprintf(os.Stderr, "[policy-bpf] wtinylfu-age-interval: %v (non-fatal)\n", err)
+			} else {
+				fmt.Printf("[policy-bpf] wtinylfu age_interval=%d\n", *wtinylFUAgeInterval)
+			}
+		}
+		// Z-02: write the configured decay window into time_decay_config[0].
+		// No-op for policies that don't declare the map.
+		const decayNSDefault = 5_000_000_000
+		if *timeDecayNS != decayNSDefault {
+			if err := polProg.SetConfigU64("time_decay_config", 0, *timeDecayNS); err != nil {
+				fmt.Fprintf(os.Stderr, "[policy-bpf] time-decay-ns: %v (non-fatal)\n", err)
+			} else {
+				fmt.Printf("[policy-bpf] time_decay decay_ns=%d (%.1f s)\n", *timeDecayNS, float64(*timeDecayNS)/1e9)
+			}
+		}
+		// Z-05: write wtinylfu_full age/doorkeeper-reset intervals.
+		// No-op for policies that don't declare wtinylfu_full_config.
+		if *wtinylFUFullAgeInterval != 4 {
+			if err := polProg.SetConfigU64("wtinylfu_full_config", 0, *wtinylFUFullAgeInterval); err != nil {
+				fmt.Fprintf(os.Stderr, "[policy-bpf] wtinylfu-full-age-interval: %v (non-fatal)\n", err)
+			}
+		}
+		if *wtinylFUFullDKResetInterval != 16 {
+			if err := polProg.SetConfigU64("wtinylfu_full_config", 1, *wtinylFUFullDKResetInterval); err != nil {
+				fmt.Fprintf(os.Stderr, "[policy-bpf] wtinylfu-full-dk-reset-interval: %v (non-fatal)\n", err)
+			}
+		}
 
 		// Wire up POST /policy/reload for hot swap. struct_ops →
 		// struct_ops retargets the live link with one BPF_LINK_UPDATE
@@ -1107,6 +1153,14 @@ func samplePolicyStats(ctx context.Context, mu *sync.Mutex, cur **policyprog.Pro
 				if v, err := p.ReadStat(policyprog.StatLastCount); err == nil {
 					metrics.Global.PolicyLastAdmitCount.Store(v)
 				}
+				// Z-04: pressure_ops strict/lenient counters.
+				// Silently ignored for other policies (out-of-range → error).
+				if v, err := p.ReadStat(policyprog.StatPressureStrictTotal); err == nil {
+					metrics.Global.PolicyPressureStrictTotal.Store(v)
+				}
+				if v, err := p.ReadStat(policyprog.StatPressureLenientTotal); err == nil {
+					metrics.Global.PolicyPressureLenientTotal.Store(v)
+				}
 			}
 			mu.Unlock()
 		}
@@ -1220,10 +1274,12 @@ func printCounters(progs *fpebpf.Programs, label string) {
 	metrics.Global.UnknownFS.Store(c[fpebpf.StatUnknownFS])
 	metrics.Global.ReadIterHits.Store(c[fpebpf.StatReadIterHits])
 	metrics.Global.ReadIterMisses.Store(c[fpebpf.StatReadIterMisses])
-	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d read_iter_hits=%d read_iter_misses=%d\n",
+	metrics.Global.ReadIterHitsPos0.Store(c[fpebpf.StatReadIterHitsPos0])
+	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d read_iter_hits=%d read_iter_misses=%d iter_pos0=%d\n",
 		label,
 		c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS],
-		c[fpebpf.StatReadIterHits], c[fpebpf.StatReadIterMisses])
+		c[fpebpf.StatReadIterHits], c[fpebpf.StatReadIterMisses],
+		c[fpebpf.StatReadIterHitsPos0])
 }
 
 func opName(op uint32) string {

@@ -24,10 +24,15 @@ import (
 )
 
 // Slot indices — must match bpf/policy_observe.bpf.c PSTAT_*.
+// pressure_ops-specific slots (Z-04) are only meaningful when that
+// policy is loaded; other policies have PSTAT_MAX≤5 so reads of
+// slots 5/6 return an out-of-range error and are silently skipped.
 const (
-	StatInvocations = 0
-	StatLastCount   = 1
-	StatLastHint    = 2
+	StatInvocations          = 0
+	StatLastCount            = 1
+	StatLastHint             = 2
+	StatPressureStrictTotal  = 5 // Z-04: pressure_ops strict-branch (visited=1, high-pressure → evict) fires
+	StatPressureLenientTotal = 6 // Z-04: pressure_ops lenient-branch (visited=1, normal → keep) fires
 )
 
 // Program bundles a loaded policy program set. Two shapes are
@@ -246,6 +251,20 @@ func (p *Program) ReadStat(slot uint32) (uint64, error) {
 		return 0, err
 	}
 	return v, nil
+}
+
+// SetConfigU64 writes a u64 value to slot 0 of a named BPF ARRAY map in the
+// policy collection. No-op when the map doesn't exist (policy doesn't declare it).
+// Used for Z-01 (wtinylfu_config) and similar per-policy tuning knobs.
+func (p *Program) SetConfigU64(mapName string, slot uint32, val uint64) error {
+	if p.Coll == nil {
+		return nil
+	}
+	m, ok := p.Coll.Maps[mapName]
+	if !ok {
+		return nil // policy doesn't expose this map — silently ignore
+	}
+	return m.Update(slot, val, 0 /* BPF_ANY */)
 }
 
 // AttachedCount returns how many links are live (useful for

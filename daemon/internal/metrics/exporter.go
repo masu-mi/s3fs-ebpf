@@ -66,6 +66,13 @@ type Counters struct {
 	// S3FS_IOC_STATS[0].
 	PolicyEvictionsTotal atomic.Uint64 // counter
 
+	// Z-04: pressure_ops strict/lenient branch fire counters.
+	// Only non-zero when policy_pressure_ops is the loaded policy.
+	// Strict: visited=1 AND high-pressure → evict (skip second chance).
+	// Lenient: visited=1 AND normal pressure → keep (standard SIEVE clear).
+	PolicyPressureStrictTotal  atomic.Uint64 // counter
+	PolicyPressureLenientTotal atomic.Uint64 // counter
+
 	// kmod-side .read_folio arena hits — the "true" cache hit count
 	// (as opposed to fentry-side FastPathHits which measures getattr
 	// hits on the BPF-side inode_index). Sourced from
@@ -84,6 +91,10 @@ type Counters struct {
 	// a daemon upcall via the events ringbuf, op=S3FS_OP_READ).
 	ReadIterHits   atomic.Uint64 // counter
 	ReadIterMisses atomic.Uint64 // counter
+	// Y-06: subset of ReadIterHits where ki_pos==0 (first read per
+	// file open). ReadIterHits/ReadIterHitsPos0 ≈ 2 confirms the
+	// data+EOF double-fire that inflated rate_total before Y-01.
+	ReadIterHitsPos0 atomic.Uint64 // counter
 }
 
 // Global is a package-level sink so any component can bump counters
@@ -195,14 +206,19 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_policy_hook_invocations_total", "fentry invocations on s3fs_policy_on_admit (counted by the loaded policy BPF program).", "counter", Global.PolicyHookInvocations.Load()},
 		{"s3fs_ebpf_policy_last_admit_count", "Snapshot count from the last admit_replace, as recorded by the policy BPF program.", "gauge", Global.PolicyLastAdmitCount.Load()},
 		{"s3fs_ebpf_policy_evictions_total", "Admit-table entries removed by policy eviction votes (kmod-side hash_del).", "counter", Global.PolicyEvictionsTotal.Load()},
+		// Z-04: pressure_ops diagnostic counters (0 when a different policy is loaded).
+		{"s3fs_ebpf_policy_pressure_strict_total", "pressure_ops: on_evict took strict path (visited=1, high-pressure → evict). Z-04.", "counter", Global.PolicyPressureStrictTotal.Load()},
+		{"s3fs_ebpf_policy_pressure_lenient_total", "pressure_ops: on_evict took lenient path (visited=1, normal pressure → keep). Z-04.", "counter", Global.PolicyPressureLenientTotal.Load()},
 
 		// True kmod-side cache hit — read_folio served from arena.
 		{"s3fs_ebpf_folio_hits_total", "kmod-side .read_folio calls served from arena (true cache hit). Divide by (this + read_miss_upcalls_total) for hit ratio.", "counter", Global.FolioHits.Load()},
 		{"s3fs_ebpf_admit_invalidations_total", "Page-cache invalidations by admit_replace for new or moved admit ranges (unchanged ranges keep their page cache).", "counter", Global.AdmitInvalidations.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
-		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (read prewarm hit).", "counter", Global.ReadIterHits.Load()},
+		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},
 		{"s3fs_ebpf_read_iter_misses_total", "generic_file_read_iter calls where ino was unknown; triggers daemon prewarm upcall.", "counter", Global.ReadIterMisses.Load()},
+		// Y-06: pos==0 subset. hits_total / pos0_hits_total ≈ 2 confirms data+EOF double-fire.
+		{"s3fs_ebpf_read_iter_pos0_hits_total", "read_iter hits where ki_pos==0 (first read per open); ≈ N_ACCESS in bench. Y-06 diagnostic.", "counter", Global.ReadIterHitsPos0.Load()},
 	}
 	for _, m := range metrics {
 		fmt.Fprintf(w, "# HELP %s %s\n", m.name, m.help)

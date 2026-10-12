@@ -38,7 +38,7 @@ BUCKET=${BUCKET:-s3fs-test}
 N_FILES=${N_FILES:-30}          # working set size (softcap=8 → 22 evict candidates)
 # Defaults match the recorded results in docs/journal/hit-rate-bench.md
 # and `trace-replay`'s --zipf default.
-N_ACCESS=${N_ACCESS:-200}       # workload length
+N_ACCESS=${N_ACCESS:-2000}      # workload length; 200 was too short for aging/ghost/decay to fire (Y-03)
 ZIPF_ALPHA=${ZIPF_ALPHA:-0.7}   # skew — smaller = more uniform
 SEED=${SEED:-42}                # random seed for workload generation
 SOFTCAP=${SOFTCAP:-8}           # slots; passed to kmod (--softcap) and the reference sims
@@ -76,12 +76,14 @@ seed_bucket() {
 	docker exec "$MINIO_CONTAINER" mc mb --ignore-existing \
 		"local/$BUCKET" >/dev/null
 	# One .txt per iteration index, distinct content so a hit is
-	# obviously the cached copy.
+	# obviously the cached copy. Zero-padded names (hitrate_000.txt) so
+	# S3 alphabetical listing order matches numeric order — prevents ino
+	# assignment from correlating with Zipf rank (Y-04).
 	local i
 	for i in $(seq 0 $((N_FILES-1))); do
-		printf 'hitrate file %02d line1\nhitrate file %02d line2\n' "$i" "$i" \
+		printf 'hitrate file %03d line1\nhitrate file %03d line2\n' "$i" "$i" \
 			| docker exec -i "$MINIO_CONTAINER" \
-				mc pipe "local/$BUCKET/hitrate_$i.txt" >/dev/null
+				mc pipe "local/$BUCKET/hitrate_$(printf '%03d' "$i").txt" >/dev/null
 	done
 }
 
@@ -163,14 +165,16 @@ run_one() {
 	# (daemon upcall + re-admit). This is the true cache miss, whereas
 	# fast_path_hits/slow_path_misses count fentry hits on the BPF-side
 	# inode_index which stays populated even after admit eviction.
-	local b_miss b_reload b_evict b_admits b_folio_hits b_read_iter_hits
+	local b_miss b_reload b_evict b_admits b_folio_hits b_read_iter_hits b_read_iter_pos0_hits
 	b_miss=$(read_counter s3fs_ebpf_read_miss_upcalls_total)
 	b_reload=$(read_counter s3fs_ebpf_read_miss_errors_total)
 	b_evict=$(read_counter s3fs_ebpf_policy_evictions_total)
 	b_admits=$(read_counter s3fs_ebpf_admits_current)
 	b_folio_hits=$(read_counter s3fs_ebpf_folio_hits_total)
 	b_read_iter_hits=$(read_counter s3fs_ebpf_read_iter_hits_total)
-	log "$pol: baseline miss=$b_miss err=$b_reload evict=$b_evict admits_current=$b_admits folio=$b_folio_hits iter=$b_read_iter_hits"
+	b_read_iter_pos0_hits=$(read_counter s3fs_ebpf_read_iter_pos0_hits_total)
+	b_read_iter_pos0_hits=${b_read_iter_pos0_hits:-0}
+	log "$pol: baseline miss=$b_miss err=$b_reload evict=$b_evict admits_current=$b_admits folio=$b_folio_hits iter=$b_read_iter_hits iter_pos0=$b_read_iter_pos0_hits"
 	# Effective cache size: admit-set samples taken at every interleave
 	# point and at the end of the workload.
 	local adm_sum=0 adm_n=0 adm_max=0 adm
@@ -191,7 +195,7 @@ run_one() {
 		# `cat` triggers open+getattr+read → folio_hit if in arena,
 		# upcall miss otherwise. Track non-zero exit so U-01 errs
 		# column shows real failures, not misses miscounted as hits.
-		if ! sudo cat "$MOUNT/hitrate_${idx}.txt" >/dev/null 2>&1; then
+		if ! sudo cat "$MOUNT/$(printf 'hitrate_%03d.txt' "$idx")" >/dev/null 2>&1; then
 			errs=$((errs + 1))
 		fi
 		i=$((i + 1))
@@ -212,39 +216,54 @@ run_one() {
 	log "$pol: workload done, settling ${POST}s for counter mirror"
 	sleep "$POST"
 
-	local f_miss f_reload f_evict f_folio_hits f_read_iter_hits
+	local f_miss f_reload f_evict f_folio_hits f_read_iter_hits f_read_iter_pos0_hits
 	f_miss=$(read_counter s3fs_ebpf_read_miss_upcalls_total)
 	# shellcheck disable=SC2034  # kept for symmetry with b_reload
 	f_reload=$(read_counter s3fs_ebpf_read_miss_errors_total)
 	f_evict=$(read_counter s3fs_ebpf_policy_evictions_total)
 	f_folio_hits=$(read_counter s3fs_ebpf_folio_hits_total)
 	f_read_iter_hits=$(read_counter s3fs_ebpf_read_iter_hits_total)
+	f_read_iter_pos0_hits=$(read_counter s3fs_ebpf_read_iter_pos0_hits_total)
+	f_read_iter_pos0_hits=${f_read_iter_pos0_hits:-0}
 
-	local d_miss d_evict d_folio_hits d_read_iter_hits d_page_cache_hits total rate_arena rate_total ms_per
+	local d_miss d_evict d_folio_hits d_read_iter_hits d_read_iter_pos0_hits d_page_cache_hits total rate_arena hit_rate iter_mult ms_per
 	d_miss=$((f_miss - b_miss))
 	d_evict=$((f_evict - b_evict))
 	d_folio_hits=$((f_folio_hits - b_folio_hits))
 	d_read_iter_hits=$((f_read_iter_hits - b_read_iter_hits))
-	# page-cache approx: iter_hits that were neither arena hits nor upcall misses.
-	# Can be slightly negative due to counter-read races; floor at 0.
-	d_page_cache_hits=$(( d_read_iter_hits - d_folio_hits - d_miss ))
+	d_read_iter_pos0_hits=$((f_read_iter_pos0_hits - b_read_iter_pos0_hits))
+	# Y-06: use pos0_hits (first read per open ≈ N_ACCESS) as denominator for pc.
+	# read_iter_hits / pos0_hits ≈ 2 confirms the data+EOF double-fire (Y-01 root cause).
+	# If pos0_hits==0 (old daemon), fall back to the over-counted read_iter_hits path.
+	if [ "$d_read_iter_pos0_hits" -gt 0 ]; then
+		d_page_cache_hits=$(( d_read_iter_pos0_hits - d_folio_hits - d_miss ))
+	else
+		d_page_cache_hits=$(( d_read_iter_hits - d_folio_hits - d_miss ))
+	fi
 	[ "$d_page_cache_hits" -lt 0 ] && d_page_cache_hits=0
 	total=$N_ACCESS
 	if [ "$total" -gt 0 ]; then
 		rate_arena=$(awk "BEGIN{printf \"%.2f\", 100*$d_folio_hits/$total}")
-		rate_total=$(awk "BEGIN{printf \"%.2f\", 100*($d_folio_hits+$d_page_cache_hits)/$total}")
+		# hit_rate = fraction of accesses that did NOT trigger an S3 upcall.
+		# Unlike (folio+pc)/N this is bounded [0,100] and matches Belady semantics.
+		hit_rate=$(awk "BEGIN{printf \"%.2f\", 100*(1 - $d_miss/$total)}")
+		# iter_mult ≈ 2 when read_iter fires data+EOF per cat (Y-06 diagnostic).
+		iter_mult=$(awk "BEGIN{printf \"%.2f\", $d_read_iter_pos0_hits>0 ? $d_read_iter_hits/$d_read_iter_pos0_hits : 0}")
 	else
 		rate_arena="-"
-		rate_total="-"
+		hit_rate="-"
+		iter_mult="-"
 	fi
 	ms_per=$(awk "BEGIN{printf \"%.2f\", ($end_ns-$start_ns)/1000000/$N_ACCESS}")
 
 	local adm_mean
 	adm_mean=$(awk "BEGIN{printf \"%.1f\", $adm_sum/($adm_n>0?$adm_n:1)}")
 
-	# folio=arena hits; pc=page-cache approx; rate_arena=folio/N; rate_total=(folio+pc)/N.
-	printf 'RESULT policy=%-14s  folio=%5d  pc=%5d  miss=%5d  err=%3d  rate_arena=%6s%%  rate_total=%6s%%  evictions=%5d  adm_mean=%5s  adm_max=%3d  ms/access=%s\n' \
-		"$pol" "$d_folio_hits" "$d_page_cache_hits" "$d_miss" "$errs" "$rate_arena" "$rate_total" "$d_evict" "$adm_mean" "$adm_max" "$ms_per" | tee -a "$OUT/summary.txt"
+	# folio=arena hits; pc=page-cache approx (pos0-corrected, Y-06);
+	# rate_arena=folio/N; hit_rate=1-miss/N (primary, bounded [0,100]);
+	# iter_mult=iter_hits/pos0_hits (≈2 confirms data+EOF double-fire).
+	printf 'RESULT policy=%-14s  folio=%5d  pc=%5d  miss=%5d  err=%3d  rate_arena=%6s%%  hit_rate=%6s%%  evictions=%5d  adm_mean=%5s  adm_max=%3d  iter_mult=%s  ms/access=%s\n' \
+		"$pol" "$d_folio_hits" "$d_page_cache_hits" "$d_miss" "$errs" "$rate_arena" "$hit_rate" "$d_evict" "$adm_mean" "$adm_max" "$iter_mult" "$ms_per" | tee -a "$OUT/summary.txt"
 }
 
 # Reference bounds on the exact trace the live runs used. trace-replay
