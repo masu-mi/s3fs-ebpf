@@ -398,6 +398,12 @@ func runFastpath(args []string) int {
 		"[R-01] use s3fs_read_pattern_map sequential signal to promote large-file "+
 			"read-miss upcalls to full-file GETs, reducing S3 round-trips. "+
 			"Requires fentry/generic_file_read_iter (incompatible with --no-read-iter-hook).")
+	prefetchSeq := fs.Bool("prefetch-seq-admit", false,
+		"[AA-04] proactively pre-admit the next sequential chunk while the current "+
+			"chunk is still being read, reducing cold-miss upcalls for sequential "+
+			"large-file reads. Fires when s3fs_read_pattern_map shows SeqRatio ≥ 0.70 "+
+			"and the read position is within 2 MiB of the admitted range boundary. "+
+			"Requires --pattern-aware-admit (incompatible with --no-read-iter-hook).")
 	wtinylFUAgeInterval := fs.Uint64("wtinylfu-age-interval", 512,
 		"[Z-01] W-TinyLFU CMS aging interval: halve all CMS counters every N on_hit calls. "+
 			"Lower values age faster (suit short bench runs); higher values age slower "+
@@ -446,11 +452,39 @@ func runFastpath(args []string) int {
 		}
 	}
 
+	// Z-03: scale S3-FIFO ghost map proportionally to admit capacity.
+	// Ghost entries = ~4× the expected number of admitted files so
+	// promotion fires even after large working-set eviction cycles.
+	// Formula: max(8192, softcap*1024), capped at 65536 (≈1 MB map).
+	// softcap=-1 means "leave kmod default (8)" → ghost_cap = 8192.
+	const (
+		s3fifoGhostMap      = "s3fifo3_state"
+		s3fifoGhostMinCap   = uint32(8192)
+		s3fifoGhostMaxCap   = uint32(65536)
+	)
+	s3fifoGhostCap := s3fifoGhostMinCap
+	if *softcapFlag > 0 {
+		if est := uint32(*softcapFlag) * 1024; est > s3fifoGhostCap {
+			s3fifoGhostCap = est
+		}
+	}
+	if s3fifoGhostCap > s3fifoGhostMaxCap {
+		s3fifoGhostCap = s3fifoGhostMaxCap
+	}
+	policyLoadOpts := policyprog.LoadOpts{
+		MapMaxEntries: map[string]uint32{s3fifoGhostMap: s3fifoGhostCap},
+	}
+
 	if *patternAdmit && *noReadIterHook {
 		fmt.Fprintln(os.Stderr, "--pattern-aware-admit requires the read-iter hook; cannot combine with --no-read-iter-hook")
 		return 1
 	}
+	if *prefetchSeq && *noReadIterHook {
+		fmt.Fprintln(os.Stderr, "--prefetch-seq-admit requires the read-iter hook; cannot combine with --no-read-iter-hook")
+		return 1
+	}
 	patternAwareAdmitEnabled = *patternAdmit
+	prefetchSeqEnabled = *prefetchSeq
 
 	if err := SetInoStatePath(*inoState); err != nil {
 		fmt.Fprintf(os.Stderr, "ino-state: %v\n", err)
@@ -549,7 +583,7 @@ func runFastpath(args []string) int {
 			fmt.Fprintf(os.Stderr, "policy-bpf: %v\n", err)
 			return 1
 		}
-		polProg, err = policyprog.Load(bpfPath)
+		polProg, err = policyprog.Load(bpfPath, policyLoadOpts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "policy-bpf load: %v\n", err)
 			return 1
@@ -634,7 +668,7 @@ func runFastpath(args []string) int {
 				http.Error(w, err.Error(), http.StatusForbidden)
 				return
 			}
-			newProg, err := policyprog.Load(newPath)
+			newProg, err := policyprog.Load(newPath, policyLoadOpts)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -809,6 +843,10 @@ func runFastpath(args []string) int {
 		// entry with Prewarm=false, or any ino kmod knows about
 		// that daemon hasn't warmed yet.
 		go runReadMissLoop(ctx, *dev, progs, s3c)
+		// AA-04: proactive sequential prefetch — pre-admit the next
+		// chunk of large files while the current chunk is still being
+		// read. No-op unless --prefetch-seq-admit is set.
+		go runSeqPrefetchLoop(ctx, *dev, progs, s3c)
 	}
 
 	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")

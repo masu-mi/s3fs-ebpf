@@ -14,11 +14,15 @@ OUT_DIR=${OUT_DIR:-/tmp/bench-scale}
 MP_EBPF=/mnt/s3demo
 MP_FUSE_RAW=/mnt/s3fuse
 MP_FUSE_CACHE=/mnt/s3fuse-cache
+MP_MOUNT_S3=/mnt/s3-mountpoint          # I-01
 FUSE_CACHE_DIR=/tmp/s3fs-fuse-cache
 EBPF_CACHE_DIR=/tmp/s3fs-ebpf-cache
+MOUNT_S3_CACHE_DIR=${MOUNT_S3_CACHE_DIR:-/tmp/mount-s3-cache}  # I-01
 FILE=${FILE:-hello.txt}
 RUNTIME=${RUNTIME:-5}
 JOBS_LIST=${JOBS_LIST:-"1 2 4 8 16 32 64"}
+
+MOUNT_S3_STARTED=0
 
 mkdir -p "$OUT_DIR" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
 sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
@@ -50,11 +54,27 @@ start_ebpf() {
 	cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true
 }
 
+# I-01: Mountpoint for Amazon S3 — conditional on mount-s3 being installed.
+start_mount_s3() {
+	if ! mount_s3_available; then
+		log "mount-s3 not found — skipping I-01 arm (install mountpoint-s3 to enable)"
+		return
+	fi
+	log "mounting mount-s3 at $MP_MOUNT_S3"
+	mount_s3_mount "$MP_MOUNT_S3" "$MOUNT_S3_CACHE_DIR" || {
+		log "mount-s3 mount failed — skipping I-01 arm"
+		return
+	}
+	MOUNT_S3_STARTED=1
+	cat "$MP_MOUNT_S3/$FILE" >/dev/null 2>&1 || true
+}
+
 stop_all() {
 	log "stopping"
 	ebpf_stop "$MP_EBPF"
 	umount_hard "$MP_FUSE_CACHE"
 	umount_hard "$MP_FUSE_RAW"
+	if [ "$MOUNT_S3_STARTED" -eq 1 ]; then umount_hard "$MP_MOUNT_S3"; fi
 }
 trap stop_all EXIT
 
@@ -114,6 +134,7 @@ check_prereq
 start_fuse_raw
 start_fuse_cache
 start_ebpf
+start_mount_s3  # I-01 (no-op if mount-s3 not installed)
 
 echo "" > "$OUT_DIR/stat.md"
 {
@@ -126,6 +147,7 @@ echo "" > "$OUT_DIR/stat.md"
 		run_stat "$MP_EBPF"       'ebpf'       "$jobs"
 		run_stat "$MP_FUSE_RAW"   'fuse-raw'   "$jobs"
 		run_stat "$MP_FUSE_CACHE" 'fuse-cache' "$jobs"
+		[ "$MOUNT_S3_STARTED" -eq 1 ] && run_stat "$MP_MOUNT_S3" 'mount-s3'  "$jobs"
 	done
 	echo '```'
 } > "$OUT_DIR/stat.md"
@@ -144,6 +166,10 @@ cat "$OUT_DIR/stat.md" >&2
 		run_read "$MP_FUSE_RAW"   'fuse-raw'   "$jobs"
 		sync; sudo sysctl -q -w vm.drop_caches=1
 		run_read "$MP_FUSE_CACHE" 'fuse-cache' "$jobs"
+		if [ "$MOUNT_S3_STARTED" -eq 1 ]; then
+			sync; sudo sysctl -q -w vm.drop_caches=1
+			run_read "$MP_MOUNT_S3" 'mount-s3'  "$jobs"
+		fi
 	done
 	echo '```'
 } > "$OUT_DIR/read.md"

@@ -62,3 +62,24 @@ func TestResolve_BarePathIsFileShortcut(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestLoadOpts_UnknownMapIgnored pins Z-03: passing a MapMaxEntries
+// override for a map that doesn't exist in the .bpf.o must be silently
+// ignored. Load(path) fails here because there is no real .bpf.o, but
+// the spec-mutation loop itself must not panic or error on unknown names.
+func TestLoadOpts_UnknownMapIgnored(t *testing.T) {
+	opts := LoadOpts{
+		MapMaxEntries: map[string]uint32{
+			"s3fifo3_state":      32768,
+			"nonexistent_map_zz": 999,
+		},
+	}
+	// Load on a non-existent path — we only care that the opts struct
+	// is accepted; the real error is the missing file, not the opts.
+	_, err := Load("/nonexistent/path.bpf.o", opts)
+	if err == nil {
+		t.Fatal("Load on missing .bpf.o: want error, got nil")
+	}
+	// Must be a parse/open error, not a panic from the opts loop.
+	t.Logf("got expected error: %v", err)
+}

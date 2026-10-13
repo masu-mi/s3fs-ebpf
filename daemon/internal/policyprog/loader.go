@@ -59,16 +59,35 @@ type Program struct {
 	VTable   *ebpf.Map                // the attached struct_ops map (struct_ops only)
 }
 
+// LoadOpts carries optional per-load tuning knobs. Zero value is valid
+// and behaves identically to the no-opts path.
+type LoadOpts struct {
+	// MapMaxEntries overrides max_entries for the named maps before the
+	// collection is loaded. Useful for Z-03: scaling the S3-FIFO ghost
+	// map proportionally to the workload's admit capacity so promotion
+	// fires correctly under large N_FILES workloads. Unknown map names
+	// are silently ignored (safe to pass opts that don't apply to the
+	// currently loaded policy).
+	MapMaxEntries map[string]uint32
+}
+
 // Load reads a .bpf.o and returns a ready-to-attach Program. The
 // object may declare 1..N fentry programs (all attached on Attach())
 // and should expose a "policy_stats" ARRAY map for daemon-side
 // metric mirroring (optional but conventional).
 //
 // Missing map is a warning; missing programs is an error.
-func Load(path string) (*Program, error) {
+func Load(path string, opts ...LoadOpts) (*Program, error) {
 	spec, err := ebpf.LoadCollectionSpec(path)
 	if err != nil {
 		return nil, fmt.Errorf("policyprog: parse %s: %w", path, err)
+	}
+	if len(opts) > 0 {
+		for mapName, maxEntries := range opts[0].MapMaxEntries {
+			if ms, ok := spec.Maps[mapName]; ok {
+				ms.MaxEntries = maxEntries
+			}
+		}
 	}
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
