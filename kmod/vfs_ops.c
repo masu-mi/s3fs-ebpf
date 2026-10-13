@@ -273,6 +273,17 @@ struct s3fs_admit {
 	u32 flags;
 };
 
+/*
+ * R1 invariant: if a PCACHE entry exists for ino in the hash, then fd->buf
+ * for that ino is non-NULL.  Maintained by two rules:
+ *   - s3fs_ebpf_populate_pages calls admit_insert_pcache while holding
+ *     fd->lock, so no eviction can free fd->buf between the copy and insert.
+ *   - s3fs_file_data_reset re-evicts all remaining PCACHE entries for ino
+ *     inside fd->lock before freeing fd->buf.
+ * Lock order: fd->lock (mutex, outer) → s3fs_admits_lock (rwlock, inner).
+ * No path takes s3fs_admits_lock before fd->lock, so no deadlock is possible.
+ */
+
 #define S3FS_ADMIT_HASH_BITS 6
 
 static DEFINE_HASHTABLE(s3fs_admits, S3FS_ADMIT_HASH_BITS);
@@ -1769,6 +1780,9 @@ static void s3fs_file_data_reset(u64 ino)
 {
 	struct inode *inode;
 	struct s3fs_file_data *fd;
+	struct s3fs_admit *a;
+	struct hlist_node *tmp;
+	bool removed = false;
 
 	if (!s3fs_active_sb)
 		return;
@@ -1779,6 +1793,27 @@ static void s3fs_file_data_reset(u64 ino)
 	if (fd) {
 		mutex_lock(&fd->lock);
 		if (!fd->dirty) {
+			/* R1: re-evict any PCACHE entry inserted between
+			 * admit_drop_all_ranges and this point, before freeing
+			 * fd->buf.  Without this, populate could insert a new
+			 * entry after admit_drop_all_ranges released the write
+			 * lock but before we freed buf; that entry would then
+			 * point at a NULL fd->buf on the next read.
+			 * Lock order: fd->lock (outer) → s3fs_admits_lock (inner). */
+			write_lock(&s3fs_admits_lock);
+			hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
+				if (a->ino != ino)
+					continue;
+				if (!(a->flags & S3FS_ADMIT_FLAG_PCACHE))
+					continue;
+				hash_del(&a->node);
+				kfree(a);
+				atomic_dec(&s3fs_admits_count);
+				removed = true;
+			}
+			if (removed)
+				atomic_inc(&s3fs_admit_gen);
+			write_unlock(&s3fs_admits_lock);
 			kvfree(fd->buf);
 			fd->buf  = NULL;
 			fd->cap  = 0;
@@ -2429,16 +2464,16 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 				 offset >> PAGE_SHIFT,
 				 (end - 1) >> PAGE_SHIFT);
 
+	/* R1: insert the pcache entry while fd->lock is still held so no
+	 * eviction can free fd->buf between the copy above and the insert
+	 * below.  kzalloc inside admit_insert_pcache runs before write_lock,
+	 * so sleeping with fd->lock (mutex) held is safe. */
+	err = admit_insert_pcache(ino, offset, size);
 out_unlock:
 	mutex_unlock(&fd->lock);
 out_iput:
 	iput(inode);
-	if (err)
-		return err;
-
-	/* Insert the page-cache-mode admit entry (may coexist with an older
-	 * arena entry; lookup picks the first hit per range). */
-	return admit_insert_pcache(ino, offset, size);
+	return err;
 }
 
 /* -- File ops (regular files) --------------------------------------------- */
