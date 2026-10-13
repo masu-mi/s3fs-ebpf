@@ -973,6 +973,14 @@ pcache モードは Linux page cache を第 2 キャッシュ層として活用�
 | err=0 (正常動作) | ✅ PASS |
 | **総合** | **PASS** |
 
+> **⚠️ 数値は無効 (P3 バグ) — 再計測必要**
+>
+> この計測は P3 バグ (admit_insert_pcache 重複挿入 + admit_replace が pcache エントリを保持しない + capacity 制限が pcache に効かない) が存在する状態で実施されました。
+>
+> - `evictions=0` は capacity mode が pcache エントリを eviction 対象に含めていなかった結果。
+> - hit_rate 94% は fd->buf が eviction されずに Linux page cache に残り続けたため達成された見かけ上の値で、`capacity_bytes=352` の制限内に収まったキャッシュによるものではありません。
+> - P3 修正後 (`admit_insert_pcache` dedup + `admit_replace` pcache 保持 + 容量 eviction 対象化 + `fd->buf` 解放) で再計測し、`adm_max ≤ capacity_bytes` かつ `hit_rate ≤ opt (Belady)` を確認する必要があります。
+
 ---
 
 ## 17. AB-09 bench-write pcache 非劣化 (2026-10-13)
