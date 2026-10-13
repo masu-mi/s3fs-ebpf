@@ -282,6 +282,13 @@ struct s3fs_admit {
  *     inside fd->lock before freeing fd->buf.
  * Lock order: fd->lock (mutex, outer) → s3fs_admits_lock (rwlock, inner).
  * No path takes s3fs_admits_lock before fd->lock, so no deadlock is possible.
+ *
+ * S1 corollary: the R1 invariant holds only under fd->lock.  Between
+ * fc_pcache_check (lockless fast path) and the moment fill_from_kmalloc
+ * takes fd->lock, an eviction + re-populate can run, leaving a stale
+ * fd->buf that now covers a different range.  fill_from_kmalloc therefore
+ * re-verifies the PCACHE entry's existence inside fd->lock whenever the
+ * global admit generation changed since the check.
  */
 
 #define S3FS_ADMIT_HASH_BITS 6
@@ -486,17 +493,22 @@ static struct s3fs_admit *admit_lookup_at_locked(u64 ino, u64 pos)
  * Drop every admitted range of `ino` (partial admits can register
  * several). Takes the admit lock. Returns how many were dropped.
  */
-static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
+/* S4: pcache_out is set to true if at least one PCACHE entry was removed.
+ * Callers that don't need the flag pass NULL. */
+static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes, bool *pcache_out)
 {
 	struct s3fs_admit *a;
 	struct hlist_node *tmp;
 	unsigned int n = 0;
 	u64 b = 0;
+	bool saw_pcache = false;
 
 	write_lock(&s3fs_admits_lock);
 	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
 		if (a->ino != ino)
 			continue;
+		if (a->flags & S3FS_ADMIT_FLAG_PCACHE)
+			saw_pcache = true;
 		hash_del(&a->node);
 		atomic_dec(&s3fs_admits_count);
 		b += a->size;
@@ -508,6 +520,8 @@ static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
 	write_unlock(&s3fs_admits_lock);
 	if (bytes)
 		*bytes = b;
+	if (pcache_out)
+		*pcache_out = saw_pcache;
 	return n;
 }
 
@@ -532,7 +546,13 @@ static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
  * fc may be NULL (file->private_data not allocated yet, or readahead
  * path where file == NULL).  In that case we always take the rwlock.
  */
-static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
+/* S1: gen_out receives the s3fs_admit_gen value used for the admit-table
+ * probe so that fill_from_kmalloc can detect table mutations that occurred
+ * in the TOCTOU window between this check and taking fd->lock.  NULL is
+ * accepted (read_iter fast path, which goes directly to generic_file_read_iter
+ * without calling fill_from_kmalloc). */
+static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos,
+			     u32 *gen_out)
 {
 	struct s3fs_admit *a;
 	bool found;
@@ -550,11 +570,17 @@ static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
 		 * to be seen with stale pcache/off/end values.
 		 */
 		if (smp_load_acquire(&fc->gen) == cur_gen) {
-			if (!fc->pcache)
+			if (!fc->pcache) {
+				if (gen_out)
+					*gen_out = cur_gen;
 				return false; /* no pcache entry for any pos */
+			}
 			/* pcache=true: fast-path only within the confirmed range */
-			if (pos >= fc->off && pos < fc->end)
+			if (pos >= fc->off && pos < fc->end) {
+				if (gen_out)
+					*gen_out = cur_gen;
 				return true;
+			}
 			/* pos outside cached range: fall through to slow path */
 		}
 	}
@@ -580,6 +606,8 @@ static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
 		WRITE_ONCE(fc->pcache, found);
 		smp_store_release(&fc->gen, cur_gen);
 	}
+	if (gen_out)
+		*gen_out = cur_gen;
 	return found;
 }
 
@@ -786,31 +814,21 @@ static bool pending_exists(u64 ino); /* defined with the upcall machinery */
  * inodes so capacity_bytes bounds actual allocations. */
 static void s3fs_file_data_reset(u64 ino);
 
-/* Q1: true if ino has at least one PCACHE admit entry in the table. */
-static bool admit_has_pcache(u64 ino)
-{
-	struct s3fs_admit *a;
-	bool found = false;
-
-	read_lock(&s3fs_admits_lock);
-	hash_for_each_possible(s3fs_admits, a, node, ino) {
-		if (a->ino == ino && (a->flags & S3FS_ADMIT_FLAG_PCACHE)) {
-			found = true;
-			break;
-		}
-	}
-	read_unlock(&s3fs_admits_lock);
-	return found;
-}
-
 /* Evict every admitted range of `ino`: drop it from the table, report
  * it to the daemon (evict log), drop its page cache, and free its
- * fd->buf (P3/Q1: only for pcache inos; arena inos have no fd->buf). */
+ * fd->buf (P3/Q1: only for pcache inos; arena inos have no fd->buf).
+ *
+ * S4: admit_drop_all_ranges reports whether a PCACHE entry was dropped
+ * atomically inside its write_lock, eliminating the prior TOCTOU window
+ * where populate could insert a PCACHE entry after the old admit_has_pcache
+ * check but before admit_drop_all_ranges, causing drop to remove the entry
+ * while reset was never called — leaving fd->buf allocated outside the
+ * capacity limit. */
 static bool admit_evict_ino(u64 ino, u64 *freed)
 {
-	bool had_pcache = admit_has_pcache(ino); /* Q1: check before drop */
+	bool had_pcache = false;
 
-	if (!admit_drop_all_ranges(ino, freed))
+	if (!admit_drop_all_ranges(ino, freed, &had_pcache))
 		return false;
 	evict_log_push(ino);
 	s3fs_evict_page_cache(ino);
@@ -2672,12 +2690,19 @@ static void s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
 	kunmap_local(fkva);
 }
 
-/* Q2: returns true when fd->buf held data for pos (normal pcache hit).
- * Returns false when buf is NULL or pos is beyond buf (evicted between
- * fc_pcache_check and fill); caller must invalidate fc and fall through
- * to the upcall path rather than serving zero-filled data as a hit. */
+/* Q2 / S1: returns true when fd->buf held valid data for pos (pcache hit).
+ * Returns false when buf is NULL, pos is beyond buf, or the admit entry
+ * disappeared between fc_pcache_check and here.  Caller must invalidate fc
+ * and fall through to the upcall path rather than serving stale data as a hit.
+ *
+ * gen: the s3fs_admit_gen value captured by fc_pcache_check.  If the global
+ * gen advanced before we take fd->lock (TOCTOU window), we re-verify the
+ * PCACHE entry's existence under read_lock before trusting fd->buf.
+ * gen == 0 disables this check (fallback path where no admit entry is expected).
+ * Lock order when re-probing: fd->lock (outer) → s3fs_admits_lock (inner, read). */
 static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
-					  loff_t pos, struct s3fs_file_data *fd)
+					  loff_t pos, struct s3fs_file_data *fd,
+					  u64 ino, u32 gen)
 {
 	void *fkva;
 	size_t avail = 0;
@@ -2688,7 +2713,20 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 		return false;
 	}
 	mutex_lock(&fd->lock);
+	/* S1: if gen changed since fc_pcache_check, re-verify the entry still
+	 * covers pos before trusting fd->buf.  A mismatch means eviction (or
+	 * a concurrent populate on a different range) ran in the TOCTOU window;
+	 * we must not serve whatever happens to be in buf as a hit. */
 	buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
+	if (buf_valid && gen != 0 &&
+	    atomic_read(&s3fs_admit_gen) != gen) {
+		struct s3fs_admit *a;
+		read_lock(&s3fs_admits_lock);
+		a = admit_lookup_at_locked(ino, (u64)pos);
+		if (!a || !(a->flags & S3FS_ADMIT_FLAG_PCACHE))
+			buf_valid = false;
+		read_unlock(&s3fs_admits_lock);
+	}
 	if (buf_valid)
 		avail = min_t(size_t, fs_size, fd->size - (size_t)pos);
 	fkva = kmap_local_folio(folio, 0);
@@ -2751,21 +2789,23 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	u64 uaddr = 0, asize = 0;
 	loff_t pos = folio_pos(folio);
 	size_t fs_size = folio_size(folio);
+	u32 pcache_gen = 0; /* S1: gen captured by fc_pcache_check for TOCTOU detection */
 
 	/* AB-04 / AB-10 fast path: page-cache mode admit — data is in fd->buf.
 	 * fc_pcache_check avoids the rwlock when the per-file cache is warm.
 	 * file may be NULL on readahead paths; fc_pcache_check handles NULL fc. */
 	if (fc_pcache_check(file ? file->private_data : NULL,
-			    inode->i_ino, (u64)pos)) {
+			    inode->i_ino, (u64)pos, &pcache_gen)) {
 		if (s3fs_folio_fill_from_kmalloc(folio, fs_size, pos,
-						 inode->i_private)) {
+						 inode->i_private,
+						 inode->i_ino, pcache_gen)) {
 			atomic_long_inc(&s3fs_folio_hits);
 			s3fs_policy_on_hit(inode->i_ino);
 			(void)s3fs_policy_ops_eval_hit(inode->i_ino);
 			goto out;
 		}
-		/* Q2: buf was evicted between pcache_check and fill; invalidate
-		 * fc so the next call re-probes the table, then fall to upcall. */
+		/* Q2/S1: buf was invalid (evicted or TOCTOU); invalidate fc so
+		 * the next call re-probes the table, then fall to upcall. */
 		if (file && file->private_data) {
 			struct s3fs_file_admit_cache *fc_local = file->private_data;
 			smp_store_release(&fc_local->gen, 0);
@@ -2811,14 +2851,17 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 					 * ADMIT_ARENA.  fc_pcache_check updates the
 					 * per-file cache so subsequent read_iter
 					 * calls can fast-path without rwlock. */
+					pcache_gen = 0;
 					if (fc_pcache_check(
 						file ? file->private_data : NULL,
-						inode->i_ino, (u64)pos)) {
+						inode->i_ino, (u64)pos,
+						&pcache_gen)) {
 						if (s3fs_folio_fill_from_kmalloc(
 							folio, fs_size, pos,
-							inode->i_private))
+							inode->i_private,
+							inode->i_ino, pcache_gen))
 							goto out;
-						/* Q2: evicted again — invalidate fc */
+						/* Q2/S1: evicted/TOCTOU — invalidate fc */
 						if (file && file->private_data) {
 							struct s3fs_file_admit_cache *fc_local =
 								file->private_data;
@@ -2838,8 +2881,9 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 		}
 	}
 
-	/* Fallback: per-inode kmalloc buffer. */
-	s3fs_folio_fill_from_kmalloc(folio, fs_size, pos, inode->i_private);
+	/* Fallback: per-inode kmalloc buffer (gen=0 disables TOCTOU re-probe). */
+	s3fs_folio_fill_from_kmalloc(folio, fs_size, pos, inode->i_private,
+				     inode->i_ino, 0);
 
 out:
 	folio_mark_uptodate(folio);
@@ -2870,7 +2914,7 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	 * fc_pcache_check avoids the rwlock on the hot path once the cache
 	 * entry is confirmed for this file descriptor. */
 	if (pos < size &&
-	    fc_pcache_check(file->private_data, inode->i_ino, (u64)pos))
+	    fc_pcache_check(file->private_data, inode->i_ino, (u64)pos, NULL))
 		return generic_file_read_iter(iocb, to);
 
 	if (!s3fs_arena_bypass && pos < size &&
@@ -3084,7 +3128,7 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 		WRITE_ONCE(fc->end, 0);
 		smp_store_release(&fc->gen, 0);
 	}
-	admit_drop_all_ranges(inode->i_ino, NULL);
+	admit_drop_all_ranges(inode->i_ino, NULL, NULL);
 	evict_log_push(inode->i_ino);
 	if (invalidate_inode_pages2(inode->i_mapping) != 0)
 		/* Dirty folios present — harmless, dirty-file path is skipped above */
