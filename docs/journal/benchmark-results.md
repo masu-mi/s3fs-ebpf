@@ -785,6 +785,8 @@ kmod の `s3fs_arena_copy_to_iter` に ktime 計測を追加し、IOC_STATS [3]/
 
 補足: 1MB ファイルは 256 ページなので、1 回の `read()` ごとに GUP 累積コストが 256 × 1728 ns ≈ **442 µs** 発生する。これが大ファイルで arena が page-cache に劣後する構造的な原因。
 
+> **計測コスト注記**: サンプル数 106 は少なく、ktime_get_ns() 自体の呼び出しコスト (~10-30 ns/call) が含まれている。平均値は参考値として扱うこと。本計測の目的 (GUP > 500 ns の判定) には十分だが、精度が必要な場合はサンプル数を 10,000 以上に増やし計測コスト分を差し引く必要がある。
+
 ### 13.2 AB-02: arena vs page-cache 読み取りレイテンシ比較
 
 `s3fs_arena_bypass` モジュールパラメータで arena fast path を無効化し、同条件で比較。
@@ -843,7 +845,7 @@ pcache は arena より **+2.1%** 改善したが、fuse-raw との差は縮ま�
 
 **gate (b): PASS** — ebpf-pcache (8.047 ms) ≤ fuse-cache (8.489 ms)。大ファイル劣後は解消済み。
 
-注: arena (7.768ms) が pcache (8.047ms) より速いのは、10 MiB ファイル (2560 ページ) では GUP コスト (2560 × 1728 ns ≈ 4.4ms) を含んでいるにもかかわらず arena の KVM DMA 経路の低レイテンシが優る可能性がある。あるいは page cache path で `generic_file_read_iter` のオーバーヘッドが GUP コストを上回っているか要確認。ただし両者の差は 0.28ms (3.5%) であり、測定ノイズの範囲内。
+注: arena (7.768ms) が pcache (8.047ms) より 0.28ms (3.5%) 速いのは測定ノイズの範囲内。`sudo cat` のプロセス起動コストが数 ms 支配的であるため、この差分に対する根拠ある解釈はできない (§15.3 参照)。
 
 ### 14.3 microbench p50 read (criterion c)
 
