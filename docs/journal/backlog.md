@@ -517,8 +517,11 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-09 | Q3: S3FS_POPULATE_MAX_END=4GiB → offset>4GB の chunk admit が全て弾かれる | P1 | ✅ 修正済 (commit b6d42d1) |
 | AC-10 | Q4: timed_reads の awk が gawk 専用 + µs パース誤り → bench 計測値が不正 | P1 | ✅ 修正済 (commit 214813d) |
 | AC-11 | R1: populate/evict race → pcache entry が NULL fd->buf を指しゼロ返し (データ破損) | P0 必須 | ✅ 修正済 (commit caf0b7f) |
-| AC-12 | R2: timed_reads fallback が silent → 計測方法が記録に残らない | P1 | ✅ 修正済 (commit b911a03) |
+| AC-12 | R2: timed_reads fallback が silent → 計測方法が記録に残らない | P1 | ⚠️ S2 バグあり (commit b911a03 — subshell で method が消える; commit 633dfe8 で修正済) |
 | AC-13 | R3: Q1 修正前ビルドの §16 計測が無効 → R1 ビルドで再計測が必要 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
+| AC-14 | S1: check/fill 間の TOCTOU → eviction+populate が重なるとゼロ返し | P0 必須 | ✅ 修正済 (commit 8eeab28) |
+| AC-15 | S2: timed_reads を subshell から呼ぶと TIMED_READS_METHOD が消える → AB07-RESULT の method= が常に hyperfine | P1 | ✅ 修正済 (commit 633dfe8) |
+| AC-16 | S3: evict-race テストが eviction ゼロでも通過 / lockdep 無効時に PASS 表記 / grep パターン不足 | P1 | ✅ 修正済 (commit 633dfe8) |
 
 ### AC-01 受け入れ条件
 2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
@@ -564,6 +567,20 @@ populate/evict 競合の 2 段修正:
 
 ### AC-12 修正内容 (R2)
 `timed_reads` に `TIMED_READS_METHOD` グローバル変数を追加。hyperfine 失敗時は stderr に警告を出力し `TIMED_READS_METHOD=loop` に設定。`AB07-RESULT` 行に `method=<value>` フィールドを追加。
+
+### AC-14 修正内容 (S1)
+
+`fc_pcache_check` に `u32 *gen_out` を追加し、fast/slow path 双方で probe 時の `s3fs_admit_gen` を返す。`s3fs_folio_fill_from_kmalloc` に `u64 ino, u32 gen` を追加し、`mutex_lock(&fd->lock)` 後に `atomic_read(&s3fs_admit_gen) != gen` なら `read_lock(&s3fs_admits_lock)` 下で `admit_lookup_at_locked(ino, pos)` を引き直す。PCACHE entry が消えていれば `buf_valid=false`。`gen==0` でチェックをスキップ（フォールバックパス）。S4 として `admit_drop_all_ranges` に `bool *pcache_out` を追加し `admit_has_pcache` の TOCTOU も閉じた（`admit_has_pcache` 関数を削除）。
+
+### AC-15 修正内容 (S2)
+
+`$()` サブシェル内の変数代入は呼び出し元に戻らないため `TIMED_READS_METHOD=loop` が毎回消えていた。`touch "$OUT/.timed_reads_fallback"` でファイル経由に切り替え、`resolve_timed_reads_method()` が `AB07-RESULT` 出力直前にファイル有無を判定。スクリプト先頭で sentinel を `rm -f` する。
+
+### AC-16 修正内容 (S3)
+
+1. `get_evict_count()` で Prometheus metrics から evictions_total を取得し、stress 前後の差分が 0 なら FAIL。
+2. `/proc/lockdep_stats` の有無で lockdep 利用可否を判定し、不在時は PASS でなく SKIP と表示。
+3. dmesg grep パターンに `BUG: sleeping function called from invalid context`、`inconsistent lock state`、`circular locking`、`BUG: KASAN` を追加。
 
 ### AC-13 再計測内容 (R3)
 R1 修正後ビルドで `bench-hitrate.sh`（arena/pcache 両モード, seed=42）、`bench-ab-pcache.sh`（100 MiB）、`test-pcache-multiread.sh`、`test-pcache-evict-race.sh` を再計測し `br §18` に記録する。§16 の注記に §18 への参照を追記済み。
