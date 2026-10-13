@@ -502,7 +502,7 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 
 ---
 
-## AC. pcache モード修正 (P1〜P6、2026-10-13 レビュー、`br §14〜16`)
+## AC. pcache モード修正 (P1〜P6 / Q1〜Q4、2026-10-13 レビュー、`br §14〜16`)
 
 | # | 内容 | 優先度 | 状態 |
 |---|---|---|---|
@@ -512,6 +512,10 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-04 | P4: fc_pcache_check のメモリ順序 (smp_acquire/release 欠如) | P1 | ✅ 修正済 (commit 879dbfa) |
 | AC-05 | P5: bench-ab-pcache の gate (b) が 10 MiB / timed_reads に startup コスト | P1 | ✅ デフォルト 100 MiB + hyperfine に変更 |
 | AC-06 | P6: 64-job 律速の特定 (perf c2c / lockstat / generic_file_read_iter 比較) | P2 | ⏳ 未着手 |
+| AC-07 | Q1: s3fs_file_data_reset が i_size_write(0) → stat/read が eviction 後に壊れる | P0 必須 | ✅ 修正済 (commit b3ae6e8) |
+| AC-08 | Q2: populate_pages と eviction の race → pcache 経路でゼロ読み (NULL buf) | P0 必須 | ✅ 修正済 (commit b3ae6e8) |
+| AC-09 | Q3: S3FS_POPULATE_MAX_END=4GiB → offset>4GB の chunk admit が全て弾かれる | P1 | ✅ 修正済 (commit b6d42d1) |
+| AC-10 | Q4: timed_reads の awk が gawk 専用 + µs パース誤り → bench 計測値が不正 | P1 | ✅ 修正済 (commit 214813d) |
 
 ### AC-01 受け入れ条件
 2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
@@ -534,6 +538,18 @@ ioctl に `size=0` / `offset=U64_MAX-1, size=16` / `offset=0, size=1<<40` を渡
 - `perf c2c record -a -- fio ...` (64 jobs, shared small file) でキャッシュライン競合の特定
 - `perf record -g` + `lockstat` でロック競合の確認
 - 比較対象: `.read_iter = generic_file_read_iter` 直結版 (admit 判定なし) での IOPS 計測
+
+### AC-07 修正内容 (Q1)
+`s3fs_file_data_reset` から `i_size_write(inode, 0)` を削除。eviction は fd->buf のみ解放し、VFS inode の i_size はそのまま保持。次の .read_folio が upcall してデータを再取得する。arena モードのinos に対して呼ばれないよう `admit_has_pcache()` ガード追加。
+
+### AC-08 修正内容 (Q2)
+`s3fs_folio_fill_from_kmalloc` を `bool` 返却型に変更。`fd->buf != NULL` を明示チェックし、NULL なら false を返す。`.read_folio` の pcache 経路で false が返ったら fc->gen を 0 にリセットして upcall 経路にフォールスルー。
+
+### AC-09 修正内容 (Q3)
+`S3FS_POPULATE_MAX_END (4 GiB)` を `S3FS_POPULATE_MAX_SIZE (64 MiB)` に変更。offset+size ではなく呼び出し単位の size を制限するため、offset が 4 GiB 超のチャンクも受け付けられる。overflow チェックは維持。
+
+### AC-10 修正内容 (Q4)
+`timed_reads` を `hyperfine --export-json` + `jq` ベースに書き直し。gawk 専用 3 引数 `match()` を除去、µs パース誤りを修正。`jq` を `need_cmds` に追加。コメントの「startup 除外」表記を削除。
 
 ## 8. 参照
 
