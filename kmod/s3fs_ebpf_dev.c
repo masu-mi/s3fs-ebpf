@@ -415,6 +415,10 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			st.values[1] = (u64)atomic_long_read(&s3fs_folio_hits);
 		if (st.count > 2)
 			st.values[2] = (u64)atomic_long_read(&s3fs_admit_invalidations);
+		if (st.count > 3)
+			st.values[3] = (u64)atomic_long_read(&s3fs_gup_calls_total);
+		if (st.count > 4)
+			st.values[4] = (u64)atomic_long_read(&s3fs_gup_ns_total);
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;
@@ -440,6 +444,14 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 out_free_req:
 		kfree(req);
 		return err;
+	}
+	case S3FS_IOC_POPULATE_PAGES: {
+		struct s3fs_populate_pages req;
+
+		if (copy_from_user(&req, uarg, sizeof(req)))
+			return -EFAULT;
+		return s3fs_ebpf_populate_pages(req.ino, req.offset, req.size,
+						(const void __user *)req.data_ptr);
 	}
 	default:
 		return -ENOTTY;

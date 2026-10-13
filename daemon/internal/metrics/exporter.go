@@ -85,6 +85,13 @@ type Counters struct {
 	// real content changes, not the number of full-list re-sends.
 	AdmitInvalidations atomic.Uint64 // counter
 
+	// AB-01: GUP (pin_user_pages_remote) call count and accumulated
+	// latency from s3fs_arena_copy_to_iter. Sourced from
+	// S3FS_IOC_STATS[3]/[4]. bench-ab-arena-vs-pagecache.sh reads
+	// these to compute mean GUP ns/call without bpftrace.
+	GupCallsTotal atomic.Uint64 // counter
+	GupNsTotal    atomic.Uint64 // counter
+
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
 	// ReadIterMisses counts reads where the ino was unknown (triggers
@@ -213,6 +220,11 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		// True kmod-side cache hit — read_folio served from arena.
 		{"s3fs_ebpf_folio_hits_total", "kmod-side .read_folio calls served from arena (true cache hit). Divide by (this + read_miss_upcalls_total) for hit ratio.", "counter", Global.FolioHits.Load()},
 		{"s3fs_ebpf_admit_invalidations_total", "Page-cache invalidations by admit_replace for new or moved admit ranges (unchanged ranges keep their page cache).", "counter", Global.AdmitInvalidations.Load()},
+
+		// AB-01: GUP latency diagnostics from s3fs_arena_copy_to_iter.
+		// gup_calls_total / gup_ns_total → mean ns/call. 0 when arena_bypass=1.
+		{"s3fs_ebpf_gup_calls_total", "AB-01: pin_user_pages_remote calls in s3fs_arena_copy_to_iter (1 per page per arena read).", "counter", Global.GupCallsTotal.Load()},
+		{"s3fs_ebpf_gup_ns_total", "AB-01: accumulated pin_user_pages_remote latency in nanoseconds. Divide by gup_calls_total for mean ns/call.", "counter", Global.GupNsTotal.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},

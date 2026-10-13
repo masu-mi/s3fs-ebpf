@@ -30,6 +30,54 @@ type admitEntry struct {
 	Offset uint64
 }
 
+// AB-04: populatePagesArg mirrors `struct s3fs_populate_pages`.
+// The daemon hands S3 data to kmod via this ioctl so kmod can store it
+// in fd->buf (kernel memory) and insert a PCACHE-mode admit entry.
+// Reads then use s3fs_folio_fill_from_kmalloc (no GUP).
+type populatePagesArg struct {
+	Ino     uint64
+	Offset  uint64
+	Size    uint64
+	DataPtr uint64 // user pointer to data bytes (unsafe.Pointer value)
+}
+
+// s3fsIocPopulatePages = _IOW(0xE3, 0x0E, struct s3fs_populate_pages)
+// _IOW = (1<<30) | (size<<16) | (magic<<8) | nr
+const s3fsIocPopulatePages = (1 << 30) | (uint32(unsafe.Sizeof(populatePagesArg{})) << 16) | (0xE3 << 8) | 0x0E
+
+// populatePages sends S3 data to kmod via S3FS_IOC_POPULATE_PAGES.
+// kmod copies the bytes into the inode's fd->buf and inserts a PCACHE admit.
+// Returns an error if the inode is dirty (user-written content takes precedence).
+func populatePages(devPath string, ino uint64, offset int64, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", devPath, err)
+	}
+	defer f.Close()
+	return populatePagesOn(int(f.Fd()), ino, offset, data)
+}
+
+func populatePagesOn(devFd int, ino uint64, offset int64, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	arg := populatePagesArg{
+		Ino:     ino,
+		Offset:  uint64(offset),
+		Size:    uint64(len(data)),
+		DataPtr: uint64(uintptr(unsafe.Pointer(&data[0]))),
+	}
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
+		uintptr(devFd), uintptr(s3fsIocPopulatePages),
+		uintptr(unsafe.Pointer(&arg))); errno != 0 {
+		return fmt.Errorf("ioctl POPULATE_PAGES ino=%d: %w", ino, errno)
+	}
+	return nil
+}
+
 // updateArenaHighWater advances the ArenaUsedBytes gauge when `off+size`
 // exceeds the current high-water mark. Called after every AdmitContent so
 // /metrics reflects the furthest byte written into the arena.
@@ -612,6 +660,27 @@ func handleReadMiss(ctx context.Context, devPath string,
 		_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
 		return
 	}
+	// AB-04: when --arena-metadata-only, bypass BPF arena and send data
+	// directly to kmod's page cache via POPULATE_PAGES ioctl.
+	if arenaMetadataOnlyEnabled {
+		if err := populatePages(devPath, ev.Ino, chunkOffset, body); err != nil {
+			fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
+			metrics.Global.ReadMissErrors.Add(1)
+			_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
+			return
+		}
+		if chunkOffset > 0 {
+			fmt.Printf("[upcall] ino=%d %s pcache range [%d,%d)\n",
+				ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
+		} else {
+			fmt.Printf("[upcall] ino=%d %s pcache %d bytes\n",
+				ev.Ino, entry.Name, len(body))
+		}
+		_ = signalAdmit(devPath, ev.Ino, 0)
+		return
+	}
+
+	// Arena path (default).
 	off, err := progs.AdmitContent(body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit content: %v\n", ev.Ino, err)
@@ -648,6 +717,11 @@ func handleReadMiss(ctx context.Context, devPath string,
 // prefetchSeqEnabled gates runSeqPrefetchLoop. Set once by main before any
 // goroutine reads it.
 var prefetchSeqEnabled bool
+
+// arenaMetadataOnlyEnabled switches the miss handler to use
+// S3FS_IOC_POPULATE_PAGES instead of AdmitContent + admitArena.
+// Set once by main from the --arena-metadata-only flag.
+var arenaMetadataOnlyEnabled bool
 
 const (
 	// prefetchInterval is how often the prefetch goroutine scans admitted inos.

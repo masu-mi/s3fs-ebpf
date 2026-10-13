@@ -27,6 +27,13 @@ int  s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			     u32 count);
 void s3fs_ebpf_admit_shutdown(void);
 
+/* AB-04: populate the Linux page cache (via fd->buf) for `ino` with `size`
+ * bytes of file data from user pointer `data_ptr` at file offset `offset`.
+ * Inserts an S3FS_ADMIT_FLAG_PCACHE admit entry so read paths skip the
+ * BPF arena / GUP and fall through to generic_file_read_iter. */
+int  s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
+			      const void __user *data_ptr);
+
 /*
  * Entry table replace — daemon publishes the current bucket snapshot
  * here; kmod atomically swaps in the new table and flushes the dcache
@@ -107,6 +114,18 @@ extern atomic_t s3fs_admits_count;
 extern unsigned int s3fs_softcap;
 /* `capacity_bytes` module parameter (S-02). 0 = legacy vote mode. */
 extern unsigned long long s3fs_capacity_bytes;
+
+/* AB-02: when non-zero, s3fs_ebpf_read_iter skips the arena fast path
+ * and always falls through to generic_file_read_iter (page-cache path).
+ * Allows bench-ab-arena-vs-pagecache.sh to compare arena vs page-cache
+ * latency under identical conditions without remounting. */
+extern bool s3fs_arena_bypass;
+
+/* AB-01: cumulative GUP (pin_user_pages_remote) call count and total
+ * latency in nanoseconds. Exported via IOC_STATS slots 3/4 so the
+ * bench script can compute mean ns/call without bpftrace. */
+extern atomic_long_t s3fs_gup_calls_total;
+extern atomic_long_t s3fs_gup_ns_total;
 
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
  * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */

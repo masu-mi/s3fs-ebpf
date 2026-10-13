@@ -363,4 +363,38 @@ struct s3fs_rename_event {
 #define S3FS_IOC_POP_FLUSH_WAIT \
 	_IOR(S3FS_IOC_MAGIC, 0x0D, struct s3fs_flush_event)
 
+/*
+ * S3FS_IOC_POPULATE_PAGES — AB-04: write file data directly into the
+ * kernel page cache for an admitted inode, bypassing the BPF arena /
+ * GUP path entirely.
+ *
+ * The daemon fetches an S3 object range and hands the raw bytes to kmod
+ * via this ioctl. kmod locks each page-aligned folio in the inode's
+ * address_space, copies the data from userspace, marks it uptodate, and
+ * releases the lock. Subsequent reads via generic_file_read_iter find
+ * the data in the page cache without any GUP.
+ *
+ * After the copy, kmod inserts an admit entry with the
+ * S3FS_ADMIT_FLAG_PCACHE flag set (uaddr=0, no daemon mm needed).
+ * .read_iter skips the arena fast path and falls through to
+ * generic_file_read_iter so the page cache serves the data.
+ * If the kernel evicts the folios later, .read_folio re-triggers the
+ * daemon upcall which calls this ioctl again to re-populate.
+ *
+ * data_ptr is a user-space pointer to `size` bytes of file content
+ * starting at file position `offset`.
+ */
+struct s3fs_populate_pages {
+	__u64 ino;
+	__u64 offset;    /* file offset where data starts */
+	__u64 size;      /* number of bytes in data */
+	__u64 data_ptr;  /* user pointer to data bytes */
+};
+
+/* AB-04: admit entry flag — data is in page cache, not in BPF arena. */
+#define S3FS_ADMIT_FLAG_PCACHE  (1U << 0)
+
+#define S3FS_IOC_POPULATE_PAGES \
+	_IOW(S3FS_IOC_MAGIC, 0x0E, struct s3fs_populate_pages)
+
 #endif /* _S3FS_EBPF_UAPI_H */
