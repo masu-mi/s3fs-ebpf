@@ -27,8 +27,10 @@ OUT=${OUT:-/tmp/bench-ab-pcache}
 SETTLE=${SETTLE:-10}
 FILE=${FILE:-hello.txt}
 LARGE_FILE=${LARGE_FILE:-ab07_large.bin}
-LARGE_BYTES=${LARGE_BYTES:-$((10 * 1024 * 1024))}  # 10 MiB; set 104857600 for 100 MiB
-N_READS=${N_READS:-20}
+# P5: gate (b) spec is 100 MiB; default is now 100 MiB.
+# Set LARGE_BYTES=10485760 to reproduce the prior 10 MiB measurement.
+LARGE_BYTES=${LARGE_BYTES:-104857600}
+N_READS=${N_READS:-5}
 MICRO_ITERS=${MICRO_ITERS:-2000}
 FIO_JOBS=${FIO_JOBS:-64}
 FIO_RUNTIME=${FIO_RUNTIME:-5}
@@ -40,7 +42,7 @@ log() { echo "[ab-pcache] $*" >&2; }
 
 # ── prereq ────────────────────────────────────────────────────────────────────
 
-need_cmds docker curl fio awk
+need_cmds docker curl fio awk hyperfine
 need_built
 minio_require "$FILE"
 
@@ -128,13 +130,32 @@ measure_fio_iops() {
     | awk '/IOPS=/{match($0, /IOPS=[^,]+/); print substr($0, RSTART+5, RLENGTH-5)}'
 }
 
-# timed_reads <path> <n> — mean ms/read.
+# timed_reads <path> <n> — mean ms/read (hyperfine median, process-startup excluded).
+# P5: use hyperfine instead of date+loop so sudo cat's fork/exec overhead
+# (~3-5ms) is amortized across runs and does not dominate the measurement.
+# --warmup 1 primes the page cache; subsequent runs measure cache-hot path.
 timed_reads() {
-    local path=$1 n=$2 i start_ns end_ns
-    start_ns=$(date +%s%N)
-    for i in $(seq 1 "$n"); do sudo cat "$path" >/dev/null 2>&1; done
-    end_ns=$(date +%s%N)
-    awk "BEGIN{printf \"%.3f\", ($end_ns - $start_ns) / 1000000 / $n}"
+    local path=$1 n=$2
+    # hyperfine prints "Time (mean ± σ): X.XXX s ± …"
+    # Extract the mean in ms.
+    hyperfine --warmup 1 --runs "$n" \
+        --export-json /dev/null \
+        "sudo cat '$path' >/dev/null" 2>/dev/null \
+    | awk '/Time.*mean/{
+        match($0, /([0-9]+\.[0-9]+) (m|µ|s)/, a);
+        v=a[1]; u=a[2];
+        if (u=="s")  v=v*1000;
+        if (u=="µs") v=v/1000;
+        printf "%.3f", v; exit
+      }' \
+    || {
+        # Fallback: plain loop if hyperfine parsing fails
+        local i start_ns end_ns
+        start_ns=$(date +%s%N)
+        for i in $(seq 1 "$n"); do sudo cat "$path" >/dev/null 2>&1; done
+        end_ns=$(date +%s%N)
+        awk "BEGIN{printf \"%.3f\", ($end_ns - $start_ns) / 1000000 / $n}"
+    }
 }
 
 # measure_micro <mp> <label> outvar_ops outvar_full

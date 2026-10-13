@@ -502,6 +502,39 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 
 ---
 
+## AC. pcache モード修正 (P1〜P6、2026-10-13 レビュー、`br §14〜16`)
+
+| # | 内容 | 優先度 | 状態 |
+|---|---|---|---|
+| AC-01 | P1: fc_pcache_check が pos を無視 → 分割 admit でゼロ読み | P0 必須 | ✅ 修正済 (commit efe7a08) |
+| AC-02 | P2: populate_pages にオーバーフロー検査なし → 範囲外書き込み | P0 必須 | ✅ 修正済 (commit efe7a08) |
+| AC-03 | P3: admit_insert_pcache 重複 + admit_replace でエントリ消去 + 容量未適用 | P0 | ✅ 修正済 (commit 1271adf) |
+| AC-04 | P4: fc_pcache_check のメモリ順序 (smp_acquire/release 欠如) | P1 | ✅ 修正済 (commit 879dbfa) |
+| AC-05 | P5: bench-ab-pcache の gate (b) が 10 MiB / timed_reads に startup コスト | P1 | ✅ デフォルト 100 MiB + hyperfine に変更 |
+| AC-06 | P6: 64-job 律速の特定 (perf c2c / lockstat / generic_file_read_iter 比較) | P2 | ⏳ 未着手 |
+
+### AC-01 受け入れ条件
+2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
+
+### AC-02 受け入れ条件
+ioctl に `size=0` / `offset=U64_MAX-1, size=16` / `offset=0, size=1<<40` を渡し、いずれも `-EINVAL` で返ること。
+
+### AC-03 受け入れ条件
+`bench-hitrate.sh` を `DAEMON_EXTRA_FLAGS=--arena-metadata-only` で実行したとき、admit set の bytes が `capacity_bytes` 以下に保たれること (`adm_max` で確認)。hit rate が Belady (opt) を超えないこと。`br §16` 結論も修正済み。
+
+### AC-04 受け入れ条件
+`fc_pcache_check` の writer が `smp_store_release(&fc->gen, ...)` を使い、reader が `smp_load_acquire(&fc->gen)` を使うことで ARM/POWER の弱いメモリモデルでも pcache/off/end の可視性が保証される。
+
+### AC-05 対応内容
+- `scripts/bench-ab-pcache.sh`: `LARGE_BYTES` デフォルトを 104857600 (100 MiB) に変更
+- `timed_reads`: `hyperfine --warmup 1 --runs N` ベースに変更 (sudo cat 起動コスト除外)
+- `br §14.2`: 「arena の KVM DMA 経路」という根拠のない記述を削除
+
+### AC-06 調査計画 (未着手)
+- `perf c2c record -a -- fio ...` (64 jobs, shared small file) でキャッシュライン競合の特定
+- `perf record -g` + `lockstat` でロック競合の確認
+- 比較対象: `.read_iter = generic_file_read_iter` 直結版 (admit 判定なし) での IOPS 計測
+
 ## 8. 参照
 
 - `docs/journal/week4a-implementation-notes.md §9` / `§10`
