@@ -135,6 +135,8 @@ measure_fio_iops() {
 # awk used gawk-only 3-arg match() (silent failure on mawk) and mismatched
 # the µs unit (captured "µ" but compared against "µs").
 # --warmup 1 primes the page cache so measured runs hit the FS hot path.
+# R2: on fallback, emit a warning to stderr and set TIMED_READS_METHOD=loop.
+TIMED_READS_METHOD=hyperfine
 timed_reads() {
     local path=$1 n=$2
     local tmpjson
@@ -142,11 +144,14 @@ timed_reads() {
     if hyperfine --warmup 1 --runs "$n" \
            --export-json "$tmpjson" \
            "sudo cat '$path' >/dev/null" >/dev/null 2>&1; then
+        TIMED_READS_METHOD=hyperfine
         printf '%.3f' "$(jq '.results[0].mean * 1000' "$tmpjson")"
         rm -f "$tmpjson"
     else
         rm -f "$tmpjson"
-        # Fallback: plain loop
+        # R2: hyperfine failed — warn and fall back to plain loop
+        log "WARNING: hyperfine failed for '${path}'; falling back to loop timing (method=loop)" >&2
+        TIMED_READS_METHOD=loop
         local i start_ns end_ns
         start_ns=$(date +%s%N)
         for i in $(seq 1 "$n"); do sudo cat "$path" >/dev/null 2>&1; done
@@ -295,12 +300,13 @@ fi
 echo "=================================================================="
 } | tee "$OUT/ab07-report.txt"
 
-printf 'AB07-RESULT  date=%s  fuse_raw_iops=%s  arena_iops=%s  pcache_iops=%s  fuse_cache_ms=%s  arena_ms=%s  pcache_ms=%s  arena_ops=%s  pcache_ops=%s  gate_a=%s  gate_b=%s  gate_c=%s\n' \
+printf 'AB07-RESULT  date=%s  fuse_raw_iops=%s  arena_iops=%s  pcache_iops=%s  fuse_cache_ms=%s  arena_ms=%s  pcache_ms=%s  arena_ops=%s  pcache_ops=%s  gate_a=%s  gate_b=%s  gate_c=%s  method=%s\n' \
     "$(date +%Y-%m-%d)" \
     "$FUSE_RAW_IOPS" "$ARENA_IOPS" "$PCACHE_IOPS" \
     "$FUSE_CACHE_LARGE_MS" "$ARENA_LARGE_MS" "$PCACHE_LARGE_MS" \
     "$ARENA_OPS" "$PCACHE_OPS" \
     "$gate_a" "$gate_b" "$gate_c" \
+    "$TIMED_READS_METHOD" \
 | tee -a "$OUT/ab07-report.txt"
 
 echo ""
