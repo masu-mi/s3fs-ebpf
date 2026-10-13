@@ -68,7 +68,8 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 .PHONY: help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
-        bench bench-write bench-scale bench-3way setup-bench-env \
+        bench bench-write bench-scale bench-3way \
+        bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
         lint-scripts readme test-arena clean
 
@@ -243,6 +244,18 @@ bench-scale: all ## Parallel scaling bench (numjobs=1..64, stat + read)
 bench-3way: all ## ebpf vs fuse-raw vs fuse-cache 3-way comparison
 	@echo "==> 3-way (ebpf vs fuse-raw vs fuse-cache) bench — results in /tmp/bench-3way/"
 	$(SCRIPTS_DIR)/bench-3way.sh
+
+bench-hitrate: all ## Hit-rate bench across Layer 2 policies (Zipf workload, capacity mode)
+	@echo "==> hit-rate bench — results in /tmp/bench-hitrate/"
+	$(SCRIPTS_DIR)/bench-hitrate.sh
+
+bench-hitrate-multi: all ## Multi-seed / Zipf-α sweep hit-rate bench (set ALPHAS= for sweep)
+	@echo "==> multi-seed/alpha hit-rate bench — results in /tmp/bench-hitrate-multi/"
+	$(SCRIPTS_DIR)/bench-hitrate-multi.sh
+
+bench-hitrate-mixed: all ## D-01 mixed large+small file hit-rate bench (Y-05 acceptance)
+	@echo "==> mixed-file hit-rate bench — results in /tmp/bench-hitrate-mixed/"
+	$(SCRIPTS_DIR)/bench-hitrate-mixed.sh
 
 setup-bench-env: ## Install bench dependencies (hyperfine, fio, s3fs, /etc/passwd-s3fs)
 	$(SCRIPTS_DIR)/setup-toolchain.sh bench

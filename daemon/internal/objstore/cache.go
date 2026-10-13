@@ -26,12 +26,22 @@ import (
 // when under the cap (V2-01 fast path). Stored as *int64 rather than
 // sync/atomic.Int64 so that the DiskCache value can be assigned once
 // from NewDiskCache without triggering go vet noCopy warnings.
+//
+// AA-05: watermark-based eviction. evictIfNeeded fires the slow path
+// (ReadDir + mtime sort + remove) when usedBytes + newBytes exceeds
+// highWMFrac × maxBytes, and evicts down to lowWMFrac × maxBytes.
+// This batches evictions: instead of making exactly one write's worth
+// of room, we clear a 20 %-point band (90→70 % of maxBytes) per cycle,
+// matching the pattern used by OS page-cache and SSD staging tiers.
+// Both fractions are set to sensible defaults in NewDiskCache.
 type DiskCache struct {
-	dir       string
-	tag       string
-	bucket    string
-	maxBytes  int64
-	usedBytes *int64 // nil when eviction disabled; atomic via sync/atomic ops
+	dir        string
+	tag        string
+	bucket     string
+	maxBytes   int64
+	highWMFrac float64 // trigger threshold (0.0–1.0); default 0.90
+	lowWMFrac  float64 // eviction target (0.0–1.0);  default 0.70
+	usedBytes  *int64  // nil when eviction disabled; atomic via sync/atomic ops
 }
 
 // NewDiskCache returns a cache rooted at `dir`. `tag` prefixes stderr
@@ -41,7 +51,10 @@ type DiskCache struct {
 // `maxBytes` caps the total on-disk size; 0 means unlimited.
 // Empty `dir` yields a valid no-op cache.
 func NewDiskCache(dir, tag, bucket string, maxBytes int64) (DiskCache, error) {
-	c := DiskCache{dir: dir, tag: tag, bucket: bucket, maxBytes: maxBytes}
+	c := DiskCache{
+		dir: dir, tag: tag, bucket: bucket, maxBytes: maxBytes,
+		highWMFrac: 0.90, lowWMFrac: 0.70,
+	}
 	if dir == "" {
 		return c, nil
 	}
@@ -155,20 +168,24 @@ func (c *DiskCache) InvalidateRename(oldKey, newKey string) {
 	c.Invalidate(newKey)
 }
 
-// evictIfNeeded removes the oldest cache files (by mtime) until adding
-// newBytes would not exceed maxBytes.
+// evictIfNeeded removes the oldest cache files (by mtime) until the
+// post-write total would fall at or below the low watermark.
 //
-// Fast path (V2-01): when the in-memory usedBytes counter shows we are
-// under cap, the function returns without any I/O. The slow path (ReadDir
-// + stat + sort + remove) runs only when the counter indicates overflow;
-// it also re-syncs the counter from disk to self-correct any drift from
-// concurrent Invalidate calls or external file removals.
+// Fast path (V2-01): when the in-memory usedBytes counter is below the
+// high watermark, the function returns without any I/O.
+//
+// Slow path (AA-05): fires when usedBytes + newBytes exceeds
+// highWMFrac × maxBytes. It re-syncs the counter from disk, then evicts
+// oldest-first until usedBytes + newBytes ≤ lowWMFrac × maxBytes.
+// Evicting to 70 % rather than to maxBytes means fewer eviction cycles
+// under sustained write pressure (amortises ReadDir cost across writes).
 func (c *DiskCache) evictIfNeeded(newBytes int64) {
 	if c.maxBytes <= 0 || c.usedBytes == nil {
 		return
 	}
-	// Fast path: counter says we have room — skip all I/O.
-	if atomic.LoadInt64(c.usedBytes)+newBytes <= c.maxBytes {
+	hwm := int64(float64(c.maxBytes) * c.highWMFrac)
+	// Fast path: counter shows we are below the high watermark.
+	if atomic.LoadInt64(c.usedBytes)+newBytes <= hwm {
 		return
 	}
 	// Slow path: scan directory for authoritative sizes and mtime order.
@@ -201,7 +218,8 @@ func (c *DiskCache) evictIfNeeded(newBytes int64) {
 	// Re-sync the counter to correct any drift accumulated since startup.
 	atomic.StoreInt64(c.usedBytes, total)
 
-	need := total + newBytes - c.maxBytes
+	lwm := int64(float64(c.maxBytes) * c.lowWMFrac)
+	need := total + newBytes - lwm
 	if need <= 0 {
 		return
 	}

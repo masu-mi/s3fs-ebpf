@@ -248,7 +248,7 @@ run_one() {
 		# Unlike (folio+pc)/N this is bounded [0,100] and matches Belady semantics.
 		hit_rate=$(awk "BEGIN{printf \"%.2f\", 100*(1 - $d_miss/$total)}")
 		# iter_mult ≈ 2 when read_iter fires data+EOF per cat (Y-06 diagnostic).
-		iter_mult=$(awk "BEGIN{printf \"%.2f\", $d_read_iter_pos0_hits>0 ? $d_read_iter_hits/$d_read_iter_pos0_hits : 0}")
+		iter_mult=$(awk "BEGIN{d=$d_read_iter_pos0_hits; n=$d_read_iter_hits; printf \"%.2f\", (d>0) ? n/d : 0}")
 	else
 		rate_arena="-"
 		hit_rate="-"

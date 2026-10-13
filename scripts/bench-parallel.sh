@@ -28,8 +28,10 @@ OUT_DIR=${OUT_DIR:-/tmp/bench-parallel}
 MP_EBPF=/mnt/s3demo
 MP_FUSE_RAW=/mnt/s3fuse
 MP_FUSE_CACHE=/mnt/s3fuse-cache
+MP_MOUNT_S3=/mnt/s3-mountpoint          # I-01
 FUSE_CACHE_DIR=/tmp/s3fs-fuse-cache
 EBPF_CACHE_DIR=/tmp/s3fs-ebpf-cache
+MOUNT_S3_CACHE_DIR=${MOUNT_S3_CACHE_DIR:-/tmp/mount-s3-cache}  # I-01
 FILE=${FILE:-hello.txt}
 BIG_FILE=${BIG_FILE:-big.bin}
 DURATION=${DURATION:-30}      # seconds of concurrent workload
@@ -37,6 +39,8 @@ READERS_PER_MP=${READERS_PER_MP:-4}
 WRITERS_PER_MP=${WRITERS_PER_MP:-1}
 METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
 DASHBOARD_URL=${DASHBOARD_URL:-http://localhost:3000/d/s3fs-ebpf-overview}
+
+MOUNT_S3_STARTED=0
 
 mkdir -p "$OUT_DIR" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
 sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
@@ -47,6 +51,21 @@ check_prereq() {
 	need_cmds s3fs
 	need_built
 	minio_require "$FILE"
+}
+
+# I-01: Mountpoint for Amazon S3 — conditional on mount-s3 being installed.
+start_mount_s3() {
+	if ! mount_s3_available; then
+		log "mount-s3 not found — skipping I-01 arm (install mountpoint-s3 to enable)"
+		return
+	fi
+	log "mounting mount-s3 at $MP_MOUNT_S3"
+	mount_s3_mount "$MP_MOUNT_S3" "$MOUNT_S3_CACHE_DIR" || {
+		log "mount-s3 mount failed — skipping I-01 arm"
+		return
+	}
+	MOUNT_S3_STARTED=1
+	cat "$MP_MOUNT_S3/$FILE" >/dev/null 2>&1 || true
 }
 
 start_fuse_raw() {
@@ -76,6 +95,7 @@ stop_all() {
 	ebpf_stop "$MP_EBPF"
 	umount_hard "$MP_FUSE_CACHE"
 	umount_hard "$MP_FUSE_RAW"
+	if [ "$MOUNT_S3_STARTED" -eq 1 ]; then umount_hard "$MP_MOUNT_S3"; fi
 }
 trap stop_all EXIT
 
@@ -134,11 +154,13 @@ check_prereq
 start_fuse_raw
 start_fuse_cache
 start_ebpf
+start_mount_s3  # I-01 (no-op if mount-s3 not installed)
 
 log "warm-up: single cat per mount so first-hit costs don't dominate"
 cat "$MP_EBPF/$FILE"       >/dev/null 2>&1 || true
 cat "$MP_FUSE_CACHE/$FILE" >/dev/null 2>&1 || true
 cat "$MP_FUSE_RAW/$FILE"   >/dev/null 2>&1 || true
+[ "$MOUNT_S3_STARTED" -eq 1 ] && cat "$MP_MOUNT_S3/$FILE" >/dev/null 2>&1 || true
 
 collect_ebpf_metrics_snapshot t0
 
@@ -151,6 +173,7 @@ log "  → open $DASHBOARD_URL to watch MinIO traffic + Go runtime overlay live"
 spawn_readers "$MP_EBPF"       "$READERS_PER_MP" "$DURATION"
 spawn_readers "$MP_FUSE_CACHE" "$READERS_PER_MP" "$DURATION"
 spawn_readers "$MP_FUSE_RAW"   "$READERS_PER_MP" "$DURATION"
+[ "$MOUNT_S3_STARTED" -eq 1 ] && spawn_readers "$MP_MOUNT_S3" "$READERS_PER_MP" "$DURATION"
 spawn_writers "$MP_EBPF"       "$WRITERS_PER_MP" "$DURATION"
 spawn_writers "$MP_FUSE_CACHE" "$WRITERS_PER_MP" "$DURATION"
 spawn_writers "$MP_FUSE_RAW"   "$WRITERS_PER_MP" "$DURATION"

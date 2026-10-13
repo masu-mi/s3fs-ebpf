@@ -97,7 +97,7 @@ extern atomic_long_t s3fs_admit_invalidations;
 
 /* Running admit hash size. Read from s3fs_kfunc_admit_count() in
  * tree_traversal.c so BPF policy programs can make pressure-aware
- * decisions. Updated under s3fs_admits_lock. */
+ * decisions. Updated under s3fs_admits_lock write side (rwlock). */
 extern atomic_t s3fs_admits_count;
 
 /* Default for the `softcap` module parameter (entry count above which
@@ -109,7 +109,7 @@ extern unsigned int s3fs_softcap;
 extern unsigned long long s3fs_capacity_bytes;
 
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
- * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock inside. */
+ * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */
 u64 s3fs_admit_size(u64 ino);
 
 /* Drain the ring buffer of policy-evicted inos. `out` holds up to

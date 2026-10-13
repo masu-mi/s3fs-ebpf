@@ -36,8 +36,10 @@ func TestDiskCache_Eviction(t *testing.T) {
 	dir := t.TempDir()
 	payload := []byte("0123456789") // 10 bytes each
 
-	// Cap at 25 bytes — fits 2 entries (20 B) but not 3 (30 B).
-	cache, err := NewDiskCache(dir, KindS3, "bucket", 25)
+	// Cap at 30 bytes (hwm=27, lwm=21 with AA-05 watermarks).
+	// a+b=20 B ≤ hwm: no eviction. Writing c(10 B): 20+10=30 > hwm →
+	// slow path; need=20+10-21=9 → evict a(10 B) only, result [b,c].
+	cache, err := NewDiskCache(dir, KindS3, "bucket", 30)
 	if err != nil {
 		t.Fatalf("NewDiskCache: %v", err)
 	}
@@ -53,8 +55,8 @@ func TestDiskCache_Eviction(t *testing.T) {
 		t.Fatal("key b should be present after two writes within limit")
 	}
 
-	// Writing c (10 B) would push total to 30 B > 25 B cap.
-	// The oldest file (a) must be evicted first.
+	// Writing c (10 B): 20+10=30 > hwm(27), evict a (oldest, need=9).
+	// Result: [b,c] at 20 B (= lwm, 1 entry evicted as expected).
 	cache.Write("c", payload)
 
 	if _, ok := cache.Read("a"); ok {
@@ -130,6 +132,53 @@ func TestDiskCache_UsedBytesSeededFromDisk(t *testing.T) {
 	}
 	if got := atomic.LoadInt64(c2.usedBytes); got != 20 {
 		t.Errorf("after restart, usedBytes = %d, want 20 (seeded from disk)", got)
+	}
+}
+
+// TestDiskCache_WatermarkBatchEviction pins AA-05: when the high watermark
+// is exceeded, eviction removes enough entries to reach the low watermark,
+// not just enough to fit the new write. This amortises ReadDir cost and
+// matches OS page-cache / SSD-staging eviction patterns.
+func TestDiskCache_WatermarkBatchEviction(t *testing.T) {
+	dir := t.TempDir()
+	payload := []byte("0123456789") // 10 bytes each
+
+	// maxBytes=100 → hwm=90, lwm=70.
+	// Write a..h (8×10=80 B). Still under hwm.
+	// Write i (10 B): 80+10=90 ≤ hwm(90) → no eviction. After: 90 B.
+	// Write j (10 B): 90+10=100 > hwm(90) → slow path.
+	//   total=90, need=90+10-70=30 → evict a,b,c (3×10 B). After: 70 B.
+	cache, err := NewDiskCache(dir, KindS3, "bucket", 100)
+	if err != nil {
+		t.Fatalf("NewDiskCache: %v", err)
+	}
+
+	keys := []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"}
+	for _, k := range keys {
+		time.Sleep(2 * time.Millisecond) // distinct mtimes for stable sort
+		cache.Write(k, payload)
+	}
+	// All 9 entries (90 B) must still be present — at the high watermark.
+	for _, k := range keys {
+		if _, ok := cache.Read(k); !ok {
+			t.Errorf("key %q should be present before batch-eviction write", k)
+		}
+	}
+
+	// Write j (10 B) crosses hwm → batch eviction to lwm(70 B).
+	// Oldest 3 entries (a, b, c) are evicted.
+	time.Sleep(2 * time.Millisecond)
+	cache.Write("j", payload)
+
+	for _, k := range []string{"a", "b", "c"} {
+		if _, ok := cache.Read(k); ok {
+			t.Errorf("key %q should have been batch-evicted to reach low watermark", k)
+		}
+	}
+	for _, k := range []string{"d", "e", "f", "g", "h", "i", "j"} {
+		if _, ok := cache.Read(k); !ok {
+			t.Errorf("key %q should still be present after batch-eviction", k)
+		}
 	}
 }
 

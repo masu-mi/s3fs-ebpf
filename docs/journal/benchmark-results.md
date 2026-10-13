@@ -636,3 +636,130 @@ mount-s3      5000   1000    545–562 ms  8,896–9,167  110 µs   140 µs    1
 - キャッシュを揃えた比較 (fuse-cache 519µs vs mount-s3 110µs) でも mount-s3 は **4.7× 速い**
 - mount-s3 が速い理由は S3 GET を VFS 経由で非同期 prefetch + 専用バッファキャッシュを持つため (libfuse ではなく独自 fuse カーネル I/F)
 - **ebpf-A+C p50=3.075µs** は mount-s3 よりさらに **36×** 速い (キャッシュ有り同士の比較)
+
+---
+
+## § 12. AA-01/AA-03/AA-05/Z-03 実装後 再計測 (2026-10-13)
+
+### 12.1 bench-latency — hyperfine + microbench + fio (2026-10-13)
+
+変更点: AA-01 rwlock、AA-03 `.read_iter` 直実装、AA-06 mount-s3 追加、AA-05 watermark eviction、Z-03 ghost cap 比例化
+
+#### warm stat (hyperfine, hello.txt)
+
+| 対象 | mean [µs] | 相対 (ebpf=1) |
+|---|---:|---:|
+| s3fs-fuse | 717.1 | 1.01 |
+| s3fs-ebpf B | 713.0 | 1.00 |
+| fuse-cache | 727.7 | 1.02 |
+| mount-s3 | 714.4 | 1.00 |
+
+全 backend ≈ 710–730 µs で誤差範囲内 (stat は VFS 経由なので差なし)。
+
+#### warm cat (hyperfine, hello.txt)
+
+| 対象 | mean | 相対 (ebpf=1) |
+|---|---:|---:|
+| s3fs-fuse | 2.8 ms | 4.83× |
+| s3fs-ebpf B | 586 µs | 1.00 |
+| fuse-cache | 1.4 ms | 2.38× |
+| mount-s3 | 769 µs | 1.31× |
+
+ebpf が **4.83×** fuse 比。mount-s3 比でも **1.31×** 優位。
+
+#### cold cat drop_caches=1 (page cache only, I-02)
+
+| 対象 | mean | 相対 (ebpf=1) |
+|---|---:|---:|
+| s3fs-fuse | 4.9 ms | 2.67× |
+| s3fs-ebpf B | 1.8 ms | 1.00 |
+| fuse-cache | 3.4 ms | 1.87× |
+| mount-s3 | 2.3 ms | 1.27× |
+
+arena がページキャッシュ破棄後も保持されているため ebpf が最速。
+
+#### large file cat throughput (warm)
+
+| 対象 | big.bin (≈64KB) | 10m.bin | 100m.bin |
+|---|---:|---:|---:|
+| s3fs-fuse | 4.7 ms | 13.8 ms | 104.8 ms |
+| s3fs-ebpf B | **797 µs** | **2.0 ms** | 13.0 ms |
+| fuse-cache | 1.6 ms | 2.7 ms | **11.1 ms** |
+| mount-s3 | 1.6 ms | 5.8 ms | 44.9 ms |
+
+100m.bin では fuse-cache (disk cache) が ebpf (arena) を 1.17× 上回る。64KB〜10MB では ebpf が 2〜7× 優位。
+
+#### microbench read p50 (5000 iters open+read+close)
+
+| 対象 | p50 |
+|---|---:|
+| s3fs-fuse | 1.724 ms |
+| s3fs-ebpf B | **3.216 µs** |
+| fuse-cache | 513 µs |
+| mount-s3 | 113 µs |
+
+AA-03 (`s3fs_ebpf_read_iter`) 実装後も p50=3.2µs (目標 2µs 未達)。前回 3.075µs と比較して同等水準。mount-s3 比では **35×** 速い。
+
+---
+
+### 12.2 bench-scale — fio stat/read parallel scaling (2026-10-13)
+
+AA-06 で mount-s3 が追加されたため 4-way 比較に。
+
+#### stat scale (fio filestat)
+
+```
+label       job       IOPS clat_ns(norm)
+ebpf          1      6385k      26877
+fuse-raw      1      6159k      13572
+fuse-cache    1      6453k       5981
+mount-s3      1      6484k       6938
+ebpf         64      21.2M       2019
+fuse-raw     64      21.0M       1909
+fuse-cache   64      21.3M       1738
+mount-s3     64      21.4M       1781
+```
+
+stat は全 backend が 64 jobs で ~21M IOPS に収束。
+
+#### read scale (fio psync, single small file shared)
+
+```
+label       job       IOPS
+ebpf          1      1460k
+fuse-raw      1      1636k
+fuse-cache    1      1638k
+mount-s3      1      1639k
+ebpf         64      4045k
+fuse-raw     64      5289k
+fuse-cache   64      5325k
+mount-s3     64      5326k
+```
+
+ebpf の read IOPS は 64 jobs で fuse-raw 比 **76%** に留まる。AA-01 rwlock 後も高並列 read で 20–25% の遅れが残る。8 jobs から飽和 (~4300k) しており、`admit_snapshot` 以外のボトルネック (arena GUP コスト、VFS layer) が residual。
+
+---
+
+### 12.3 bench-hitrate — policy hit-rate (2026-10-13, seed=42)
+
+N_FILES=30, Zipf α=0.7, 2000 accesses, softcap=8, capacity_bytes=352
+
+```
+RESULT policy=observe          hit_rate= 27.15%
+RESULT policy=freq2bit_ops     hit_rate= 30.05%
+RESULT policy=lru_ops          hit_rate= 30.60%
+RESULT policy=sieve_ops        hit_rate= 30.60%
+RESULT policy=s3fifo_ops       hit_rate= 31.55%
+RESULT policy=wtinylfu_ops     hit_rate= 29.60%
+RESULT policy=wtinylfu_full    hit_rate= 34.25%
+RESULT policy=pressure_ops     hit_rate= 31.95%
+RESULT policy=time_decay_ops   hit_rate= 31.50%
+RESULT policy=size_aware_ops   hit_rate= 35.20%  ← 最高
+REFERENCE opt                  64.15%
+REFERENCE lru (sim)            39.20%
+REFERENCE sieve (sim)          43.80%
+```
+
+Z-03 (ghost cap 比例化) はデフォルト softcap=8 では ghost_cap=8192 のまま変化なし。前回 (10-12) 計測値と同水準。size_aware_ops が 35.2% でトップ。
+
+**awk iter_mult バグ修正**: `printf` 引数内の `>` がリダイレクト演算子として誤解析されていた (`bench-hitrate.sh`, `bench-hitrate-mixed.sh`)。変数経由の形式 `d=N; n=M; (d>0)?n/d:0` に修正。

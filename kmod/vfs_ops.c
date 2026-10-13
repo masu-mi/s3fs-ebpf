@@ -272,7 +272,10 @@ struct s3fs_admit {
 #define S3FS_ADMIT_HASH_BITS 6
 
 static DEFINE_HASHTABLE(s3fs_admits, S3FS_ADMIT_HASH_BITS);
-static DEFINE_SPINLOCK(s3fs_admits_lock);
+/* AA-01: rwlock instead of spinlock so concurrent .read_folio calls on
+ * distinct inos can take the read side in parallel. Write side is held
+ * only by admit_replace / admit_shutdown (infrequent daemon ioctls). */
+static DEFINE_RWLOCK(s3fs_admits_lock);
 
 /* Running size of the admit hash. Updated in lock-step with hash_add
  * / hash_del calls under s3fs_admits_lock. Exposed to BPF programs
@@ -436,7 +439,7 @@ static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
 	unsigned int n = 0;
 	u64 b = 0;
 
-	spin_lock(&s3fs_admits_lock);
+	write_lock(&s3fs_admits_lock);
 	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
 		if (a->ino != ino)
 			continue;
@@ -446,7 +449,7 @@ static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
 		kfree(a);
 		n++;
 	}
-	spin_unlock(&s3fs_admits_lock);
+	write_unlock(&s3fs_admits_lock);
 	if (bytes)
 		*bytes = b;
 	return n;
@@ -483,11 +486,11 @@ u64 s3fs_admit_size(u64 ino)
 	struct s3fs_admit *a;
 	u64 size = 0;
 
-	spin_lock(&s3fs_admits_lock);
+	read_lock(&s3fs_admits_lock);
 	a = admit_lookup_locked(ino);
 	if (a)
 		size = a->size;
-	spin_unlock(&s3fs_admits_lock);
+	read_unlock(&s3fs_admits_lock);
 	return size;
 }
 
@@ -650,7 +653,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		}
 	}
 
-	spin_lock(&s3fs_admits_lock);
+	write_lock(&s3fs_admits_lock);
 	/*
 	 * S-01: decide which entries actually changed before the old table
 	 * is dropped. The daemon re-sends the whole list on every miss /
@@ -696,7 +699,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 */
 	if (count)
 		s3fs_admitted_mm = mm;
-	spin_unlock(&s3fs_admits_lock);
+	write_unlock(&s3fs_admits_lock);
 
 	kfree(staged); /* array itself; nodes now live in the hash */
 	staged = NULL;
@@ -936,11 +939,11 @@ void s3fs_ebpf_admit_shutdown(void)
 {
 	struct mm_struct *prev;
 
-	spin_lock(&s3fs_admits_lock);
+	write_lock(&s3fs_admits_lock);
 	admit_clear_locked();
 	prev = s3fs_admitted_mm;
 	s3fs_admitted_mm = NULL;
-	spin_unlock(&s3fs_admits_lock);
+	write_unlock(&s3fs_admits_lock);
 
 	if (prev)
 		mmput(prev);
@@ -2018,7 +2021,7 @@ static bool admit_snapshot(u64 ino, u64 pos,
 	struct s3fs_admit *a;
 	bool hit = false;
 
-	spin_lock(&s3fs_admits_lock);
+	read_lock(&s3fs_admits_lock);
 	a = admit_lookup_at_locked(ino, pos);
 	if (a) {
 		u64 within = pos - a->offset;
@@ -2027,7 +2030,7 @@ static bool admit_snapshot(u64 ino, u64 pos,
 		*out_mm    = s3fs_admitted_mm;
 		hit = true;
 	}
-	spin_unlock(&s3fs_admits_lock);
+	read_unlock(&s3fs_admits_lock);
 	return hit;
 }
 
@@ -2210,6 +2213,44 @@ static void s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 	mutex_unlock(&fd->lock);
 }
 
+/* AA-03: copy arena data directly into a user iov_iter, bypassing the
+ * page-cache folio path entirely. One page at a time via GUP so we stay
+ * within the pin_user_pages_remote() contract (no sleeping while pinned). */
+static ssize_t s3fs_arena_copy_to_iter(struct mm_struct *mm,
+					u64 uaddr, u64 avail,
+					struct iov_iter *to, size_t copy_len)
+{
+	size_t remaining = copy_len;
+	ssize_t total = 0;
+
+	while (remaining > 0) {
+		struct page *ap = NULL;
+		void *akva;
+		unsigned long abs = (unsigned long)(uaddr + (u64)total);
+		unsigned long pgoff = abs & (PAGE_SIZE - 1);
+		size_t chunk = min_t(size_t, remaining, PAGE_SIZE - pgoff);
+		long pinned;
+		int locked = 1;
+		size_t copied;
+
+		mmap_read_lock(mm);
+		pinned = pin_user_pages_remote(mm, abs & PAGE_MASK, 1, 0, &ap, &locked);
+		if (locked)
+			mmap_read_unlock(mm);
+		if (pinned != 1)
+			break;
+		akva = kmap_local_page(ap);
+		copied = copy_to_iter((u8 *)akva + pgoff, chunk, to);
+		kunmap_local(akva);
+		unpin_user_pages(&ap, 1);
+		if (!copied)
+			break;
+		total += (ssize_t)copied;
+		remaining -= copied;
+	}
+	return total;
+}
+
 static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 {
 	struct inode *inode = folio->mapping->host;
@@ -2234,9 +2275,9 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	}
 
 	/* Miss + daemon alive: trigger upcall, wait, retry. */
-	spin_lock(&s3fs_admits_lock);
+	read_lock(&s3fs_admits_lock);
 	mm = s3fs_admitted_mm;
-	spin_unlock(&s3fs_admits_lock);
+	read_unlock(&s3fs_admits_lock);
 
 	if (mm) {
 		struct s3fs_pending *p = pending_get_or_create(inode->i_ino);
@@ -2271,6 +2312,35 @@ out:
 	folio_mark_uptodate(folio);
 	folio_unlock(folio);
 	return 0;
+}
+
+/* AA-03: .read_iter fast path — arena hit → copy_to_iter directly; miss →
+ * fall through to generic_file_read_iter (page-cache + .read_folio). */
+static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
+{
+	struct file *file = iocb->ki_filp;
+	struct inode *inode = file_inode(file);
+	loff_t pos = iocb->ki_pos;
+	loff_t size = i_size_read(inode);
+	u64 uaddr = 0, avail = 0;
+	struct mm_struct *mm = NULL;
+
+	if (pos < size &&
+	    admit_snapshot(inode->i_ino, (u64)pos, &uaddr, &avail, &mm) && mm) {
+		size_t count = iov_iter_count(to);
+		size_t copy_len = min3(count, (size_t)avail,
+				       (size_t)(size - pos));
+		ssize_t copied = s3fs_arena_copy_to_iter(mm, uaddr, avail,
+							  to, copy_len);
+		if (copied > 0) {
+			atomic_long_inc(&s3fs_folio_hits);
+			s3fs_policy_on_hit(inode->i_ino);
+			(void)s3fs_policy_ops_eval_hit(inode->i_ino);
+			iocb->ki_pos += copied;
+			return copied;
+		}
+	}
+	return generic_file_read_iter(iocb, to);
 }
 
 static const struct address_space_operations s3fs_ebpf_aops = {
@@ -2455,7 +2525,7 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 static const struct file_operations s3fs_ebpf_file_fops = {
 	.open		= s3fs_ebpf_file_open,
 	.llseek		= generic_file_llseek,
-	.read_iter	= generic_file_read_iter,
+	.read_iter	= s3fs_ebpf_read_iter,   /* AA-03 */
 	.write		= s3fs_ebpf_file_write,
 	.mmap		= generic_file_mmap,
 	.splice_read	= filemap_splice_read,
@@ -2817,7 +2887,7 @@ static void admit_drop_ino_locked(u64 ino)
 	struct s3fs_admit *a;
 	struct hlist_node *tmp;
 
-	spin_lock(&s3fs_admits_lock);
+	write_lock(&s3fs_admits_lock);
 	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
 		if (a->ino != ino)
 			continue;
@@ -2826,7 +2896,7 @@ static void admit_drop_ino_locked(u64 ino)
 		kfree(a);
 		break;
 	}
-	spin_unlock(&s3fs_admits_lock);
+	write_unlock(&s3fs_admits_lock);
 }
 
 /*
