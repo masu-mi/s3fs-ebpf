@@ -42,7 +42,7 @@ log() { echo "[ab-pcache] $*" >&2; }
 
 # ── prereq ────────────────────────────────────────────────────────────────────
 
-need_cmds docker curl fio awk hyperfine
+need_cmds docker curl fio awk jq hyperfine
 need_built
 minio_require "$FILE"
 
@@ -130,32 +130,29 @@ measure_fio_iops() {
     | awk '/IOPS=/{match($0, /IOPS=[^,]+/); print substr($0, RSTART+5, RLENGTH-5)}'
 }
 
-# timed_reads <path> <n> — mean ms/read (hyperfine median, process-startup excluded).
-# P5: use hyperfine instead of date+loop so sudo cat's fork/exec overhead
-# (~3-5ms) is amortized across runs and does not dominate the measurement.
-# --warmup 1 primes the page cache; subsequent runs measure cache-hot path.
+# timed_reads <path> <n> — mean ms/read, wall-clock (process startup included).
+# Q4: use hyperfine --export-json + jq for portable extraction; the prior
+# awk used gawk-only 3-arg match() (silent failure on mawk) and mismatched
+# the µs unit (captured "µ" but compared against "µs").
+# --warmup 1 primes the page cache so measured runs hit the FS hot path.
 timed_reads() {
     local path=$1 n=$2
-    # hyperfine prints "Time (mean ± σ): X.XXX s ± …"
-    # Extract the mean in ms.
-    hyperfine --warmup 1 --runs "$n" \
-        --export-json /dev/null \
-        "sudo cat '$path' >/dev/null" 2>/dev/null \
-    | awk '/Time.*mean/{
-        match($0, /([0-9]+\.[0-9]+) (m|µ|s)/, a);
-        v=a[1]; u=a[2];
-        if (u=="s")  v=v*1000;
-        if (u=="µs") v=v/1000;
-        printf "%.3f", v; exit
-      }' \
-    || {
-        # Fallback: plain loop if hyperfine parsing fails
+    local tmpjson
+    tmpjson=$(mktemp /tmp/timed-reads-XXXXXX.json)
+    if hyperfine --warmup 1 --runs "$n" \
+           --export-json "$tmpjson" \
+           "sudo cat '$path' >/dev/null" >/dev/null 2>&1; then
+        printf '%.3f' "$(jq '.results[0].mean * 1000' "$tmpjson")"
+        rm -f "$tmpjson"
+    else
+        rm -f "$tmpjson"
+        # Fallback: plain loop
         local i start_ns end_ns
         start_ns=$(date +%s%N)
         for i in $(seq 1 "$n"); do sudo cat "$path" >/dev/null 2>&1; done
         end_ns=$(date +%s%N)
         awk "BEGIN{printf \"%.3f\", ($end_ns - $start_ns) / 1000000 / $n}"
-    }
+    fi
 }
 
 # measure_micro <mp> <label> outvar_ops outvar_full
