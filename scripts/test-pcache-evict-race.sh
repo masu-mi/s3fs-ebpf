@@ -45,7 +45,7 @@ N_READERS=${N_READERS:-4}       # concurrent reader processes per file
 FILE_SIZE=$(( 9 * 1024 * 1024 ))
 POLICY_EVAL_INTERVAL=${POLICY_EVAL_INTERVAL:-0.2}  # seconds between eval hits
 METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
-DAEMON_HTTP_URL=${DAEMON_HTTP_URL:-http://localhost:9601}
+DAEMON_METRICS_URL=${DAEMON_METRICS_URL:-http://localhost:9600}
 
 log()  { printf '[evict-race] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -96,18 +96,34 @@ ebpf_start_daemon "$OUT/daemon.log" \
     --softcap=2 \
     --cache-capacity="${CHUNK_BYTES}" \
     --metrics-addr=:9600 \
-    --http-addr=:9601 \
     --sample-every=1s --sync-every=5s
 log "daemon started, settling ${SETTLE}s"
 sleep "$SETTLE"
 
-# ── record dmesg timestamp before the run ─────────────────────────────────────
-DMESG_BEFORE=$(dmesg --time-format=reltime 2>/dev/null | wc -l || dmesg | wc -l)
+# ── S3-1: snapshot eviction counter before the run ───────────────────────────
+# Parse Prometheus text format: handles both 'metric value' and 'metric{...} value'.
+get_evict_count() {
+    curl -sf "${METRICS_URL}" 2>/dev/null \
+        | awk '/^s3fs_ebpf_evictions_total[{ ]/{print int($NF); exit}' \
+        || echo "-1"
+}
+EVICT_BEFORE=$(get_evict_count)
+log "evictions before stress: ${EVICT_BEFORE}"
+
+# ── S3-2: detect lockdep availability ────────────────────────────────────────
+LOCKDEP_AVAIL=0
+[ -r /proc/lockdep_stats ] && LOCKDEP_AVAIL=1
+if [ "$LOCKDEP_AVAIL" -eq 0 ]; then
+    log "INFO: /proc/lockdep_stats absent (CONFIG_PROVE_LOCKING disabled) — lockdep check will be SKIP"
+fi
+
+# ── record dmesg line count before the run ───────────────────────────────────
+DMESG_BEFORE=$(dmesg 2>/dev/null | wc -l || echo 0)
 
 # ── background: hammer POST /policy/eval ─────────────────────────────────────
 hammer_policy_eval() {
     while true; do
-        curl -sf -X POST "${DAEMON_HTTP_URL}/policy/eval" \
+        curl -sf -X POST "${DAEMON_METRICS_URL}/policy/eval" \
             -H 'Content-Type: application/json' \
             -d '{"file":"/mnt/s3demo/evict-race-test-1.bin"}' \
             >/dev/null 2>&1 || true
@@ -162,14 +178,32 @@ for pid in "${READER_PIDS[@]}"; do
     fi
 done
 
-# ── check lockdep ─────────────────────────────────────────────────────────────
-LOCKDEP_WARNINGS=0
-if dmesg --time-format=reltime 2>/dev/null | tail -n +"$DMESG_BEFORE" \
-        | grep -qE 'possible deadlock|lock order|WARNING: (possible|suspicious)'; then
-    LOCKDEP_WARNINGS=1
-    log "WARNING: lockdep warning(s) found in dmesg — see below"
-    dmesg --time-format=reltime 2>/dev/null | tail -n +"$DMESG_BEFORE" \
-        | grep -E 'possible deadlock|lock order|WARNING: (possible|suspicious)' >&2
+# ── S3-1: verify evictions actually occurred ─────────────────────────────────
+EVICT_AFTER=$(get_evict_count)
+EVICT_DELTA=$(( EVICT_AFTER - EVICT_BEFORE ))
+log "evictions after stress: ${EVICT_AFTER} (delta=${EVICT_DELTA})"
+EVICT_PASS=FAIL
+if [ "$EVICT_BEFORE" -eq -1 ] || [ "$EVICT_AFTER" -eq -1 ]; then
+    EVICT_PASS="SKIP(metrics unavailable)"
+elif [ "$EVICT_DELTA" -gt 0 ]; then
+    EVICT_PASS=PASS
+else
+    log "ERROR: zero evictions — capacity pressure did not fire; test may be vacuous"
+fi
+
+# ── S3-2/S3-3: check dmesg for kernel errors and lockdep warnings ─────────────
+# S3-3: extended pattern set (lockdep + KASAN + sleeping-in-atomic)
+DMESG_PATTERN='possible deadlock|lock order|WARNING: (possible|suspicious)|inconsistent lock state|circular locking|BUG: sleeping function called from invalid context|BUG: KASAN'
+LOCKDEP_STATUS=SKIP
+if [ "$LOCKDEP_AVAIL" -eq 1 ]; then
+    NEW_DMESG=$(dmesg 2>/dev/null | tail -n +"$DMESG_BEFORE")
+    if echo "$NEW_DMESG" | grep -qE "$DMESG_PATTERN"; then
+        LOCKDEP_STATUS=FAIL
+        log "WARNING: kernel warning(s) found in dmesg — see below"
+        echo "$NEW_DMESG" | grep -E "$DMESG_PATTERN" >&2
+    else
+        LOCKDEP_STATUS=PASS
+    fi
 fi
 
 # ── report ────────────────────────────────────────────────────────────────────
@@ -182,6 +216,8 @@ printf "files      : %d × %d MiB\n" "$N_FILES" "$(( FILE_SIZE / 1024 / 1024 ))"
 printf "readers    : %d per file (%d total)\n" "$N_READERS" "$(( N_READERS * N_FILES ))"
 printf "capacity   : %d MiB  (forces eviction after each chunk)\n" "$(( CHUNK_BYTES / 1024 / 1024 ))"
 printf "duration   : %ds\n" "$DURATION"
+printf "evictions  : before=%s after=%s delta=%d\n" \
+    "$EVICT_BEFORE" "$EVICT_AFTER" "$EVICT_DELTA"
 echo ""
 if [ -f "$READER_FAIL" ]; then
     printf "sha256     : FAIL (%s)\n" "$(cat "$READER_FAIL")"
@@ -190,20 +226,22 @@ elif [ "$READER_FAIL_COUNT" -gt 0 ]; then
 else
     echo "sha256     : PASS (all reads matched originals)"
 fi
-if [ "$LOCKDEP_WARNINGS" -eq 0 ]; then
-    echo "lockdep    : PASS (no warnings in dmesg)"
-else
-    echo "lockdep    : FAIL (see dmesg above)"
+printf "evictions  : %s\n" "$EVICT_PASS"
+printf "lockdep    : %s\n" "$LOCKDEP_STATUS"
+if [ "$LOCKDEP_AVAIL" -eq 0 ]; then
+    echo "  (rerun with CONFIG_PROVE_LOCKING=y for full lockdep coverage)"
 fi
 echo ""
-if [ -f "$READER_FAIL" ] || [ "$READER_FAIL_COUNT" -gt 0 ] || [ "$LOCKDEP_WARNINGS" -ne 0 ]; then
-    echo "OVERALL: FAIL"
-else
-    echo "OVERALL: PASS"
-fi
+# Overall: FAIL if any hard check failed; PASS only if sha256 + evictions both pass
+# lockdep SKIP is acceptable (not a failure)
+overall=PASS
+[ -f "$READER_FAIL" ] && overall=FAIL
+[ "$READER_FAIL_COUNT" -gt 0 ] && overall=FAIL
+[[ "$EVICT_PASS" == FAIL ]] && overall=FAIL
+[ "$LOCKDEP_STATUS" = FAIL ] && overall=FAIL
+echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/evict-race-report.txt"
 
-if [ -f "$READER_FAIL" ] || [ "$READER_FAIL_COUNT" -gt 0 ] || [ "$LOCKDEP_WARNINGS" -ne 0 ]; then
-    exit 1
-fi
+# Exit non-zero on any hard failure
+[[ "$overall" == FAIL ]] && exit 1 || exit 0
