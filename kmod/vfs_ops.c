@@ -2361,14 +2361,12 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 	return 0;
 }
 
-/*
- * P2: Maximum permitted offset+size for a single POPULATE_PAGES call.
- * Daemon chunks are at most partialAdmitChunk (4 MiB) so 4 GiB is
- * already 1000× above any realistic payload; it also keeps end well
- * within size_t on 32-bit kernels (SIZE_MAX == 4 GiB - 1 there).
- * Blocks the overflow attacks tested in P2 (size=0, U64 wrap, 1<<40).
- */
-#define S3FS_POPULATE_MAX_END  (4ULL << 30)
+/* Q3: limit applies to per-call *size*, not offset+size, so large files can
+ * be admitted in chunks at offsets > 4 GiB.  Daemon chunks are ≤ 4 MiB
+ * (partialAdmitChunk); 64 MiB is 16× headroom while bounding kvmalloc cost
+ * per call.  The per-ino buffer still grows to offset+size; files larger than
+ * available kernel memory should use arena mode instead of pcache mode. */
+#define S3FS_POPULATE_MAX_SIZE  (64ULL << 20)   /* 64 MiB per call */
 
 /* AB-04: populate fd->buf with S3 data from userspace, then insert a
  * page-cache-mode admit entry. Reads served by .read_folio via
@@ -2386,14 +2384,12 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 	u64 end;
 	int err = 0;
 
-	/* P2: reject degenerate or dangerously large requests before any
-	 * allocation.  size=0 underflows (offset+size-1) in the later
-	 * invalidate_mapping_pages call; overflow or an end beyond
-	 * S3FS_POPULATE_MAX_END would cause kvmalloc to attempt a TiB
-	 * allocation and then copy_from_user to write past the buffer. */
-	if (size == 0)
+	/* P2/Q3: reject degenerate or oversized requests before any allocation.
+	 * size=0 underflows in invalidate_mapping_pages; size > MAX_SIZE would
+	 * exhaust memory in a single call; overflow would wrap end past u64. */
+	if (size == 0 || size > S3FS_POPULATE_MAX_SIZE)
 		return -EINVAL;
-	if (check_add_overflow(offset, size, &end) || end > S3FS_POPULATE_MAX_END)
+	if (check_add_overflow(offset, size, &end))
 		return -EINVAL;
 
 	if (!s3fs_active_sb)
