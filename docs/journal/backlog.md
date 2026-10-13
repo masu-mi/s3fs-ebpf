@@ -516,6 +516,9 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-08 | Q2: populate_pages と eviction の race → pcache 経路でゼロ読み (NULL buf) | P0 必須 | ✅ 修正済 (commit b3ae6e8) |
 | AC-09 | Q3: S3FS_POPULATE_MAX_END=4GiB → offset>4GB の chunk admit が全て弾かれる | P1 | ✅ 修正済 (commit b6d42d1) |
 | AC-10 | Q4: timed_reads の awk が gawk 専用 + µs パース誤り → bench 計測値が不正 | P1 | ✅ 修正済 (commit 214813d) |
+| AC-11 | R1: populate/evict race → pcache entry が NULL fd->buf を指しゼロ返し (データ破損) | P0 必須 | ✅ 修正済 (commit caf0b7f) |
+| AC-12 | R2: timed_reads fallback が silent → 計測方法が記録に残らない | P1 | ✅ 修正済 (commit b911a03) |
+| AC-13 | R3: Q1 修正前ビルドの §16 計測が無効 → R1 ビルドで再計測が必要 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
 
 ### AC-01 受け入れ条件
 2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
@@ -550,6 +553,28 @@ ioctl に `size=0` / `offset=U64_MAX-1, size=16` / `offset=0, size=1<<40` を渡
 
 ### AC-10 修正内容 (Q4)
 `timed_reads` を `hyperfine --export-json` + `jq` ベースに書き直し。gawk 専用 3 引数 `match()` を除去、µs パース誤りを修正。`jq` を `need_cmds` に追加。コメントの「startup 除外」表記を削除。
+
+### AC-11 修正内容 (R1)
+populate/evict 競合の 2 段修正:
+
+1. `s3fs_ebpf_populate_pages`: `admit_insert_pcache` を `fd->lock` 保持中に呼ぶよう移動。`kzalloc` は `write_lock` 前に済ませるため `admit_insert_pcache` 内部構造は変更なし。ロック順: `fd->lock`（mutex, outer）→ `s3fs_admits_lock`（rwlock, inner）。
+2. `s3fs_file_data_reset`: `fd->lock` 内で `fd->buf` 解放の前に、その ino の PCACHE エントリを再度 `write_lock` で取り除く。`admit_drop_all_ranges` と `admit_insert_pcache` の間に差し込まれた entry を確実に消す。
+
+不変条件コメントを `struct s3fs_admit` の直後に追記。ストレステスト `scripts/test-pcache-evict-race.sh` を追加。
+
+### AC-12 修正内容 (R2)
+`timed_reads` に `TIMED_READS_METHOD` グローバル変数を追加。hyperfine 失敗時は stderr に警告を出力し `TIMED_READS_METHOD=loop` に設定。`AB07-RESULT` 行に `method=<value>` フィールドを追加。
+
+### AC-13 再計測内容 (R3)
+R1 修正後ビルドで `bench-hitrate.sh`（arena/pcache 両モード, seed=42）、`bench-ab-pcache.sh`（100 MiB）、`test-pcache-multiread.sh`、`test-pcache-evict-race.sh` を再計測し `br §18` に記録する。§16 の注記に §18 への参照を追記済み。
+
+**受け入れ条件**:
+- `adm_max ≤ capacity_bytes`（両モード）
+- `hit_rate ≤ opt`（Belady 64.15%）
+- arena hit_rate が §12.3 の lru/sieve 30.6% から著しく外れていない
+- AB-07 gate (a)(b)(c) がいずれも PASS または SKIP
+- sha256 全一致（multiread + evict-race）
+- lockdep 警告なし
 
 ## 8. 参照
 
