@@ -530,11 +530,19 @@ static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
 
 	if (fc) {
 		cur_gen = atomic_read(&s3fs_admit_gen);
-		if (READ_ONCE(fc->gen) == cur_gen) {
-			if (!READ_ONCE(fc->pcache))
+		/*
+		 * P4: smp_load_acquire pairs with the smp_store_release on the
+		 * write path below.  The acquire barrier guarantees that, once
+		 * we observe the matching gen, all preceding stores (pcache,
+		 * off, end) are also visible — even on weakly-ordered CPUs
+		 * (ARM, POWER) where plain READ_ONCE would allow the new gen
+		 * to be seen with stale pcache/off/end values.
+		 */
+		if (smp_load_acquire(&fc->gen) == cur_gen) {
+			if (!fc->pcache)
 				return false; /* no pcache entry for any pos */
 			/* pcache=true: fast-path only within the confirmed range */
-			if (pos >= READ_ONCE(fc->off) && pos < READ_ONCE(fc->end))
+			if (pos >= fc->off && pos < fc->end)
 				return true;
 			/* pos outside cached range: fall through to slow path */
 		}
@@ -553,10 +561,13 @@ static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
 	read_unlock(&s3fs_admits_lock);
 
 	if (fc) {
+		/* Write off/end/pcache before releasing gen (P4).  Any reader
+		 * that observes the new gen via smp_load_acquire is guaranteed
+		 * to see the updated off/end/pcache. */
 		WRITE_ONCE(fc->off,    a_off);
 		WRITE_ONCE(fc->end,    a_end);
 		WRITE_ONCE(fc->pcache, found);
-		WRITE_ONCE(fc->gen,    cur_gen);
+		smp_store_release(&fc->gen, cur_gen);
 	}
 	return found;
 }
@@ -2988,11 +2999,16 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 	 *    clean folios, so the next read_iter reaches .read_folio rather
 	 *    than being served directly from the page cache.
 	 */
-	/* AB-10: reset per-file cache before dropping admits so next read
-	 * re-checks via rwlock rather than using the now-stale cached value. */
+	/* AB-10 / P4: reset per-file cache before dropping admits so next read
+	 * re-checks via rwlock.  smp_store_release ensures a concurrent
+	 * reader that loads gen=0 via smp_load_acquire also sees pcache=false
+	 * (the zeroed struct from kzalloc), not a stale pcache=true. */
 	if (file->private_data) {
 		struct s3fs_file_admit_cache *fc = file->private_data;
-		WRITE_ONCE(fc->gen, 0);
+		WRITE_ONCE(fc->pcache, false);
+		WRITE_ONCE(fc->off, 0);
+		WRITE_ONCE(fc->end, 0);
+		smp_store_release(&fc->gen, 0);
 	}
 	admit_drop_all_ranges(inode->i_ino, NULL);
 	evict_log_push(inode->i_ino);
