@@ -264,9 +264,13 @@ static bool resolve_entry_by_name(unsigned long parent_ino,
 struct s3fs_admit {
 	struct hlist_node node;
 	u64 ino;
-	u64 uaddr;   /* daemon user_vm address of the range's bytes */
+	u64 uaddr;   /* daemon user_vm address of the range's bytes (0 in PCACHE mode) */
 	u64 size;    /* range length */
 	u64 offset;  /* file offset where the range starts (D-01) */
+	/* AB-04: S3FS_ADMIT_FLAG_PCACHE set means data is in Linux page cache,
+	 * not in the BPF arena. GUP path is skipped; generic_file_read_iter
+	 * serves reads from page cache directly. */
+	u32 flags;
 };
 
 #define S3FS_ADMIT_HASH_BITS 6
@@ -276,6 +280,24 @@ static DEFINE_HASHTABLE(s3fs_admits, S3FS_ADMIT_HASH_BITS);
  * distinct inos can take the read side in parallel. Write side is held
  * only by admit_replace / admit_shutdown (infrequent daemon ioctls). */
 static DEFINE_RWLOCK(s3fs_admits_lock);
+
+/*
+ * AB-10: admit generation counter. Incremented (inside write_lock) by every
+ * admit table mutation: admit_replace, admit_drop_all_ranges,
+ * admit_insert_pcache, admit_shutdown. Per-file caches keyed on the current
+ * generation; a stale gen forces one rwlock re-check, after which the cache
+ * is refreshed and subsequent reads are lock-free.
+ */
+static atomic_t s3fs_admit_gen = ATOMIC_INIT(1);
+
+/*
+ * AB-10: per-file admit snapshot cached in file->private_data.
+ * Allocated in .open, freed in .release.
+ */
+struct s3fs_file_admit_cache {
+	u32  gen;    /* s3fs_admit_gen value when pcache was last confirmed */
+	bool pcache; /* true = PCACHE admit exists for this ino at gen */
+};
 
 /* Running size of the admit hash. Updated in lock-step with hash_add
  * / hash_del calls under s3fs_admits_lock. Exposed to BPF programs
@@ -316,6 +338,12 @@ module_param_named(capacity_bytes, s3fs_capacity_bytes, ullong, 0644);
 MODULE_PARM_DESC(capacity_bytes,
 	"Admit-set byte capacity; >0 enables capacity mode (evict by policy score until it fits). 0 = legacy vote mode");
 
+/* AB-02: bench-only bypass — skip arena fast path, always use page cache. */
+bool s3fs_arena_bypass __read_mostly;
+module_param_named(arena_bypass, s3fs_arena_bypass, bool, 0644);
+MODULE_PARM_DESC(arena_bypass,
+	"AB-02: skip arena fast path in .read_iter; use generic_file_read_iter for all reads (bench only, default off)");
+
 /* Cumulative count of admit entries removed by policy_ops eviction
  * votes. Exposed via S3FS_IOC_STATS so the daemon can mirror it into
  * the Prometheus endpoint. Monotonically increasing counter. */
@@ -337,6 +365,12 @@ atomic_long_t s3fs_folio_hits = ATOMIC_LONG_INIT(0);
  * content changes, not with every full-list re-send.
  */
 atomic_long_t s3fs_admit_invalidations = ATOMIC_LONG_INIT(0);
+
+/* AB-01: GUP call count and accumulated latency (ns) in s3fs_arena_copy_to_iter.
+ * Exported via IOC_STATS slots 3/4. bench-ab-arena-vs-pagecache.sh reads
+ * delta values to compute mean ns/GUP call without needing bpftrace. */
+atomic_long_t s3fs_gup_calls_total = ATOMIC_LONG_INIT(0);
+atomic_long_t s3fs_gup_ns_total    = ATOMIC_LONG_INIT(0);
 
 /* Ring buffer of ino values evicted by policy vote since the last
  * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
@@ -449,10 +483,72 @@ static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
 		kfree(a);
 		n++;
 	}
+	if (n)
+		atomic_inc(&s3fs_admit_gen); /* AB-10: invalidate per-file caches */
 	write_unlock(&s3fs_admits_lock);
 	if (bytes)
 		*bytes = b;
 	return n;
+}
+
+/*
+ * AB-10: per-file admit cache check.
+ *
+ * Fast path: if fc->gen matches the current global gen, return the cached
+ * boolean without touching the rwlock.
+ * Slow path (cache miss or stale gen): take read_lock, probe the hash,
+ * read cur_gen while still under the lock (so gen is consistent with the
+ * table state observed), update the cache, unlock.
+ *
+ * fc may be NULL (file->private_data not allocated yet, or readahead path
+ * where file == NULL).  In that case we always take the rwlock.
+ */
+static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
+{
+	struct s3fs_admit *a;
+	bool found;
+	u32 cur_gen;
+
+	if (fc) {
+		cur_gen = atomic_read(&s3fs_admit_gen);
+		if (READ_ONCE(fc->gen) == cur_gen)
+			return READ_ONCE(fc->pcache);
+	}
+
+	/* Slow path: rwlock + read gen atomically with the table. */
+	read_lock(&s3fs_admits_lock);
+	a = admit_lookup_at_locked(ino, pos);
+	found = a && (a->flags & S3FS_ADMIT_FLAG_PCACHE);
+	cur_gen = atomic_read(&s3fs_admit_gen);
+	read_unlock(&s3fs_admits_lock);
+
+	if (fc) {
+		WRITE_ONCE(fc->pcache, found);
+		WRITE_ONCE(fc->gen, cur_gen);
+	}
+	return found;
+}
+
+/* AB-04: insert or update a page-cache-mode admit entry (uaddr=0). */
+static int admit_insert_pcache(u64 ino, u64 offset, u64 size)
+{
+	struct s3fs_admit *a;
+
+	a = kzalloc(sizeof(*a), GFP_KERNEL);
+	if (!a)
+		return -ENOMEM;
+	a->ino    = ino;
+	a->uaddr  = 0;
+	a->size   = size;
+	a->offset = offset;
+	a->flags  = S3FS_ADMIT_FLAG_PCACHE;
+
+	write_lock(&s3fs_admits_lock);
+	hash_add(s3fs_admits, &a->node, ino);
+	atomic_inc(&s3fs_admits_count);
+	atomic_inc(&s3fs_admit_gen); /* AB-10: new pcache entry → stale caches must re-check */
+	write_unlock(&s3fs_admits_lock);
+	return 0;
 }
 
 static void admit_clear_locked(void)
@@ -699,6 +795,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 */
 	if (count)
 		s3fs_admitted_mm = mm;
+	atomic_inc(&s3fs_admit_gen); /* AB-10: table replaced → all per-file caches stale */
 	write_unlock(&s3fs_admits_lock);
 
 	kfree(staged); /* array itself; nodes now live in the hash */
@@ -943,6 +1040,7 @@ void s3fs_ebpf_admit_shutdown(void)
 	admit_clear_locked();
 	prev = s3fs_admitted_mm;
 	s3fs_admitted_mm = NULL;
+	atomic_inc(&s3fs_admit_gen); /* AB-10: shutdown clears all entries */
 	write_unlock(&s3fs_admits_lock);
 
 	if (prev)
@@ -1995,6 +2093,68 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 	return 0;
 }
 
+/* AB-04: populate fd->buf with S3 data from userspace, then insert a
+ * page-cache-mode admit entry. Reads served by .read_folio via
+ * s3fs_folio_fill_from_kmalloc (no GUP); page cache accumulates
+ * uptodate folios so subsequent reads via generic_file_read_iter
+ * are served from page cache without touching .read_folio at all.
+ *
+ * Refuses to overwrite a dirty inode (user-written content takes
+ * precedence over S3 data until the flush completes). */
+int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
+			     const void __user *data_ptr)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+	int err = 0;
+
+	if (!s3fs_active_sb)
+		return -ENODEV;
+	inode = ilookup(s3fs_active_sb, (unsigned long)ino);
+	if (!inode)
+		return -ENOENT;
+	fd = inode->i_private;
+	if (!fd) {
+		err = -EIO;
+		goto out_iput;
+	}
+
+	mutex_lock(&fd->lock);
+	if (fd->dirty) {
+		/* Never overwrite user-written content with stale S3 data. */
+		err = -EBUSY;
+		goto out_unlock;
+	}
+	err = s3fs_file_data_reserve(fd, (size_t)(offset + size));
+	if (err)
+		goto out_unlock;
+
+	if (copy_from_user(fd->buf + offset, data_ptr, (size_t)size)) {
+		err = -EFAULT;
+		goto out_unlock;
+	}
+	if (offset + size > (u64)fd->size) {
+		fd->size = (size_t)(offset + size);
+		i_size_write(inode, (loff_t)fd->size);
+	}
+	/* Invalidate any stale page-cache folios for this range so the
+	 * next read triggers .read_folio and picks up the new fd->buf data. */
+	invalidate_mapping_pages(inode->i_mapping,
+				 offset >> PAGE_SHIFT,
+				 (offset + size - 1) >> PAGE_SHIFT);
+
+out_unlock:
+	mutex_unlock(&fd->lock);
+out_iput:
+	iput(inode);
+	if (err)
+		return err;
+
+	/* Insert the page-cache-mode admit entry (may coexist with an older
+	 * arena entry; lookup picks the first hit per range). */
+	return admit_insert_pcache(ino, offset, size);
+}
+
 /* -- File ops (regular files) --------------------------------------------- */
 
 /* How long .read_folio waits for a daemon upcall to admit the ino
@@ -2234,7 +2394,12 @@ static ssize_t s3fs_arena_copy_to_iter(struct mm_struct *mm,
 		size_t copied;
 
 		mmap_read_lock(mm);
-		pinned = pin_user_pages_remote(mm, abs & PAGE_MASK, 1, 0, &ap, &locked);
+		{
+			ktime_t t0 = ktime_get();
+			pinned = pin_user_pages_remote(mm, abs & PAGE_MASK, 1, 0, &ap, &locked);
+			atomic_long_inc(&s3fs_gup_calls_total);
+			atomic_long_add(ktime_to_ns(ktime_sub(ktime_get(), t0)), &s3fs_gup_ns_total);
+		}
 		if (locked)
 			mmap_read_unlock(mm);
 		if (pinned != 1)
@@ -2259,7 +2424,19 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	loff_t pos = folio_pos(folio);
 	size_t fs_size = folio_size(folio);
 
-	/* Fast path: admit hit. admit_snapshot() returns the arena
+	/* AB-04 / AB-10 fast path: page-cache mode admit — data is in fd->buf.
+	 * fc_pcache_check avoids the rwlock when the per-file cache is warm.
+	 * file may be NULL on readahead paths; fc_pcache_check handles NULL fc. */
+	if (fc_pcache_check(file ? file->private_data : NULL,
+			    inode->i_ino, (u64)pos)) {
+		atomic_long_inc(&s3fs_folio_hits);
+		s3fs_policy_on_hit(inode->i_ino);
+		(void)s3fs_policy_ops_eval_hit(inode->i_ino);
+		s3fs_folio_fill_from_kmalloc(folio, fs_size, pos, inode->i_private);
+		goto out;
+	}
+
+	/* Fast path: arena admit hit. admit_snapshot() returns the arena
 	 * address for `pos` and the bytes available in the covering
 	 * range. fill_from_arena reads from the returned uaddr with
 	 * pos=0 (range-relative), copying up to `avail` bytes. */
@@ -2292,12 +2469,25 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 					&p->done, S3FS_UPCALL_WAIT_JIFFIES);
 				err = p->err;
 				pending_put(p);
-				if (remaining > 0 && err == 0 &&
-				    admit_snapshot(inode->i_ino, (u64)pos,
-						   &uaddr, &asize, &mm) && mm) {
-					s3fs_folio_fill_from_arena(folio,
-						fs_size, 0, mm, uaddr, asize);
-					goto out;
+				if (remaining > 0 && err == 0) {
+					/* AB-04 / AB-10: daemon may have responded with
+					 * POPULATE_PAGES (pcache mode) rather than
+					 * ADMIT_ARENA.  fc_pcache_check updates the
+					 * per-file cache so subsequent read_iter
+					 * calls can fast-path without rwlock. */
+					if (fc_pcache_check(
+						file ? file->private_data : NULL,
+						inode->i_ino, (u64)pos)) {
+						s3fs_folio_fill_from_kmalloc(
+							folio, fs_size, pos, inode->i_private);
+						goto out;
+					}
+					if (admit_snapshot(inode->i_ino, (u64)pos,
+							   &uaddr, &asize, &mm) && mm) {
+						s3fs_folio_fill_from_arena(folio,
+							fs_size, 0, mm, uaddr, asize);
+						goto out;
+					}
 				}
 			} else {
 				pending_put(p);
@@ -2314,8 +2504,16 @@ out:
 	return 0;
 }
 
-/* AA-03: .read_iter fast path — arena hit → copy_to_iter directly; miss →
- * fall through to generic_file_read_iter (page-cache + .read_folio). */
+/* AA-03 / AB-04: .read_iter fast path.
+ *
+ * Priority order:
+ *   1. AB-04 page-cache mode (PCACHE admit flag): skip arena entirely,
+ *      fall through to generic_file_read_iter so page cache serves the data.
+ *      .read_folio fills fd->buf → folio on the first miss; subsequent
+ *      reads are served from the uptodate folio without touching .read_folio.
+ *   2. Arena mode (AA-03): admit hit → s3fs_arena_copy_to_iter (GUP path).
+ *      Bypassed when s3fs_arena_bypass=1 (AB-02 bench flag).
+ *   3. Fallback: generic_file_read_iter (page cache + .read_folio upcall). */
 static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct file *file = iocb->ki_filp;
@@ -2325,7 +2523,14 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	u64 uaddr = 0, avail = 0;
 	struct mm_struct *mm = NULL;
 
+	/* AB-04 / AB-10: page-cache mode — data in fd->buf / page cache.
+	 * fc_pcache_check avoids the rwlock on the hot path once the cache
+	 * entry is confirmed for this file descriptor. */
 	if (pos < size &&
+	    fc_pcache_check(file->private_data, inode->i_ino, (u64)pos))
+		return generic_file_read_iter(iocb, to);
+
+	if (!s3fs_arena_bypass && pos < size &&
 	    admit_snapshot(inode->i_ino, (u64)pos, &uaddr, &avail, &mm) && mm) {
 		size_t count = iov_iter_count(to);
 		size_t copy_len = min3(count, (size_t)avail,
@@ -2448,6 +2653,9 @@ static int s3fs_ebpf_file_release(struct inode *inode, struct file *file)
 {
 	/* close(2): fire and forget, do not block. */
 	(void)s3fs_maybe_enqueue_flush(file, false);
+	/* AB-10: free per-file admit cache */
+	kfree(file->private_data);
+	file->private_data = NULL;
 	return 0;
 }
 
@@ -2485,6 +2693,14 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 	struct s3fs_file_data *fd = inode->i_private;
 	bool dirty = false;
 
+	/* AB-10: allocate per-file admit cache; gen=0 forces first-read re-check. */
+	if (!file->private_data) {
+		struct s3fs_file_admit_cache *fc =
+			kzalloc(sizeof(*fc), GFP_KERNEL);
+		if (fc)
+			file->private_data = fc;
+	}
+
 	if (!READ_ONCE(s3fs_nocache))
 		return 0;
 	if (fd) {
@@ -2514,6 +2730,12 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 	 *    clean folios, so the next read_iter reaches .read_folio rather
 	 *    than being served directly from the page cache.
 	 */
+	/* AB-10: reset per-file cache before dropping admits so next read
+	 * re-checks via rwlock rather than using the now-stale cached value. */
+	if (file->private_data) {
+		struct s3fs_file_admit_cache *fc = file->private_data;
+		WRITE_ONCE(fc->gen, 0);
+	}
 	admit_drop_all_ranges(inode->i_ino, NULL);
 	evict_log_push(inode->i_ino);
 	if (invalidate_inode_pages2(inode->i_mapping) != 0)

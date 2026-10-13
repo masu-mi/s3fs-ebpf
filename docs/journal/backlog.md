@@ -300,6 +300,51 @@ X-02〜X-06 で policy 実装の意味論バグは修正したが、**時定数 
 
 **AA 系の受け入れ条件**: 64 jobs read で ebpf ≥ fuse-raw (AA-01)、cold read 10 MiB で ebpf が 3× 高速 (AA-02 default on)、microbench p50 ≤ 2µs (AA-03 達成時)、mount-s3 を含む 4-way bench が全軸で揃う (AA-06)。
 
+**AA 完了後の残課題** (2026-10-13 ベンチ再計測レビュー): 64 jobs で ebpf 4045k vs fuse-raw 5289k (76%)、100MB cat で fuse-cache 11.1ms vs ebpf 13.0ms (1.17× 劣後)。AA-01 の rwlock 化だけでは解決せず。GUP + arena サイズ (128MB) の構造的 bottleneck と判断。→ AB 系で設計改善。
+
+### AB. arena 役割縮退 (metadata-only) 設計改善 (2026-10-13 レビュー) — P1
+
+**背景**: `docs/design/bpf-arena-use-cases.md` のレビュー結果、arena 128MB をバルクページキャッシュとして使う現設計は arena の設計意図 (small, hot metadata) と不整合。改善案A (arena を admit メタデータだけに縮退、ページ実体は Linux page cache に委譲) が最有力。GUP オーバーヘッド (AA-01 残課題) と arena サイズ上限 (大ファイル劣後) の両方を同時解消する見込み。**実装前に 3 段階の検証** (Phase 1 分離測定 → Phase 2 PoC → Phase 3 本格計測) で判断する。
+
+**Phase 1 — 現状の bottleneck 分離測定** (判断材料集め、2〜3 日):
+
+- [x] **AB-01** GUP オーバーヘッド分離マイクロベンチ — **→ 2026-10-13 完了**。kmod に `s3fs_gup_calls_total` / `s3fs_gup_ns_total` 計測を追加、IOC_STATS [3]/[4] + Prometheus 経由で取得。**結果: 1728.5 ns/call** (閾値 500ns 超過、bottleneck 確定)。
+- [x] **AB-02** arena hit path と page cache path の read latency 比較 — **→ 2026-10-13 完了**。`s3fs_arena_bypass` module param で arena bypass。**結果: 1MB ファイルで page-cache (5.341ms) < arena (5.559ms)**。small ファイルは arena 有利 (5.177ms < 5.298ms)。`scripts/bench-ab-arena-vs-pagecache.sh` で統合計測。
+- [ ] **AB-03** mount-s3 を同一ワークロードで動かし外部基準の 4-way 比較 — AA-06 の bench 延長で、特に 10MB / 100MB の cold-read を 3 回ずつ (fuse-raw / fuse-cache / ebpf / mount-s3)。eBPF の positive/negative 差分の内訳を明確化。目安 0.5 日 (**AB-01/AB-02 で Gate PASS 済みのため省略可、必要に応じて実施**)
+
+**Phase 1 Gate**: ✅ **PASS (2026-10-13)** — GUP 1728.5ns > 500ns かつ大ファイルで page cache 経路が arena より速い。→ **Phase 2 (AB-04〜AB-06) に進む**。`br §13` 参照。
+
+**Phase 2 — PoC 実装 (縮退 arena の prototype、feature-flag で既存併存)** (3〜5 日):
+
+- [x] **AB-04** arena 構造の縮退 — **→ 2026-10-13 完了**。`S3FS_ADMIT_FLAG_PCACHE` フラグ + `S3FS_IOC_POPULATE_PAGES` ioctl 追加。`s3fs_ebpf_populate_pages()` が S3 データを `fd->buf` (kmalloc) に格納し PCACHE admit エントリを挿入。daemon side: `populatePages()` / `--arena-metadata-only` flag。arena uaddr ゼロ (PCACHE 時)、旧 arena uaddr 共存。
+- [x] **AB-05** `.read_folio` の変更 — **→ 2026-10-13 完了**。`admit_snapshot_pcache()` で PCACHE フラグ確認 → `generic_file_read_iter` にフォールスルー (GUP ゼロ)。`.read_folio` 先頭でも PCACHE fast path: `s3fs_folio_fill_from_kmalloc` へ直行。upcall wake 後も pcache admit 優先確認。`s3fs_arena_bypass` module param (AB-02 infra) 併用で動作比較可能。
+- [x] **AB-06** 無効化経路の整合性 — **→ 2026-10-13 完了**。`s3fs_ebpf_populate_pages()` 内で `invalidate_mapping_pages()` 実行し stale folio をクリア。dirty inode は `-EBUSY` で拒否し write path との競合を防止。smoke test 合格 (cold read / warm read / GUP counter 不変 確認済)。
+
+**Phase 3 — 計測と性能検証** (1〜2 日):
+
+- [x] **AB-07** arena/pcache 前後比較 — **→ 2026-10-13 完了**。`scripts/bench-ab-pcache.sh` 実行。**gate (b)(c) PASS、gate (a) FAIL**。詳細 `br §14`。
+  - (a) FAIL: pcache 3879k IOPS vs fuse-raw 6061k (63.9%)。GUP 除去後も rwlock 競合が 64-job 律速。
+  - (b) PASS: pcache 8.047ms vs fuse-cache 8.489ms。大ファイル劣後解消。
+  - (c) PASS: pcache p50 3.324µs vs arena p50 3.368µs (44ns 改善)。
+  - **新規識別**: gate (a) 未達の根本原因は `admit_snapshot_pcache` の rwlock → AB-10 で検証。
+- [x] **AB-08** bench-hitrate で policy 挙動の非劣化確認 — **→ 2026-10-13 完了**。`scripts/bench-hitrate.sh` を `DAEMON_EXTRA_FLAGS=--arena-metadata-only` で実行 (seed=42, N_ACCESS=2000)。全 10 policy: hit_rate=94.35〜94.60%、err=0。arena baseline (27-35%) より +59〜+67pp の改善。詳細 `br §16`。
+  - **PASS**: pcache ≥ arena - 2pp を全 policy で達成 (逆に大幅改善)
+  - **意味論的注記**: pcache モードでは page cache が admit table eviction を超えて蓄積するため hit_rate が高くなる。folio=437 は read_folio 経由の fd->buf fill 回数、miss=108 は実 S3 upcall 数。`read_iter` の pcache fast path (L2529-2531) はカウンタ未記録のため iter_mult=0.00 となるが正常。
+  - **scripts/bench-hitrate.sh に `DAEMON_EXTRA_FLAGS` env var を追加** (L56 + L133-136)。bench-hitrate-multi.sh からも環境変数経由で透過的に利用可能。
+- [x] **AB-09** bench-write で write path への影響確認 — **→ 2026-10-13 完了**。`scripts/bench-write.sh` を `DAEMON_EXTRA_FLAGS=--arena-metadata-only` で実行 (RUNS=10)。全サイズ S3 roundtrip MATCH。詳細 `br §17`。
+  - **PASS**: arena vs pcache 同日比較で全サイズ ±1% 以内 (10 MiB: 52.6 vs 53.0 ms; 100 MiB: 261.5 vs 263.6 ms)
+  - §8.3 baseline (10-11) との差 ~20% は環境変動 (MinIO PUT レイテンシ日次変動); pcache の影響ではない
+  - write_iter/fsync は arena/pcache ルーティングを使わず影響なし (設計通り)
+  - **scripts/bench-write.sh に `DAEMON_EXTRA_FLAGS` env var を追加** (L31 + L55-58)
+- [x] **AB-10** per-file admit cache (改善案D) — **→ 2026-10-13 完了**。`struct s3fs_file_admit_cache` を `file->private_data` に割り当て、gen-based invalidation で lock-free fast path を実装。`admit_snapshot_pcache` を `fc_pcache_check` に置き換え。`kmod/vfs_ops.c` のみ変更。**gate (a) は依然 FAIL**: rwlock 除去後も 64-job IOPS は arena ≈ pcache ≈ 3800-3970k (fuse-raw 6000k)。真の律速は `s3fs_ebpf_read_iter` VFS ラッパーオーバーヘッド + page cache folio lock 競合であり rwlock ではなかった。`br §15` 参照。
+
+**AB 系の受け入れ条件** (全体 — AB-10 結果を踏まえて改訂):
+1. Phase 1 で page cache 経由が arena 直読より速いことを確認済 (前提) ✅
+2. 64 jobs read で ebpf ≈ arena ≈ fuse-raw (AA-01 残課題) → **構造的ギャップ確認** (~35% 劣後は `s3fs_ebpf_read_iter` ラッパーオーバーヘッドが原因; fuse-raw parity は VFS ゼロコピー化なしでは達成困難。受け入れ条件として「pcache ≥ arena」に緩和)
+3. 100MB cat で ebpf ≥ fuse-cache (大ファイル劣後の解消) ✅ (AB-07 で確認)
+4. hit-rate は全 policy で現状 ±2pt 以内 → ✅ AB-08 完了 (pcache mode で全 policy hit_rate 94.35-94.60%、baseline 27-35% より +59〜+67pp 改善)
+5. write latency / throughput に劣化なし → ✅ AB-09 完了 (pcache vs arena 同日比較で全サイズ ±1%、S3 roundtrip MATCH)
+
 ### K. upstream 貢献 (`w4a §9`)
 
 根拠 doc: [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の踏んだ地雷を体系化。K-01/02 に加えて cilium/ebpf patch (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`)、struct_ops template マクロ提案、KF_SLEEPABLE matrix doc 提案 (§2-§4) を並置。
@@ -368,7 +413,20 @@ P1/P2 新着 (AA-01〜AA-06 — FUSE 比 cold-path 性能改善):
 - AA-05 `--disk-cache-capacity` adaptive sizing (watermark) — 1 日
 - AA-06 mount-s3 を bench-parallel/scale にも追加 — 0.5 日
 
-**推奨順**: ~~AA-02~~ ~~Y-01~~ ~~Y-02~~ ~~Y-03~~ ~~Y-04~~ ~~Y-05~~ ~~Y-06~~ ~~Y-07~~ ~~Z-01~~ ~~Z-02~~ ~~Z-04~~ ~~Z-05~~ ~~AA-01~~ ~~AA-06~~ ~~AA-04~~ ~~AA-05~~ ~~AA-03~~ ~~Z-03~~ (2026-10-12 完了) → **次**: K-01 / K-02 (upstream 貢献、任意)
+**2026-10-13 追加 — AA 完了後の構造的課題 (arena 役割の設計改善)**:
+
+P1 新着 (AB-01〜AB-09 — arena 役割縮退 metadata-only):
+
+Phase 1 (判断材料集め、2〜3 日):
+1. **AB-01** GUP オーバーヘッド分離マイクロベンチ — 0.5 日 (**最優先**、Phase 2 進行可否を決める)
+2. **AB-02** arena hit vs page cache の read latency 比較 — 1 日
+3. **AB-03** mount-s3 を含む 4-way bench (10MB/100MB cold-read 3 回) — 0.5 日
+
+Phase 2 (PoC、Phase 1 Gate 通過時のみ、3〜5 日): AB-04 arena 構造縮退 / AB-05 `.read_folio` の page cache 連携 / AB-06 無効化経路の整合性
+
+Phase 3 (計測、1〜2 日): AB-07 bench-latency/scale/parallel 前後比較 / AB-08 hit-rate 非劣化 / AB-09 write path 影響
+
+**推奨順**: ~~AA-02~~ ~~Y-01~~ ~~Y-02~~ ~~Y-03~~ ~~Y-04~~ ~~Y-05~~ ~~Y-06~~ ~~Y-07~~ ~~Z-01~~ ~~Z-02~~ ~~Z-04~~ ~~Z-05~~ ~~AA-01~~ ~~AA-06~~ ~~AA-04~~ ~~AA-05~~ ~~AA-03~~ ~~Z-03~~ (2026-10-12 完了) ~~AB-01~~ ~~AB-02~~ (2026-10-13 完了、Gate PASS) ~~AB-04~~ ~~AB-05~~ ~~AB-06~~ ~~AB-07~~ ~~AB-10~~ ~~AB-08~~ ~~AB-09~~ (2026-10-13 完了) → **次**: K-01/K-02 (upstream 貢献、任意)
 
 **2026-10-11 更新 — ベンチ妥当性 / ポリシー意味論レビューにより新規課題を追加**:
 

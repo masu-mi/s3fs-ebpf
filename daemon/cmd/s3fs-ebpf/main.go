@@ -404,6 +404,11 @@ func runFastpath(args []string) int {
 			"large-file reads. Fires when s3fs_read_pattern_map shows SeqRatio ≥ 0.70 "+
 			"and the read position is within 2 MiB of the admitted range boundary. "+
 			"Requires --pattern-aware-admit (incompatible with --no-read-iter-hook).")
+	arenaMetadataOnly := fs.Bool("arena-metadata-only", false,
+		"[AB-04] store S3 object data in the kernel page cache (via fd->buf) instead of "+
+			"the BPF arena. Reads are served by generic_file_read_iter from the page "+
+			"cache — no GUP per page. Eliminates the 1.7µs/page GUP overhead at the "+
+			"cost of one extra copy on admit. Does not require BPF arena allocation.")
 	wtinylFUAgeInterval := fs.Uint64("wtinylfu-age-interval", 512,
 		"[Z-01] W-TinyLFU CMS aging interval: halve all CMS counters every N on_hit calls. "+
 			"Lower values age faster (suit short bench runs); higher values age slower "+
@@ -485,6 +490,7 @@ func runFastpath(args []string) int {
 	}
 	patternAwareAdmitEnabled = *patternAdmit
 	prefetchSeqEnabled = *prefetchSeq
+	arenaMetadataOnlyEnabled = *arenaMetadataOnly
 
 	if err := SetInoStatePath(*inoState); err != nil {
 		fmt.Fprintf(os.Stderr, "ino-state: %v\n", err)
@@ -1243,6 +1249,12 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 					}
 					if len(vals) >= 3 {
 						metrics.Global.AdmitInvalidations.Store(vals[2])
+					}
+					if len(vals) >= 4 {
+						metrics.Global.GupCallsTotal.Store(vals[3])
+					}
+					if len(vals) >= 5 {
+						metrics.Global.GupNsTotal.Store(vals[4])
 					}
 				}
 			}
