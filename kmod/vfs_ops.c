@@ -293,10 +293,19 @@ static atomic_t s3fs_admit_gen = ATOMIC_INIT(1);
 /*
  * AB-10: per-file admit snapshot cached in file->private_data.
  * Allocated in .open, freed in .release.
+ *
+ * P1 fix: cache the last confirmed pcache range [off, end) so that
+ * the fast path is only taken when pos is within that range.  A
+ * prior implementation cached only the bool, causing the fast path
+ * to fire for any pos once a pcache entry was found for a different
+ * offset on the same fd — leading to zero-reads from the unfilled
+ * portion of fd->buf on split (multi-chunk) admits.
  */
 struct s3fs_file_admit_cache {
-	u32  gen;    /* s3fs_admit_gen value when pcache was last confirmed */
-	bool pcache; /* true = PCACHE admit exists for this ino at gen */
+	u32  gen;    /* s3fs_admit_gen value when range was last confirmed */
+	bool pcache; /* true = PCACHE admit exists for this ino at [off,end) */
+	u64  off;    /* start of the confirmed pcache range */
+	u64  end;    /* off+size of the confirmed pcache range (exclusive) */
 };
 
 /* Running size of the admit hash. Updated in lock-step with hash_add
@@ -492,39 +501,62 @@ static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes)
 }
 
 /*
- * AB-10: per-file admit cache check.
+ * AB-10 / P1: per-file admit cache check.
  *
- * Fast path: if fc->gen matches the current global gen, return the cached
- * boolean without touching the rwlock.
- * Slow path (cache miss or stale gen): take read_lock, probe the hash,
- * read cur_gen while still under the lock (so gen is consistent with the
- * table state observed), update the cache, unlock.
+ * Fast path: if fc->gen matches the current global gen AND
+ *   - pcache is false  → no pcache entry for any pos in this ino, OR
+ *   - pcache is true   → pos is within the confirmed range [off, end)
+ * return the cached result without touching the rwlock.
  *
- * fc may be NULL (file->private_data not allocated yet, or readahead path
- * where file == NULL).  In that case we always take the rwlock.
+ * Slow path (stale gen or pos outside cached range): take read_lock,
+ * probe the hash for the entry that covers pos, save the range while
+ * still under the lock, update the cache, unlock.
+ *
+ * P1 fix: the prior implementation returned the cached bool for *any*
+ * pos once the gen matched, ignoring whether pos was within the
+ * confirmed range.  On split admits (one fd, two chunks), a pos in the
+ * second chunk would hit the fast path from the first chunk's check,
+ * calling s3fs_folio_fill_from_kmalloc on unfilled fd->buf → zeros.
+ *
+ * fc may be NULL (file->private_data not allocated yet, or readahead
+ * path where file == NULL).  In that case we always take the rwlock.
  */
 static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
 {
 	struct s3fs_admit *a;
 	bool found;
 	u32 cur_gen;
+	u64 a_off = 0, a_end = 0;
 
 	if (fc) {
 		cur_gen = atomic_read(&s3fs_admit_gen);
-		if (READ_ONCE(fc->gen) == cur_gen)
-			return READ_ONCE(fc->pcache);
+		if (READ_ONCE(fc->gen) == cur_gen) {
+			if (!READ_ONCE(fc->pcache))
+				return false; /* no pcache entry for any pos */
+			/* pcache=true: fast-path only within the confirmed range */
+			if (pos >= READ_ONCE(fc->off) && pos < READ_ONCE(fc->end))
+				return true;
+			/* pos outside cached range: fall through to slow path */
+		}
 	}
 
 	/* Slow path: rwlock + read gen atomically with the table. */
 	read_lock(&s3fs_admits_lock);
 	a = admit_lookup_at_locked(ino, pos);
 	found = a && (a->flags & S3FS_ADMIT_FLAG_PCACHE);
+	/* Save range before unlock — a is only valid under the lock. */
+	if (found) {
+		a_off = a->offset;
+		a_end = a->offset + a->size;
+	}
 	cur_gen = atomic_read(&s3fs_admit_gen);
 	read_unlock(&s3fs_admits_lock);
 
 	if (fc) {
+		WRITE_ONCE(fc->off,    a_off);
+		WRITE_ONCE(fc->end,    a_end);
 		WRITE_ONCE(fc->pcache, found);
-		WRITE_ONCE(fc->gen, cur_gen);
+		WRITE_ONCE(fc->gen,    cur_gen);
 	}
 	return found;
 }
@@ -2093,6 +2125,15 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 	return 0;
 }
 
+/*
+ * P2: Maximum permitted offset+size for a single POPULATE_PAGES call.
+ * Daemon chunks are at most partialAdmitChunk (4 MiB) so 4 GiB is
+ * already 1000× above any realistic payload; it also keeps end well
+ * within size_t on 32-bit kernels (SIZE_MAX == 4 GiB - 1 there).
+ * Blocks the overflow attacks tested in P2 (size=0, U64 wrap, 1<<40).
+ */
+#define S3FS_POPULATE_MAX_END  (4ULL << 30)
+
 /* AB-04: populate fd->buf with S3 data from userspace, then insert a
  * page-cache-mode admit entry. Reads served by .read_folio via
  * s3fs_folio_fill_from_kmalloc (no GUP); page cache accumulates
@@ -2106,7 +2147,18 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 {
 	struct inode *inode;
 	struct s3fs_file_data *fd;
+	u64 end;
 	int err = 0;
+
+	/* P2: reject degenerate or dangerously large requests before any
+	 * allocation.  size=0 underflows (offset+size-1) in the later
+	 * invalidate_mapping_pages call; overflow or an end beyond
+	 * S3FS_POPULATE_MAX_END would cause kvmalloc to attempt a TiB
+	 * allocation and then copy_from_user to write past the buffer. */
+	if (size == 0)
+		return -EINVAL;
+	if (check_add_overflow(offset, size, &end) || end > S3FS_POPULATE_MAX_END)
+		return -EINVAL;
 
 	if (!s3fs_active_sb)
 		return -ENODEV;
@@ -2125,7 +2177,8 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		err = -EBUSY;
 		goto out_unlock;
 	}
-	err = s3fs_file_data_reserve(fd, (size_t)(offset + size));
+	/* `end` (= offset + size) was validated above; safe to cast. */
+	err = s3fs_file_data_reserve(fd, (size_t)end);
 	if (err)
 		goto out_unlock;
 
@@ -2133,15 +2186,16 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		err = -EFAULT;
 		goto out_unlock;
 	}
-	if (offset + size > (u64)fd->size) {
-		fd->size = (size_t)(offset + size);
+	if (end > (u64)fd->size) {
+		fd->size = (size_t)end;
 		i_size_write(inode, (loff_t)fd->size);
 	}
 	/* Invalidate any stale page-cache folios for this range so the
-	 * next read triggers .read_folio and picks up the new fd->buf data. */
+	 * next read triggers .read_folio and picks up the new fd->buf data.
+	 * end > 0 is guaranteed by the size==0 check above. */
 	invalidate_mapping_pages(inode->i_mapping,
 				 offset >> PAGE_SHIFT,
-				 (offset + size - 1) >> PAGE_SHIFT);
+				 (end - 1) >> PAGE_SHIFT);
 
 out_unlock:
 	mutex_unlock(&fd->lock);
