@@ -975,13 +975,14 @@ pcache モードは Linux page cache を第 2 キャッシュ層として活用�
 | err=0 (正常動作) | ✅ PASS |
 | **総合** | **PASS** |
 
-> **⚠️ 数値は無効 (P3 バグ) — 再計測必要**
+> **⚠️ 数値は無効 (P3 バグ + R1 前) — §18 に再計測結果**
 >
 > この計測は P3 バグ (admit_insert_pcache 重複挿入 + admit_replace が pcache エントリを保持しない + capacity 制限が pcache に効かない) が存在する状態で実施されました。
+> さらに Q1 修正前のビルド (1271adf〜7ddb0d7) では evict 後の再 read が EOF になっていた可能性があるため、R1 修正後ビルドでの再計測が必要でした。
 >
 > - `evictions=0` は capacity mode が pcache エントリを eviction 対象に含めていなかった結果。
 > - hit_rate 94% は fd->buf が eviction されずに Linux page cache に残り続けたため達成された見かけ上の値で、`capacity_bytes=352` の制限内に収まったキャッシュによるものではありません。
-> - P3 修正後 (`admit_insert_pcache` dedup + `admit_replace` pcache 保持 + 容量 eviction 対象化 + `fd->buf` 解放) で再計測し、`adm_max ≤ capacity_bytes` かつ `hit_rate ≤ opt (Belady)` を確認する必要があります。
+> - R1 修正後 (AC-11) の再計測結果は **§18** を参照してください。
 
 ---
 
@@ -1023,3 +1024,80 @@ arena モードを同条件 (RUNS=10, 2026-10-13) で再計測したところ:
 | S3 byte roundtrip MATCH (全サイズ) | ✅ PASS |
 | write path に pcache モードの影響なし | ✅ PASS (write_iter/fsync は arena 非使用) |
 | **総合** | **PASS** |
+
+---
+
+## 18. R1 修正後 再計測 (AC-11/AC-13、2026-10-13)
+
+Q1 修正前ビルド (1271adf〜7ddb0d7) で取得した §16/§17 の数値は evict 後の再 read が EOF になっていた可能性があるため無効と判定。R1 (populate/evict race 修正) を含むビルドで下記を再計測。
+
+### 18.1 AC-03 bench-hitrate.sh 再計測
+
+`bench-hitrate.sh` を arena モードと `DAEMON_EXTRA_FLAGS=--arena-metadata-only` の両方で実行（seed=42）。
+
+合格条件:
+- `adm_max ≤ capacity_bytes`（容量制限が有効）
+- `hit_rate ≤ opt`（Belady 上限 64.15% を超えない）
+- arena モードの hit_rate が §12.3 の lru/sieve 30.6% から著しく外れていないこと
+
+#### arena モード (seed=42)
+
+| policy | hit_rate | opt | adm_max | capacity_bytes | 判定 |
+|---|---:|---:|---:|---:|---|
+| ⏳ 実行待ち | — | — | — | — | — |
+
+#### pcache モード `--arena-metadata-only` (seed=42)
+
+| policy | hit_rate | opt | adm_max | capacity_bytes | 判定 |
+|---|---:|---:|---:|---:|---|
+| ⏳ 実行待ち | — | — | — | — | — |
+
+### 18.2 AC-05 bench-ab-pcache.sh 再計測
+
+`bench-ab-pcache.sh`（LARGE_BYTES=104857600、hyperfine、N_READS=5）
+
+| 指標 | fuse-raw | fuse-cache | ebpf-arena | ebpf-pcache | gate |
+|---|---:|---:|---:|---:|---|
+| 64-job IOPS (a) | ⏳ | — | ⏳ | ⏳ | — |
+| 100 MiB ms/read (b) | — | ⏳ | ⏳ | ⏳ | — |
+| microbench ops/s (c) | — | — | ⏳ | ⏳ | — |
+
+`AB07-RESULT` 行: ⏳ 実行待ち
+
+### 18.3 test-pcache-multiread.sh (AC-01 回帰確認)
+
+分割 admit (> 8 MiB ファイル) の sha256 一致確認。
+
+| 結果 | 備考 |
+|---|---|
+| ⏳ 実行待ち | — |
+
+### 18.4 test-pcache-evict-race.sh (AC-11 ストレステスト)
+
+DURATION=120s、N_FILES=4、N_READERS=4、capacity_bytes=4 MiB (eviction 強制)。
+
+| sha256 整合性 | lockdep 警告 | 総合 |
+|---|---|---|
+| ⏳ 実行待ち | ⏳ | — |
+
+### 18.5 gate 判定まとめ
+
+| 条件 | 結果 |
+|---|---|
+| AC-03: adm_max ≤ capacity_bytes (両モード) | ⏳ |
+| AC-03: hit_rate ≤ opt=64.15% (両モード) | ⏳ |
+| AC-03: arena hit_rate が §12.3 と概ね一致 | ⏳ |
+| AC-05: AB-07 gate (a)(b)(c) | ⏳ |
+| AC-13: sha256 全一致 (multiread + evict-race) | ⏳ |
+| lockdep 警告なし | ⏳ |
+| **総合** | **⏳ 実行待ち** |
+
+> 計測はこのセクションに数値を直接書き込んでください。  
+> 実行コマンド:
+> ```
+> sudo ./scripts/bench-hitrate.sh          # arena モード
+> sudo DAEMON_EXTRA_FLAGS=--arena-metadata-only ./scripts/bench-hitrate.sh  # pcache モード
+> sudo ./scripts/bench-ab-pcache.sh        # AC-05
+> sudo ./scripts/test-pcache-multiread.sh  # AC-01 回帰
+> sudo ./scripts/test-pcache-evict-race.sh # AC-11
+> ```
