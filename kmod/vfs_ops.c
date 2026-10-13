@@ -771,21 +771,40 @@ static void s3fs_evict_page_cache(u64 ino)
 
 static bool pending_exists(u64 ino); /* defined with the upcall machinery */
 
-/* P3: defined after struct s3fs_file_data (line ~1650); frees fd->buf
- * for non-dirty inodes so capacity_bytes bounds actual allocations. */
+/* P3 / Q1: defined after struct s3fs_file_data; frees fd->buf for non-dirty
+ * inodes so capacity_bytes bounds actual allocations. */
 static void s3fs_file_data_reset(u64 ino);
+
+/* Q1: true if ino has at least one PCACHE admit entry in the table. */
+static bool admit_has_pcache(u64 ino)
+{
+	struct s3fs_admit *a;
+	bool found = false;
+
+	read_lock(&s3fs_admits_lock);
+	hash_for_each_possible(s3fs_admits, a, node, ino) {
+		if (a->ino == ino && (a->flags & S3FS_ADMIT_FLAG_PCACHE)) {
+			found = true;
+			break;
+		}
+	}
+	read_unlock(&s3fs_admits_lock);
+	return found;
+}
 
 /* Evict every admitted range of `ino`: drop it from the table, report
  * it to the daemon (evict log), drop its page cache, and free its
- * fd->buf (P3: bounds capacity_bytes for pcache entries). Returns false
- * when nothing was admitted. *freed gets the bytes released. */
+ * fd->buf (P3/Q1: only for pcache inos; arena inos have no fd->buf). */
 static bool admit_evict_ino(u64 ino, u64 *freed)
 {
+	bool had_pcache = admit_has_pcache(ino); /* Q1: check before drop */
+
 	if (!admit_drop_all_ranges(ino, freed))
 		return false;
 	evict_log_push(ino);
 	s3fs_evict_page_cache(ino);
-	s3fs_file_data_reset(ino);
+	if (had_pcache)
+		s3fs_file_data_reset(ino);
 	return true;
 }
 
@@ -1764,7 +1783,9 @@ static void s3fs_file_data_reset(u64 ino)
 			fd->buf  = NULL;
 			fd->cap  = 0;
 			fd->size = 0;
-			i_size_write(inode, 0);
+			/* Q1: do NOT clear inode i_size — it reflects the S3 object
+			 * size and must survive eviction so stat(2) and read_iter
+			 * keep returning the correct file size. */
 		}
 		mutex_unlock(&fd->lock);
 	}
@@ -2620,18 +2641,24 @@ static void s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
 	kunmap_local(fkva);
 }
 
-static void s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
-					 loff_t pos, struct s3fs_file_data *fd)
+/* Q2: returns true when fd->buf held data for pos (normal pcache hit).
+ * Returns false when buf is NULL or pos is beyond buf (evicted between
+ * fc_pcache_check and fill); caller must invalidate fc and fall through
+ * to the upcall path rather than serving zero-filled data as a hit. */
+static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
+					  loff_t pos, struct s3fs_file_data *fd)
 {
 	void *fkva;
 	size_t avail = 0;
+	bool buf_valid;
 
 	if (!fd) {
 		folio_zero_range(folio, 0, fs_size);
-		return;
+		return false;
 	}
 	mutex_lock(&fd->lock);
-	if ((size_t)pos < fd->size)
+	buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
+	if (buf_valid)
 		avail = min_t(size_t, fs_size, fd->size - (size_t)pos);
 	fkva = kmap_local_folio(folio, 0);
 	if (avail > 0)
@@ -2640,6 +2667,7 @@ static void s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 		memset((u8 *)fkva + avail, 0, fs_size - avail);
 	kunmap_local(fkva);
 	mutex_unlock(&fd->lock);
+	return buf_valid;
 }
 
 /* AA-03: copy arena data directly into a user iov_iter, bypassing the
@@ -2698,11 +2726,19 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	 * file may be NULL on readahead paths; fc_pcache_check handles NULL fc. */
 	if (fc_pcache_check(file ? file->private_data : NULL,
 			    inode->i_ino, (u64)pos)) {
-		atomic_long_inc(&s3fs_folio_hits);
-		s3fs_policy_on_hit(inode->i_ino);
-		(void)s3fs_policy_ops_eval_hit(inode->i_ino);
-		s3fs_folio_fill_from_kmalloc(folio, fs_size, pos, inode->i_private);
-		goto out;
+		if (s3fs_folio_fill_from_kmalloc(folio, fs_size, pos,
+						 inode->i_private)) {
+			atomic_long_inc(&s3fs_folio_hits);
+			s3fs_policy_on_hit(inode->i_ino);
+			(void)s3fs_policy_ops_eval_hit(inode->i_ino);
+			goto out;
+		}
+		/* Q2: buf was evicted between pcache_check and fill; invalidate
+		 * fc so the next call re-probes the table, then fall to upcall. */
+		if (file && file->private_data) {
+			struct s3fs_file_admit_cache *fc_local = file->private_data;
+			smp_store_release(&fc_local->gen, 0);
+		}
 	}
 
 	/* Fast path: arena admit hit. admit_snapshot() returns the arena
@@ -2747,9 +2783,16 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 					if (fc_pcache_check(
 						file ? file->private_data : NULL,
 						inode->i_ino, (u64)pos)) {
-						s3fs_folio_fill_from_kmalloc(
-							folio, fs_size, pos, inode->i_private);
-						goto out;
+						if (s3fs_folio_fill_from_kmalloc(
+							folio, fs_size, pos,
+							inode->i_private))
+							goto out;
+						/* Q2: evicted again — invalidate fc */
+						if (file && file->private_data) {
+							struct s3fs_file_admit_cache *fc_local =
+								file->private_data;
+							smp_store_release(&fc_local->gen, 0);
+						}
 					}
 					if (admit_snapshot(inode->i_ino, (u64)pos,
 							   &uaddr, &asize, &mm) && mm) {
