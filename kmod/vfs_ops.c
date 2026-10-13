@@ -561,10 +561,19 @@ static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos)
 	return found;
 }
 
-/* AB-04: insert or update a page-cache-mode admit entry (uaddr=0). */
+/*
+ * AB-04 / P3: insert or update a page-cache-mode admit entry (uaddr=0).
+ *
+ * P3 fix: prior code always hash_add'd a new entry, so repeated
+ * POPULATE_PAGES calls for the same (ino, offset) — e.g. on a re-read
+ * after admit_replace cleared the entry — accumulated duplicates and
+ * inflated s3fs_admits_count without bound.  Now update in-place when
+ * the same (ino, offset) already exists.
+ */
 static int admit_insert_pcache(u64 ino, u64 offset, u64 size)
 {
-	struct s3fs_admit *a;
+	struct s3fs_admit *a, *existing;
+	bool updated = false;
 
 	a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
@@ -576,10 +585,28 @@ static int admit_insert_pcache(u64 ino, u64 offset, u64 size)
 	a->flags  = S3FS_ADMIT_FLAG_PCACHE;
 
 	write_lock(&s3fs_admits_lock);
-	hash_add(s3fs_admits, &a->node, ino);
-	atomic_inc(&s3fs_admits_count);
-	atomic_inc(&s3fs_admit_gen); /* AB-10: new pcache entry → stale caches must re-check */
+	hash_for_each_possible(s3fs_admits, existing, node, ino) {
+		if (existing->ino == ino &&
+		    existing->offset == offset &&
+		    (existing->flags & S3FS_ADMIT_FLAG_PCACHE)) {
+			if (existing->size != size) {
+				existing->size = size;
+				/* Range changed: stale per-file caches must re-check */
+				atomic_inc(&s3fs_admit_gen);
+			}
+			updated = true;
+			break;
+		}
+	}
+	if (!updated) {
+		hash_add(s3fs_admits, &a->node, ino);
+		atomic_inc(&s3fs_admits_count);
+		atomic_inc(&s3fs_admit_gen);
+	}
 	write_unlock(&s3fs_admits_lock);
+
+	if (updated)
+		kfree(a);
 	return 0;
 }
 
@@ -594,6 +621,31 @@ static void admit_clear_locked(void)
 		kfree(a);
 	}
 	atomic_set(&s3fs_admits_count, 0);
+}
+
+/*
+ * P3: admit_replace-specific clear — removes only non-pcache (arena)
+ * entries.  Pcache entries survive the snapshot replacement so they
+ * are counted in capacity enforcement and remain eviction candidates.
+ * Returns the number of pcache entries still in the table.
+ * Caller must hold write_lock.
+ */
+static int admit_clear_arena_locked(void)
+{
+	struct s3fs_admit *a;
+	struct hlist_node *tmp;
+	unsigned int i;
+	int pcache_count = 0;
+
+	hash_for_each_safe(s3fs_admits, i, tmp, a, node) {
+		if (a->flags & S3FS_ADMIT_FLAG_PCACHE) {
+			pcache_count++;
+			continue;
+		}
+		hash_del(&a->node);
+		kfree(a);
+	}
+	return pcache_count;
 }
 
 /*
@@ -708,8 +760,13 @@ static void s3fs_evict_page_cache(u64 ino)
 
 static bool pending_exists(u64 ino); /* defined with the upcall machinery */
 
+/* P3: defined after struct s3fs_file_data (line ~1650); frees fd->buf
+ * for non-dirty inodes so capacity_bytes bounds actual allocations. */
+static void s3fs_file_data_reset(u64 ino);
+
 /* Evict every admitted range of `ino`: drop it from the table, report
- * it to the daemon (evict log) and drop its page cache. Returns false
+ * it to the daemon (evict log), drop its page cache, and free its
+ * fd->buf (P3: bounds capacity_bytes for pcache entries). Returns false
  * when nothing was admitted. *freed gets the bytes released. */
 static bool admit_evict_ino(u64 ino, u64 *freed)
 {
@@ -717,12 +774,13 @@ static bool admit_evict_ino(u64 ino, u64 *freed)
 		return false;
 	evict_log_push(ino);
 	s3fs_evict_page_cache(ino);
+	s3fs_file_data_reset(ino);
 	return true;
 }
 
 struct s3fs_victim {
 	int score;     /* policy on_evict return value, clamped >= 0 */
-	u32 idx;       /* position in the pushed snapshot */
+	u64 ino;       /* inode number (P3: replaces entries[] idx so pcache can be included) */
 	u32 tiebreak;  /* hash_32(ino,32): decorrelates from ino/Zipf distribution (Y-02) */
 };
 
@@ -746,6 +804,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	struct mm_struct *prev_mm;
 	u32 i, n_changed = 0;
 	int err = 0;
+	/* P3: pcache entries survive admit_replace; collected for capacity
+	 * accounting and eviction alongside the freshly-staged arena entries. */
+	u64 *pcache_inos  = NULL;
+	u64 *pcache_sizes = NULL;
+	int pcache_remaining = 0;
 
 	if (count && (!entries || !mm))
 		return -EINVAL;
@@ -811,10 +874,45 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		}
 		changed[i] = !same;
 	}
-	admit_clear_locked();
+	/* P3: collect pcache entry info before clearing arena entries so we
+	 * can include them in capacity enforcement outside the lock.
+	 * GFP_ATOMIC is required because write_lock is a spinlock variant. */
+	{
+		struct s3fs_admit *ea;
+		unsigned int bi;
+
+		hash_for_each(s3fs_admits, bi, ea, node) {
+			if (ea->flags & S3FS_ADMIT_FLAG_PCACHE)
+				pcache_remaining++;
+		}
+		if (pcache_remaining > 0) {
+			pcache_inos  = kcalloc(pcache_remaining, sizeof(u64), GFP_ATOMIC);
+			pcache_sizes = kcalloc(pcache_remaining, sizeof(u64), GFP_ATOMIC);
+			if (pcache_inos && pcache_sizes) {
+				int pi = 0;
+
+				hash_for_each(s3fs_admits, bi, ea, node) {
+					if ((ea->flags & S3FS_ADMIT_FLAG_PCACHE) &&
+					    pi < pcache_remaining) {
+						pcache_inos[pi]  = ea->ino;
+						pcache_sizes[pi] = ea->size;
+						pi++;
+					}
+				}
+				pcache_remaining = pi;
+			} else {
+				kfree(pcache_inos);
+				kfree(pcache_sizes);
+				pcache_inos = pcache_sizes = NULL;
+				pcache_remaining = 0;
+			}
+		}
+	}
+	/* P3: preserve pcache entries; only remove arena entries */
+	admit_clear_arena_locked();
 	for (i = 0; i < count; i++)
 		hash_add(s3fs_admits, &staged[i]->node, staged[i]->ino);
-	atomic_set(&s3fs_admits_count, count);
+	atomic_set(&s3fs_admits_count, (int)count + pcache_remaining);
 	prev_mm = s3fs_admitted_mm;
 	/*
 	 * Keep the daemon mm reference live when the admit set transiently
@@ -894,54 +992,57 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 * followup ioctl. */
 	/*
 	 * Policy vote consumption. For every ino in the freshly-admitted
-	 * snapshot, ask the loaded policy programs (fmod_ret and
-	 * struct_ops, whichever is attached) whether the entry should be
-	 * evicted. struct_ops wins when both are attached because it is
-	 * the primary path (see docs/design/policy-attach-comparison.md).
+	 * snapshot (arena entries + surviving pcache entries), ask the loaded
+	 * policy programs whether the entry should be evicted.  struct_ops
+	 * wins when both are attached (primary path).
+	 *
+	 * P3: pcache entries are now included so capacity_bytes bounds the
+	 * total admitted set, not just the arena subset.  eval_inos/cand are
+	 * sized for count + pcache_remaining unique inos.
 	 *
 	 * Enforcement threshold: only apply eviction once the snapshot
-	 * exceeds a soft cap (S3FS_EVICT_SOFTCAP). This mirrors real
-	 * cache-management systems that let a warm-up phase happen
-	 * before applying pressure, and avoids gratuitous churn on tiny
-	 * working sets.
+	 * exceeds a soft cap (S3FS_EVICT_SOFTCAP).
 	 */
 	{
 		u32 fmodret_votes = 0, structops_votes = 0, evicted = 0;
 		const u32 softcap = READ_ONCE(s3fs_softcap);
 		const u64 cap_bytes = READ_ONCE(s3fs_capacity_bytes);
+		/* P3: total candidate entries = arena + pcache */
+		u32 total_count = count + (u32)pcache_remaining;
 		struct s3fs_victim *cand = NULL;
 		u64 live_bytes = 0;
 		u32 ncand = 0;
-		/* X-01: call on_evict exactly once per unique ino. Inos with
-		 * multiple ranges (D-01 partial admit) must not have their
-		 * policy state mutated N times — stateful policies (SIEVE
-		 * visited bit, wtinylfu CMS, time_decay last_hit) would
-		 * accumulate incorrect state per extra call. */
+		/* X-01: call on_evict exactly once per unique ino. */
 		u64 *eval_inos = NULL;
 		int *eval_scores = NULL;
 		u32 eval_count = 0;
+		int pi;
 
 		if (cap_bytes) {
 			for (i = 0; i < count; i++)
 				live_bytes += entries[i].size;
+			/* P3: add pcache bytes to live_bytes */
+			for (pi = 0; pi < pcache_remaining; pi++)
+				live_bytes += pcache_sizes[pi];
 			if (live_bytes > cap_bytes) {
-				cand = kcalloc(count, sizeof(*cand), GFP_KERNEL);
+				cand = kcalloc(total_count, sizeof(*cand), GFP_KERNEL);
 				if (!cand)
 					pr_warn_ratelimited("s3fs_ebpf: capacity eviction skipped (-ENOMEM)\n");
 			}
 		}
 
-		eval_inos   = kcalloc(count, sizeof(*eval_inos),   GFP_KERNEL);
-		eval_scores = kcalloc(count, sizeof(*eval_scores), GFP_KERNEL);
+		eval_inos   = kcalloc(total_count, sizeof(*eval_inos),   GFP_KERNEL);
+		eval_scores = kcalloc(total_count, sizeof(*eval_scores), GFP_KERNEL);
 		if (!eval_inos || !eval_scores) {
 			pr_warn_ratelimited("s3fs_ebpf: on_evict dedup alloc failed, skipping eviction\n");
 			kfree(eval_inos);
 			kfree(eval_scores);
 			kfree(cand);
-			return 0;
+			goto out_free_pcache;
 		}
 
-		/* Phase 1: collect unique inos and call on_evict once each. */
+		/* Phase 1: collect unique inos and call on_evict once each.
+		 * First arena entries, then pcache entries (P3). */
 		for (i = 0; i < count; i++) {
 			u64 ino = entries[i].ino;
 			u32 j;
@@ -951,7 +1052,34 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 					break;
 			}
 			if (j < eval_count)
-				continue; /* already evaluated */
+				continue;
+
+			{
+				int fr_vote = s3fs_policy_on_evict(ino);
+				int so_vote = s3fs_policy_ops_eval_evict(ino);
+				int score   = max3(fr_vote, so_vote, 0);
+
+				eval_inos[eval_count]   = ino;
+				eval_scores[eval_count] = score;
+				eval_count++;
+
+				if (fr_vote != 0)
+					fmodret_votes++;
+				if (so_vote != 0)
+					structops_votes++;
+			}
+		}
+		/* P3: Phase 1 continued — pcache inos */
+		for (pi = 0; pi < pcache_remaining; pi++) {
+			u64 ino = pcache_inos[pi];
+			u32 j;
+
+			for (j = 0; j < eval_count; j++) {
+				if (eval_inos[j] == ino)
+					break;
+			}
+			if (j < eval_count)
+				continue;
 
 			{
 				int fr_vote = s3fs_policy_on_evict(ino);
@@ -969,10 +1097,10 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			}
 		}
 
-		/* Phase 2: build cand[] / drive legacy eviction using per-ino
-		 * scores. In capacity mode each ino appears at most once in
-		 * cand[] (first-range entry); admit_evict_ino frees all ranges
-		 * of the ino in one shot so live_bytes decrements correctly. */
+		/* Phase 2: build cand[] / drive legacy eviction.  In capacity
+		 * mode each ino appears at most once (cand[].ino stores the ino
+		 * directly — P3 replaced the entries[]-index approach so pcache
+		 * entries can be represented without a parallel entries[] slot). */
 		for (i = 0; i < count; i++) {
 			u64 ino = entries[i].ino;
 			int score = 0;
@@ -987,20 +1115,18 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 
 			if (cap_bytes) {
 				if (cand) {
-					/* Skip duplicate ino entries — admit_evict_ino
-					 * is ino-granular, not range-granular. */
 					u32 k;
 					bool already = false;
 
 					for (k = 0; k < ncand; k++) {
-						if (entries[cand[k].idx].ino == ino) {
+						if (cand[k].ino == ino) {
 							already = true;
 							break;
 						}
 					}
 					if (!already) {
 						cand[ncand].score    = score;
-						cand[ncand].idx      = i;
+						cand[ncand].ino      = ino;
 						cand[ncand].tiebreak = hash_32((u32)ino ^ (u32)(ino >> 32), 32);
 						ncand++;
 					}
@@ -1008,8 +1134,50 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				continue;
 			}
 
-			/* Legacy mode: any vote evicts, once over softcap. */
+			/* Legacy mode */
 			if (count <= softcap || !score)
+				continue;
+			if (pending_exists(ino))
+				continue;
+			if (admit_evict_ino(ino, NULL))
+				evicted++;
+		}
+		/* P3: Phase 2 continued — pcache inos */
+		for (pi = 0; pi < pcache_remaining; pi++) {
+			u64 ino = pcache_inos[pi];
+			int score = 0;
+			u32 j;
+
+			for (j = 0; j < eval_count; j++) {
+				if (eval_inos[j] == ino) {
+					score = eval_scores[j];
+					break;
+				}
+			}
+
+			if (cap_bytes) {
+				if (cand) {
+					u32 k;
+					bool already = false;
+
+					for (k = 0; k < ncand; k++) {
+						if (cand[k].ino == ino) {
+							already = true;
+							break;
+						}
+					}
+					if (!already) {
+						cand[ncand].score    = score;
+						cand[ncand].ino      = ino;
+						cand[ncand].tiebreak = hash_32((u32)ino ^ (u32)(ino >> 32), 32);
+						ncand++;
+					}
+				}
+				continue;
+			}
+
+			/* Legacy mode: pcache entries evictable once over softcap */
+			if (total_count <= softcap || !score)
 				continue;
 			if (pending_exists(ino))
 				continue;
@@ -1025,13 +1193,13 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 
 			sort(cand, ncand, sizeof(*cand), s3fs_victim_cmp, NULL);
 			for (k = 0; k < ncand && live_bytes > cap_bytes; k++) {
-				u64 ino = entries[cand[k].idx].ino;
+				u64 ino = cand[k].ino;
 				u64 freed = 0;
 
 				if (pending_exists(ino))
 					continue;
 				if (!admit_evict_ino(ino, &freed))
-					continue; /* ino already evicted (shouldn't happen with dedup) */
+					continue;
 				evicted++;
 				live_bytes -= min(freed, live_bytes);
 			}
@@ -1042,16 +1210,20 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		}
 		if (fmodret_votes)
 			pr_info("s3fs_ebpf: fmod_ret voted evict on %u/%u entries\n",
-				fmodret_votes, count);
+				fmodret_votes, total_count);
 		if (structops_votes)
 			pr_info("s3fs_ebpf: struct_ops voted evict on %u/%u entries\n",
-				structops_votes, count);
+				structops_votes, total_count);
 		if (evicted) {
 			atomic_long_add(evicted, &s3fs_evictions_total);
 			pr_info("s3fs_ebpf: policy evicted %u entries (softcap=%u capacity_bytes=%llu)\n",
 				evicted, softcap, cap_bytes);
 		}
 	}
+
+out_free_pcache:
+	kfree(pcache_inos);
+	kfree(pcache_sizes);
 	return 0;
 
 out_free_staged:
@@ -1555,6 +1727,38 @@ struct s3fs_file_data {
 	size_t cap;
 	bool   dirty;   /* set by .write, cleared after successful daemon flush */
 };
+
+/*
+ * P3: free the per-inode kmalloc buffer when a pcache entry is evicted.
+ * After eviction the page cache is also dropped, so subsequent reads
+ * reach .read_folio which re-fetches from S3 and re-populates fd->buf.
+ * Dirty inodes are skipped — their buffer holds user-written content
+ * pending flush to S3.
+ */
+static void s3fs_file_data_reset(u64 ino)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+
+	if (!s3fs_active_sb)
+		return;
+	inode = ilookup(s3fs_active_sb, (unsigned long)ino);
+	if (!inode)
+		return;
+	fd = inode->i_private;
+	if (fd) {
+		mutex_lock(&fd->lock);
+		if (!fd->dirty) {
+			kvfree(fd->buf);
+			fd->buf  = NULL;
+			fd->cap  = 0;
+			fd->size = 0;
+			i_size_write(inode, 0);
+		}
+		mutex_unlock(&fd->lock);
+	}
+	iput(inode);
+}
 
 /* -- Write-back flush queue --------------------------------------------- */
 /*
