@@ -517,11 +517,16 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-09 | Q3: S3FS_POPULATE_MAX_END=4GiB → offset>4GB の chunk admit が全て弾かれる | P1 | ✅ 修正済 (commit b6d42d1) |
 | AC-10 | Q4: timed_reads の awk が gawk 専用 + µs パース誤り → bench 計測値が不正 | P1 | ✅ 修正済 (commit 214813d) |
 | AC-11 | R1: populate/evict race → pcache entry が NULL fd->buf を指しゼロ返し (データ破損) | P0 必須 | ✅ 修正済 (commit caf0b7f) |
-| AC-12 | R2: timed_reads fallback が silent → 計測方法が記録に残らない | P1 | ⚠️ S2 バグあり (commit b911a03 — subshell で method が消える; commit 633dfe8 で修正済) |
+| AC-12 | R2: timed_reads fallback が silent → 計測方法が記録に残らない | P1 | ✅ 修正済 (commit b911a03 + 633dfe8) |
 | AC-13 | R3: Q1 修正前ビルドの §16 計測が無効 → R1 ビルドで再計測が必要 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
 | AC-14 | S1: check/fill 間の TOCTOU → eviction+populate が重なるとゼロ返し | P0 必須 | ✅ 修正済 (commit 8eeab28) |
 | AC-15 | S2: timed_reads を subshell から呼ぶと TIMED_READS_METHOD が消える → AB07-RESULT の method= が常に hyperfine | P1 | ✅ 修正済 (commit 633dfe8) |
 | AC-16 | S3: evict-race テストが eviction ゼロでも通過 / lockdep 無効時に PASS 表記 / grep パターン不足 | P1 | ✅ 修正済 (commit 633dfe8) |
+| AC-17 | S5: upcall 完了後の eviction 窓 (signal_admit → wakeup) でゼロ返し → retry ループで防御 | P1 | ✅ 修正済 |
+| AC-18 | S7: invalidate_mapping_pages がロック中 folio をスキップ → 古い uptodate page が eviction 後も残存 | P1 | ✅ 修正済 |
+| AC-19 | S8: populate_pages が i_size を縮小方向に更新 → 部分 re-populate で VFS ファイルサイズが縮む | P1 | ✅ 修正済 |
+| AC-20 | S10: admit_snapshot が PCACHE entry (uaddr=0) を arena hit として返す → GUP で near-NULL アクセス | P0 必須 | ✅ 修正済 |
+| AC-21 | S11: populate_pages が先頭 chunk のみ valid 扱い → 2 chunk 目以降の読み出しが buf_valid=false でループ | P0 必須 | ✅ 修正済 |
 
 ### AC-01 受け入れ条件
 2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
@@ -581,6 +586,28 @@ populate/evict 競合の 2 段修正:
 1. `get_evict_count()` で Prometheus metrics から evictions_total を取得し、stress 前後の差分が 0 なら FAIL。
 2. `/proc/lockdep_stats` の有無で lockdep 利用可否を判定し、不在時は PASS でなく SKIP と表示。
 3. dmesg grep パターンに `BUG: sleeping function called from invalid context`、`inconsistent lock state`、`circular locking`、`BUG: KASAN` を追加。
+
+### AC-17 修正内容 (S5)
+
+`s3fs_ebpf_read_folio` に `upcall_retries` カウンタと `goto retry` ラベルを追加。daemon 応答後に fast path（pcache check / arena snapshot）を最大 `S3FS_UPCALL_MAX_RETRIES=3` 回再試行し、eviction が wakeup 窓に割り込んでも正しいデータを読めるよう保護。全リトライ消費後のみフォールバックに落ちる。
+
+### AC-18 修正内容 (S7)
+
+`s3fs_evict_page_cache` の `invalidate_mapping_pages` を `invalidate_inode_pages2` に置換。前者はロック中の folio を無音でスキップするため並行リーダーが古い uptodate page を保持し続けるが、後者は folio lock を待って確実に無効化する。
+
+### AC-19 修正内容 (S8)
+
+`s3fs_ebpf_populate_pages` の i_size_write 条件を変更。旧: `if (end > fd->size) { fd->size = end; i_size_write(...); }`。新: fd->size を end で grow-only 更新したのち、`if ((loff_t)fd->size > i_size_read(inode))` のみ i_size_write を呼ぶ。eviction が fd->size を 0 にリセットしても i_size は S3 オブジェクトサイズのまま保持される。
+
+### AC-20 修正内容 (S10)
+
+`admit_snapshot` の admit hit 判定に `!(a->flags & S3FS_ADMIT_FLAG_PCACHE)` ガードを追加。PCACHE entry は uaddr=0 (データは fd->buf) のため、arena path に流すと near-NULL GUP でゼロフォリオが生成されていた。PCACHE entry はこのパスを完全にスキップし、fc_pcache_check / fill_from_kmalloc で処理する。
+
+### AC-21 修正内容 (S11)
+
+`s3fs_file_data` に `u64 populated_chunks` フィールド（4 MiB chunk ビットマップ、最大 256 MiB）を追加。`s3fs_ebpf_populate_pages` が `[offset, end)` を跨ぐ全 chunk ビットを立て、`s3fs_folio_fill_from_kmalloc` が pos の chunk bit を確認してから buf を読む。`s3fs_file_data_reset` / `s3fs_file_data_new` でそれぞれ 0 クリア / 初期 chunk 設定。旧の連続ウォーターマーク (buf_valid_end) はチャンク飛び配送と部分 re-populate 後の再読みに失敗していた。
+
+また `test-pcache-evict-race.sh` の eviction メトリクス名を `s3fs_ebpf_evictions_total` → `s3fs_ebpf_policy_evictions_total` に修正し、`overall=PASS` 計算を `{ ... } | tee` の外（report サブシェルの前）に移動して変数消滅バグを解消。
 
 ### AC-13 再計測内容 (R3)
 R1 修正後ビルドで `bench-hitrate.sh`（arena/pcache 両モード, seed=42）、`bench-ab-pcache.sh`（100 MiB）、`test-pcache-multiread.sh`、`test-pcache-evict-race.sh` を再計測し `br §18` に記録する。§16 の注記に §18 への参照を追記済み。
