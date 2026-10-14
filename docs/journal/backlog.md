@@ -533,6 +533,13 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-25 | T4: retry 上限到達の -EIO がデータ破損と区別できない (retry_exhausted カウンタ未実装) | P2 | ✅ 修正済 |
 | AC-26 | T5: チャンク単位 bit が部分 populate を有効扱い — fallback 経路の over-count | P2 | ✅ 修正済 (pcache 経路は T2 で解消済) |
 | AC-27 | T6: T1〜T3 修正後ビルドで §18.1〜18.4 を再計測 + §18.5〜18.8 追加 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
+| AC-28 | U1: test-populate-boundary.sh が kmod ソース grep → 実 ioctl 呼び出しに置き換え | P0 必須 | ✅ 修正済 |
+| AC-29 | U2: test-evict-readback.sh の eviction 0 回が WARNING → FAIL（metrics 不可時のみ SKIP） | P0 必須 | ✅ 修正済 |
+| AC-30 | U3: test-write-readback.sh にサブテスト 4（flush+drop_caches 再 read）追加 | P0 必須 | ✅ 修正済 |
+| AC-31 | U4: Makefile test-regression に test-pcache-multiread + test-pcache-evict-race-short 追加 | P0 必須 | ✅ 修正済 |
+| AC-32 | U5: flush 完了時（signal_flush err==0）に fd->size 以下の全 chunk bit を立てる | P1 推奨 | ✅ 修正済 |
+| AC-33 | U6: populate_pages の eof を fd->size → i_size_read(inode) に変更（evict 後 fd->size=0 対策） | P1 推奨 | ✅ 修正済 |
+| AC-34 | U7: U1〜U6 入り後に make test-regression + §18.1/18.2 bench を実行し結果を記録 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
 
 ### AC-01 受け入れ条件
 2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
@@ -645,6 +652,65 @@ R1 修正後ビルドで `bench-hitrate.sh`（arena/pcache 両モード, seed=42
 - AB-07 gate (a)(b)(c) がいずれも PASS または SKIP
 - sha256 全一致（multiread + evict-race）
 - lockdep 警告なし
+
+### AC-28 修正内容 (U1)
+
+`scripts/test-populate-boundary.sh` の境界チェック 3 項目（B1〜B3）を kmod ソースへの grep から実 ioctl 呼び出しに置き換えた。`scripts/lib/populate-boundary-ioctl.py`（新規）が `/dev/s3fs_ebpf` を直接 open し `fcntl.ioctl` で 4 ケースを発行する。
+
+- size=0 → EINVAL
+- offset=U64\_MAX-1, size=16（オーバーフロー）→ EINVAL
+- size=64 MiB+1 → EINVAL
+- offset=5 GiB, size=4 MiB（有効範囲）→ EINVAL 以外
+
+デバイスが開けない場合（root 不足・kmod 未ロード）は exit code 2 を返し、テストスクリプトが SKIP 扱いにする。
+
+**受け入れ条件**: `scripts/test-populate-boundary.sh` を root で実行したとき、ioctl boundary (4 cases) が PASS と表示され、ソース grep に依存しないこと。
+
+### AC-29 修正内容 (U2)
+
+`scripts/test-evict-readback.sh` の eviction 確認ロジックを修正。旧: `EVICT_DELTA < 1` で WARNING を出力するのみで `overall` に影響なし。新: `EVICT_DELTA < 1` で `EVICT_PASS=FAIL` を設定し `overall=FAIL` にする。metrics 取得失敗（-1）の場合のみ SKIP。
+
+**受け入れ条件**: eviction が起きない設定（例: 容量大）で実行したとき overall が FAIL になること。
+
+### AC-30 修正内容 (U3)
+
+`scripts/test-write-readback.sh` にサブテスト 4 を追加。1 MiB のランダムデータを書いて close し（fire-and-forget flush 発火）、MinIO に PUT されるまで `mc stat` でポーリング（最大 30 秒）する。確認後 `echo 3 > /proc/sys/vm/drop_caches` でページキャッシュを捨て、再 read した sha256 が元データと一致することを確認する。これにより `dirty=false` かつ `populated_chunks=0` の状態（U5 経路）が通る。
+
+**受け入れ条件**: `scripts/test-write-readback.sh` でサブテスト 4 が PASS と表示されること。
+
+### AC-31 修正内容 (U4)
+
+`Makefile` の `test-regression` ターゲットに `test-pcache-multiread`（AC-01 / T2）と `test-pcache-evict-race-short`（R1/S1/T3）を追加。`test-pcache-evict-race-short` は `DURATION=30` で呼ぶ専用ターゲット。`.PHONY` リストにも追加。
+
+**受け入れ条件**: `make test-regression` が 6 テスト（write-readback / large-file-read / evict-readback / populate-boundary / pcache-multiread / evict-race-short）すべてを実行すること。
+
+### AC-32 修正内容 (U5)
+
+`s3fs_ebpf_signal_flush` に bitmap セット処理を追加。daemon が PUT ACK（`IOC_SIGNAL_FLUSH`）を送ってきたとき、`err==0 && !fd->dirty && fd->buf && fd->size > 0` の条件下で `fd->size-1` に対応する最終 chunk インデックス `last_ci` を計算し、`ci=0..last_ci` の全ビットを `fd->populated_chunks` に立てる。flush 後の fd->buf はファイル全体の正データなので安全。fire-and-forget / fsync-wait 両方のパスに適用。
+
+**受け入れ条件**: サブテスト 4（flush+drop_caches 再 read）で sha256 が一致すること。daemon 停止中は upcall でロードされるため正常動作継続。
+
+### AC-33 修正内容 (U6)
+
+`s3fs_ebpf_populate_pages` の eof 計算を `max(end, fd->size)` から `max(end, i_size_read(inode))` に変更。eviction 後 `s3fs_file_data_reset` が `fd->size=0` にリセットするため旧式では `eof == end` となり、部分 re-populate 時に最終チャンクでない chunk も last\_ci 条件（`end >= eof`）で valid 扱いになっていた。`i_size_read` は Q1/S8 不変条件により eviction をまたいでも S3 オブジェクトサイズを保持する。
+
+**受け入れ条件**: eviction 後の部分 re-populate で余分な chunk bit が立たないこと。`test-evict-readback.sh` が PASS。
+
+### AC-34 再計測内容 (U7)
+
+AC-28〜AC-33（U1〜U6）を含むビルドで以下を実行し `br §18` に結果を記録する。
+
+```
+make test-regression      # all 6 tests PASS
+make bench                # §18.1: latency
+make bench-hitrate        # §18.2: hit-rate (pcache mode)
+```
+
+**受け入れ条件**:
+- `make test-regression` 全テスト PASS
+- §18.1 latency が §17 比で大きな退行なし
+- §18.2 hit\_rate が Belady 上限（64.15%）を超えない
+- `adm_max ≤ capacity_bytes`
 
 ## 8. 参照
 

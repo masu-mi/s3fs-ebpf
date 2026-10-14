@@ -130,15 +130,62 @@ else
     exit 1
 fi
 
+# ── sub-test 4: flush to S3, drop page cache, re-read (U5 path) ──────────────
+# Writes a file and closes it (triggering async flush to S3).  Waits for the
+# daemon to PUT the object to MinIO, then drops the VFS page cache so the next
+# read must go through the miss path (dirty=false, bitmap possibly empty).
+# Verifies that content is still correct after a cold re-read via daemon upcall.
+log "sub-test 4: flush → drop_caches → re-read (bitmap-empty path)"
+TEST4_FILE="$MOUNT/t4-flush-reread.bin"
+TEST4_KEY="t4-flush-reread.bin"
+ORIG4="$TMPDIR_LOCAL/orig4.bin"
+dd if=/dev/urandom bs=65536 count=16 iflag=fullblock 2>/dev/null > "$ORIG4"
+ORIG4_HASH=$(sha256sum "$ORIG4" | awk '{print $1}')
+log "  reference sha256: $ORIG4_HASH"
+
+# Write and close (triggers fire-and-forget flush)
+sudo dd if="$ORIG4" of="$TEST4_FILE" bs=65536 2>/dev/null
+
+# Poll MinIO until the daemon's PUT lands (up to 30s)
+docker exec "$MINIO_CONTAINER" mc alias set local http://localhost:9000 \
+    minioadmin minioadmin >/dev/null 2>&1
+FLUSH_OK=false
+for _ in $(seq 1 30); do
+    if docker exec "$MINIO_CONTAINER" mc stat \
+            "local/$S3_BUCKET/$TEST4_KEY" >/dev/null 2>&1; then
+        FLUSH_OK=true
+        break
+    fi
+    sleep 1
+done
+if ! $FLUSH_OK; then
+    log "  sub-test 4 FAIL: flush timeout — MinIO object not found after 30s"
+    exit 1
+fi
+log "  flush confirmed in MinIO"
+
+# Drop VFS page cache — next read must re-fetch via daemon upcall
+echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+
+READ4_HASH=$(sudo sha256sum "$TEST4_FILE" | awk '{print $1}')
+log "  re-read sha256:   $READ4_HASH"
+if [ "$READ4_HASH" = "$ORIG4_HASH" ]; then
+    log "  sub-test 4 PASS"
+else
+    log "  sub-test 4 FAIL: sha256 mismatch after flush+drop_caches"
+    exit 1
+fi
+
 # ── report ────────────────────────────────────────────────────────────────────
 {
 echo ""
 echo "=============================================================="
 echo "test-write-readback  $(date +%Y-%m-%d)"
 echo "=============================================================="
-echo "sub-test 1 (echo/cat new file)       : PASS"
-echo "sub-test 2 (cross-chunk write/read)  : PASS"
-echo "sub-test 3 (truncate-extend + write) : PASS"
+echo "sub-test 1 (echo/cat new file)             : PASS"
+echo "sub-test 2 (cross-chunk write/read)        : PASS"
+echo "sub-test 3 (truncate-extend + write)       : PASS"
+echo "sub-test 4 (flush+drop_caches re-read)     : PASS"
 echo ""
 echo "OVERALL: PASS"
 echo "=============================================================="
