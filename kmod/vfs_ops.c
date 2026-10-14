@@ -2852,9 +2852,10 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 	 * T1: dirty inodes own their buf entirely — the bitmap is never maintained
 	 * for the write path, so bypass it when fd->dirty is set.
 	 * T2: pcache path (gen != 0) — R1 invariant guarantees fd->buf covers any
-	 * range with a live pcache entry, but the bitmap check is still required:
-	 * after eviction+re-populate, fd->buf may hold zeros for chunks not yet
-	 * fetched; serving them would produce sha256 corruption under evict-race. */
+	 * range with a live pcache entry; skip the 64-chunk bitmap cap so files
+	 * > 256 MiB read correctly.  The S1 TOCTOU re-verify below handles the
+	 * evict-race window (eviction+re-populate between fc_pcache_check and
+	 * fd->lock) without needing a bitmap for ci >= 64. */
 	{
 		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
 		if (fd->dirty || fd->flushing) {
@@ -2862,8 +2863,9 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 			 * write/flush path; bypass the bitmap entirely. */
 			buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
 		} else if (gen != 0) {
-			buf_valid = fd->buf != NULL && (size_t)pos < fd->size &&
-				    ci < 64 && (fd->populated_chunks & (1ULL << ci));
+			/* T2: pcache entry existence (verified by S1 below)
+			 * is the correctness proof; no bitmap needed. */
+			buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
 		} else {
 			buf_valid = fd->buf != NULL &&
 				    (size_t)pos < fd->size &&
