@@ -662,20 +662,28 @@ func handleReadMiss(ctx context.Context, devPath string,
 	}
 	// AB-04: when --arena-metadata-only, bypass BPF arena and send data
 	// directly to kmod's page cache via POPULATE_PAGES ioctl.
+	// The kmod limits each call to S3FS_POPULATE_MAX_SIZE (64 MiB), so split
+	// body into partialAdmitChunk-sized pieces; full-admit bodies (seq promote)
+	// can be arbitrarily large.
 	if arenaMetadataOnlyEnabled {
-		if err := populatePages(devPath, ev.Ino, chunkOffset, body); err != nil {
-			fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
-			metrics.Global.ReadMissErrors.Add(1)
-			_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
-			return
+		off := chunkOffset
+		rem := body
+		for len(rem) > 0 {
+			n := len(rem)
+			if n > partialAdmitChunk {
+				n = partialAdmitChunk
+			}
+			if err := populatePages(devPath, ev.Ino, off, rem[:n]); err != nil {
+				fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
+				metrics.Global.ReadMissErrors.Add(1)
+				_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
+				return
+			}
+			off += int64(n)
+			rem = rem[n:]
 		}
-		if chunkOffset > 0 {
-			fmt.Printf("[upcall] ino=%d %s pcache range [%d,%d)\n",
-				ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-		} else {
-			fmt.Printf("[upcall] ino=%d %s pcache %d bytes\n",
-				ev.Ino, entry.Name, len(body))
-		}
+		fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
+			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
 		_ = signalAdmit(devPath, ev.Ino, 0)
 		return
 	}

@@ -120,6 +120,14 @@ EVICT_AFTER=$(get_evict_count)
 EVICT_DELTA=$(( EVICT_AFTER - EVICT_BEFORE ))
 log "evictions after: ${EVICT_AFTER} (delta=${EVICT_DELTA})"
 
+EVICT_PASS=PASS
+if [ "$EVICT_BEFORE" -eq -1 ] || [ "$EVICT_AFTER" -eq -1 ]; then
+    EVICT_PASS=SKIP
+elif [ "$EVICT_DELTA" -lt 1 ]; then
+    log "FAIL: no evictions occurred (delta=${EVICT_DELTA}) — test is vacuous (check capacity_bytes setting)"
+    EVICT_PASS=FAIL
+fi
+
 # ── step 4: check file size after eviction (Q1 check) ────────────────────────
 log "step 4: stat after eviction (Q1: i_size must survive eviction)"
 SIZE_AFTER=$(sudo stat -c %s "$MOUNT/$TEST_FILE")
@@ -150,9 +158,7 @@ overall=PASS
 [ "$Q1_PASS" = "FAIL" ] && overall=FAIL
 [ "$SHA_PASS" = "FAIL" ] && overall=FAIL
 [ "$S8_PASS" = "FAIL" ] && overall=FAIL
-if [ "$EVICT_DELTA" -lt 1 ]; then
-    log "WARNING: no evictions occurred — test may be vacuous (evict delta=${EVICT_DELTA})"
-fi
+[[ "$EVICT_PASS" == FAIL ]] && overall=FAIL
 
 {
 echo ""
@@ -168,6 +174,8 @@ printf "Q1 (i_size survives eviction)            : %s  (before=%d after=%d)\n" \
 printf "sha256 (content correct after re-read)   : %s\n" "$SHA_PASS"
 printf "S8 (i_size not shrunk by partial repop.) : %s  (final=%d)\n" \
     "$S8_PASS" "$SIZE_FINAL"
+printf "evictions occurred                       : %s  (delta=%d)\n" \
+    "$EVICT_PASS" "$EVICT_DELTA"
 echo ""
 echo "OVERALL: $overall"
 echo "=============================================================="

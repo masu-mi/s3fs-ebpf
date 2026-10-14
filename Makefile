@@ -74,6 +74,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         lint-scripts readme test-arena \
         test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
+        test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short \
         clean
 
 ## Help:
@@ -309,10 +310,10 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	 $(SCRIPTS_DIR)/kmod-unload.sh s3fs_kfunc || true; \
 	 exit $$rc
 
-## Regression tests (T1–T5 coverage):
-test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary ## Run all T1–T5 regression tests
+## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
+test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short ## Run all regression tests
 
-test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend)
+test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
 	@sudo $(SCRIPTS_DIR)/test-write-readback.sh
 
@@ -324,9 +325,21 @@ test-evict-readback: kmod daemon ## Q1/S8: evict then re-read — size and conte
 	@echo "==> test-evict-readback (Q1/S8/AC-24)"
 	@sudo $(SCRIPTS_DIR)/test-evict-readback.sh
 
-test-populate-boundary: kmod daemon ## P2/Q3: POPULATE ioctl boundary values (size=0, overflow, >64 MiB)
+test-populate-boundary: kmod daemon ## P2/Q3: POPULATE ioctl boundary values — live ioctl calls (size=0, overflow, >64 MiB, valid)
 	@echo "==> test-populate-boundary (P2/Q3/AC-25)"
 	@sudo $(SCRIPTS_DIR)/test-populate-boundary.sh
+
+test-pcache-multiread: kmod daemon ## AC-01: pcache split-chunk multi-chunk read sha256 match
+	@echo "==> test-pcache-multiread (AC-01)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-multiread.sh
+
+test-pcache-evict-race: kmod daemon ## R1/S1/T3: evict-race concurrent stress (default DURATION=120s)
+	@echo "==> test-pcache-evict-race (R1/S1/T3)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-evict-race.sh
+
+test-pcache-evict-race-short: kmod daemon ## R1/S1/T3: evict-race stress (DURATION=30s, for regression suite)
+	@echo "==> test-pcache-evict-race (R1/S1/T3, short, DURATION=30)"
+	@sudo DURATION=30 $(SCRIPTS_DIR)/test-pcache-evict-race.sh
 
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts

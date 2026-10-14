@@ -6,27 +6,14 @@
 # P2: size > 64 MiB must return -EINVAL (prevents OOM on a single call).
 # Q3: (offset + size) overflow past u64 must return -EINVAL.
 #
-# These checks live in s3fs_ebpf_populate_pages (kmod/vfs_ops.c) and are
-# validated here by watching the daemon's logged error codes when it attempts
-# to call the ioctl via a synthetic Go-side path, OR by checking that the
-# daemon does not crash and the kmod does not emit a kernel WARN when given
-# boundary inputs.
-#
-# Strategy: this test exercises the checks indirectly via the daemon's
-# S3FS_IOC_POPULATE_PAGES ioctl wrapper.  The daemon validates inputs before
-# calling the ioctl, so we verify (a) the daemon-level guards don't regress,
-# and (b) by reading the kmod source, the ioctl-level guards are present.
-# A future improvement is a dedicated C ioctl tester; for now the test
-# verifies observable behaviour (kmod does not panic, size in dmesg is 0 for
-# these paths).
-#
-# Specifically tested:
-#   1. size=0   — daemon rejects before ioctl (S3FS_POPULATE_MAX_SIZE check)
-#   2. size > 64 MiB  — ioctl returns -EINVAL
-#   3. offset overflow — ioctl returns -EINVAL
-#
-# Since these are kernel-internal guards, the test verifies no WARN/BUG appears
-# in dmesg after each attempt.  The daemon log is also checked for any panic.
+# These guards live in s3fs_ebpf_populate_pages (kmod/vfs_ops.c) and are
+# exercised directly via scripts/lib/populate-boundary-ioctl.py which opens
+# /dev/s3fs_ebpf and fires the ioctl with each boundary argument set, verifying
+# the returned errno.  The four cases are:
+#   1. size=0              → EINVAL
+#   2. offset=U64_MAX-1, size=16 → overflow → EINVAL
+#   3. size=64MiB+1        → EINVAL
+#   4. offset=5GiB, size=4MiB  → passes guards (returns ENOENT/ENODEV, not EINVAL)
 #
 # Usage:
 #   sudo ./scripts/test-populate-boundary.sh
@@ -44,7 +31,7 @@ source "$TOPDIR/scripts/lib/bench.sh"
 MOUNT=${MOUNT:-/mnt/s3demo}
 OUT=${OUT:-/tmp/test-populate-boundary}
 SETTLE=${SETTLE:-8}
-DAEMON_METRICS_URL=${DAEMON_METRICS_URL:-http://localhost:9600}
+IOCTL_SCRIPT="$TOPDIR/scripts/lib/populate-boundary-ioctl.py"
 
 log()  { printf '[populate-boundary] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -59,7 +46,7 @@ trap cleanup EXIT
 mkdir -p "$OUT"
 
 # ── prereqs ───────────────────────────────────────────────────────────────────
-need_cmds docker
+need_cmds docker python3
 need_built
 
 # ── mount ─────────────────────────────────────────────────────────────────────
@@ -75,17 +62,16 @@ ebpf_start_daemon "$OUT/daemon.log" \
 log "daemon started, settling ${SETTLE}s"
 sleep "$SETTLE"
 
-# Helper: check dmesg for kernel WARNs/BUGs after each boundary probe
+# Helper: check dmesg for kernel WARNs/BUGs
 check_dmesg_clean() {
-    local label="$1"
     local new_dmesg
     new_dmesg=$(dmesg 2>/dev/null | tail -n +"$DMESG_BEFORE")
     if echo "$new_dmesg" | grep -qE 'WARNING:|BUG:|Oops:|kernel BUG|general protection'; then
-        log "  $label: kernel WARN/BUG in dmesg — FAIL"
+        log "  dmesg scan: kernel WARN/BUG found — FAIL"
         echo "$new_dmesg" | grep -E 'WARNING:|BUG:|Oops:|kernel BUG|general protection' >&2
         return 1
     fi
-    log "  $label: no kernel WARN/BUG — PASS"
+    log "  dmesg scan: no kernel WARN/BUG — PASS"
     return 0
 }
 
@@ -99,38 +85,20 @@ check_daemon_alive() {
     return 0
 }
 
-B1_PASS=true
-B2_PASS=true
-B3_PASS=true
-
-# ── boundary check 1: verify kmod source has size=0 guard ────────────────────
-# The guard is at vfs_ops.c: `if (size == 0 || size > S3FS_POPULATE_MAX_SIZE)`
-log "boundary 1: verifying size=0 guard in kmod source"
-if grep -q 'size == 0 || size > S3FS_POPULATE_MAX_SIZE' \
-        "$TOPDIR/kmod/vfs_ops.c"; then
-    log "  size=0 guard present in vfs_ops.c — PASS"
+# ── ioctl boundary checks (4 cases via Python helper) ────────────────────────
+log "running ioctl boundary checks (populate-boundary-ioctl.py)"
+IOCTL_PASS=PASS
+if python3 "$IOCTL_SCRIPT" 2>&1; then
+    log "  ioctl boundary: PASS"
 else
-    log "  size=0 guard MISSING from vfs_ops.c — FAIL"
-    B1_PASS=false
-fi
-
-# ── boundary check 2: verify 64 MiB cap constant ─────────────────────────────
-log "boundary 2: verifying 64 MiB cap constant"
-if grep -qE 'S3FS_POPULATE_MAX_SIZE.*64ULL << 20|64ULL << 20.*S3FS_POPULATE_MAX_SIZE' \
-        "$TOPDIR/kmod/vfs_ops.c"; then
-    log "  64 MiB cap (S3FS_POPULATE_MAX_SIZE) present — PASS"
-else
-    log "  64 MiB cap MISSING from vfs_ops.c — FAIL"
-    B2_PASS=false
-fi
-
-# ── boundary check 3: verify overflow guard ───────────────────────────────────
-log "boundary 3: verifying offset+size overflow guard"
-if grep -q 'check_add_overflow' "$TOPDIR/kmod/vfs_ops.c"; then
-    log "  check_add_overflow guard present — PASS"
-else
-    log "  check_add_overflow guard MISSING — FAIL"
-    B3_PASS=false
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        log "  ioctl boundary: SKIP (device not accessible)"
+        IOCTL_PASS=SKIP
+    else
+        log "  ioctl boundary: FAIL"
+        IOCTL_PASS=FAIL
+    fi
 fi
 
 # ── functional: large normal file still works after guard checks ───────────────
@@ -145,39 +113,38 @@ docker exec -i "$MINIO_CONTAINER" mc pipe \
     "local/$S3_BUCKET/$SEED_FILE" < "$TMPDIR_LOCAL/seed.bin" >/dev/null
 sleep 3  # let daemon sync the new entry
 
-FUNC_PASS=true
-READ_HASH=$(sudo sha256sum "$MOUNT/$SEED_FILE" 2>/dev/null | awk '{print $1}' || echo "ERROR")
+FUNC_PASS=PASS
+READ_HASH=$(sha256sum "$MOUNT/$SEED_FILE" 2>/dev/null | awk '{print $1}' || echo "ERROR")
 if [ "$READ_HASH" = "$SEED_HASH" ]; then
     log "  normal 1 MiB read: PASS (sha256 match)"
 else
     log "  normal 1 MiB read: FAIL (expected $SEED_HASH got $READ_HASH)"
-    FUNC_PASS=false
+    FUNC_PASS=FAIL
 fi
 
 # ── dmesg and daemon health ────────────────────────────────────────────────────
-DMESG_PASS=true
-DAEMON_PASS=true
+DMESG_PASS=PASS
+DAEMON_PASS=PASS
 log "final checks"
-check_dmesg_clean "dmesg scan" || DMESG_PASS=false
-check_daemon_alive || DAEMON_PASS=false
+check_dmesg_clean || DMESG_PASS=FAIL
+check_daemon_alive || DAEMON_PASS=FAIL
 
 # ── report ────────────────────────────────────────────────────────────────────
-pass_str() { $1 && echo PASS || echo FAIL; }
 overall=PASS
-$B1_PASS && $B2_PASS && $B3_PASS && $FUNC_PASS && $DMESG_PASS && $DAEMON_PASS \
-    || overall=FAIL
+[[ "$IOCTL_PASS" == FAIL ]] && overall=FAIL
+[[ "$FUNC_PASS"  == FAIL ]] && overall=FAIL
+[[ "$DMESG_PASS" == FAIL ]] && overall=FAIL
+[[ "$DAEMON_PASS" == FAIL ]] && overall=FAIL
 
 {
 echo ""
 echo "=============================================================="
 echo "test-populate-boundary  $(date +%Y-%m-%d)"
 echo "=============================================================="
-echo "boundary 1 (size=0 guard)           : $(pass_str $B1_PASS)"
-echo "boundary 2 (64 MiB cap)             : $(pass_str $B2_PASS)"
-echo "boundary 3 (offset overflow guard)  : $(pass_str $B3_PASS)"
-echo "functional (1 MiB normal read)      : $(pass_str $FUNC_PASS)"
-echo "dmesg (no WARN/BUG)                 : $(pass_str $DMESG_PASS)"
-echo "daemon alive                        : $(pass_str $DAEMON_PASS)"
+echo "ioctl boundary (4 cases)            : $IOCTL_PASS"
+echo "functional (1 MiB normal read)      : $FUNC_PASS"
+echo "dmesg (no WARN/BUG)                 : $DMESG_PASS"
+echo "daemon alive                        : $DAEMON_PASS"
 echo ""
 echo "OVERALL: $overall"
 echo "=============================================================="
