@@ -1027,9 +1027,9 @@ arena モードを同条件 (RUNS=10, 2026-10-13) で再計測したところ:
 
 ---
 
-## 18. R1 修正後 再計測 (AC-11/AC-13、2026-10-13)
+## 18. R1/T1〜T3 修正後 再計測 (AC-11/AC-13/AC-27、2026-10-14)
 
-Q1 修正前ビルド (1271adf〜7ddb0d7) で取得した §16/§17 の数値は evict 後の再 read が EOF になっていた可能性があるため無効と判定。R1 (populate/evict race 修正) を含むビルドで下記を再計測。
+Q1 修正前ビルド (1271adf〜7ddb0d7) で取得した §16/§17 の数値は evict 後の再 read が EOF になっていた可能性があるため無効と判定。R1 (populate/evict race 修正) を含むビルドで §18.1〜18.4 を再計測。T1〜T3 修正 (AC-22〜AC-24) 後のビルドで §18.5〜18.8 を追加。
 
 ### 18.1 AC-03 bench-hitrate.sh 再計測
 
@@ -1072,15 +1072,48 @@ Q1 修正前ビルド (1271adf〜7ddb0d7) で取得した §16/§17 の数値は
 |---|---|
 | ⏳ 実行待ち | — |
 
-### 18.4 test-pcache-evict-race.sh (AC-11 ストレステスト)
+### 18.4 test-pcache-evict-race.sh (AC-11/T3 ストレステスト)
 
-DURATION=120s、N_FILES=4、N_READERS=4、capacity_bytes=4 MiB (eviction 強制)。
+DURATION=120s、N_FILES=4、N_READERS=**8**（T3 で増加）、capacity_bytes=4 MiB (eviction 強制)。
+`blocked for more than` パターンを DMESG_PATTERN に追加済み（T3 対応）。
 
-| sha256 整合性 | lockdep 警告 | 総合 |
+| sha256 整合性 | lockdep 警告 | hung task 警告 | 総合 |
+|---|---|---|---|
+| ⏳ 実行待ち | ⏳ | ⏳ | — |
+
+### 18.5 test-write-readback.sh (AC-22/T1 回帰確認)
+
+T1 修正後ビルドで実行: echo/cat 新規ファイル、4 MiB 跨ぎ追記 sha256、truncate-extend + write + read。
+
+| sub-test 1 (echo/cat) | sub-test 2 (4 MiB+ append) | sub-test 3 (truncate-extend) | 総合 |
+|---|---|---|---|
+| ⏳ 実行待ち | ⏳ | ⏳ | — |
+
+### 18.6 test-large-file-read.sh (AC-23/T2 回帰確認)
+
+300 MiB ファイルを pcache モードで先頭から末尾まで読み sha256 一致を確認。
+
+| sha256 一致 | ファイルサイズ一致 | 総合 |
 |---|---|---|
 | ⏳ 実行待ち | ⏳ | — |
 
-### 18.5 gate 判定まとめ
+### 18.7 test-evict-readback.sh (AC-24/Q1/S8 回帰確認)
+
+9 MiB ファイルを pcache モードで evict 後に stat + sha256 確認。
+
+| Q1 (i_size 保持) | sha256 一致 | S8 (再 populate 後サイズ) | 総合 |
+|---|---|---|---|
+| ⏳ 実行待ち | ⏳ | ⏳ | — |
+
+### 18.8 test-populate-boundary.sh (AC-02/Q3 回帰確認)
+
+size=0、64 MiB 超、offset overflow の 3 境界値ガードが kmod ソースに存在することを確認。
+
+| size=0 ガード | 64 MiB cap | overflow ガード | 総合 |
+|---|---|---|---|
+| ⏳ 実行待ち | ⏳ | ⏳ | — |
+
+### 18.9 gate 判定まとめ
 
 | 条件 | 結果 |
 |---|---|
@@ -1089,15 +1122,22 @@ DURATION=120s、N_FILES=4、N_READERS=4、capacity_bytes=4 MiB (eviction 強制)
 | AC-03: arena hit_rate が §12.3 と概ね一致 | ⏳ |
 | AC-05: AB-07 gate (a)(b)(c) | ⏳ |
 | AC-13: sha256 全一致 (multiread + evict-race) | ⏳ |
+| AC-22/T1: write-readback 全 sub-test PASS | ⏳ |
+| AC-23/T2: 300 MiB ファイル sha256 一致 | ⏳ |
+| AC-24/T3: evict-race に hung task 警告なし | ⏳ |
 | lockdep 警告なし | ⏳ |
 | **総合** | **⏳ 実行待ち** |
 
 > 計測はこのセクションに数値を直接書き込んでください。  
 > 実行コマンド:
 > ```
-> sudo ./scripts/bench-hitrate.sh          # arena モード
-> sudo DAEMON_EXTRA_FLAGS=--arena-metadata-only ./scripts/bench-hitrate.sh  # pcache モード
-> sudo ./scripts/bench-ab-pcache.sh        # AC-05
-> sudo ./scripts/test-pcache-multiread.sh  # AC-01 回帰
-> sudo ./scripts/test-pcache-evict-race.sh # AC-11
+> sudo ./scripts/bench-hitrate.sh          # arena モード (§18.1)
+> sudo DAEMON_EXTRA_FLAGS=--arena-metadata-only ./scripts/bench-hitrate.sh  # pcache モード (§18.1)
+> sudo ./scripts/bench-ab-pcache.sh        # AC-05 (§18.2)
+> sudo ./scripts/test-pcache-multiread.sh  # AC-01 回帰 (§18.3)
+> sudo ./scripts/test-pcache-evict-race.sh # AC-11/T3 ストレス (§18.4)
+> sudo ./scripts/test-write-readback.sh    # T1 回帰 (§18.5)
+> sudo ./scripts/test-large-file-read.sh   # T2 回帰 (§18.6)
+> sudo ./scripts/test-evict-readback.sh    # Q1/S8 回帰 (§18.7)
+> sudo ./scripts/test-populate-boundary.sh # P2/Q3 境界値 (§18.8)
 > ```

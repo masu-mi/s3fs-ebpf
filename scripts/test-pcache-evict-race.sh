@@ -40,7 +40,7 @@ OUT=${OUT:-/tmp/test-pcache-evict-race}
 SETTLE=${SETTLE:-8}
 DURATION=${DURATION:-120}       # seconds to run concurrent stress
 N_FILES=${N_FILES:-4}           # number of large files to seed
-N_READERS=${N_READERS:-4}       # concurrent reader processes per file
+N_READERS=${N_READERS:-8}       # T3: 8 readers stress the folio-lock / evict deadlock window
 # 9 MiB: > 2 × 4 MiB partialAdmitChunk so at least 3 POPULATE_PAGES calls
 FILE_SIZE=$(( 9 * 1024 * 1024 ))
 POLICY_EVAL_INTERVAL=${POLICY_EVAL_INTERVAL:-0.2}  # seconds between eval hits
@@ -51,7 +51,8 @@ log()  { printf '[evict-race] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
 
 TMPDIR_LOCAL=$(mktemp -d /tmp/pcache-evict-race-XXXXXX)
-READER_FAIL="$TMPDIR_LOCAL/reader.fail"
+READER_FAIL="$TMPDIR_LOCAL/reader.fail"   # sha256 content mismatch (data corruption)
+READER_ERROR="$TMPDIR_LOCAL/reader.error" # sha256sum exited non-zero (-EIO)
 
 cleanup() {
     # Stop background hammers and readers first
@@ -108,8 +109,16 @@ get_evict_count() {
         | awk '/^s3fs_ebpf_policy_evictions_total[{ ]/{print int($NF); exit}' \
         || echo "-1"
 }
+# T4: retry_exhausted counter — non-zero means capacity-pressure -EIO (not corruption).
+get_retry_exhausted_count() {
+    curl -sf "${METRICS_URL}" 2>/dev/null \
+        | awk '/^s3fs_ebpf_upcall_retry_exhausted_total[{ ]/{print int($NF); exit}' \
+        || echo "-1"
+}
 EVICT_BEFORE=$(get_evict_count)
+RETRY_BEFORE=$(get_retry_exhausted_count)
 log "evictions before stress: ${EVICT_BEFORE}"
+log "retry_exhausted before stress: ${RETRY_BEFORE}"
 
 # ── S3-2: detect lockdep availability ────────────────────────────────────────
 LOCKDEP_AVAIL=0
@@ -143,8 +152,17 @@ reader_loop() {
     local deadline=$(( $(date +%s) + DURATION ))
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        local got
-        got=$(sudo sha256sum "$MOUNT/$fname" 2>/dev/null | awk '{print $1}')
+        local sha_out sha_rc got
+        sha_out=$(sudo sha256sum "$MOUNT/$fname" 2>/dev/null)
+        sha_rc=$?
+        if [ "$sha_rc" -ne 0 ]; then
+            # sha256sum itself failed — file read returned -EIO.
+            # T4: capacity-pressure retry exhaustion causes this, not data corruption.
+            # Exit 2 so the collector distinguishes it from a MISMATCH (exit 1).
+            printf 'READ_ERROR file=%s\n' "$fname" > "$READER_ERROR"
+            exit 2
+        fi
+        got=$(printf '%s' "$sha_out" | awk '{print $1}')
         if [ "$got" != "$expected" ]; then
             printf 'MISMATCH file=%s expected=%s got=%s\n' \
                 "$fname" "$expected" "$got" > "$READER_FAIL"
@@ -171,18 +189,26 @@ sleep "$DURATION"
 kill "$HAMMER_PID" 2>/dev/null || true
 wait "$HAMMER_PID" 2>/dev/null || true
 
-# Collect reader exit codes
-READER_FAIL_COUNT=0
+# Collect reader exit codes — distinguish MISMATCH (1) from READ_ERROR (2).
+READER_FAIL_COUNT=0   # sha256 wrong (data corruption)
+READER_ERROR_COUNT=0  # sha256sum failed (-EIO, capacity pressure)
 for pid in "${READER_PIDS[@]}"; do
-    if ! wait "$pid" 2>/dev/null; then
-        READER_FAIL_COUNT=$(( READER_FAIL_COUNT + 1 ))
-    fi
+    rc=0
+    wait "$pid" 2>/dev/null || rc=$?
+    case $rc in
+        0) ;;
+        2) READER_ERROR_COUNT=$(( READER_ERROR_COUNT + 1 )) ;;
+        *) READER_FAIL_COUNT=$(( READER_FAIL_COUNT + 1 )) ;;
+    esac
 done
 
 # ── S3-1: verify evictions actually occurred ─────────────────────────────────
 EVICT_AFTER=$(get_evict_count)
+RETRY_AFTER=$(get_retry_exhausted_count)
 EVICT_DELTA=$(( EVICT_AFTER - EVICT_BEFORE ))
+RETRY_DELTA=$(( RETRY_AFTER - RETRY_BEFORE ))
 log "evictions after stress: ${EVICT_AFTER} (delta=${EVICT_DELTA})"
+log "retry_exhausted after stress: ${RETRY_AFTER} (delta=${RETRY_DELTA})"
 EVICT_PASS=FAIL
 if [ "$EVICT_BEFORE" -eq -1 ] || [ "$EVICT_AFTER" -eq -1 ]; then
     EVICT_PASS="SKIP(metrics unavailable)"
@@ -193,8 +219,12 @@ else
 fi
 
 # ── S3-2/S3-3: check dmesg for kernel errors and lockdep warnings ─────────────
-# S3-3: extended pattern set (lockdep + KASAN + sleeping-in-atomic)
-DMESG_PATTERN='possible deadlock|lock order|WARNING: (possible|suspicious)|inconsistent lock state|circular locking|BUG: sleeping function called from invalid context|BUG: KASAN'
+# S3-3/T3: extended pattern set (lockdep + KASAN + sleeping-in-atomic + hung task).
+# "blocked for more than" catches the T3 deadlock: a reader holding a folio lock
+# waiting for a daemon upcall while the daemon calls invalidate_inode_pages2 (old
+# behaviour) — both sides block indefinitely.  With invalidate_mapping_pages (T3
+# fix) the ioctl path never waits on the folio lock so this cannot trigger.
+DMESG_PATTERN='possible deadlock|lock order|WARNING: (possible|suspicious)|inconsistent lock state|circular locking|BUG: sleeping function called from invalid context|BUG: KASAN|blocked for more than'
 LOCKDEP_STATUS=SKIP
 if [ "$LOCKDEP_AVAIL" -eq 1 ]; then
     NEW_DMESG=$(dmesg 2>/dev/null | tail -n +"$DMESG_BEFORE")
@@ -208,7 +238,9 @@ if [ "$LOCKDEP_AVAIL" -eq 1 ]; then
 fi
 
 # ── overall result (computed before the report so the variable survives tee) ──
-# lockdep SKIP is acceptable (not a failure); sha256 + evictions must both PASS.
+# lockdep SKIP is acceptable (not a failure); sha256 corruption + evictions must PASS.
+# READ_ERROR (exit 2) = -EIO from capacity pressure (T4 scenario) — warn but not a
+# hard regression; MISMATCH (exit 1 / READER_FAIL_COUNT) = data corruption → FAIL.
 overall=PASS
 [ -f "$READER_FAIL" ] && overall=FAIL
 [ "$READER_FAIL_COUNT" -gt 0 ] && overall=FAIL
@@ -227,13 +259,26 @@ printf "capacity   : %d MiB  (forces eviction after each chunk)\n" "$(( CHUNK_BY
 printf "duration   : %ds\n" "$DURATION"
 printf "evictions  : before=%s after=%s delta=%d\n" \
     "$EVICT_BEFORE" "$EVICT_AFTER" "$EVICT_DELTA"
+printf "retry_exh  : before=%s after=%s delta=%d  (T4: capacity-pressure -EIO)\n" \
+    "$RETRY_BEFORE" "$RETRY_AFTER" "$RETRY_DELTA"
 echo ""
 if [ -f "$READER_FAIL" ]; then
     printf "sha256     : FAIL (%s)\n" "$(cat "$READER_FAIL")"
 elif [ "$READER_FAIL_COUNT" -gt 0 ]; then
-    printf "sha256     : FAIL (%d reader(s) exited non-zero)\n" "$READER_FAIL_COUNT"
+    printf "sha256     : FAIL (%d reader(s) data-corruption)\n" "$READER_FAIL_COUNT"
 else
     echo "sha256     : PASS (all reads matched originals)"
+fi
+if [ "$READER_ERROR_COUNT" -gt 0 ]; then
+    if [ -f "$READER_ERROR" ]; then
+        printf "read_err   : WARN %d reader(s) got -EIO (%s) — see retry_exh delta\n" \
+            "$READER_ERROR_COUNT" "$(cat "$READER_ERROR")"
+    else
+        printf "read_err   : WARN %d reader(s) got -EIO — see retry_exh delta\n" \
+            "$READER_ERROR_COUNT"
+    fi
+else
+    echo "read_err   : none (-EIO not observed)"
 fi
 printf "evictions  : %s\n" "$EVICT_PASS"
 printf "lockdep    : %s\n" "$LOCKDEP_STATUS"

@@ -527,6 +527,12 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-19 | S8: populate_pages が i_size を縮小方向に更新 → 部分 re-populate で VFS ファイルサイズが縮む | P1 | ✅ 修正済 |
 | AC-20 | S10: admit_snapshot が PCACHE entry (uaddr=0) を arena hit として返す → GUP で near-NULL アクセス | P0 必須 | ✅ 修正済 |
 | AC-21 | S11: populate_pages が先頭 chunk のみ valid 扱い → 2 chunk 目以降の読み出しが buf_valid=false でループ | P0 必須 | ✅ 修正済 |
+| AC-22 | T1: write 後 read が -EIO — dirty inode でも bitmap チェックを通過させる | P0 必須 | ✅ 修正済 |
+| AC-23 | T2: 256 MiB 超の位置が常に読めない — pcache 経路で ci < 64 ガードを除去 | P0 必須 | ✅ 修正済 |
+| AC-24 | T3: evict ioctl が invalidate_inode_pages2 で folio lock を待ちデッドロック | P1 | ✅ 修正済 |
+| AC-25 | T4: retry 上限到達の -EIO がデータ破損と区別できない (retry_exhausted カウンタ未実装) | P2 | ✅ 修正済 |
+| AC-26 | T5: チャンク単位 bit が部分 populate を有効扱い — fallback 経路の over-count | P2 | ✅ 修正済 (pcache 経路は T2 で解消済) |
+| AC-27 | T6: T1〜T3 修正後ビルドで §18.1〜18.4 を再計測 + §18.5〜18.8 追加 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
 
 ### AC-01 受け入れ条件
 2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
@@ -608,6 +614,26 @@ populate/evict 競合の 2 段修正:
 `s3fs_file_data` に `u64 populated_chunks` フィールド（4 MiB chunk ビットマップ、最大 256 MiB）を追加。`s3fs_ebpf_populate_pages` が `[offset, end)` を跨ぐ全 chunk ビットを立て、`s3fs_folio_fill_from_kmalloc` が pos の chunk bit を確認してから buf を読む。`s3fs_file_data_reset` / `s3fs_file_data_new` でそれぞれ 0 クリア / 初期 chunk 設定。旧の連続ウォーターマーク (buf_valid_end) はチャンク飛び配送と部分 re-populate 後の再読みに失敗していた。
 
 また `test-pcache-evict-race.sh` の eviction メトリクス名を `s3fs_ebpf_evictions_total` → `s3fs_ebpf_policy_evictions_total` に修正し、`overall=PASS` 計算を `{ ... } | tee` の外（report サブシェルの前）に移動して変数消滅バグを解消。
+
+### AC-22 修正内容 (T1)
+
+`s3fs_folio_fill_from_kmalloc` の `buf_valid` 判定に `fd->dirty` 分岐を追加。dirty inode は `.write` が buf に書き込んだ内容が正なので bitmap (`populated_chunks`) を参照しない。`fd->dirty` が true のとき `buf_valid = fd->buf != NULL && pos < fd->size` として bitmap を完全バイパス。
+
+**受け入れ条件**: `scripts/test-write-readback.sh` で (1) echo/cat 新規ファイル、(2) 4 MiB を跨ぐ追記後 sha256 一致、(3) truncate-extend 後 write+read が全て PASS。
+
+### AC-23 修正内容 (T2)
+
+同じく `s3fs_folio_fill_from_kmalloc` の `buf_valid` 判定に `gen != 0`（pcache 経路）分岐を追加。R1 不変条件より pcache entry が存在すれば `fd->buf` はその範囲を覆っているため、64-chunk (`ci < 64`) ガードおよびビットマップ参照を不要にできる。`gen != 0` のとき `buf_valid = fd->buf != NULL && pos < fd->size`。fallback 経路（`gen == 0`）は従来どおりビットマップを使用。
+
+`populate_pages` の chunk loop `ci < 64` ガードはフォールバック経路のビットマップ保護としてそのまま維持。pcache 経路はビットマップに依存しないため実害なし。
+
+**受け入れ条件**: `scripts/test-large-file-read.sh` で 300 MiB ファイルを pcache モードで先頭から末尾まで読み sha256 一致。
+
+### AC-24 修正内容 (T3)
+
+`s3fs_evict_page_cache` の `invalidate_inode_pages2`（folio_lock で待機）を `invalidate_mapping_pages`（folio_trylock でスキップ）に変更。daemon の miss 処理が直列の場合、reader が folio lock を持ったまま upcall 完了を待つ間に daemon が evict ioctl を発行すると両者がデッドロックする。non-blocking パスにすることで ioctl 経路が folio lock を待たない。スキップされた folio は次の eviction round まで page cache に残るが、最新 S3 データを保持しているため correctness に影響なし。
+
+**受け入れ条件**: `scripts/test-pcache-evict-race.sh` を `N_READERS=8` で実行し、hung task 警告（`blocked for more than`）と -EIO が出ないこと。DMESG_PATTERN に `blocked for more than` を追加済み。
 
 ### AC-13 再計測内容 (R3)
 R1 修正後ビルドで `bench-hitrate.sh`（arena/pcache 両モード, seed=42）、`bench-ab-pcache.sh`（100 MiB）、`test-pcache-multiread.sh`、`test-pcache-evict-race.sh` を再計測し `br §18` に記録する。§16 の注記に §18 への参照を追記済み。

@@ -419,6 +419,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			st.values[3] = (u64)atomic_long_read(&s3fs_gup_calls_total);
 		if (st.count > 4)
 			st.values[4] = (u64)atomic_long_read(&s3fs_gup_ns_total);
+		if (st.count > 5)
+			st.values[5] = (u64)atomic_long_read(&s3fs_upcall_retry_exhausted);
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;

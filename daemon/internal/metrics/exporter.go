@@ -92,6 +92,12 @@ type Counters struct {
 	GupCallsTotal atomic.Uint64 // counter
 	GupNsTotal    atomic.Uint64 // counter
 
+	// T4: .read_folio calls that exhausted S3FS_UPCALL_MAX_RETRIES with
+	// the daemon alive (capacity eviction won every retry window).
+	// Sourced from S3FS_IOC_STATS[5]. Non-zero in the evict-race report
+	// means -EIO from capacity pressure, not data corruption.
+	UpcallRetryExhausted atomic.Uint64 // counter
+
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
 	// ReadIterMisses counts reads where the ino was unknown (triggers
@@ -225,6 +231,11 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		// gup_calls_total / gup_ns_total → mean ns/call. 0 when arena_bypass=1.
 		{"s3fs_ebpf_gup_calls_total", "AB-01: pin_user_pages_remote calls in s3fs_arena_copy_to_iter (1 per page per arena read).", "counter", Global.GupCallsTotal.Load()},
 		{"s3fs_ebpf_gup_ns_total", "AB-01: accumulated pin_user_pages_remote latency in nanoseconds. Divide by gup_calls_total for mean ns/call.", "counter", Global.GupNsTotal.Load()},
+
+		// T4: capacity-pressure -EIO distinguisher. Non-zero means eviction
+		// outpaced the retry loop (capacity=1 chunk + many readers). Incremented
+		// when S3FS_UPCALL_MAX_RETRIES were exhausted with the daemon alive.
+		{"s3fs_ebpf_upcall_retry_exhausted_total", "T4: .read_folio calls where S3FS_UPCALL_MAX_RETRIES were exhausted (daemon alive but eviction won every retry window). Non-zero means -EIO from capacity pressure, not data corruption.", "counter", Global.UpcallRetryExhausted.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},
