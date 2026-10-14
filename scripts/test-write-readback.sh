@@ -115,10 +115,11 @@ dd if=/dev/urandom bs=1024 count=$(( EXTEND_SIZE / 1024 )) \
 ORIG3_HASH=$(sha256sum "$ORIG3" | awk '{print $1}')
 log "  reference sha256: $ORIG3_HASH (${EXTEND_SIZE} bytes)"
 
-# Create a small file then truncate-extend
+# Create a small file then truncate-extend; conv=notrunc preserves the
+# extended size so dd writes over the zero-padded region without O_TRUNC.
 echo "seed" | sudo tee "$TEST3_FILE" > /dev/null
 sudo truncate -s "$EXTEND_SIZE" "$TEST3_FILE"
-sudo dd if="$ORIG3" of="$TEST3_FILE" bs=65536 2>/dev/null
+sudo dd if="$ORIG3" of="$TEST3_FILE" bs=65536 conv=notrunc 2>/dev/null
 
 READ3_HASH=$(sudo sha256sum "$TEST3_FILE" | awk '{print $1}')
 log "  readback sha256:  $READ3_HASH"

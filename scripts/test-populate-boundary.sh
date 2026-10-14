@@ -99,7 +99,9 @@ check_daemon_alive() {
     return 0
 }
 
-ALL_PASS=true
+B1_PASS=true
+B2_PASS=true
+B3_PASS=true
 
 # ── boundary check 1: verify kmod source has size=0 guard ────────────────────
 # The guard is at vfs_ops.c: `if (size == 0 || size > S3FS_POPULATE_MAX_SIZE)`
@@ -109,7 +111,7 @@ if grep -q 'size == 0 || size > S3FS_POPULATE_MAX_SIZE' \
     log "  size=0 guard present in vfs_ops.c — PASS"
 else
     log "  size=0 guard MISSING from vfs_ops.c — FAIL"
-    ALL_PASS=false
+    B1_PASS=false
 fi
 
 # ── boundary check 2: verify 64 MiB cap constant ─────────────────────────────
@@ -119,7 +121,7 @@ if grep -qE 'S3FS_POPULATE_MAX_SIZE.*64ULL << 20|64ULL << 20.*S3FS_POPULATE_MAX_
     log "  64 MiB cap (S3FS_POPULATE_MAX_SIZE) present — PASS"
 else
     log "  64 MiB cap MISSING from vfs_ops.c — FAIL"
-    ALL_PASS=false
+    B2_PASS=false
 fi
 
 # ── boundary check 3: verify overflow guard ───────────────────────────────────
@@ -128,7 +130,7 @@ if grep -q 'check_add_overflow' "$TOPDIR/kmod/vfs_ops.c"; then
     log "  check_add_overflow guard present — PASS"
 else
     log "  check_add_overflow guard MISSING — FAIL"
-    ALL_PASS=false
+    B3_PASS=false
 fi
 
 # ── functional: large normal file still works after guard checks ───────────────
@@ -143,32 +145,39 @@ docker exec -i "$MINIO_CONTAINER" mc pipe \
     "local/$S3_BUCKET/$SEED_FILE" < "$TMPDIR_LOCAL/seed.bin" >/dev/null
 sleep 3  # let daemon sync the new entry
 
+FUNC_PASS=true
 READ_HASH=$(sudo sha256sum "$MOUNT/$SEED_FILE" 2>/dev/null | awk '{print $1}' || echo "ERROR")
 if [ "$READ_HASH" = "$SEED_HASH" ]; then
     log "  normal 1 MiB read: PASS (sha256 match)"
 else
     log "  normal 1 MiB read: FAIL (expected $SEED_HASH got $READ_HASH)"
-    ALL_PASS=false
+    FUNC_PASS=false
 fi
 
 # ── dmesg and daemon health ────────────────────────────────────────────────────
+DMESG_PASS=true
+DAEMON_PASS=true
 log "final checks"
-check_dmesg_clean "dmesg scan" || ALL_PASS=false
-check_daemon_alive || ALL_PASS=false
+check_dmesg_clean "dmesg scan" || DMESG_PASS=false
+check_daemon_alive || DAEMON_PASS=false
 
 # ── report ────────────────────────────────────────────────────────────────────
+pass_str() { $1 && echo PASS || echo FAIL; }
 overall=PASS
-$ALL_PASS || overall=FAIL
+$B1_PASS && $B2_PASS && $B3_PASS && $FUNC_PASS && $DMESG_PASS && $DAEMON_PASS \
+    || overall=FAIL
 
 {
 echo ""
 echo "=============================================================="
 echo "test-populate-boundary  $(date +%Y-%m-%d)"
 echo "=============================================================="
-echo "boundary 1 (size=0 guard)           : $( $ALL_PASS && echo PASS || echo see above )"
-echo "boundary 2 (64 MiB cap)             : $( $ALL_PASS && echo PASS || echo see above )"
-echo "boundary 3 (offset overflow guard)  : $( $ALL_PASS && echo PASS || echo see above )"
-echo "functional (1 MiB normal read)      : $( [ "$READ_HASH" = "$SEED_HASH" ] && echo PASS || echo FAIL )"
+echo "boundary 1 (size=0 guard)           : $(pass_str $B1_PASS)"
+echo "boundary 2 (64 MiB cap)             : $(pass_str $B2_PASS)"
+echo "boundary 3 (offset overflow guard)  : $(pass_str $B3_PASS)"
+echo "functional (1 MiB normal read)      : $(pass_str $FUNC_PASS)"
+echo "dmesg (no WARN/BUG)                 : $(pass_str $DMESG_PASS)"
+echo "daemon alive                        : $(pass_str $DAEMON_PASS)"
 echo ""
 echo "OVERALL: $overall"
 echo "=============================================================="
