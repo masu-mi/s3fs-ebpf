@@ -49,6 +49,21 @@ mkdir -p "$OUT"
 need_cmds docker python3
 need_built
 
+# ── seed functional test file BEFORE daemon start ────────────────────────────
+# The daemon syncs the bucket on startup; seeding here ensures the inode is
+# present on the initial sync so the functional read does not race with the
+# 5-second sync interval.
+SEED_FILE="populate-boundary-seed.bin"
+log "seeding ${SEED_FILE} into MinIO (before daemon start)"
+docker exec "$MINIO_CONTAINER" mc alias set local http://localhost:9000 \
+    minioadmin minioadmin >/dev/null 2>&1
+dd if=/dev/urandom bs=$(( 1024 * 1024 )) count=1 iflag=fullblock 2>/dev/null \
+    > "$TMPDIR_LOCAL/seed.bin"
+SEED_HASH=$(sha256sum "$TMPDIR_LOCAL/seed.bin" | awk '{print $1}')
+docker exec -i "$MINIO_CONTAINER" mc pipe \
+    "local/$S3_BUCKET/$SEED_FILE" < "$TMPDIR_LOCAL/seed.bin" >/dev/null
+log "seed done (hash: ${SEED_HASH})"
+
 # ── mount ─────────────────────────────────────────────────────────────────────
 log "mounting s3fs-ebpf"
 ebpf_mount "$MOUNT"
@@ -101,17 +116,8 @@ else
     fi
 fi
 
-# ── functional: large normal file still works after guard checks ───────────────
-log "functional: seed + read a 1 MiB file to confirm normal path works"
-docker exec "$MINIO_CONTAINER" mc alias set local http://localhost:9000 \
-    minioadmin minioadmin >/dev/null 2>&1
-SEED_FILE="populate-boundary-seed.bin"
-dd if=/dev/urandom bs=$(( 1024 * 1024 )) count=1 iflag=fullblock 2>/dev/null \
-    > "$TMPDIR_LOCAL/seed.bin"
-SEED_HASH=$(sha256sum "$TMPDIR_LOCAL/seed.bin" | awk '{print $1}')
-docker exec -i "$MINIO_CONTAINER" mc pipe \
-    "local/$S3_BUCKET/$SEED_FILE" < "$TMPDIR_LOCAL/seed.bin" >/dev/null
-sleep 3  # let daemon sync the new entry
+# ── functional: verify normal 1 MiB read after ioctl guard checks ─────────────
+log "functional: reading ${SEED_FILE} (seeded before daemon start)"
 
 FUNC_PASS=PASS
 READ_HASH=$(sha256sum "$MOUNT/$SEED_FILE" 2>/dev/null | awk '{print $1}' || echo "ERROR")
