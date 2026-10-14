@@ -1256,6 +1256,9 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 					if len(vals) >= 5 {
 						metrics.Global.GupNsTotal.Store(vals[4])
 					}
+					if len(vals) >= 6 {
+						metrics.Global.UpcallRetryExhausted.Store(vals[5])
+					}
 				}
 			}
 

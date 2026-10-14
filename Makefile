@@ -71,7 +71,10 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
-        lint-scripts readme test-arena clean
+        lint-scripts readme test-arena \
+        test-regression test-write-readback test-large-file-read \
+        test-evict-readback test-populate-boundary \
+        clean
 
 ## Help:
 help: ## Show this help
@@ -305,6 +308,25 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	 echo "==> rmmod s3fs_kfunc"; \
 	 $(SCRIPTS_DIR)/kmod-unload.sh s3fs_kfunc || true; \
 	 exit $$rc
+
+## Regression tests (T1–T5 coverage):
+test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary ## Run all T1–T5 regression tests
+
+test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend)
+	@echo "==> test-write-readback (T1/AC-22)"
+	@sudo $(SCRIPTS_DIR)/test-write-readback.sh
+
+test-large-file-read: kmod daemon ## T2/Q3: 300 MiB pcache read, sha256 must match
+	@echo "==> test-large-file-read (T2/AC-23)"
+	@sudo $(SCRIPTS_DIR)/test-large-file-read.sh
+
+test-evict-readback: kmod daemon ## Q1/S8: evict then re-read — size and content unchanged
+	@echo "==> test-evict-readback (Q1/S8/AC-24)"
+	@sudo $(SCRIPTS_DIR)/test-evict-readback.sh
+
+test-populate-boundary: kmod daemon ## P2/Q3: POPULATE ioctl boundary values (size=0, overflow, >64 MiB)
+	@echo "==> test-populate-boundary (P2/Q3/AC-25)"
+	@sudo $(SCRIPTS_DIR)/test-populate-boundary.sh
 
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts

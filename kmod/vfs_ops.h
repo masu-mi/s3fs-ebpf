@@ -127,6 +127,11 @@ extern bool s3fs_arena_bypass;
 extern atomic_long_t s3fs_gup_calls_total;
 extern atomic_long_t s3fs_gup_ns_total;
 
+/* T4: .read_folio calls that exhausted S3FS_UPCALL_MAX_RETRIES with the
+ * daemon alive. Exported via IOC_STATS slot 5.  Non-zero means capacity
+ * pressure caused -EIO (not data corruption). */
+extern atomic_long_t s3fs_upcall_retry_exhausted;
+
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
  * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */
 u64 s3fs_admit_size(u64 ino);

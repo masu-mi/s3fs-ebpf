@@ -399,6 +399,13 @@ atomic_long_t s3fs_admit_invalidations = ATOMIC_LONG_INIT(0);
 atomic_long_t s3fs_gup_calls_total = ATOMIC_LONG_INIT(0);
 atomic_long_t s3fs_gup_ns_total    = ATOMIC_LONG_INIT(0);
 
+/* T4: .read_folio cases where S3FS_UPCALL_MAX_RETRIES were exhausted with the
+ * daemon alive — eviction fired in the retry window every time.  Reached when
+ * capacity=1 chunk and many concurrent readers compete for the same ino.
+ * Exported via IOC_STATS slot 5.  Non-zero distinguishes "capacity exhaustion"
+ * -EIO from "data corruption" -EIO in the evict-race report. */
+atomic_long_t s3fs_upcall_retry_exhausted = ATOMIC_LONG_INIT(0);
+
 /* Ring buffer of ino values evicted by policy vote since the last
  * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
  * head/tail. Overflow (queue full) is counted separately so the
@@ -792,9 +799,13 @@ noinline int s3fs_policy_on_hit(u64 ino)
  * generic_file_read_iter never reaches .read_folio), so eviction would
  * neither cause a miss nor be visible to on_hit/hit-rate accounting —
  * the admit table would stop bounding what is actually cached.
- * S7: invalidate_inode_pages2 waits for folio locks (unlike
- * invalidate_mapping_pages which silently skips locked folios), so
- * concurrent readers cannot keep stale uptodate pages alive past eviction.
+ * T3: use non-blocking invalidate_mapping_pages (folio_trylock) instead of
+ * invalidate_inode_pages2 (folio_lock) to avoid deadlock when a reader holds
+ * a folio lock waiting for a daemon upcall while the daemon's ioctl eviction
+ * path calls this function.  Folios skipped by trylock remain in page cache
+ * until the next eviction; correctness is unaffected (they hold current S3
+ * data).  miss-handling is serial in the daemon, so the window where a reader
+ * is blocked with a folio lock is bounded by S3FS_UPCALL_WAIT_JIFFIES.
  */
 static void s3fs_evict_page_cache(u64 ino)
 {
@@ -805,7 +816,7 @@ static void s3fs_evict_page_cache(u64 ino)
 	inode = ilookup(s3fs_active_sb, ino);
 	if (!inode)
 		return;
-	invalidate_inode_pages2(inode->i_mapping);
+	invalidate_mapping_pages(inode->i_mapping, 0, -1);
 	iput(inode);
 }
 
@@ -2490,19 +2501,29 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		err = -EFAULT;
 		goto out_unlock;
 	}
-	/* S11: mark ALL chunks covered by [offset, end) as populated.
-	 * A single populate_pages call can span more than one chunk when the
-	 * daemon's pattern-aware path promotes a chunk-miss to a full-file GET
-	 * (offset=0, size=file_size).  Marking only the first chunk left
-	 * chunks 1..N with valid data in fd->buf but their bits unset, causing
-	 * readers at pos in those chunks to get buf_valid=false and loop. */
+	/* S11: mark chunks covered by [offset, end) as populated.
+	 * T5: only mark a chunk if it is FULLY covered by [offset, end), or if
+	 * it is the last chunk and end reaches the file's EOF (so no valid
+	 * content exists beyond end — the partial tail is safe to serve from
+	 * fd->buf because pos < fd->size already guards the read limit).
+	 * Marking partially-covered inner chunks would expose stale/zero data in
+	 * the fallback (gen==0) path for positions below offset. The pcache path
+	 * (gen!=0) bypasses the bitmap entirely via the T2 fix. */
 	{
+		u64 chunk_size = (u64)1 << S3FS_PCACHE_CHUNK_SHIFT;
 		u32 ci;
 		u32 first_ci = (u32)(offset >> S3FS_PCACHE_CHUNK_SHIFT);
 		u32 last_ci  = (u32)((end - 1) >> S3FS_PCACHE_CHUNK_SHIFT);
+		/* eof: file content end after this populate — never shrinks. */
+		u64 eof = (end > (u64)fd->size) ? end : (u64)fd->size;
 
-		for (ci = first_ci; ci <= last_ci && ci < 64; ci++)
-			fd->populated_chunks |= (1ULL << ci);
+		for (ci = first_ci; ci <= last_ci && ci < 64; ci++) {
+			u64 chunk_start = (u64)ci * chunk_size;
+			u64 chunk_end   = chunk_start + chunk_size;
+			if ((offset <= chunk_start && chunk_end <= end) ||
+			    (ci == last_ci && end >= eof))
+				fd->populated_chunks |= (1ULL << ci);
+		}
 	}
 	if (end > (u64)fd->size)
 		fd->size = (size_t)end;
@@ -2760,13 +2781,24 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 	 * we must not serve whatever happens to be in buf as a hit.
 	 * S11: per-chunk bitmask — check bit for the 4-MiB chunk containing pos.
 	 * This handles out-of-order chunk delivery and single-chunk re-populate
-	 * after eviction (the old contiguous watermark buf_valid_end failed both). */
+	 * after eviction (the old contiguous watermark buf_valid_end failed both).
+	 * T1: dirty inodes own their buf entirely — the bitmap is never maintained
+	 * for the write path, so bypass it when fd->dirty is set.
+	 * T2: pcache path (gen != 0) — R1 invariant guarantees fd->buf covers any
+	 * range with a live pcache entry; skip the 64-chunk cap so files > 256 MiB
+	 * read correctly without needing a dynamic bitmap. */
 	{
 		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
-		buf_valid = fd->buf != NULL &&
-			    (size_t)pos < fd->size &&
-			    ci < 64 &&
-			    (fd->populated_chunks & (1ULL << ci));
+		if (fd->dirty) {
+			buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
+		} else if (gen != 0) {
+			buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
+		} else {
+			buf_valid = fd->buf != NULL &&
+				    (size_t)pos < fd->size &&
+				    ci < 64 &&
+				    (fd->populated_chunks & (1ULL << ci));
+		}
 	}
 	if (buf_valid && gen != 0 &&
 	    atomic_read(&s3fs_admit_gen) != gen) {
@@ -2921,6 +2953,12 @@ retry:
 			}
 		}
 	}
+
+	/* T4: count retry exhaustion (daemon alive but eviction won every window).
+	 * Distinguishes "capacity pressure -EIO" from "data corruption" in reports.
+	 * Only fires when mm != NULL (daemon was present) and we hit the retry cap. */
+	if (mm && upcall_retries >= S3FS_UPCALL_MAX_RETRIES)
+		atomic_long_inc(&s3fs_upcall_retry_exhausted);
 
 	/* Fallback: per-inode bootstrap buffer (gen=0, no TOCTOU re-probe).
 	 * Reached when the daemon is absent, timed out, or all retries are
