@@ -102,9 +102,10 @@ sleep "$SETTLE"
 
 # ── S3-1: snapshot eviction counter before the run ───────────────────────────
 # Parse Prometheus text format: handles both 'metric value' and 'metric{...} value'.
+# Daemon exports evictions as s3fs_ebpf_policy_evictions_total (vals[0] from kmod stats).
 get_evict_count() {
     curl -sf "${METRICS_URL}" 2>/dev/null \
-        | awk '/^s3fs_ebpf_evictions_total[{ ]/{print int($NF); exit}' \
+        | awk '/^s3fs_ebpf_policy_evictions_total[{ ]/{print int($NF); exit}' \
         || echo "-1"
 }
 EVICT_BEFORE=$(get_evict_count)
@@ -206,6 +207,14 @@ if [ "$LOCKDEP_AVAIL" -eq 1 ]; then
     fi
 fi
 
+# ── overall result (computed before the report so the variable survives tee) ──
+# lockdep SKIP is acceptable (not a failure); sha256 + evictions must both PASS.
+overall=PASS
+[ -f "$READER_FAIL" ] && overall=FAIL
+[ "$READER_FAIL_COUNT" -gt 0 ] && overall=FAIL
+[[ "$EVICT_PASS" == FAIL ]] && overall=FAIL
+[ "$LOCKDEP_STATUS" = FAIL ] && overall=FAIL
+
 # ── report ────────────────────────────────────────────────────────────────────
 {
 echo ""
@@ -232,13 +241,6 @@ if [ "$LOCKDEP_AVAIL" -eq 0 ]; then
     echo "  (rerun with CONFIG_PROVE_LOCKING=y for full lockdep coverage)"
 fi
 echo ""
-# Overall: FAIL if any hard check failed; PASS only if sha256 + evictions both pass
-# lockdep SKIP is acceptable (not a failure)
-overall=PASS
-[ -f "$READER_FAIL" ] && overall=FAIL
-[ "$READER_FAIL_COUNT" -gt 0 ] && overall=FAIL
-[[ "$EVICT_PASS" == FAIL ]] && overall=FAIL
-[ "$LOCKDEP_STATUS" = FAIL ] && overall=FAIL
 echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/evict-race-report.txt"
