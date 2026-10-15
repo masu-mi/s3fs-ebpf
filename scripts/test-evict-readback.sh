@@ -181,4 +181,13 @@ echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/evict-readback-report.txt"
 
+printf 'RESULT name=test-evict-readback status=%s q1=%s sha256=%s s8=%s evict_delta=%d\n' \
+    "$overall" "$Q1_PASS" "$SHA_PASS" "$S8_PASS" "$EVICT_DELTA"
+if [[ "$overall" == FAIL ]]; then
+    [ "$Q1_PASS"  = FAIL ] && printf 'DETAIL q1: i_size=%d expected=%d\n' "$SIZE_AFTER" "$FILE_SIZE"
+    [ "$SHA_PASS" = FAIL ] && printf 'DETAIL sha256: expected=%s got=%s\n' "$ORIG_HASH" "$READ_HASH"
+    [ "$S8_PASS"  = FAIL ] && printf 'DETAIL s8: final_size=%d expected=%d\n' "$SIZE_FINAL" "$FILE_SIZE"
+    [[ "$EVICT_PASS" == FAIL ]] && printf 'DETAIL evict_delta=0 (no evictions — test vacuous)\n'
+fi
+
 [[ "$overall" == FAIL ]] && exit 1 || exit 0

@@ -156,4 +156,14 @@ echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/populate-boundary-report.txt"
 
+printf 'RESULT name=test-populate-boundary status=%s ioctl=%s func=%s dmesg=%s daemon=%s\n' \
+    "$overall" "$IOCTL_PASS" "$FUNC_PASS" "$DMESG_PASS" "$DAEMON_PASS"
+if [[ "$overall" == FAIL ]]; then
+    [ "$IOCTL_PASS" = FAIL ] && printf 'DETAIL ioctl: one or more boundary cases returned wrong errno\n'
+    [ "$FUNC_PASS"  = FAIL ] && printf 'DETAIL func: 1MiB normal read sha256 mismatch (expected=%s got=%s)\n' \
+        "$SEED_HASH" "$READ_HASH"
+    [ "$DMESG_PASS" = FAIL ] && printf 'DETAIL dmesg: kernel WARNING/BUG found during run\n'
+    [ "$DAEMON_PASS" = FAIL ] && printf 'DETAIL daemon: crashed during test\n'
+fi
+
 [[ "$overall" == FAIL ]] && exit 1 || exit 0

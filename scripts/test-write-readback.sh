@@ -39,10 +39,20 @@ CHUNK_BYTES=$(( 4 * 1024 * 1024 ))   # 4 MiB = S3FS_PCACHE_CHUNK_SHIFT
 CROSS_CHUNK_EXTRA=$(( 512 * 1024 ))   # 0.5 MiB past the boundary
 
 log()  { printf '[write-readback] %s\n' "$*" >&2; }
-fail() { log "FAIL: $*"; exit 1; }
+
+_RESULT_STATUS=FAIL
+_RESULT_DETAIL=""
+fail() {
+    log "FAIL: $*"
+    _RESULT_DETAIL="$*"
+    exit 1
+}
 
 TMPDIR_LOCAL=$(mktemp -d /tmp/write-readback-XXXXXX)
 cleanup() {
+    printf 'RESULT name=test-write-readback status=%s\n' "$_RESULT_STATUS"
+    [ "$_RESULT_STATUS" = FAIL ] && [ -n "$_RESULT_DETAIL" ] && \
+        printf 'DETAIL %s\n' "$_RESULT_DETAIL"
     ebpf_stop "$MOUNT" 2>/dev/null || true
     rm -rf "$TMPDIR_LOCAL"
 }
@@ -191,4 +201,5 @@ echo "OVERALL: PASS"
 echo "=============================================================="
 } | tee "$OUT/write-readback-report.txt"
 
+_RESULT_STATUS=PASS
 exit 0

@@ -39,10 +39,20 @@ FILE_SIZE=$(( 300 * 1024 * 1024 ))
 TEST_FILE="large-file-read-test.bin"
 
 log()  { printf '[large-file-read] %s\n' "$*" >&2; }
-fail() { log "FAIL: $*"; exit 1; }
+
+_RESULT_STATUS=FAIL
+_RESULT_DETAIL=""
+fail() {
+    log "FAIL: $*"
+    _RESULT_DETAIL="$*"
+    exit 1
+}
 
 TMPDIR_LOCAL=$(mktemp -d /tmp/large-file-read-XXXXXX)
 cleanup() {
+    printf 'RESULT name=test-large-file-read status=%s file_size_mib=300\n' "$_RESULT_STATUS"
+    [ "$_RESULT_STATUS" = FAIL ] && [ -n "$_RESULT_DETAIL" ] && \
+        printf 'DETAIL %s\n' "$_RESULT_DETAIL"
     ebpf_stop "$MOUNT" 2>/dev/null || true
     rm -rf "$TMPDIR_LOCAL"
 }
@@ -119,4 +129,5 @@ echo "OVERALL: PASS"
 echo "=============================================================="
 } | tee "$OUT/large-file-read-report.txt"
 
+_RESULT_STATUS=PASS
 exit 0
