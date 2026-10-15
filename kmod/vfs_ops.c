@@ -2901,22 +2901,6 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 					 fd->size);
 		avail = min_t(size_t, fs_size, chunk_end - (size_t)pos);
 	}
-	/* DBG: detect zeros being served when buf_valid=true */
-	if (avail > 0) {
-		const u8 *src = fd->buf + pos;
-		bool all_zero = true;
-		size_t zcheck = min_t(size_t, avail, 64);
-		size_t zi;
-		for (zi = 0; zi < zcheck; zi++) {
-			if (src[zi] != 0) { all_zero = false; break; }
-		}
-		if (all_zero)
-			pr_warn_ratelimited("s3fs DBG: zero-block ino=%llu pos=%lld gen=%u ci=%u pop=0x%llx size=%zu avail=%zu fs=%zu buf_readers=%u\n",
-				(u64)ino, (s64)pos, gen,
-				(u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT),
-				fd->populated_chunks, fd->size, avail, fs_size,
-				fd->buf_readers);
-	}
 	fkva = kmap_local_folio(folio, 0);
 	if (avail > 0)
 		memcpy(fkva, fd->buf + pos, avail);

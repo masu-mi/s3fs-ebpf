@@ -154,8 +154,10 @@ reader_loop() {
 
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local sha_out sha_rc got
-        sha_out=$(sudo sha256sum "$MOUNT/$fname" 2>/dev/null)
-        sha_rc=$?
+        # Use `|| sha_rc=$?` so set -e does not fire on sha256sum -EIO (exit 1);
+        # sha_rc is set to 0 on success or the non-zero exit code on failure.
+        sha_out="" sha_rc=0
+        sha_out=$(sudo sha256sum "$MOUNT/$fname" 2>/dev/null) || sha_rc=$?
         if [ "$sha_rc" -ne 0 ]; then
             # sha256sum itself failed — file read returned -EIO.
             # T4: capacity-pressure retry exhaustion causes this, not data corruption.
@@ -165,8 +167,15 @@ reader_loop() {
         fi
         got=$(printf '%s' "$sha_out" | awk '{print $1}')
         if [ "$got" != "$expected" ]; then
-            printf 'MISMATCH file=%s expected=%s got=%s\n' \
-                "$fname" "$expected" "$got" > "$READER_FAIL"
+            # Find first differing byte (decimal offset) for root-cause analysis.
+            # cmp exits 1 when files differ; || true prevents set -e from
+            # killing the subshell before we write READER_FAIL.
+            local first_diff=""
+            first_diff=$(sudo cmp -l "$TMPDIR_LOCAL/orig-${file_idx}.bin" \
+                "$MOUNT/$fname" 2>/dev/null | head -3 | \
+                awk '{printf "off=%d exp=0%s got=0%s; ", $1, $2, $3}' || true)
+            printf 'MISMATCH file=%s expected=%s got=%s first_diff=[%s]\n' \
+                "$fname" "$expected" "$got" "$first_diff" > "$READER_FAIL"
             exit 1
         fi
     done
