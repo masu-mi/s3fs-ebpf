@@ -46,6 +46,7 @@ FILE_SIZE=$(( 9 * 1024 * 1024 ))
 POLICY_EVAL_INTERVAL=${POLICY_EVAL_INTERVAL:-0.2}  # seconds between eval hits
 METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
 DAEMON_METRICS_URL=${DAEMON_METRICS_URL:-http://localhost:9600}
+TEST_NAME=${TEST_NAME:-test-pcache-evict-race}
 
 log()  { printf '[evict-race] %s\n' "$*" >&2; }
 fail() { log "FAIL: $*"; exit 1; }
@@ -289,6 +290,20 @@ echo ""
 echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/evict-race-report.txt"
+
+printf 'RESULT name=%s status=%s sha256_fail=%d read_err=%d evict_delta=%d retry_exh_delta=%d lockdep=%s\n' \
+    "$TEST_NAME" "$overall" "$READER_FAIL_COUNT" "$READER_ERROR_COUNT" \
+    "$EVICT_DELTA" "$RETRY_DELTA" "$LOCKDEP_STATUS"
+if [[ "$overall" == FAIL ]]; then
+    [ "$READER_FAIL_COUNT" -gt 0 ] && \
+        printf 'DETAIL sha256_fail=%d (data corruption — non-zero wrong content)\n' "$READER_FAIL_COUNT"
+    [ "$READER_ERROR_COUNT" -gt 0 ] && \
+        printf 'DETAIL read_err=%d (-EIO from retry exhaustion, not corruption)\n' "$READER_ERROR_COUNT"
+    [[ "$EVICT_PASS" == FAIL ]] && printf 'DETAIL evict_delta=0 (no evictions — test vacuous, check capacity_bytes)\n'
+    [ "$LOCKDEP_STATUS" = FAIL ] && printf 'DETAIL lockdep=FAIL (kernel WARN/BUG in dmesg during run)\n'
+    [ "$RETRY_DELTA" -gt 0 ] && \
+        printf 'DETAIL retry_exh_delta=%d (upcall retries exhausted under capacity pressure)\n' "$RETRY_DELTA"
+fi
 
 # Exit non-zero on any hard failure
 [[ "$overall" == FAIL ]] && exit 1 || exit 0

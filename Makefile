@@ -339,7 +339,7 @@ test-pcache-evict-race: kmod daemon ## R1/S1/T3: evict-race concurrent stress (d
 
 test-pcache-evict-race-short: kmod daemon ## R1/S1/T3: evict-race stress (DURATION=30s, for regression suite)
 	@echo "==> test-pcache-evict-race (R1/S1/T3, short, DURATION=30)"
-	@sudo DURATION=30 $(SCRIPTS_DIR)/test-pcache-evict-race.sh
+	@sudo DURATION=30 TEST_NAME=test-pcache-evict-race-short $(SCRIPTS_DIR)/test-pcache-evict-race.sh
 
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts

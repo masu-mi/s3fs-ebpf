@@ -31,9 +31,20 @@ TEST_FILE="pcache-split-test.bin"
 TMPDIR_LOCAL=$(mktemp -d /tmp/pcache-split-XXXXXX)
 
 log()  { printf '[pcache-split] %s\n' "$*" >&2; }
-fail() { log "FAIL: $*"; exit 1; }
+
+_RESULT_STATUS=FAIL
+_RESULT_DETAIL=""
+fail() {
+    log "FAIL: $*"
+    _RESULT_DETAIL="$*"
+    exit 1
+}
 
 cleanup() {
+    printf 'RESULT name=test-pcache-multiread status=%s sha256=%s\n' \
+        "$_RESULT_STATUS" "$( [ "$_RESULT_STATUS" = PASS ] && echo ok || echo mismatch )"
+    [ "$_RESULT_STATUS" = FAIL ] && [ -n "$_RESULT_DETAIL" ] && \
+        printf 'DETAIL %s\n' "$_RESULT_DETAIL"
     ebpf_stop "$MOUNT" 2>/dev/null || true
     rm -rf "$TMPDIR_LOCAL"
 }
@@ -80,6 +91,7 @@ log "read sha256:     ${READ_HASH}"
 
 if [ "$READ_HASH" = "$ORIG_HASH" ]; then
     log "PASS — sha256 matches (split-chunk pcache read correct)"
+    _RESULT_STATUS=PASS
     exit 0
 else
     fail "sha256 mismatch: expected ${ORIG_HASH}, got ${READ_HASH}"
