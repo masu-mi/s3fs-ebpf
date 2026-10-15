@@ -406,6 +406,23 @@ atomic_long_t s3fs_gup_ns_total    = ATOMIC_LONG_INIT(0);
  * -EIO from "data corruption" -EIO in the evict-race report. */
 atomic_long_t s3fs_upcall_retry_exhausted = ATOMIC_LONG_INIT(0);
 
+/* U11: .read_folio upcall waits that timed out (remaining==0) before the
+ * daemon signalled.  Caused by goroutine-pool back-pressure (readMissWorkers=16
+ * can queue 16+ goroutines; the blocking sem send in runReadMissLoop stalls the
+ * main read loop so kernel miss events sit in the list > 2 s).  U11 treats
+ * timeout as a retry (counts against the budget) instead of falling to gen=0
+ * with potentially NULL fd->buf, eliminating -EIO under load.
+ * Exported via IOC_STATS slot 6. */
+atomic_long_t s3fs_upcall_timeout = ATOMIC_LONG_INIT(0);
+
+/* D-diag: gen=0 fallback failure breakdown — which sub-condition failed?
+ * These are incremented inside s3fs_folio_fill_from_kmalloc when gen==0
+ * and buf_valid would be false.  Used to identify the root cause of
+ * -EIO in the evict-race test.  Exported via IOC_STATS slots 7/8/9. */
+atomic_long_t s3fs_gen0_fail_buf_null = ATOMIC_LONG_INIT(0); /* buf==NULL    */
+atomic_long_t s3fs_gen0_fail_bitmap   = ATOMIC_LONG_INIT(0); /* bitmap 0     */
+atomic_long_t s3fs_gen0_fail_other    = ATOMIC_LONG_INIT(0); /* pos/ci range */
+
 /* Ring buffer of ino values evicted by policy vote since the last
  * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
  * head/tail. Overflow (queue full) is counted separately so the
@@ -1347,6 +1364,7 @@ void s3fs_ebpf_admit_shutdown(void)
 struct s3fs_pending {
 	struct hlist_node node;
 	u64 ino;
+	u64 chunk_offset;     /* U13: chunk boundary (0 = full-file) */
 	struct completion done;
 	int err;
 	refcount_t refs;
@@ -1366,16 +1384,25 @@ static LIST_HEAD(s3fs_miss_events);
 static DEFINE_SPINLOCK(s3fs_miss_lock);
 static DECLARE_WAIT_QUEUE_HEAD(s3fs_miss_wq);
 
-/* Look up an existing pending entry for `ino` and bump its refcount,
- * or allocate a new one. Caller owns one reference on the returned
- * entry (must pending_put on the way out). */
-static struct s3fs_pending *pending_get_or_create(u64 ino)
+/* U13: hash key combines ino and chunk index so readers for different
+ * chunks of the same ino get independent completions.
+ * 22 = S3FS_PCACHE_CHUNK_SHIFT (defined later in this file). */
+static u64 pending_hash_key(u64 ino, u64 chunk_offset)
+{
+	return ino ^ (chunk_offset >> 22);
+}
+
+/* Look up an existing pending entry for (ino, chunk_offset) and bump
+ * its refcount, or allocate a new one. Caller owns one reference on
+ * the returned entry (must pending_put on the way out). */
+static struct s3fs_pending *pending_get_or_create(u64 ino, u64 chunk_offset)
 {
 	struct s3fs_pending *p, *fresh;
+	u64 key = pending_hash_key(ino, chunk_offset);
 
 	spin_lock(&s3fs_pending_lock);
-	hash_for_each_possible(s3fs_pending, p, node, ino) {
-		if (p->ino == ino) {
+	hash_for_each_possible(s3fs_pending, p, node, key) {
+		if (p->ino == ino && p->chunk_offset == chunk_offset) {
 			refcount_inc(&p->refs);
 			spin_unlock(&s3fs_pending_lock);
 			return p;
@@ -1387,22 +1414,23 @@ static struct s3fs_pending *pending_get_or_create(u64 ino)
 	if (!fresh)
 		return NULL;
 	INIT_HLIST_NODE(&fresh->node);
-	fresh->ino = ino;
-	fresh->err = 0;
+	fresh->ino          = ino;
+	fresh->chunk_offset = chunk_offset;
+	fresh->err          = 0;
 	init_completion(&fresh->done);
 	refcount_set(&fresh->refs, 2); /* one for hash, one for caller */
 
 	spin_lock(&s3fs_pending_lock);
 	/* Re-check for a racing insert. */
-	hash_for_each_possible(s3fs_pending, p, node, ino) {
-		if (p->ino == ino) {
+	hash_for_each_possible(s3fs_pending, p, node, key) {
+		if (p->ino == ino && p->chunk_offset == chunk_offset) {
 			refcount_inc(&p->refs);
 			spin_unlock(&s3fs_pending_lock);
 			kfree(fresh);
 			return p;
 		}
 	}
-	hash_add(s3fs_pending, &fresh->node, ino);
+	hash_add(s3fs_pending, &fresh->node, key);
 	spin_unlock(&s3fs_pending_lock);
 	return fresh;
 }
@@ -1506,13 +1534,14 @@ __poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt)
 	return mask;
 }
 
-int s3fs_ebpf_signal_admit(u64 ino, int err)
+int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err)
 {
 	struct s3fs_pending *p, *target = NULL;
+	u64 key = pending_hash_key(ino, chunk_offset);
 
 	spin_lock(&s3fs_pending_lock);
-	hash_for_each_possible(s3fs_pending, p, node, ino) {
-		if (p->ino == ino) {
+	hash_for_each_possible(s3fs_pending, p, node, key) {
+		if (p->ino == ino && p->chunk_offset == chunk_offset) {
 			target = p;
 			refcount_inc(&target->refs);
 			break;
@@ -2883,6 +2912,15 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 				    (size_t)pos < fd->size &&
 				    ci < 64 &&
 				    (fd->populated_chunks & (1ULL << ci));
+			/* D-diag: instrument gen=0 failure reason */
+			if (!buf_valid) {
+				if (fd->buf == NULL)
+					atomic_long_inc(&s3fs_gen0_fail_buf_null);
+				else if ((size_t)pos >= fd->size || ci >= 64)
+					atomic_long_inc(&s3fs_gen0_fail_other);
+				else
+					atomic_long_inc(&s3fs_gen0_fail_bitmap);
+			}
 		}
 	}
 	if (buf_valid && gen != 0 &&
@@ -2983,6 +3021,21 @@ retry:
 	pcache_gen = 0;
 	if (fc_pcache_check(file ? file->private_data : NULL,
 			    inode->i_ino, (u64)pos, &pcache_gen)) {
+		/* U10: protect fd->buf before fill_from_kmalloc.  fill holds
+		 * fd->lock for its entire body; any eviction that races here
+		 * blocks on that lock and sees buf_readers=1 when it finally
+		 * acquires it, triggering skip_reset.  Without this increment
+		 * the window between fill's fd->lock release and the
+		 * upcall-path buf_readers++ allowed eviction to clear fd->buf
+		 * (buf_readers=0), leaving the gen=0 fallback with NULL buf.
+		 * On a hot-path cache hit fill returns true and done: decrements
+		 * buf_readers back to 0 — net state is unchanged in steady state. */
+		if (!buf_reader_active && fd) {
+			mutex_lock(&fd->lock);
+			fd->buf_readers++;
+			mutex_unlock(&fd->lock);
+			buf_reader_active = true;
+		}
 		if (s3fs_folio_fill_from_kmalloc(folio, fs_size, pos,
 						 inode->i_private,
 						 inode->i_ino, pcache_gen)) {
@@ -3026,19 +3079,19 @@ retry:
 	read_unlock(&s3fs_admits_lock);
 
 	if (mm && upcall_retries < S3FS_UPCALL_MAX_RETRIES) {
-		struct s3fs_pending *p = pending_get_or_create(inode->i_ino);
+		u64 chunk_offset = ((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT)
+				   << S3FS_PCACHE_CHUNK_SHIFT;
+		struct s3fs_pending *p = pending_get_or_create(inode->i_ino,
+							       chunk_offset);
 
 		if (p) {
 			int err;
 			long remaining;
 
-			/* U8: protect fd->buf against eviction for the entire
-			 * retry window — from first upcall through the gen=0
-			 * fallback.  Increment once; decrement at done:.
-			 * s3fs_file_data_reset skips the buf free while > 0,
-			 * so the fallback always finds valid data even if the
-			 * pcache entry was evicted between signal_admit and
-			 * fill_from_kmalloc taking fd->lock. */
+			/* U8/U10: protect fd->buf against eviction.  U10 already
+			 * set buf_reader_active in the pcache path above; this
+			 * increment fires only for the fc-miss path (no prior
+			 * pcache attempt). */
 			if (!buf_reader_active && fd) {
 				mutex_lock(&fd->lock);
 				fd->buf_readers++;
@@ -3056,6 +3109,18 @@ retry:
 					upcall_retries++;
 					goto retry;
 				}
+				/* U11: timed out waiting for daemon signal — daemon
+				 * goroutine pool saturated (readMissWorkers=16),
+				 * miss queued > S3FS_UPCALL_WAIT_JIFFIES.  Count
+				 * against the retry budget and loop back; the next
+				 * pass finds buf already populated by the delayed
+				 * goroutine or gets a fast reply once pool pressure
+				 * eases.  Without U11 gen=0 hit NULL buf → -EIO. */
+				if (remaining == 0) {
+					atomic_long_inc(&s3fs_upcall_timeout);
+					upcall_retries++;
+					goto retry;
+				}
 			} else {
 				pending_put(p);
 			}
@@ -3063,18 +3128,17 @@ retry:
 	}
 
 	/* T4: count retry exhaustion (daemon alive but pcache entry evicted on
-	 * every retry).  U8: with buf_readers protecting fd->buf, the gen=0
-	 * fallback below now succeeds (correct data) rather than returning
-	 * -EIO, so this counter no longer implies data corruption or -EIO. */
+	 * every retry, or U11 timeout retries exhausted).  U8+U10: buf_readers
+	 * protects fd->buf for the entire retry window so the gen=0 fallback
+	 * finds valid data if the daemon populated at any point. */
 	if (mm && upcall_retries >= S3FS_UPCALL_MAX_RETRIES)
 		atomic_long_inc(&s3fs_upcall_retry_exhausted);
 
 	/* Fallback: per-inode bootstrap buffer (gen=0, no TOCTOU re-probe).
 	 * Reached when the daemon is absent, timed out, or all retries are
-	 * exhausted.  U8: buf_readers > 0 prevents eviction from clearing
-	 * fd->buf during the retry loop, so this path finds valid data
-	 * (correct S3 content from the last successful populate) and returns
-	 * true rather than -EIO. */
+	 * exhausted.  U8+U10: buf_readers > 0 prevents eviction from clearing
+	 * fd->buf, so this path finds valid data from the last successful
+	 * populate and returns true rather than -EIO. */
 	filled = s3fs_folio_fill_from_kmalloc(folio, fs_size, pos,
 					      inode->i_private, inode->i_ino, 0);
 

@@ -65,7 +65,7 @@ struct poll_table_struct;
 ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
 			       bool nonblocking);
 __poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt);
-int s3fs_ebpf_signal_admit(u64 ino, int err);
+int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err);
 
 /*
  * Write-back queue: kmod → daemon via S3FS_IOC_POP_FLUSH.
@@ -131,6 +131,15 @@ extern atomic_long_t s3fs_gup_ns_total;
  * daemon alive. Exported via IOC_STATS slot 5.  Non-zero means capacity
  * pressure caused -EIO (not data corruption). */
 extern atomic_long_t s3fs_upcall_retry_exhausted;
+
+/* U11: .read_folio upcall waits that timed out before daemon signal.
+ * Exported via IOC_STATS slot 6. */
+extern atomic_long_t s3fs_upcall_timeout;
+
+/* D-diag: gen=0 fallback failure reason counters. Exported via slots 7/8/9. */
+extern atomic_long_t s3fs_gen0_fail_buf_null;
+extern atomic_long_t s3fs_gen0_fail_bitmap;
+extern atomic_long_t s3fs_gen0_fail_other;
 
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
  * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */

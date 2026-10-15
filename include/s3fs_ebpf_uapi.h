@@ -90,13 +90,16 @@ struct s3fs_admit_arena {
  *
  * The daemon calls this after fetching an unadmitted object from S3
  * and issuing an admit-arena. kmod's blocked read finds its pending
- * entry keyed by ino, records the err code, and completes the
- * waiter. err==0 signals success (the caller should retry the admit
- * lookup and serve out of the arena page); err<0 propagates the
- * error to the read syscall.
+ * entry keyed by (ino, chunk_offset), records the err code, and
+ * completes the waiter. err==0 signals success (the caller should
+ * retry the admit lookup and serve from arena/pcache); err<0
+ * propagates the error to the read syscall.
+ * chunk_offset must be aligned to S3FS_PCACHE_CHUNK_SIZE (4 MiB).
+ * Full-file admits (small files) use chunk_offset=0.
  */
 struct s3fs_signal_admit {
 	__u64 ino;
+	__u64 chunk_offset;   /* chunk boundary; 0 for full-file admits */
 	__s32 err;
 	__u32 _pad;
 };

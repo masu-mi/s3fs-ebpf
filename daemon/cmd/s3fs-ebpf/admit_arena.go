@@ -467,22 +467,23 @@ type readMissEvent struct {
 	_pad   uint32
 }
 
-// signalAdmitArg mirrors `struct s3fs_signal_admit`.
+// signalAdmitArg mirrors `struct s3fs_signal_admit` (U13: added ChunkOffset).
 type signalAdmitArg struct {
-	Ino  uint64
-	Err  int32
-	_pad uint32
+	Ino         uint64
+	ChunkOffset uint64
+	Err         int32
+	_pad        uint32
 }
 
 const s3fsIocSignalAdmit = (1 << 30) | (uint32(unsafe.Sizeof(signalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
 
-func signalAdmit(devPath string, ino uint64, errCode int32) error {
+func signalAdmit(devPath string, ino uint64, chunkOffset int64, errCode int32) error {
 	f, closeFn, err := devFileOrOpen(devPath)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
-	arg := signalAdmitArg{Ino: ino, Err: errCode}
+	arg := signalAdmitArg{Ino: ino, ChunkOffset: uint64(chunkOffset), Err: errCode}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
 		f.Fd(), uintptr(s3fsIocSignalAdmit),
 		uintptr(unsafe.Pointer(&arg))); errno != 0 {
@@ -602,18 +603,24 @@ func handleReadMiss(ctx context.Context, devPath string,
 	defer func() {
 		metrics.ReadMissLatency.Observe(time.Since(miss_started))
 	}()
+	// U13: compute the aligned chunk boundary that kmod used when creating
+	// the pending entry for this miss (matches pending_get_or_create key).
+	// ALL signalAdmit calls below must use missChunkOffset so they find
+	// the correct per-chunk pending entry.
+	missChunkOffset := (ev.Offset / partialAdmitChunk) * partialAdmitChunk
+
 	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d unknown — signaling ENOENT\n", ev.Ino)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmit(devPath, ev.Ino, -2 /* -ENOENT */)
+		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -2 /* -ENOENT */)
 		return
 	}
 	if s3c == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: no S3 backend — signaling ENODATA\n",
 			ev.Ino, entry.Name)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmit(devPath, ev.Ino, -61 /* -ENODATA */)
+		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -61 /* -ENODATA */)
 		return
 	}
 
@@ -646,7 +653,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 		body, err = s3c.Get(ctx, entry.S3Key)
 	} else {
 		// Align to chunk boundary containing the miss.
-		chunkOffset = (ev.Offset / partialAdmitChunk) * partialAdmitChunk
+		chunkOffset = missChunkOffset
 		chunkSize := int64(partialAdmitChunk)
 		if chunkOffset+chunkSize > fullSize {
 			chunkSize = fullSize - chunkOffset
@@ -657,7 +664,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s get: %v\n",
 			ev.Ino, entry.S3Key, err)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
+		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 		return
 	}
 	// AB-04: when --arena-metadata-only, bypass BPF arena and send data
@@ -676,7 +683,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 			if err := populatePages(devPath, ev.Ino, off, rem[:n]); err != nil {
 				fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
 				metrics.Global.ReadMissErrors.Add(1)
-				_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
+				_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 				return
 			}
 			off += int64(n)
@@ -684,7 +691,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 		}
 		fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
 			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-		_ = signalAdmit(devPath, ev.Ino, 0)
+		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, 0)
 		return
 	}
 
@@ -693,7 +700,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit content: %v\n", ev.Ino, err)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmit(devPath, ev.Ino, -12 /* -ENOMEM */)
+		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -12 /* -ENOMEM */)
 		return
 	}
 	uaddr := progs.Arena().BaseAddr() + off
@@ -707,7 +714,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	}, progs); err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit arena: %v\n", ev.Ino, err)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmit(devPath, ev.Ino, -5 /* -EIO */)
+		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 		return
 	}
 	if chunkOffset > 0 {
@@ -717,7 +724,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 		fmt.Printf("[upcall] ino=%d %s admitted %d bytes\n",
 			ev.Ino, entry.Name, len(body))
 	}
-	_ = signalAdmit(devPath, ev.Ino, 0)
+	_ = signalAdmit(devPath, ev.Ino, missChunkOffset, 0)
 }
 
 // -- AA-04: sequential read-ahead prefetch --------------------------------
