@@ -116,10 +116,28 @@ get_retry_exhausted_count() {
         | awk '/^s3fs_ebpf_upcall_retry_exhausted_total[{ ]/{print int($NF); exit}' \
         || echo "-1"
 }
+# U11: timeout counter — non-zero confirms goroutine-pool back-pressure is exercised.
+get_upcall_timeout_count() {
+    curl -sf "${METRICS_URL}" 2>/dev/null \
+        | awk '/^s3fs_ebpf_upcall_timeout_total[{ ]/{print int($NF); exit}' \
+        || echo "-1"
+}
+# D-diag: gen=0 failure reason counters.
+get_gen0_fail_counts() {
+    curl -sf "${METRICS_URL}" 2>/dev/null | awk '
+        /^s3fs_ebpf_gen0_fail_buf_null_total[{ ]/ { buf_null=int($NF) }
+        /^s3fs_ebpf_gen0_fail_bitmap_total[{ ]/   { bitmap=int($NF) }
+        /^s3fs_ebpf_gen0_fail_other_total[{ ]/    { other=int($NF) }
+        END { printf "%d %d %d", buf_null+0, bitmap+0, other+0 }' \
+        || echo "-1 -1 -1"
+}
 EVICT_BEFORE=$(get_evict_count)
 RETRY_BEFORE=$(get_retry_exhausted_count)
+TIMEOUT_BEFORE=$(get_upcall_timeout_count)
+GEN0_BEFORE=$(get_gen0_fail_counts)
 log "evictions before stress: ${EVICT_BEFORE}"
 log "retry_exhausted before stress: ${RETRY_BEFORE}"
+log "upcall_timeout before stress: ${TIMEOUT_BEFORE}"
 
 # ── S3-2: detect lockdep availability ────────────────────────────────────────
 LOCKDEP_AVAIL=0
@@ -215,10 +233,22 @@ done
 # ── S3-1: verify evictions actually occurred ─────────────────────────────────
 EVICT_AFTER=$(get_evict_count)
 RETRY_AFTER=$(get_retry_exhausted_count)
+TIMEOUT_AFTER=$(get_upcall_timeout_count)
+GEN0_AFTER=$(get_gen0_fail_counts)
 EVICT_DELTA=$(( EVICT_AFTER - EVICT_BEFORE ))
 RETRY_DELTA=$(( RETRY_AFTER - RETRY_BEFORE ))
+TIMEOUT_DELTA=$(( TIMEOUT_AFTER - TIMEOUT_BEFORE ))
+read -r GEN0_NULL_BEFORE GEN0_BMAP_BEFORE GEN0_OTHER_BEFORE <<< "$GEN0_BEFORE"
+read -r GEN0_NULL_AFTER  GEN0_BMAP_AFTER  GEN0_OTHER_AFTER  <<< "$GEN0_AFTER"
+GEN0_NULL_DELTA=$(( GEN0_NULL_AFTER - GEN0_NULL_BEFORE ))
+GEN0_BMAP_DELTA=$(( GEN0_BMAP_AFTER - GEN0_BMAP_BEFORE ))
+GEN0_OTHER_DELTA=$(( GEN0_OTHER_AFTER - GEN0_OTHER_BEFORE ))
 log "evictions after stress: ${EVICT_AFTER} (delta=${EVICT_DELTA})"
 log "retry_exhausted after stress: ${RETRY_AFTER} (delta=${RETRY_DELTA})"
+log "upcall_timeout after stress: ${TIMEOUT_AFTER} (delta=${TIMEOUT_DELTA})"
+log "gen0_fail_buf_null after stress: ${GEN0_NULL_AFTER} (delta=${GEN0_NULL_DELTA})"
+log "gen0_fail_bitmap after stress: ${GEN0_BMAP_AFTER} (delta=${GEN0_BMAP_DELTA})"
+log "gen0_fail_other after stress: ${GEN0_OTHER_AFTER} (delta=${GEN0_OTHER_DELTA})"
 EVICT_PASS=FAIL
 if [ "$EVICT_BEFORE" -eq -1 ] || [ "$EVICT_AFTER" -eq -1 ]; then
     EVICT_PASS="SKIP(metrics unavailable)"
@@ -249,11 +279,13 @@ fi
 
 # ── overall result (computed before the report so the variable survives tee) ──
 # lockdep SKIP is acceptable (not a failure); sha256 corruption + evictions must PASS.
-# READ_ERROR (exit 2) = -EIO from capacity pressure (T4 scenario) — warn but not a
-# hard regression; MISMATCH (exit 1 / READER_FAIL_COUNT) = data corruption → FAIL.
+# READ_ERROR (exit 2) = -EIO: U8+U10 protect fd->buf so the gen=0 fallback should
+# never fail; any -EIO is a regression and must FAIL.
+# MISMATCH (exit 1 / READER_FAIL_COUNT) = data corruption → FAIL.
 overall=PASS
 [ -f "$READER_FAIL" ] && overall=FAIL
 [ "$READER_FAIL_COUNT" -gt 0 ] && overall=FAIL
+[ "$READER_ERROR_COUNT" -gt 0 ] && overall=FAIL
 [[ "$EVICT_PASS" == FAIL ]] && overall=FAIL
 [ "$LOCKDEP_STATUS" = FAIL ] && overall=FAIL
 
@@ -271,6 +303,10 @@ printf "evictions  : before=%s after=%s delta=%d\n" \
     "$EVICT_BEFORE" "$EVICT_AFTER" "$EVICT_DELTA"
 printf "retry_exh  : before=%s after=%s delta=%d  (T4: capacity-pressure -EIO)\n" \
     "$RETRY_BEFORE" "$RETRY_AFTER" "$RETRY_DELTA"
+printf "upcall_tmo : before=%s after=%s delta=%d  (U11: goroutine-pool timeout retries)\n" \
+    "$TIMEOUT_BEFORE" "$TIMEOUT_AFTER" "$TIMEOUT_DELTA"
+printf "gen0_fail  : buf_null=%d bitmap=%d other=%d  (D-diag: gen=0 fallback breakdown)\n" \
+    "$GEN0_NULL_DELTA" "$GEN0_BMAP_DELTA" "$GEN0_OTHER_DELTA"
 echo ""
 if [ -f "$READER_FAIL" ]; then
     printf "sha256     : FAIL (%s)\n" "$(cat "$READER_FAIL")"
@@ -281,14 +317,14 @@ else
 fi
 if [ "$READER_ERROR_COUNT" -gt 0 ]; then
     if [ -f "$READER_ERROR" ]; then
-        printf "read_err   : WARN %d reader(s) got -EIO (%s) — see retry_exh delta\n" \
+        printf "read_err   : FAIL %d reader(s) got -EIO (%s) — U8+U10 should prevent this\n" \
             "$READER_ERROR_COUNT" "$(cat "$READER_ERROR")"
     else
-        printf "read_err   : WARN %d reader(s) got -EIO — see retry_exh delta\n" \
+        printf "read_err   : FAIL %d reader(s) got -EIO — U8+U10 should prevent this\n" \
             "$READER_ERROR_COUNT"
     fi
 else
-    echo "read_err   : none (-EIO not observed)"
+    echo "read_err   : PASS (no -EIO observed)"
 fi
 printf "evictions  : %s\n" "$EVICT_PASS"
 printf "lockdep    : %s\n" "$LOCKDEP_STATUS"
@@ -300,14 +336,14 @@ echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/evict-race-report.txt"
 
-printf 'RESULT name=%s status=%s sha256_fail=%d read_err=%d evict_delta=%d retry_exh_delta=%d lockdep=%s\n' \
+printf 'RESULT name=%s status=%s sha256_fail=%d read_err=%d evict_delta=%d retry_exh_delta=%d timeout_delta=%d lockdep=%s\n' \
     "$TEST_NAME" "$overall" "$READER_FAIL_COUNT" "$READER_ERROR_COUNT" \
-    "$EVICT_DELTA" "$RETRY_DELTA" "$LOCKDEP_STATUS"
+    "$EVICT_DELTA" "$RETRY_DELTA" "$TIMEOUT_DELTA" "$LOCKDEP_STATUS"
 if [[ "$overall" == FAIL ]]; then
     [ "$READER_FAIL_COUNT" -gt 0 ] && \
         printf 'DETAIL sha256_fail=%d (data corruption — non-zero wrong content)\n' "$READER_FAIL_COUNT"
     [ "$READER_ERROR_COUNT" -gt 0 ] && \
-        printf 'DETAIL read_err=%d (-EIO from retry exhaustion, not corruption)\n' "$READER_ERROR_COUNT"
+        printf 'DETAIL read_err=%d (-EIO: gen=0 fallback failed — U8+U10 race still present)\n' "$READER_ERROR_COUNT"
     [[ "$EVICT_PASS" == FAIL ]] && printf 'DETAIL evict_delta=0 (no evictions — test vacuous, check capacity_bytes)\n'
     [ "$LOCKDEP_STATUS" = FAIL ] && printf 'DETAIL lockdep=FAIL (kernel WARN/BUG in dmesg during run)\n'
     [ "$RETRY_DELTA" -gt 0 ] && \

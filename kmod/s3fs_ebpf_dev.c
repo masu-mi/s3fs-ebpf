@@ -175,7 +175,7 @@ static long s3fs_dev_signal_admit(void __user *uarg)
 
 	if (copy_from_user(&sig, uarg, sizeof(sig)))
 		return -EFAULT;
-	return s3fs_ebpf_signal_admit(sig.ino, sig.err);
+	return s3fs_ebpf_signal_admit(sig.ino, sig.chunk_offset, sig.err);
 }
 
 /*
@@ -421,6 +421,14 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			st.values[4] = (u64)atomic_long_read(&s3fs_gup_ns_total);
 		if (st.count > 5)
 			st.values[5] = (u64)atomic_long_read(&s3fs_upcall_retry_exhausted);
+		if (st.count > 6)
+			st.values[6] = (u64)atomic_long_read(&s3fs_upcall_timeout);
+		if (st.count > 7)
+			st.values[7] = (u64)atomic_long_read(&s3fs_gen0_fail_buf_null);
+		if (st.count > 8)
+			st.values[8] = (u64)atomic_long_read(&s3fs_gen0_fail_bitmap);
+		if (st.count > 9)
+			st.values[9] = (u64)atomic_long_read(&s3fs_gen0_fail_other);
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;

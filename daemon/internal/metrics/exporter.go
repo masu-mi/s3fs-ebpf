@@ -98,6 +98,17 @@ type Counters struct {
 	// means -EIO from capacity pressure, not data corruption.
 	UpcallRetryExhausted atomic.Uint64 // counter
 
+	// U11: upcall waits that timed out (remaining==0) before daemon signal.
+	// Caused by goroutine-pool back-pressure in runReadMissLoop.
+	// Sourced from S3FS_IOC_STATS[6].
+	UpcallTimeouts atomic.Uint64 // counter
+
+	// D-diag: gen=0 fallback failure reason breakdown.
+	// Sourced from S3FS_IOC_STATS[7/8/9].
+	Gen0FailBufNull atomic.Uint64 // counter — buf==NULL
+	Gen0FailBitmap  atomic.Uint64 // counter — bitmap bit not set
+	Gen0FailOther   atomic.Uint64 // counter — pos/ci range
+
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
 	// ReadIterMisses counts reads where the ino was unknown (triggers
@@ -236,6 +247,10 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		// outpaced the retry loop (capacity=1 chunk + many readers). Incremented
 		// when S3FS_UPCALL_MAX_RETRIES were exhausted with the daemon alive.
 		{"s3fs_ebpf_upcall_retry_exhausted_total", "T4: .read_folio calls where S3FS_UPCALL_MAX_RETRIES were exhausted (daemon alive but eviction won every retry window). Non-zero means -EIO from capacity pressure, not data corruption.", "counter", Global.UpcallRetryExhausted.Load()},
+		{"s3fs_ebpf_upcall_timeout_total", "U11: .read_folio upcall waits that timed out before daemon signal (goroutine-pool back-pressure). U11 retries these instead of falling to gen=0 with NULL buf.", "counter", Global.UpcallTimeouts.Load()},
+		{"s3fs_ebpf_gen0_fail_buf_null_total", "D-diag: gen=0 fallback failures where fd->buf==NULL (never populated or eviction cleared buf before U10 set buf_readers).", "counter", Global.Gen0FailBufNull.Load()},
+		{"s3fs_ebpf_gen0_fail_bitmap_total", "D-diag: gen=0 fallback failures where bitmap bit not set (chunk not yet populated in fd->buf).", "counter", Global.Gen0FailBitmap.Load()},
+		{"s3fs_ebpf_gen0_fail_other_total", "D-diag: gen=0 fallback failures for other reasons (pos >= fd->size or ci >= 64).", "counter", Global.Gen0FailOther.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},

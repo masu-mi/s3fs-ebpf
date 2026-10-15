@@ -1259,6 +1259,18 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 					if len(vals) >= 6 {
 						metrics.Global.UpcallRetryExhausted.Store(vals[5])
 					}
+					if len(vals) >= 7 {
+						metrics.Global.UpcallTimeouts.Store(vals[6])
+					}
+					if len(vals) >= 8 {
+						metrics.Global.Gen0FailBufNull.Store(vals[7])
+					}
+					if len(vals) >= 9 {
+						metrics.Global.Gen0FailBitmap.Store(vals[8])
+					}
+					if len(vals) >= 10 {
+						metrics.Global.Gen0FailOther.Store(vals[9])
+					}
 				}
 			}
 
