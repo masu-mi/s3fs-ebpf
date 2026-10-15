@@ -2863,9 +2863,21 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 			 * write/flush path; bypass the bitmap entirely. */
 			buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
 		} else if (gen != 0) {
-			/* T2: pcache entry existence (verified by S1 below)
-			 * is the correctness proof; no bitmap needed. */
-			buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
+			/* T2: for ci >= 64 (files > 256 MiB) the bitmap has no
+			 * bit, so skip it — R1 invariant ensures fd->buf covers
+			 * any range with a live pcache entry.
+			 * For ci < 64 restore the bitmap guard: after eviction +
+			 * partial re-populate the reserve() memset leaves chunks
+			 * not yet fetched as zeros; the pcache entry is only
+			 * inserted after copy_from_user succeeds, so a set bit
+			 * is the reliable proof that the data is present. */
+			if (ci < 64)
+				buf_valid = fd->buf != NULL &&
+					    (size_t)pos < fd->size &&
+					    (fd->populated_chunks & (1ULL << ci));
+			else
+				buf_valid = fd->buf != NULL &&
+					    (size_t)pos < fd->size;
 		} else {
 			buf_valid = fd->buf != NULL &&
 				    (size_t)pos < fd->size &&
