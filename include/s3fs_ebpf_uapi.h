@@ -101,8 +101,19 @@ struct s3fs_signal_admit {
 	__u64 ino;
 	__u64 chunk_offset;   /* chunk boundary; 0 for full-file admits */
 	__s32 err;
-	__u32 _pad;
+	__u32 flags;          /* S3FS_SIGNAL_* */
 };
+
+/*
+ * AC-45: with err == 0, only wake the waiter if the 4 MiB chunk at
+ * chunk_offset is actually cached (allocated and populated) in the ino's
+ * fd; otherwise leave the waiter asleep and return -EAGAIN so the daemon
+ * can populate again.  Without this a handler whose data was evicted
+ * between its populate and its signal wakes the reader with nothing to
+ * read, and under frequent eviction the reader burns its retries on such
+ * stale wakeups (pcache mode only: arena admits keep no chunk).
+ */
+#define S3FS_SIGNAL_VERIFY_POPULATED	0x1u
 
 #define S3FS_IOC_SIGNAL_ADMIT \
 	_IOW(S3FS_IOC_MAGIC, 0x03, struct s3fs_signal_admit)

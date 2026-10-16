@@ -177,7 +177,8 @@ static long s3fs_dev_signal_admit(void __user *uarg)
 
 	if (copy_from_user(&sig, uarg, sizeof(sig)))
 		return -EFAULT;
-	return s3fs_ebpf_signal_admit(sig.ino, sig.chunk_offset, sig.err);
+	return s3fs_ebpf_signal_admit(sig.ino, sig.chunk_offset, sig.err,
+				       sig.flags);
 }
 
 /*
