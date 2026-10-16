@@ -7,10 +7,13 @@
 # bits, buf_valid was always false for dirty inodes — every read_folio call on a
 # user-written file returned -EIO.
 #
-# Three sub-tests are covered:
+# Five sub-tests are covered:
 #   1. echo / cat round-trip on a newly-created file
 #   2. Append that crosses the 4 MiB chunk boundary (sha256 check)
 #   3. Truncate-extend (setattr ATTR_SIZE grow) then write + read
+#   4. Flush to S3 (content verified in MinIO) → drop_caches → re-read
+#   5. drop_caches right after close, before the flush PUT (W1: data must
+#      survive inode eviction and still reach S3)
 #
 # The daemon does NOT need to be running for these tests: .write works entirely
 # in-kernel (fd->buf), and the read-back path uses the dirty fast-path added by
@@ -140,11 +143,32 @@ else
     exit 1
 fi
 
+# ── helpers for sub-tests 4/5: MinIO object content ─────────────────────────
+docker exec "$MINIO_CONTAINER" mc alias set local http://localhost:9000 \
+    minioadmin minioadmin >/dev/null 2>&1
+
+minio_sha() {
+    docker exec "$MINIO_CONTAINER" mc cat "local/$S3_BUCKET/$1" 2>/dev/null \
+        | sha256sum | awk '{print $1}'
+}
+
+# Wait (up to $3 s) until the MinIO object's content matches sha $2.
+# Existence alone is not enough: an object left over from an earlier run
+# satisfies `mc stat` before the daemon's PUT has happened.
+wait_minio_sha() {
+    local key=$1 want=$2 timeout=$3
+    for _ in $(seq 1 "$timeout"); do
+        [ "$(minio_sha "$key")" = "$want" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
 # ── sub-test 4: flush to S3, drop page cache, re-read (U5 path) ──────────────
 # Writes a file and closes it (triggering async flush to S3).  Waits for the
-# daemon to PUT the object to MinIO, then drops the VFS page cache so the next
-# read must go through the miss path (dirty=false, bitmap possibly empty).
-# Verifies that content is still correct after a cold re-read via daemon upcall.
+# daemon's PUT to land with the new content, then drops the VFS page cache so
+# the next read must go through the miss path (dirty=false, bitmap possibly
+# empty).  Verifies that content is still correct after a cold re-read.
 log "sub-test 4: flush → drop_caches → re-read (bitmap-empty path)"
 TEST4_FILE="$MOUNT/t4-flush-reread.bin"
 TEST4_KEY="t4-flush-reread.bin"
@@ -156,23 +180,11 @@ log "  reference sha256: $ORIG4_HASH"
 # Write and close (triggers fire-and-forget flush)
 sudo dd if="$ORIG4" of="$TEST4_FILE" bs=65536 2>/dev/null
 
-# Poll MinIO until the daemon's PUT lands (up to 30s)
-docker exec "$MINIO_CONTAINER" mc alias set local http://localhost:9000 \
-    minioadmin minioadmin >/dev/null 2>&1
-FLUSH_OK=false
-for _ in $(seq 1 30); do
-    if docker exec "$MINIO_CONTAINER" mc stat \
-            "local/$S3_BUCKET/$TEST4_KEY" >/dev/null 2>&1; then
-        FLUSH_OK=true
-        break
-    fi
-    sleep 1
-done
-if ! $FLUSH_OK; then
-    log "  sub-test 4 FAIL: flush timeout — MinIO object not found after 30s"
+if ! wait_minio_sha "$TEST4_KEY" "$ORIG4_HASH" 30; then
+    log "  sub-test 4 FAIL: flush timeout — MinIO content != reference after 30s"
     exit 1
 fi
-log "  flush confirmed in MinIO"
+log "  flush confirmed in MinIO (content matches)"
 
 # Drop VFS page cache — next read must re-fetch via daemon upcall
 echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
@@ -186,6 +198,36 @@ else
     exit 1
 fi
 
+# ── sub-test 5: drop_caches BEFORE the flush PUT (W1 regression) ─────────────
+# Close, then drop caches immediately — while the daemon's coalescer still
+# holds the flush event.  Before W1, drop_caches evicted the inode and
+# evict_inode freed the unflushed fd->buf: the PUT never happened (daemon log
+# "read dirty: no such file or directory") and the re-read returned whatever
+# S3/arena held before.  Overwrites an existing object so stale content is
+# distinguishable from the new write.
+log "sub-test 5: write → close → drop_caches before PUT → S3 + re-read"
+TEST5_FILE="$MOUNT/t5-evict-before-flush.bin"
+TEST5_KEY="t5-evict-before-flush.bin"
+ORIG5="$TMPDIR_LOCAL/orig5.bin"
+dd if=/dev/urandom bs=65536 count=16 iflag=fullblock 2>/dev/null > "$ORIG5"
+ORIG5_HASH=$(sha256sum "$ORIG5" | awk '{print $1}')
+log "  reference sha256: $ORIG5_HASH"
+
+sudo dd if="$ORIG5" of="$TEST5_FILE" bs=65536 2>/dev/null
+echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+
+READ5_HASH=$(sudo sha256sum "$TEST5_FILE" | awk '{print $1}')
+log "  re-read sha256:   $READ5_HASH"
+if [ "$READ5_HASH" != "$ORIG5_HASH" ]; then
+    log "  sub-test 5 FAIL: re-read mismatch — unflushed write lost on inode eviction"
+    exit 1
+fi
+if ! wait_minio_sha "$TEST5_KEY" "$ORIG5_HASH" 30; then
+    log "  sub-test 5 FAIL: MinIO content != reference after 30s — flush lost on inode eviction"
+    exit 1
+fi
+log "  sub-test 5 PASS"
+
 # ── report ────────────────────────────────────────────────────────────────────
 {
 echo ""
@@ -196,6 +238,7 @@ echo "sub-test 1 (echo/cat new file)             : PASS"
 echo "sub-test 2 (cross-chunk write/read)        : PASS"
 echo "sub-test 3 (truncate-extend + write)       : PASS"
 echo "sub-test 4 (flush+drop_caches re-read)     : PASS"
+echo "sub-test 5 (drop_caches before flush PUT)   : PASS"
 echo ""
 echo "OVERALL: PASS"
 echo "=============================================================="
