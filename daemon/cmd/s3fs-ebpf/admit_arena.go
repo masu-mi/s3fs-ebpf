@@ -651,6 +651,19 @@ const (
 	seqAdmitRatioThreshold = 0.70
 )
 
+// fullAdmitExceedsCapacity reports whether promoting a miss to a full-file
+// GET would populate more than kmod's capacity_bytes holds (AC-45).  In
+// pcache mode the whole body lands in fd chunks before any eviction can
+// run, so a file larger than the capacity would only be populated to be
+// evicted again; such files keep the chunk-by-chunk admit.
+func fullAdmitExceedsCapacity(fullSize int64) bool {
+	if !arenaMetadataOnlyEnabled {
+		return false
+	}
+	c, ok := capacityBytesFn()
+	return ok && c > 0 && fullSize > c
+}
+
 // patternAwareAdmitEnabled gates the R-01 sequential-pattern logic in
 // handleReadMiss. Set once by main before any goroutine reads it.
 var patternAwareAdmitEnabled bool
@@ -711,7 +724,8 @@ func handleReadMiss(ctx context.Context, devPath string,
 	var err error
 	isLarge := fullSize > 0 && fullSize > partialAdmitThreshold
 	useFullAdmit := !isLarge // small files always use full admit
-	if !useFullAdmit && patternAwareAdmitEnabled && progs != nil {
+	if !useFullAdmit && patternAwareAdmitEnabled && progs != nil &&
+		!fullAdmitExceedsCapacity(fullSize) {
 		if pat, ok := progs.ReadAccessPattern(ev.Ino); ok && pat.SeqRatio() >= seqAdmitRatioThreshold {
 			useFullAdmit = true
 			fmt.Printf("[upcall] ino=%d %s seq_ratio=%.2f PROMOTE_SIGNAL=pattern-aware full admit (%d bytes)\n",

@@ -1479,3 +1479,31 @@ evict-race の fd_buf_peak は 36 MiB のまま。ピークの削減は C3 (chun
 | wtinylfu_full_ops | 52.95% | 34.15% |
 
 pcache モードは capacity (352 B ≒ 7 ファイル) を無視して page cache に溜めていたので、capacity 内の hit_rate ではなかった。§16 の記録でも、pcache は arena より 60pp 以上高い 94% (evictions=0) だった。C2 で capacity が効くようになり、arena モードの水準 (27〜35%、§12.3 / §18.1) と同じになった。最適値 (opt) 64% に対して、policy ごとの差が再び意味を持つ。以後、pcache モードの hit_rate は capacity が効いた値として比べること。
+
+### 18.21 AC-45 C3: chunk 単位の pin と shed (2026-10-16)
+
+**変更 (`kmod/vfs_ops.c`、`daemon/cmd/s3fs-ebpf/admit_arena.go`)**:
+- U8 を chunk 単位にした。`fd->buf_readers` をやめて `chunks[ci].readers` にし、reader は pos を含む chunk を、pending を作る前に pin する。`s3fs_file_data_reset` は pin されていない chunk だけを free し、pin された chunk があれば table と `fd->size` を保つ。
+- `s3fs_ino_shed_unpinned` (新規): miss が in-flight の ino は丸ごとは evict しないが、`readers == 0` の chunk を (重なる PCACHE entry を先に落として) free し、その範囲の page cache も落とす。capacity の pass がこれを呼ぶ。
+- data-based fill: 起こされたあと、entry がなくても chunk が populated なら chunk から folio を埋める。埋めたときは entry を入れ直す。
+- daemon: capacity より大きいファイルは、pattern-aware の全体 admit にしない。
+
+**途中で見つけて直したバグ**: 最初の C3 では、pending の ino も丸ごと evict の対象に戻した。すると populate 直後の ino の entry が落とされ、pin された chunk だけが残り、起こされた reader が chunk から folio を埋めて、entry のない (capacity の計算にも evict にも入らない) キャッシュが page cache に残った。bench-hitrate で一部の policy (observe、wtinylfu 系、time_decay) の hit_rate が 82〜84% (最適値 64% を超える) になって気づいた。pending の ino は丸ごとは evict せず、idle な chunk だけを shed する形に直し、data-based fill には entry の入れ直しを加えた。
+
+**結果**:
+
+| 項目 | C2 | C3 |
+|---|---|---|
+| test-pcache-capacity-seq (40 MiB のファイルを順に読む、capacity 12 MiB) の fd_buf ピーク | 40 MiB (FAIL) | **12 MiB** (PASS)。chunk 単位 / 自動 (pattern-aware) の両方 |
+| test-pcache-evict-race-short (6 回) の fd_buf_peak | 36 MiB | **17〜22 MiB** |
+| 同 retry_exh_delta | 124〜160 | **0** |
+| 同 read_err | 0 | 0 |
+| bench-hitrate pcache (seed=42) | 26.2〜34.2% | 25.7〜34.7% (C2 と同じ水準) |
+| bench-ab-pcache | a 0.92 / b 15.1 ms / c PASS | a 0.91 (5688k / 6223k) / b PASS (14.4 vs 17.4 ms) / c PASS |
+| cold read 100 / 300 MiB | 0.235〜0.274 / 0.650〜0.789 s (C1) | 0.234〜0.286 / 0.686〜0.839 s |
+
+evict-race のピークが capacity 4 MiB まで下がらないのは、reader 32 本が 4 つのファイルの全 chunk を同時に待ち、待たれている chunk は pin されて守られるため。目標は「capacity + 待たれている chunk の数 × 4 MiB」で、実測はその範囲内。retry が尽きなくなったのは、起こされたあとの data-based fill で、entry が落とされていても upcall し直さずに済むため。
+
+**C4 (populate 前の受け入れ待ち) は入れない**: ピークは上の目標の範囲内に収まり、read は待たされずに通る。
+
+**make test-regression (11 本、test-pcache-capacity-seq を含む)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0。
