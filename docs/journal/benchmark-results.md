@@ -1270,3 +1270,25 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 | 修正後 | `[admit] 0 entries` | PASS (dmesg に `admit cleared mm=... (daemon)`) |
 
 **make test-regression (8 本、test-pcache-prewarm-none を含む)**: 全 PASS、exit 0。M2 の `fd_buf_audit` は全テストで drift 0。evict-race-short は sha256_fail=0、read_err=0、retry_exh_delta=0。capacity-tail は fd_buf_settled 9 MiB ≤ capacity 12 MiB。capacity-tail は引き続き目印だけの prewarm を使う (AC-44 の回避のため)。
+
+### 18.14 AC-46: populate の再確保を倍々にする (2026-10-16)
+
+**修正**: `s3fs_file_data_reserve` の `bool exact` を `size_t grow_limit` に置き換えた。populate は `grow_limit = max(populate 終端, i_size)` を渡し、新しい cap は `max(needed, min(2 × cap, grow_limit))` になる。write / setattr は `grow_limit = 0` で従来どおり切り上げる。
+
+- 4 MiB chunk ずつ順に読むと cap は 4 → 8 → 16 → … → 256 → 300 MiB と増え、memcpy の合計は O(n) (300 MiB で約 0.5 GiB、従来は約 11 GiB)。
+- 初回 (cap=0) と、i_size に届いたときは needed ちょうどになる。46 B のファイルや capacity-tail の 9 MiB 末尾読みは従来と同じサイズ。全体を読み終えた buf は i_size ちょうど。
+- `grow_limit` に populate 終端を含めるので 0 にならず (i_size=0 でも write 用の切り上げに入らない)、i_size が古くて小さい場合も needed を下回らない。
+- 途中まで読んだファイルは、読み込み済み範囲の最大で約 2 倍を確保し、容量判定 (`fd->cap`) もその分を数える。
+
+**cold read (pcache モード、prewarm: false、object ごとに mount + daemon を作り直す、3 回)**:
+
+| kmod | 100 MiB | 300 MiB | 300 / 100 |
+|---|---:|---:|---:|
+| 修正前 (cd0e125) | 0.420〜0.429 s | 2.332〜2.351 s | 5.5 |
+| 修正後 | 0.266〜0.277 s | 0.770〜0.793 s | 2.9 |
+
+修正前の数字は §18.12 (0.419〜0.441 s / 2.378〜2.410 s) と同じ水準。sha256 は全回一致。
+
+**make test-regression (8 本)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0。evict-race-short は sha256_fail=0、read_err=0、retry_exh_delta=0、fd_buf_peak 36 MiB (AC-45 と同じ値で、悪化していない)。capacity-tail は fd_buf_settled 9 MiB ≤ capacity 12 MiB。
+
+**large-file-read の監査値が 0 → 300 MiB に変わった件**: 回帰ではない。bpftrace で `s3fs_ebpf_evict_inode` を見ると、修正前も修正後も 300 MiB の inode は daemon の `entries_replace` ioctl → `shrink_dcache_sb` → `iput` で回収されている。修正前は read が遅く、`fd_buf_audit` が値の安定を待つ間にこの回収が起きて 0 になっていた。修正後は read が速くなり、監査が先に終わってから回収されるので 300 MiB (= i_size ちょうど) と出る。どちらも gauge == walk。test-evict-readback の監査値 (0 / 9 MiB) は修正前から実行ごとにばらつく。

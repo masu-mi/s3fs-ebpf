@@ -1936,8 +1936,9 @@ static inline bool s3fs_fd_buf_owned(struct inode *inode)
 
 /* AC-41: bytes actually allocated for ino's fd->buf.  The capacity loop
  * charges pcache inos by this instead of their admitted chunk sizes:
- * s3fs_file_data_reserve sizes fd->buf to the populate end, so one tail
- * chunk admits 4 MiB but allocates the whole file.  Lockless read —
+ * s3fs_file_data_reserve sizes fd->buf to at least the populate end (and,
+ * AC-46, up to 2x cap bounded by the file size), so one tail chunk admits
+ * 4 MiB but allocates the whole file.  Lockless read —
  * accounting only.  Must be called without s3fs_admits_lock held (iput). */
 static u64 s3fs_ino_buf_bytes(u64 ino)
 {
@@ -2748,11 +2749,16 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
  * than triggering the page allocator's "order too large" WARN. dd
  * bs=10M count=1 was reproducing that WARN with plain krealloc.
  *
- * AC-41: `exact` allocates exactly `needed` (read-path populate: the size
- * is final, and capacity is charged by fd->cap, so a 46 B object must not
- * cost 4 KiB of budget).  Writes keep the rounding for amortized growth. */
+ * AC-41/AC-46: a non-zero `grow_limit` selects read-path populate growth:
+ * max(needed, min(2 * cap, grow_limit)), with grow_limit = the file size.
+ * Doubling keeps the copies of a chunk-by-chunk sequential populate O(n)
+ * (exact growth copied the whole buf per 4 MiB chunk: ~11 GiB for 300 MiB).
+ * The first populate (cap 0) and anything capped by the file size get
+ * exactly what is needed, so a 46 B object still costs 46 B of capacity
+ * (charged by fd->cap).  grow_limit == 0 (write/setattr) keeps the
+ * rounding for amortized growth. */
 static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed,
-				  bool exact)
+				  size_t grow_limit)
 {
 	size_t new_cap;
 	u8 *newbuf;
@@ -2762,8 +2768,9 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed,
 
 	/* Round up to 4 KiB slab class for small growth; > 4 MiB rounds
 	 * to 2 MiB (vmalloc granularity) to keep amortized alloc cheap. */
-	if (exact)
-		new_cap = needed;
+	if (grow_limit)
+		new_cap = max(needed, fd->cap < grow_limit / 2 ?
+				      fd->cap * 2 : grow_limit);
 	else if (needed >= (4UL << 20))
 		new_cap = round_up(needed, 2UL << 20);
 	else
@@ -2832,8 +2839,11 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		err = -EBUSY;
 		goto out_unlock;
 	}
-	/* `end` (= offset + size) was validated above; safe to cast. */
-	err = s3fs_file_data_reserve(fd, (size_t)end, true);
+	/* `end` (= offset + size) was validated above; safe to cast.
+	 * AC-46: grow toward the file size; `end` keeps the limit non-zero
+	 * (and covers a stale i_size smaller than the populate range). */
+	err = s3fs_file_data_reserve(fd, (size_t)end,
+				     (size_t)max_t(u64, end, i_size_read(inode)));
 	if (err)
 		goto out_unlock;
 
@@ -2961,7 +2971,7 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 		goto out;
 	}
 
-	err = s3fs_file_data_reserve(fd, start + count, false);
+	err = s3fs_file_data_reserve(fd, start + count, 0);
 	if (err)
 		goto out;
 
@@ -3007,7 +3017,7 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 			fd->size = new_size;
 			fd->dirty = true;
 		} else if (new_size > (loff_t)fd->size) {
-			err = s3fs_file_data_reserve(fd, new_size, false);
+			err = s3fs_file_data_reserve(fd, new_size, 0);
 			if (err) {
 				mutex_unlock(&fd->lock);
 				return err;
