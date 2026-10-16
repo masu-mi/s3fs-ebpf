@@ -29,6 +29,7 @@ FUSE_CACHE_DIR=/tmp/s3fs-fuse-cache
 EBPF_CACHE_DIR=/tmp/s3fs-ebpf-cache
 WARMUP=${WARMUP:-1}
 RUNS=${RUNS:-5}
+DAEMON_EXTRA_FLAGS=${DAEMON_EXTRA_FLAGS:-}  # e.g. --arena-metadata-only for AB-09
 
 mkdir -p "$OUT_DIR" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
 sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
@@ -54,8 +55,10 @@ start_fuse_cache() {
 start_ebpf() {
 	log "load kmod + mount ebpf + start daemon"
 	ebpf_mount "$MP_EBPF"
+	# shellcheck disable=SC2086
 	ebpf_start_daemon "$OUT_DIR/fastpath.log" \
-		--cache-dir="$EBPF_CACHE_DIR" --sample-every=60s --sync-every=60s
+		--cache-dir="$EBPF_CACHE_DIR" --sample-every=60s --sync-every=60s \
+		$DAEMON_EXTRA_FLAGS
 }
 
 stop_all() {

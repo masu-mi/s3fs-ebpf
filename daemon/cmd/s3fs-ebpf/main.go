@@ -404,6 +404,12 @@ func runFastpath(args []string) int {
 			"large-file reads. Fires when s3fs_read_pattern_map shows SeqRatio ≥ 0.70 "+
 			"and the read position is within 2 MiB of the admitted range boundary. "+
 			"Requires --pattern-aware-admit (incompatible with --no-read-iter-hook).")
+	arenaMetadataOnly := fs.Bool("arena-metadata-only", false,
+		"[AB-04] store S3 object data in the kernel page cache (via fd->buf) instead of "+
+			"the BPF arena. Reads are served by generic_file_read_iter from the page "+
+			"cache — no GUP per page. Eliminates the 1.7µs/page GUP overhead at the "+
+			"cost of one extra copy on admit. Does not require BPF arena allocation. "+
+			"Prewarm warms metadata only; bodies are fetched on the first read (AC-44).")
 	wtinylFUAgeInterval := fs.Uint64("wtinylfu-age-interval", 512,
 		"[Z-01] W-TinyLFU CMS aging interval: halve all CMS counters every N on_hit calls. "+
 			"Lower values age faster (suit short bench runs); higher values age slower "+
@@ -485,6 +491,7 @@ func runFastpath(args []string) int {
 	}
 	patternAwareAdmitEnabled = *patternAdmit
 	prefetchSeqEnabled = *prefetchSeq
+	arenaMetadataOnlyEnabled = *arenaMetadataOnly
 
 	if err := SetInoStatePath(*inoState); err != nil {
 		fmt.Fprintf(os.Stderr, "ino-state: %v\n", err)
@@ -1055,6 +1062,15 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 			Size: entry.Fallback, Mode: entry.Mode,
 		})
 	}
+	// AC-44: --arena-metadata-only keeps object bodies out of the arena;
+	// content reaches fd->buf on the first read via upcall + POPULATE_PAGES.
+	// Staging the body here would make it an arena admit that consumes
+	// capacity_bytes (and bypass the pcache path) for every listed object.
+	// POPULATE_PAGES cannot be used instead: the inode does not exist yet.
+	pcacheSkip := wantPrewarm && arenaMetadataOnlyEnabled
+	if pcacheSkip {
+		wantPrewarm = false
+	}
 
 	// Step 1 — metadata warm (unconditional). Prefer S3-authoritative
 	// size/mtime when reachable; fall back to the bootstrap entry
@@ -1097,8 +1113,12 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 
 	// Step 2 — content admit (policy-gated).
 	if !wantPrewarm {
-		fmt.Printf("[prewarm] ino=%d name=%s content-skip (policy=false, stat=warm, cat=PathC)\n",
-			entry.Ino, entry.Name)
+		reason := "policy=false"
+		if pcacheSkip {
+			reason = "arena-metadata-only"
+		}
+		fmt.Printf("[prewarm] ino=%d name=%s content-skip (%s, stat=warm, cat=PathC)\n",
+			entry.Ino, entry.Name, reason)
 		return admitEntry{}, false
 	}
 	if body == nil {
@@ -1243,6 +1263,37 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 					}
 					if len(vals) >= 3 {
 						metrics.Global.AdmitInvalidations.Store(vals[2])
+					}
+					if len(vals) >= 4 {
+						metrics.Global.GupCallsTotal.Store(vals[3])
+					}
+					if len(vals) >= 5 {
+						metrics.Global.GupNsTotal.Store(vals[4])
+					}
+					if len(vals) >= 6 {
+						metrics.Global.UpcallRetryExhausted.Store(vals[5])
+					}
+					if len(vals) >= 7 {
+						metrics.Global.UpcallTimeouts.Store(vals[6])
+					}
+					if len(vals) >= 8 {
+						metrics.Global.Gen0FailBufNull.Store(vals[7])
+					}
+					if len(vals) >= 9 {
+						metrics.Global.Gen0FailBitmap.Store(vals[8])
+					}
+					if len(vals) >= 10 {
+						metrics.Global.Gen0FailOther.Store(vals[9])
+					}
+					if len(vals) >= 11 {
+						metrics.Global.FdBufBytes.Store(vals[10])
+					}
+					if len(vals) >= 12 {
+						metrics.Global.ResetSkipped.Store(vals[11])
+					}
+					if len(vals) >= 14 {
+						metrics.Global.FdBufWalkBytes.Store(vals[12])
+						metrics.Global.FdBufPcacheBytes.Store(vals[13])
 					}
 				}
 			}

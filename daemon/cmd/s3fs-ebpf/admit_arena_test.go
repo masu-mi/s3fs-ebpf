@@ -154,6 +154,69 @@ func TestPlanReplaceAdmit_MultiRangeFreesAllChunks(t *testing.T) {
 	}
 }
 
+// TestPlanReplaceAdmitRange_KeepsOtherChunks is the AC-49 regression test: a
+// chunk admit of an ino must leave that ino's other chunks admitted, and
+// must replace (and free) only the entry it overlaps.
+func TestPlanReplaceAdmitRange_KeepsOtherChunks(t *testing.T) {
+	const arenaBase uint64 = 0x100000
+	const chunk = 4 << 20
+	admits := []admitEntry{
+		{Ino: 42, Uaddr: arenaBase + 0, Size: chunk, Offset: 0},
+		{Ino: 42, Uaddr: arenaBase + chunk, Size: chunk, Offset: chunk},
+		{Ino: 7, Uaddr: arenaBase + 3*chunk, Size: 100, Offset: 0}, // other ino
+	}
+
+	// Admit chunk 2 of ino 42: nothing overlaps, nothing is freed.
+	fresh := admitEntry{Ino: 42, Uaddr: arenaBase + 4*chunk, Size: 2 << 20, Offset: 2 * chunk}
+	next, freed := planReplaceAdmitRange(append([]admitEntry(nil), admits...), fresh, arenaBase)
+	if len(next) != 4 {
+		t.Fatalf("len(next) = %d, want 4 (all kept + the new range): %+v", len(next), next)
+	}
+	if len(freed) != 0 {
+		t.Fatalf("freed = %v, want none", freed)
+	}
+
+	// Re-admit chunk 1 (e.g. after an eviction round trip): only the old
+	// chunk 1 entry is replaced and its arena bytes freed.
+	again := admitEntry{Ino: 42, Uaddr: arenaBase + 9*chunk, Size: chunk, Offset: chunk}
+	next, freed = planReplaceAdmitRange(append([]admitEntry(nil), admits...), again, arenaBase)
+	if len(next) != 3 {
+		t.Fatalf("len(next) = %d, want 3: %+v", len(next), next)
+	}
+	if len(freed) != 1 || freed[0].offset != chunk || freed[0].size != chunk {
+		t.Fatalf("freed = %v, want exactly the old chunk-1 bytes", freed)
+	}
+	if next[len(next)-1] != again {
+		t.Fatalf("new entry not appended last: %+v", next)
+	}
+
+	// A whole-object admit overlaps every range of its ino, like
+	// planReplaceAdmit, and still leaves other inos alone.
+	whole := admitEntry{Ino: 42, Uaddr: arenaBase + 20*chunk, Size: 3 * chunk, Offset: 0}
+	next, freed = planReplaceAdmitRange(append([]admitEntry(nil), admits...), whole, arenaBase)
+	if len(next) != 2 || len(freed) != 2 {
+		t.Fatalf("whole-object admit: next=%+v freed=%v, want 2 entries and 2 frees", next, freed)
+	}
+}
+
+func TestRangesOverlap(t *testing.T) {
+	for _, c := range []struct {
+		aOff, aSize, bOff, bSize uint64
+		want                     bool
+	}{
+		{0, 10, 10, 10, false}, // adjacent
+		{0, 10, 9, 10, true},
+		{5, 10, 0, 100, true}, // contained
+		{0, 0, 0, 10, false},  // empty
+		{20, 5, 0, 10, false},
+	} {
+		if got := rangesOverlap(c.aOff, c.aSize, c.bOff, c.bSize); got != c.want {
+			t.Errorf("rangesOverlap(%d,%d,%d,%d) = %v, want %v",
+				c.aOff, c.aSize, c.bOff, c.bSize, got, c.want)
+		}
+	}
+}
+
 // TestReplaceAdmit_ConcurrentPushIsSerialized pins the H-04 fix: the
 // prior implementation released admitMu before issuing admitArena, so
 // two concurrent mutators could snapshot cleanly and then race their
@@ -479,5 +542,64 @@ func TestSeqPrefetchNext(t *testing.T) {
 	// fullSize == 0 (unknown) → no prefetch.
 	if got := seqPrefetchNext(c0, chunk-1, 0); got != -1 {
 		t.Errorf("fullSize=0: want -1, got %d", got)
+	}
+}
+
+// TestEnforceCapacityAfterPopulate pins the AC-45 C2 policy: no pass when
+// kmod is not in capacity mode, and concurrent misses share a single
+// follow-up pass instead of one pass each.
+func TestEnforceCapacityAfterPopulate(t *testing.T) {
+	origFn, origCap := capacityEnforceFn, capacityBytesFn
+	defer func() { capacityEnforceFn, capacityBytesFn = origFn, origCap }()
+
+	var calls int32
+	capacityEnforceFn = func(string) (int, error) {
+		atomic.AddInt32(&calls, 1)
+		return 0, nil
+	}
+
+	for name, fn := range map[string]func() (int64, bool){
+		"capacity off":    func() (int64, bool) { return 0, true },
+		"param missing":   func() (int64, bool) { return 0, false },
+		"legacy (-1 val)": func() (int64, bool) { return -1, true },
+	} {
+		capacityBytesFn = fn
+		enforceCapacityAfterPopulate("/dev/null")
+		if got := atomic.LoadInt32(&calls); got != 0 {
+			t.Fatalf("%s: %d passes, want 0", name, got)
+		}
+	}
+
+	capacityBytesFn = func() (int64, bool) { return 4 << 20, true }
+	enforceCapacityAfterPopulate("/dev/null")
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("capacity mode: %d passes, want 1", got)
+	}
+
+	// While one pass is running, N more misses must collapse into one
+	// follow-up pass (2 passes total), not N.
+	atomic.StoreInt32(&calls, 0)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	capacityEnforceFn = func(string) (int, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			close(started)
+			<-release
+		}
+		return 0, nil
+	}
+	done := make(chan struct{})
+	go func() { enforceCapacityAfterPopulate("/dev/null"); close(done) }()
+	<-started
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); enforceCapacityAfterPopulate("/dev/null") }()
+	}
+	wg.Wait() // joiners return immediately
+	close(release)
+	<-done
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("coalesced: %d passes, want 2", got)
 	}
 }

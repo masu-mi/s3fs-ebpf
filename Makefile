@@ -71,7 +71,11 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
-        lint-scripts readme test-arena clean
+        lint-scripts readme test-arena \
+        test-regression test-write-readback test-large-file-read \
+        test-evict-readback test-populate-boundary \
+        test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
+        clean
 
 ## Help:
 help: ## Show this help
@@ -305,6 +309,65 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	 echo "==> rmmod s3fs_kfunc"; \
 	 $(SCRIPTS_DIR)/kmod-unload.sh s3fs_kfunc || true; \
 	 exit $$rc
+
+## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
+test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-pattern-aware-admit ## Run all regression tests
+
+test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
+	@echo "==> test-write-readback (T1/AC-22)"
+	@sudo $(SCRIPTS_DIR)/test-write-readback.sh
+
+test-large-file-read: kmod daemon ## T2/Q3: 300 MiB pcache read, sha256 must match
+	@echo "==> test-large-file-read (T2/AC-23)"
+	@sudo $(SCRIPTS_DIR)/test-large-file-read.sh
+
+test-evict-readback: kmod daemon ## Q1/S8: evict then re-read — size and content unchanged
+	@echo "==> test-evict-readback (Q1/S8/AC-24)"
+	@sudo $(SCRIPTS_DIR)/test-evict-readback.sh
+
+test-populate-boundary: kmod daemon ## P2/Q3: POPULATE ioctl boundary values — live ioctl calls (size=0, overflow, >64 MiB, valid)
+	@echo "==> test-populate-boundary (P2/Q3/AC-25)"
+	@sudo $(SCRIPTS_DIR)/test-populate-boundary.sh
+
+test-pcache-multiread: kmod daemon ## AC-01: pcache split-chunk multi-chunk read sha256 match
+	@echo "==> test-pcache-multiread (AC-01)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-multiread.sh
+
+test-pcache-evict-race: kmod daemon ## R1/S1/T3: evict-race concurrent stress (default DURATION=120s)
+	@echo "==> test-pcache-evict-race (R1/S1/T3)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-evict-race.sh
+
+test-pcache-evict-race-short: kmod daemon ## R1/S1/T3: evict-race stress (DURATION=30s, for regression suite)
+	@echo "==> test-pcache-evict-race (R1/S1/T3, short, DURATION=30)"
+	@sudo DURATION=30 TEST_NAME=test-pcache-evict-race-short $(SCRIPTS_DIR)/test-pcache-evict-race.sh
+
+test-pcache-capacity-tail: kmod daemon ## AC-41: capacity_bytes bounds fd->buf memory (tail-chunk reads)
+	@echo "==> test-pcache-capacity-tail (AC-41)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-tail.sh
+
+test-pcache-prewarm-none: kmod daemon ## AC-43: reads work in pcache mode when prewarm admits nothing
+	@echo "==> test-pcache-prewarm-none (AC-43)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-prewarm-none.sh
+
+test-arena-partial-readback: kmod daemon ## AC-48: arena chunk admits keep i_size (random-first + parallel reads, sha256)
+	@echo "==> test-arena-partial-readback (AC-48)"
+	@sudo $(SCRIPTS_DIR)/test-arena-partial-readback.sh
+
+test-pcache-capacity-noeval: kmod daemon ## AC-45: capacity_bytes bounds fd->buf without any policy eval (full reads, 4 x 9 MiB)
+	@echo "==> test-pcache-capacity-noeval (AC-45)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-noeval.sh
+
+test-pcache-capacity-seq: kmod daemon ## AC-45: a file larger than capacity_bytes read front to back stays within capacity (40 MiB vs 12 MiB)
+	@echo "==> test-pcache-capacity-seq (AC-45)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-seq.sh
+
+test-write-existing: kmod daemon ## AC-50: write/truncate/append on an unread existing object keeps the rest (pcache + arena)
+	@echo "==> test-write-existing (AC-50)"
+	@sudo $(SCRIPTS_DIR)/test-write-existing.sh
+
+test-pattern-aware-admit: kmod daemon ## R-01/AC-47: the fentry's access pattern still drives full-file promotion (seq, random, parallel, off)
+	@echo "==> test-pattern-aware-admit (AC-47)"
+	@sudo $(SCRIPTS_DIR)/test-pattern-aware-admit.sh
 
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts

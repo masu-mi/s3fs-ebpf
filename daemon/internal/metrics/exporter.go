@@ -29,8 +29,9 @@ type Counters struct {
 
 	// Week 4 (a) C: on-demand read-miss upcall handled by the daemon.
 	// Bumped from admit_arena.go:handleReadMiss.
-	ReadMissUpcalls  atomic.Uint64 // counter
-	ReadMissErrors   atomic.Uint64 // counter (S3 Get failed, admit failed, etc.)
+	ReadMissUpcalls     atomic.Uint64 // counter
+	ReadMissErrors      atomic.Uint64 // counter (S3 Get failed, admit failed, etc.)
+	ReadMissRepopulates atomic.Uint64 // counter (AC-45: chunk evicted before the success signal, populated again)
 
 	// Week 4 (b): dynamic bucket sync loop.
 	SyncRounds         atomic.Uint64 // counter, bumped per successful sync
@@ -84,6 +85,40 @@ type Counters struct {
 	// for new or moved ranges (S3FS_IOC_STATS[2], S-01). Should track
 	// real content changes, not the number of full-list re-sends.
 	AdmitInvalidations atomic.Uint64 // counter
+
+	// AB-01: GUP (pin_user_pages_remote) call count and accumulated
+	// latency from s3fs_arena_copy_to_iter. Sourced from
+	// S3FS_IOC_STATS[3]/[4]. bench-ab-arena-vs-pagecache.sh reads
+	// these to compute mean GUP ns/call without bpftrace.
+	GupCallsTotal atomic.Uint64 // counter
+	GupNsTotal    atomic.Uint64 // counter
+
+	// T4: .read_folio calls that exhausted S3FS_UPCALL_MAX_RETRIES with
+	// the daemon alive (capacity eviction won every retry window).
+	// Sourced from S3FS_IOC_STATS[5]. Non-zero in the evict-race report
+	// means -EIO from capacity pressure, not data corruption.
+	UpcallRetryExhausted atomic.Uint64 // counter
+
+	// U11: upcall waits that timed out (remaining==0) before daemon signal.
+	// Caused by goroutine-pool back-pressure in runReadMissLoop.
+	// Sourced from S3FS_IOC_STATS[6].
+	UpcallTimeouts atomic.Uint64 // counter
+
+	// D-diag: gen=0 fallback failure reason breakdown.
+	// Sourced from S3FS_IOC_STATS[7/8/9].
+	Gen0FailBufNull atomic.Uint64 // counter — buf==NULL
+	Gen0FailBitmap  atomic.Uint64 // counter — bitmap bit not set
+	Gen0FailOther   atomic.Uint64 // counter — pos/ci range
+
+	// M1: kmod fd->buf memory vs capacity_bytes.
+	FdBufBytes   atomic.Uint64 // gauge, bytes allocated for fd->buf
+	ResetSkipped atomic.Uint64 // counter, resets that deferred the buf free
+
+	// M2: S3FS_IOC_STATS[12/13]. Walk = sum of fd->cap over live inodes
+	// (must equal FdBufBytes at rest); Pcache = what the AC-41 capacity
+	// loop charges (sum of fd->cap over distinct pcache inos).
+	FdBufWalkBytes   atomic.Uint64 // gauge
+	FdBufPcacheBytes atomic.Uint64 // gauge
 
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
@@ -180,6 +215,7 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		// Path C read-miss upcalls.
 		{"s3fs_ebpf_read_miss_upcalls_total", "Read-miss upcalls received by daemon.", "counter", Global.ReadMissUpcalls.Load()},
 		{"s3fs_ebpf_read_miss_errors_total", "Read-miss upcalls that failed (S3 Get / admit).", "counter", Global.ReadMissErrors.Load()},
+		{"s3fs_ebpf_read_miss_repopulates_total", "Read-miss populates repeated because kmod found the chunk evicted before the success signal (AC-45).", "counter", Global.ReadMissRepopulates.Load()},
 
 		// Sync loop.
 		{"s3fs_ebpf_sync_rounds_total", "Successful bucket-sync rounds.", "counter", Global.SyncRounds.Load()},
@@ -213,6 +249,24 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		// True kmod-side cache hit — read_folio served from arena.
 		{"s3fs_ebpf_folio_hits_total", "kmod-side .read_folio calls served from arena (true cache hit). Divide by (this + read_miss_upcalls_total) for hit ratio.", "counter", Global.FolioHits.Load()},
 		{"s3fs_ebpf_admit_invalidations_total", "Page-cache invalidations by admit_replace for new or moved admit ranges (unchanged ranges keep their page cache).", "counter", Global.AdmitInvalidations.Load()},
+
+		// AB-01: GUP latency diagnostics from s3fs_arena_copy_to_iter.
+		// gup_calls_total / gup_ns_total → mean ns/call. 0 when arena_bypass=1.
+		{"s3fs_ebpf_gup_calls_total", "AB-01: pin_user_pages_remote calls in s3fs_arena_copy_to_iter (1 per page per arena read).", "counter", Global.GupCallsTotal.Load()},
+		{"s3fs_ebpf_gup_ns_total", "AB-01: accumulated pin_user_pages_remote latency in nanoseconds. Divide by gup_calls_total for mean ns/call.", "counter", Global.GupNsTotal.Load()},
+
+		// T4: capacity-pressure -EIO distinguisher. Non-zero means eviction
+		// outpaced the retry loop (capacity=1 chunk + many readers). Incremented
+		// when S3FS_UPCALL_MAX_RETRIES were exhausted with the daemon alive.
+		{"s3fs_ebpf_upcall_retry_exhausted_total", "T4: .read_folio calls where S3FS_UPCALL_MAX_RETRIES were exhausted (daemon alive but eviction won every retry window). Non-zero means -EIO from capacity pressure, not data corruption.", "counter", Global.UpcallRetryExhausted.Load()},
+		{"s3fs_ebpf_upcall_timeout_total", "U11: .read_folio upcall waits that timed out before daemon signal (goroutine-pool back-pressure). U11 retries these instead of falling to gen=0 with NULL buf.", "counter", Global.UpcallTimeouts.Load()},
+		{"s3fs_ebpf_gen0_fail_buf_null_total", "D-diag: gen=0 fallback failures where fd->buf==NULL (never populated or eviction cleared buf before U10 set buf_readers).", "counter", Global.Gen0FailBufNull.Load()},
+		{"s3fs_ebpf_gen0_fail_bitmap_total", "D-diag: gen=0 fallback failures where bitmap bit not set (chunk not yet populated in fd->buf).", "counter", Global.Gen0FailBitmap.Load()},
+		{"s3fs_ebpf_gen0_fail_other_total", "D-diag: gen=0 fallback failures for other reasons (pos >= fd->size or ci >= 64).", "counter", Global.Gen0FailOther.Load()},
+		{"s3fs_ebpf_fd_buf_bytes", "M1: bytes allocated for kmod per-inode fd->buf. capacity_bytes bounds admit entries only; compare against it to spot buffers outliving their admit.", "gauge", Global.FdBufBytes.Load()},
+		{"s3fs_ebpf_fd_buf_walk_bytes", "M2: sum of fd->cap over live inodes, recomputed per poll. Differs from s3fs_ebpf_fd_buf_bytes at rest only if the gauge drifted.", "gauge", Global.FdBufWalkBytes.Load()},
+		{"s3fs_ebpf_fd_buf_pcache_bytes", "M2: fd->buf bytes the capacity loop charges (sum of fd->cap over distinct pcache inos).", "gauge", Global.FdBufPcacheBytes.Load()},
+		{"s3fs_ebpf_reset_skipped_total", "M1: fd->buf frees deferred because buf_readers > 0 (U8/U10).", "counter", Global.ResetSkipped.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},

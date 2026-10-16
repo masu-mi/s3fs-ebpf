@@ -38,7 +38,7 @@ func TestCoalesceArenaFree_MergesAdjacentChunks(t *testing.T) {
 // pseudo-arena entry sitting right below the bump line.
 func TestCoalesceArenaFree_ReturnsTailToBump(t *testing.T) {
 	free := []arenaChunk{
-		{offset: 900, size: 100},  // abuts bump allocator at 1000
+		{offset: 900, size: 100}, // abuts bump allocator at 1000
 		{offset: 100, size: 200},
 	}
 	got, nextOff := coalesceArenaFree(free, 1000)
@@ -178,4 +178,70 @@ func equalChunks(a, b []arenaChunk) bool {
 	sort.Slice(ac, func(i, j int) bool { return ac[i].offset < ac[j].offset })
 	sort.Slice(bc, func(i, j int) bool { return bc[i].offset < bc[j].offset })
 	return reflect.DeepEqual(ac, bc)
+}
+
+// TestMergeReadPatterns pins the AC-47 per-CPU merge: only slots owned by the
+// inode count, counters are summed without u32 wrap, LastEndPos is the
+// furthest end any CPU read, and the merged SeqRatio is the ratio over all
+// CPUs.
+func TestMergeReadPatterns(t *testing.T) {
+	const ino = 42
+	got, ok := mergeReadPatterns(ino, []s3fsfpS3fsInoSlot{
+		{Ino: ino, LastEndPos: 4096, SeqCount: 3, RandCount: 1, TotalBytes: 16384},
+		{},                      // CPU that never read anything
+		{Ino: 7, SeqCount: 100}, // CPU whose slot another inode took over
+		{Ino: ino, LastEndPos: 1 << 20, SeqCount: 1<<32 - 1, RandCount: 0, TotalBytes: 1 << 20},
+	})
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := ReadPattern{
+		LastEndPos: 1 << 20,
+		SeqCount:   1<<32 + 2,
+		RandCount:  1,
+		TotalBytes: 16384 + 1<<20,
+	}
+	if got != want {
+		t.Fatalf("merge = %+v, want %+v", got, want)
+	}
+
+	// A single sequential reader that migrated once: one CPU saw only
+	// the first read as sequential, the other counted its first read
+	// (stale last_end_pos) as random. The merged ratio stays above the
+	// 0.70 promote threshold.
+	rp, _ := mergeReadPatterns(ino, []s3fsfpS3fsInoSlot{
+		{Ino: ino, LastEndPos: 8 << 20, SeqCount: 16},
+		{Ino: ino, LastEndPos: 10 << 20, SeqCount: 7, RandCount: 1},
+	})
+	if r := rp.SeqRatio(); r < 0.70 {
+		t.Fatalf("SeqRatio after one migration = %.2f, want >= 0.70", r)
+	}
+	if rp.LastEndPos != 10<<20 {
+		t.Fatalf("LastEndPos = %d, want %d", rp.LastEndPos, 10<<20)
+	}
+
+	// Slots owned by other inodes (or empty) mean "not seen".
+	if _, ok := mergeReadPatterns(ino, []s3fsfpS3fsInoSlot{{Ino: 7, SeqCount: 5}, {}}); ok {
+		t.Fatal("ok = true for slots owned by other inodes")
+	}
+	if r := (ReadPattern{}).SeqRatio(); r != 0 {
+		t.Fatalf("empty SeqRatio = %v, want 0", r)
+	}
+}
+
+// TestSlotIndex pins the hash shared with the BPF side
+// (s3fs_slot_index in include/s3fs_shared_types.h): the result must stay in
+// range and spread consecutive inos (they come from a counter).
+func TestSlotIndex(t *testing.T) {
+	seen := map[uint32]int{}
+	for ino := uint64(1); ino <= 256; ino++ {
+		idx := slotIndex(ino)
+		if idx >= 1<<slotBits {
+			t.Fatalf("slotIndex(%d) = %d out of range", ino, idx)
+		}
+		seen[idx]++
+	}
+	if len(seen) < 200 { // 256 consecutive inos into 1024 slots
+		t.Fatalf("only %d distinct slots for 256 consecutive inos", len(seen))
+	}
 }

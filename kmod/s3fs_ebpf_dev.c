@@ -103,13 +103,14 @@ static long s3fs_dev_probe_kvbase(void __user *uarg)
 /*
  * S3FS_IOC_ADMIT_ARENA handler.
  *
- * count==0 clears kmod's admit table (dropping the previously held
- * mm reference). Otherwise: grab a reference on the caller's mm
- * (daemon's mm — the caller is the ioctl syscall in daemon context),
- * copy the entry array from userspace, hand both off to the vfs-side
- * admit table. Reference lifecycle: on success the mm reference
- * passes to the admit table (dropped by a future count==0 admit or by
- * module unload). On failure we drop it here.
+ * Grab a reference on the caller's mm (daemon's mm — the caller is the
+ * ioctl syscall in daemon context), copy the entry array from
+ * userspace, hand both off to the vfs-side admit table. count==0
+ * clears the arena admits (pcache entries survive) but still hands
+ * over the mm: AC-43 — an empty prewarm must arm the upcall path, which
+ * is gated on s3fs_admitted_mm. Reference lifecycle: on success the mm
+ * reference passes to the admit table (replaced by the next admit,
+ * dropped by module unload). On failure we drop it here.
  */
 static long s3fs_dev_admit_arena(void __user *uarg)
 {
@@ -121,19 +122,20 @@ static long s3fs_dev_admit_arena(void __user *uarg)
 	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
 		return -EFAULT;
 
-	if (hdr.count == 0) {
-		err = s3fs_ebpf_admit_replace(NULL, NULL, 0);
-		if (!err)
-			pr_info("s3fs_ebpf: admit cleared\n");
-		return err;
-	}
-
 	if (hdr.count > 4096)
 		return -E2BIG;
 
 	mm = get_task_mm(current);
 	if (!mm)
 		return -ESRCH;
+
+	if (hdr.count == 0) {
+		err = s3fs_ebpf_admit_replace(mm, NULL, 0);
+		if (err)
+			goto out_put_mm;
+		pr_info("s3fs_ebpf: admit cleared mm=%p (daemon)\n", mm);
+		return 0;
+	}
 
 	entries = kcalloc(hdr.count, sizeof(*entries), GFP_KERNEL);
 	if (!entries) {
@@ -175,7 +177,8 @@ static long s3fs_dev_signal_admit(void __user *uarg)
 
 	if (copy_from_user(&sig, uarg, sizeof(sig)))
 		return -EFAULT;
-	return s3fs_ebpf_signal_admit(sig.ino, sig.err);
+	return s3fs_ebpf_signal_admit(sig.ino, sig.chunk_offset, sig.err,
+				       sig.flags);
 }
 
 /*
@@ -415,6 +418,26 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			st.values[1] = (u64)atomic_long_read(&s3fs_folio_hits);
 		if (st.count > 2)
 			st.values[2] = (u64)atomic_long_read(&s3fs_admit_invalidations);
+		if (st.count > 3)
+			st.values[3] = (u64)atomic_long_read(&s3fs_gup_calls_total);
+		if (st.count > 4)
+			st.values[4] = (u64)atomic_long_read(&s3fs_gup_ns_total);
+		if (st.count > 5)
+			st.values[5] = (u64)atomic_long_read(&s3fs_upcall_retry_exhausted);
+		if (st.count > 6)
+			st.values[6] = (u64)atomic_long_read(&s3fs_upcall_timeout);
+		if (st.count > 7)
+			st.values[7] = (u64)atomic_long_read(&s3fs_gen0_fail_buf_null);
+		if (st.count > 8)
+			st.values[8] = (u64)atomic_long_read(&s3fs_gen0_fail_bitmap);
+		if (st.count > 9)
+			st.values[9] = (u64)atomic_long_read(&s3fs_gen0_fail_other);
+		if (st.count > 10)
+			st.values[10] = (u64)atomic_long_read(&s3fs_fd_buf_bytes);
+		if (st.count > 11)
+			st.values[11] = (u64)atomic_long_read(&s3fs_reset_skipped);
+		if (st.count > 13)
+			s3fs_ebpf_fd_buf_audit(&st.values[12], &st.values[13]);
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;
@@ -440,6 +463,14 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 out_free_req:
 		kfree(req);
 		return err;
+	}
+	case S3FS_IOC_POPULATE_PAGES: {
+		struct s3fs_populate_pages req;
+
+		if (copy_from_user(&req, uarg, sizeof(req)))
+			return -EFAULT;
+		return s3fs_ebpf_populate_pages(req.ino, req.offset, req.size,
+						(const void __user *)req.data_ptr);
 	}
 	default:
 		return -ENOTTY;
