@@ -1087,7 +1087,7 @@ microbench p50 / p95 / p99: arena 3.490 / 3.639 / 6.559 µs、pcache 3.588 / 3.7
 所見:
 - (a) は §14.1 (3,879k、0.64×) とほぼ同じ水準で、改善も悪化もしていない。
 - (b) は 100 MiB 条件での初めての計測で、§14.2 (10 MiB で PASS) とは直接比較できない。100 MiB では fuse-cache に対して arena も pcache も遅い。
-- (c) は 2.3% 差で、§14.3 (pcache が +0.9%) から逆転した。差は小さく、p99 は pcache の方が低いので、ノイズの範囲かは反復計測で確認が必要。
+- (c) は 2.3% 差で、§14.3 (pcache が +0.9%) から逆転した。差は小さく、p99 は pcache の方が低い。§18.10 の反復計測 (4 回中 3 回 PASS) でノイズと判断した。
 
 ### 18.3 test-pcache-multiread.sh (AC-01 回帰確認)
 
@@ -1172,3 +1172,31 @@ AC-05 の (a) は §14 以来の未達が続いている。(b)(c) は今回の 1
 > sudo ./scripts/test-evict-readback.sh    # Q1/S8 回帰 (§18.7)
 > sudo ./scripts/test-populate-boundary.sh # P2/Q3 境界値 (§18.8)
 > ```
+
+### 18.10 追加検証: U10 A/B と fd->buf メモリ (M1、2026-10-16)
+
+§18.2 の性能低下と、容量制限がバッファ側で効いていない疑いの両方について、pcache ヒット経路の `buf_readers` 増減 (U10) を外す A/B で確認した。あわせて `fd->buf` の確保量を常設メトリクスとして追加した (`0c47ff7`: `s3fs_ebpf_fd_buf_bytes` / `s3fs_ebpf_reset_skipped_total`)。
+
+**ab-pcache** (LARGE_BYTES=100 MiB、§18.2 と同じ条件、A → B → A → B の順に各 2 回):
+
+| variant | pcache IOPS | pcache ms/read (100 MiB) | pcache ops/s | gate (c) |
+|---|---:|---:|---:|---|
+| A (U10 あり) #1 / #2 | 3,980k / 3,997k | 19.715 / 19.575 | 281,250 / 280,528 | PASS / PASS |
+| B (U10 なし) #1 / #2 | 3,999k / 3,941k | 19.765 / 19.756 | 280,903 / 279,872 | PASS / FAIL |
+
+A と B の差は同じ variant の 2 回の差より小さく、ノイズの範囲。§18.2 の性能低下の原因は U10 ではない。§18.2 で (c) が FAIL したのもノイズと判断する (今回 4 回中 3 回 PASS、差は ±1% 以内)。
+
+**evict-race** (120 s、32 readers、capacity 4 MiB):
+
+| variant | read_err | retry_exh | reset_skipped | fd_buf peak | fd_buf settled |
+|---|---:|---:|---:|---:|---:|
+| A (U10 あり) | 0 | 0 | 1,086 | 40 MiB | 0 |
+| B (U10 なし) | 0 | 0 | 1,112 | 40 MiB | 0 |
+| B 最終ビルド #1 / #2 (`f44e2b4`) | 0 / 0 | 0 / 0 | 1,137 / 1,112 | 40 / 40 MiB | 0 / 0 |
+
+30 s 版 (`test-pcache-evict-race-short`) は B で 6 回実行。retry_exh は 1 回だけ 10 で、残り 5 回は 0。その 1 回も gen0_fail = 0、EIO = 0 で、gen=0 フォールバックで救えていた。
+
+結論:
+- U10 は不要と判断し削除した (`f44e2b4`、hot path で `fd->lock` を 2 回取る処理がなくなる)。計装とはコミットを分けたので、retry が増えた場合は単独で revert できる。
+- 読み込み停止後に `fd->buf` は 0 まで戻る。skip_reset で解放が遅れた buf が残り続ける状況は観測されなかった。evict-race に「停止後の fd_buf ≤ capacity_bytes」を PASS 条件として追加済み。
+- **容量制限が効いていない本当の原因は U10 ではなく buf の確保サイズ**。ピーク 40 MiB は capacity 4 MiB の 10 倍で、4 ファイル × 9 MiB をそれぞれ 2 MiB 単位に切り上げた 10 MiB ずつに当たる。`s3fs_file_data_reserve` が populate 範囲の終端まで確保するので、末尾 chunk 1 つの populate でファイル全体分の buf ができる。一方 kmod の容量判定 (`live_bytes`) は admit 済み chunk のバイト数しか数えない。対策は backlog AC-41 に記録した。
