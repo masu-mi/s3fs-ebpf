@@ -103,13 +103,14 @@ static long s3fs_dev_probe_kvbase(void __user *uarg)
 /*
  * S3FS_IOC_ADMIT_ARENA handler.
  *
- * count==0 clears kmod's admit table (dropping the previously held
- * mm reference). Otherwise: grab a reference on the caller's mm
- * (daemon's mm — the caller is the ioctl syscall in daemon context),
- * copy the entry array from userspace, hand both off to the vfs-side
- * admit table. Reference lifecycle: on success the mm reference
- * passes to the admit table (dropped by a future count==0 admit or by
- * module unload). On failure we drop it here.
+ * Grab a reference on the caller's mm (daemon's mm — the caller is the
+ * ioctl syscall in daemon context), copy the entry array from
+ * userspace, hand both off to the vfs-side admit table. count==0
+ * clears the arena admits (pcache entries survive) but still hands
+ * over the mm: AC-43 — an empty prewarm must arm the upcall path, which
+ * is gated on s3fs_admitted_mm. Reference lifecycle: on success the mm
+ * reference passes to the admit table (replaced by the next admit,
+ * dropped by module unload). On failure we drop it here.
  */
 static long s3fs_dev_admit_arena(void __user *uarg)
 {
@@ -121,19 +122,20 @@ static long s3fs_dev_admit_arena(void __user *uarg)
 	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
 		return -EFAULT;
 
-	if (hdr.count == 0) {
-		err = s3fs_ebpf_admit_replace(NULL, NULL, 0);
-		if (!err)
-			pr_info("s3fs_ebpf: admit cleared\n");
-		return err;
-	}
-
 	if (hdr.count > 4096)
 		return -E2BIG;
 
 	mm = get_task_mm(current);
 	if (!mm)
 		return -ESRCH;
+
+	if (hdr.count == 0) {
+		err = s3fs_ebpf_admit_replace(mm, NULL, 0);
+		if (err)
+			goto out_put_mm;
+		pr_info("s3fs_ebpf: admit cleared mm=%p (daemon)\n", mm);
+		return 0;
+	}
 
 	entries = kcalloc(hdr.count, sizeof(*entries), GFP_KERNEL);
 	if (!entries) {

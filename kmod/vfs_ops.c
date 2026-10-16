@@ -504,9 +504,9 @@ void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow)
 	evict_log_drain(out, cap, filled, overflow);
 }
 
-/* Reference on the daemon's mm, held while the admit table is
- * non-empty. Dropped by shutdown or by replacing the admits with
- * count=0. All entries in the table share this single mm. */
+/* Reference on the daemon's mm, set by every admit_replace that passes
+ * an mm (count=0 included, AC-43) and dropped only by admit_shutdown.
+ * Also gates the read-miss upcall. All entries share this single mm. */
 static struct mm_struct *s3fs_admitted_mm;
 
 /* Set in fill_super so admit_replace can ilookup() cached inodes and
@@ -1052,8 +1052,12 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 * fallback and break subsequent reads (P-07 hit-rate bench). The
 	 * mm pointer only gets cleared through s3fs_ebpf_admit_shutdown()
 	 * on daemon exit.
+	 *
+	 * AC-43: a count=0 call from the daemon also carries its mm, so an
+	 * empty prewarm (e.g. prewarm-meta-only.cel in pcache mode) still
+	 * arms the upcall path. Only a NULL mm keeps the previous pointer.
 	 */
-	if (count)
+	if (mm)
 		s3fs_admitted_mm = mm;
 	atomic_inc(&s3fs_admit_gen); /* AB-10: table replaced → all per-file caches stale */
 	write_unlock(&s3fs_admits_lock);
@@ -1061,9 +1065,9 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	kfree(staged); /* array itself; nodes now live in the hash */
 	staged = NULL;
 
-	/* Drop the previous mm ref only when we replaced it (count>0).
-	 * For count=0 we kept prev_mm as the active pointer — no put. */
-	if (count && prev_mm)
+	/* Drop the previous mm ref only when we replaced it (mm != NULL).
+	 * For mm=NULL we kept prev_mm as the active pointer — no put. */
+	if (mm && prev_mm)
 		mmput(prev_mm);
 
 	if (s3fs_active_sb) {
