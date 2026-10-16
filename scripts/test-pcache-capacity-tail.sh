@@ -17,8 +17,8 @@
 #      policy eval round.
 #      A generated CEL policy prewarms only a tiny sentinel object: default
 #      prewarm would stage each 9 MiB file as an arena admit and fill
-#      capacity_bytes by itself, while prewarming nothing leaves
-#      s3fs_admitted_mm unset (no admit ever lands), so no upcall can fire.
+#      capacity_bytes by itself.  (Before AC-43, prewarming nothing also
+#      left s3fs_admitted_mm unset so no upcall fired; the sentinel stays.)
 #   4. After a final eval, s3fs_ebpf_fd_buf_bytes must be <= CAPACITY.
 #
 # Usage:

@@ -1255,3 +1255,18 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 差はない。populate の終端は 4 MiB の倍数なので、2 MiB 単位に切り上げても同じサイズになり、結果は同じになる (差が出るのは末尾の端数 chunk だけ)。一方で、chunk ごとに `kvmalloc` + 全体の memcpy が起きるのはどちらでも同じで、サイズを 3 倍にすると時間は 5.7 倍になる (O(n²)。300 MiB で memcpy の合計は約 11 GiB)。これは AC-41 以前からある問題なので、AC-46 として記録する。AC-05 (b) のゲートは hyperfine の warmup 後 (page cache 上) を測るので、この影響は出ない。
 
 **hit 側コピーのロック**: `s3fs_folio_fill_from_kmalloc` は検証 (`buf_valid`、S1 の再検証) から `memcpy(fkva, fd->buf + pos, avail)` までを `fd->lock` の中で行う。`fd->buf` を差し替える reserve (populate/write/setattr) と reset もすべて `fd->lock` の中なので、U10 を外しても、再確保で古いポインタからコピーすることはない。`read_dirty` の `copy_to_user` も `fd->lock` の中。
+
+### 18.13 AC-43: prewarm が空でも upcall を有効にする (2026-10-16)
+
+**原因**: read miss の upcall は `s3fs_admitted_mm != NULL` のときだけ飛ぶ。`S3FS_IOC_ADMIT_ARENA` の count=0 経路は `admit_replace(NULL, NULL, 0)` を呼び、admit_replace も `count > 0` のときだけ mm を設定していた。prewarm が 0 件 (`prewarm: false`) だと daemon の最初の push が count=0 になり、mm が設定されないまま全 read が upcall なしで失敗する。
+
+**修正**: ioctl は count=0 でも `get_task_mm(current)` を取り、admit_replace に渡す。admit_replace は `mm != NULL` なら (count に関係なく) `s3fs_admitted_mm` を差し替え、前の参照を `mmput` する。mm=NULL の呼び出しは前の mm を保つ (現在は呼び出し元なし)。daemon 終了時の `clearAdmits` (count=0) も同じ daemon の mm を渡すだけなので、終了時の挙動は変わらない (mm を落とすのは従来どおり `admit_shutdown` だけ)。
+
+**test-pcache-prewarm-none (新規)**: 専用バケット `s3fs-prewarm-none` に小さい object と 9 MiB (3 chunk) の object を置き、`prewarm: false` の policy と `--arena-metadata-only` で起動して、両方を全体読みして sha256 を比べる。
+
+| kmod | daemon log | 結果 |
+|---|---|---|
+| 修正前 | `[admit] 0 entries` | FAIL (2 本とも空の内容が返る) |
+| 修正後 | `[admit] 0 entries` | PASS (dmesg に `admit cleared mm=... (daemon)`) |
+
+**make test-regression (8 本、test-pcache-prewarm-none を含む)**: 全 PASS、exit 0。M2 の `fd_buf_audit` は全テストで drift 0。evict-race-short は sha256_fail=0、read_err=0、retry_exh_delta=0。capacity-tail は fd_buf_settled 9 MiB ≤ capacity 12 MiB。capacity-tail は引き続き目印だけの prewarm を使う (AC-44 の回避のため)。
