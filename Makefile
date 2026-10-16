@@ -311,7 +311,7 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	 exit $$rc
 
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
-test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-arena-partial-readback test-pcache-capacity-noeval ## Run all regression tests
+test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -356,6 +356,10 @@ test-arena-partial-readback: kmod daemon ## AC-48: arena chunk admits keep i_siz
 test-pcache-capacity-noeval: kmod daemon ## AC-45: capacity_bytes bounds fd->buf without any policy eval (full reads, 4 x 9 MiB)
 	@echo "==> test-pcache-capacity-noeval (AC-45)"
 	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-noeval.sh
+
+test-pcache-capacity-seq: kmod daemon ## AC-45: a file larger than capacity_bytes read front to back stays within capacity (40 MiB vs 12 MiB)
+	@echo "==> test-pcache-capacity-seq (AC-45)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-seq.sh
 
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts

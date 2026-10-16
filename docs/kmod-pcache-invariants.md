@@ -28,18 +28,20 @@
 ## populate 後の capacity 強制 (AC-45 C2)
 - pcache の miss (populate ioctl + signal) は kmod の `admit_replace` を呼ばないので、capacity の evict は eval / sync が来るまで動かなかった。daemon は `--cache-capacity` が効いているとき (kmod パラメータ `capacity_bytes` > 0) に限り、**最後の populate のあと、signal の前に** `refreshAdmits` (= `admit_replace` の再実行) を行う (`enforceCapacityAfterPopulate`)。signal の前なので、この miss の chunk は pending に守られる。同時に来た miss は 1 回の追加の pass にまとめる (single-flight)。
 
-## buf_readers (U8)
-- `fd->buf_readers` は `fd->lock` で保護する。`s3fs_ebpf_read_folio` の中で upcall 経路 (U8) に入るときに 1 回だけ ++ し (`buf_reader_active`)、`done:` で -- する。pcache ヒット経路の ++ (U10) は A/B で不要と確認して削除済み (hot path で fd->lock を取らない)。
-- 意味: 「この reader は retry や gen=0 fallback で `fd->buf` を後から読む可能性がある」。> 0 の間は reset が buf を free しない。
+## chunk の pin (U8、AC-45 C3 で chunk 単位になった)
+- `fd->chunks[ci].readers` は `fd->lock` で保護する (`fd->buf_readers` は廃止)。`s3fs_ebpf_read_folio` は upcall 経路 (U8) に入るとき、**pending を作る前に**、pos を含む chunk を 1 回だけ pin し (`s3fs_fd_chunk_pin`、table の要素がなければ作る。失敗したら pin なしで続ける)、`done:` で unpin する。pcache ヒット経路の pin (U10) は A/B で不要と確認して削除済み (hot path で fd->lock を取らない)。
+- 意味: 「この reader は retry や data-based fill で、この chunk を後から読む可能性がある」。pin された chunk は reset / shed が free しない。pending があれば reader は pin 済み (前述の成功 signal の契約はこれに依存)。`s3fs_fd_chunk_free` は `readers` を保つので、pin / unpin の数はずれない。
+- data-based fill: 起こされたあと (`upcall_retries > 0`)、entry がなくても chunk が populated ならそこから folio を埋める (`s3fs_folio_fill_from_kmalloc` の `quiet` 版。gen0 の失敗カウンタは増やさない)。capacity の pass が entry だけを先に落としても、無駄な upcall を繰り返さない。埋めたときは、その chunk の PCACHE entry を入れ直す (entry がないまま page cache に folio が残ると、capacity の計算にも evict にも入らない)。
 - upcall のリトライ上限は `S3FS_UPCALL_MAX_RETRIES=3`。timeout (U11) もこの回数に含める。使い切ったら gen=0 fallback に進む。
 
 ## reset の条件 (`s3fs_file_data_reset`)
 - 呼ばれる経路: `admit_evict_ino` の中で、`admit_drop_all_ranges` が PCACHE entry を落としたと報告したとき (S4: 判定は write_lock 内で atomic に行う) だけ。
-- `fd->lock` 下で `!dirty && !flushing && buf_readers == 0` のときに限り、PCACHE entry の再 evict (1 件でも消したら `s3fs_admit_gen++`) → `kvfree(buf)`、`size`/`cap`/`populated_chunks` を 0 にする。
+- `fd->lock` 下で `!dirty && !flushing` のとき、この ino の PCACHE entry を全部落とし (1 件でも消したら `s3fs_admit_gen++`)、**`readers == 0` の chunk だけを free** する (C3)。pin された chunk が 1 つでも残れば `fd->size` と table を保ち (`s3fs_reset_skipped++`)、1 つも残らなければ table を free して `size = 0`。
 - AC-41: 容量判定 (`live_bytes`) は arena entry のサイズ + pcache ino ごとの `fd->cap` (`s3fs_ino_buf_bytes`、ino 単位で 1 回)。`fd->cap` は確保済み chunk の `cap` の合計。admit 済み chunk のサイズではない。evict 後は before/after の `fd->cap` 差分を解放量として引く (skip_reset なら 0)。
 - AC-45 (C1): fd の中身は 4 MiB の chunk の表 (`fd->chunks[]`、`S3FS_CHUNK_SIZE`)。populate は、足りない chunk を `min(4 MiB, max(終端, i_size) - chunk 先頭)` ちょうどで確保する (AC-41: 46 B のファイルは 46 B。AC-46 の倍々と全体の memcpy はなくなり、触った chunk の分だけ確保する)。write は chunk の中で倍々 (最小 4 KiB、上限 4 MiB) に伸ばす (非 pcache の dirty ファイルは最大で 2 倍まで確保する)。確保済み chunk のうち fd->size 以降のバイトは 0 (縮小は境界 chunk の後半を 0 にして、後ろの chunk を free)。setattr の拡張は chunk を確保しない (hole、dirty の間は 0 として読める)。`populated` は signal_flush でも確保済み chunk にだけ立つ (hole は次の read で取り直す)。chunk の上限は `S3FS_MAX_CHUNKS` (1 TiB)、超えたら -EFBIG。
 - M1/M2: `fd->cap` を変える箇所は `s3fs_fd_chunk_ensure` と `s3fs_fd_chunk_free` の 2 つだけで、そこで `s3fs_fd_buf_bytes` も同じだけ増減する (file_data_new / write / populate / reset / free / truncate はすべてこの 2 つを経由する)。`s3fs_ebpf_fd_buf_audit` (STATS[12/13]) が全 inode を走査した合計と突き合わせる (I/O が止まっていれば gauge == walk)。走査は `s_inode_list_lock` → `i_lock` だけを取り、admits_lock とは入れ子にしない。
-- どれかが偽なら何もしない (skip_reset)。後で再試行する仕組みはなく、次に evict されたときに回収される。inode の `i_size` はクリアしない (Q1)。
+- dirty / flushing のときは何もしない。pin で残った chunk は、reader が unpin したあと、次に evict されたときに回収される (entry を入れ直しているので capacity の計算に入る)。inode の `i_size` はクリアしない (Q1)。
+- AC-45 C3 (shed): capacity の pass は、miss が in-flight (`pending_exists`) の ino を丸ごとは evict しない (待っている reader の chunk と entry を守る)。代わりに `s3fs_ino_shed_unpinned` で、`readers == 0` の chunk を、重なる PCACHE entry を先に落として free し、その範囲の page cache を落とす。capacity より大きいファイルを順に読んでも、読み終わった chunk が溜まらない。daemon は、capacity より大きいファイルを全体 admit (pattern-aware promote) にしない (`fullAdmitExceedsCapacity`、全体を populate してから evict しても意味がない)。
 
 ## flush pin (W1)
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。
