@@ -1314,3 +1314,44 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 | 修正後 | 52.50〜53.70% | 46.30〜47.50% | 0 |
 
 hit_rate は平均で約 0.5pp 下がった。30 ファイルの最初のアクセスが prewarm なしの miss になる分 (最大 30 / 2000 = 1.5pp) の範囲。修正前の rate_arena が高いのは prewarm された arena admit から folio を埋めていたためで、修正後は arena admit がなくなり、policy ごとの差もほぼなくなった (policy 比較には arena モードの bench を使う)。
+
+### 18.16 AB-07 gate の再調査: (a) は read の fentry、(b) は再現しない (2026-10-16)
+
+**前提の確認**: 計測カーネルは 6.12 (KVM ゲスト、6 vCPU)。gate (a) は `fio --ioengine=psync --size=1 --bs=1 --thread` で 18 B の `hello.txt` を 64 jobs で読むので、folio はどの FS でも 4 KiB 1 枚。`perf c2c` はゲストで memory events が使えず不可 (`memory events not supported`)。perf は `/usr/lib/linux-tools-6.8.0-146/perf` を直接使った。
+
+**(a) fentry の A/B (pcache モード、64 jobs × 5 s、3 回)**:
+
+| 条件 | IOPS |
+|---|---|
+| fuse-raw | 6126k〜6145k |
+| ebpf-pcache (既定) | 4900k〜4965k |
+| ebpf-pcache `--no-read-iter-hook --pattern-aware-admit=false` | 6071k〜6145k |
+| ebpf-pcache `--pattern-aware-admit=false` (fentry は残る) | 4959k〜4992k |
+
+fentry を外すと差は消える。kmod の hit 経路 (`fc_pcache_check` → `generic_file_read_iter`) は原因ではない。
+
+**perf record (既定構成、fio 実行中に 3 s)**: fentry 関連の合計は約 19%。`copy_from_kernel_nofault` + `_allowed` + `bpf_probe_read_kernel` = 6.8% (`BPF_CORE_READ` による)、BPF プログラム本体 5.6%、hash lookup (`lookup_nulls_elem_raw` ほか) 約 4.1%、trampoline / rcu / migrate 約 2.4%。policy の kfunc は上位に出ない (observe policy)。
+
+**BPF の変種 (B0 = 現行ソースを再生成、各 3 回)**:
+
+| 変種 | IOPS |
+|---|---|
+| B0 | 4822k〜4927k |
+| V1: `BPF_CORE_READ` をやめて直接参照 | 5272k〜5284k (+8%) |
+| V2: V1 + pattern 更新なし (計測専用) | 5656k〜5683k (+16%) |
+| V3: V1 + inode_index / policy_hit なし (計測専用) | 5352k〜5488k (+11%) |
+
+**(b) folio の order**: `tracepoint:filemap:mm_filemap_add_to_page_cache` で 100 MiB を読むと、fuse-cache も ebpf も order 0 が 25,600 件ずつ。6.12 の FUSE は large folio を使っておらず、large folio 仮説は成り立たない。warm cat は ebpf 9.5 ms / fuse-cache 10.5 ms (`hyperfine -N`)、`sudo cat` でも ebpf 約 14 ms / fuse-cache 約 15 ms で、§18.2 の 1.20× は再現しない。
+
+**bench-ab-pcache.sh (100m.bin をバケットから外して実行)**:
+
+| BPF | fuse_raw | pcache IOPS | (a) 比 | fuse_cache_ms | pcache_ms | gate |
+|---|---:|---:|---:|---:|---:|---|
+| B0 | 5997k | 4887k | 0.81 | 17.550 | 14.296 | a FAIL / b PASS / c PASS |
+| V1 | 6053k | 5266k | 0.87 | 17.273 | 14.325 | a FAIL / b PASS / c PASS |
+
+§18.2 (a 0.66、b 1.20×) から B0 の時点で改善している。§18.2 以降に入った U10 の削除などが効いた可能性があるが、ここでは切り分けていない。
+
+**採用**: V1 (直接参照) のみ。挙動は変わらず、s_magic の判定は FUSE を含む全 FS の read で走るので、他の FS の負担も減る。bpf2go の .o は再生成 (変更なしでも手元の toolchain ではバイナリが変わる)。go test 全 ok、test-regression 8 本全 PASS。
+
+**残り (AC-47)**: pattern map の更新 (同じ ino の値に atomic 3 回 + 書き込み 1 回、64 jobs で同じ cacheline) が約 8%。案は `LRU_PERCPU_HASH` にして daemon 側で CPU ごとの値を合算する (LastEndPos は最大値を使う)。inode_index + policy_hit は約 3%。

@@ -258,25 +258,30 @@ int BPF_PROG(s3fs_fp_read_iter,
 	if (!iocb)
 		return 0;
 
-	filp = BPF_CORE_READ(iocb, ki_filp);
+	/* fentry args are BTF-typed, so plain dereferences compile to
+	 * fault-safe direct loads (with CO-RE relocations via vmlinux.h).
+	 * BPF_CORE_READ would call bpf_probe_read_kernel per field: ~7% of
+	 * CPU in the 64-job fio read (gate (a)), and the s_magic filter runs
+	 * on every generic_file_read_iter in the system, FUSE included. */
+	filp = iocb->ki_filp;
 	if (!filp)
 		return 0;
 
-	inode = BPF_CORE_READ(filp, f_inode);
+	inode = filp->f_inode;
 	if (!inode)
 		return 0;
 
-	sb = BPF_CORE_READ(inode, i_sb);
+	sb = inode->i_sb;
 	if (!sb)
 		return 0;
 
-	magic = BPF_CORE_READ(sb, s_magic);
+	magic = sb->s_magic;
 	if (magic != S3FS_EBPF_MAGIC)
 		return 0;
 
-	ino = BPF_CORE_READ(inode, i_ino);
-	pos = (__u64)BPF_CORE_READ(iocb, ki_pos);
-	len = (__u64)BPF_CORE_READ(to, count);
+	ino = inode->i_ino;
+	pos = (__u64)iocb->ki_pos;
+	len = (__u64)to->count;
 
 	/* Update access pattern: sequential if pos is within slack of
 	 * the previous read's end offset, random otherwise.
