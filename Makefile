@@ -311,7 +311,7 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	 exit $$rc
 
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
-test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq ## Run all regression tests
+test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -360,6 +360,10 @@ test-pcache-capacity-noeval: kmod daemon ## AC-45: capacity_bytes bounds fd->buf
 test-pcache-capacity-seq: kmod daemon ## AC-45: a file larger than capacity_bytes read front to back stays within capacity (40 MiB vs 12 MiB)
 	@echo "==> test-pcache-capacity-seq (AC-45)"
 	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-seq.sh
+
+test-write-existing: kmod daemon ## AC-50: write/truncate/append on an unread existing object keeps the rest (pcache + arena)
+	@echo "==> test-write-existing (AC-50)"
+	@sudo $(SCRIPTS_DIR)/test-write-existing.sh
 
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts

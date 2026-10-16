@@ -520,8 +520,12 @@ type readMissEvent struct {
 	Ino    uint64
 	Offset int64
 	Count  uint32
-	_pad   uint32
+	Flags  uint32
 }
+
+// missFlagForWrite mirrors S3FS_MISS_FLAG_FOR_WRITE (AC-50): kmod is about
+// to modify the file and needs the chunk at Offset loaded into its fd.
+const missFlagForWrite = 0x1
 
 // signalAdmitArg mirrors `struct s3fs_signal_admit` (U13: added ChunkOffset).
 type signalAdmitArg struct {
@@ -555,6 +559,60 @@ func signalAdmitFlags(devPath string, ino uint64, chunkOffset int64, errCode int
 		return fmt.Errorf("ioctl SIGNAL_ADMIT: %w", errno)
 	}
 	return nil
+}
+
+// handleLoadForWrite serves a miss that kmod flagged S3FS_MISS_FLAG_FOR_WRITE
+// (AC-50): load the 4 MiB chunk containing ev.Offset into the ino's fd with
+// POPULATE_PAGES — whatever the admit mode, since the bytes are for the
+// write buffer, not the arena — and signal the waiter once kmod confirms
+// the chunk is cached.
+func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backend, ev readMissEvent) {
+	missChunkOffset := (ev.Offset / partialAdmitChunk) * partialAdmitChunk
+	fail := func(code int32, format string, a ...any) {
+		fmt.Fprintf(os.Stderr, "[upcall] ino=%d load-for-write: "+format+"\n",
+			append([]any{ev.Ino}, a...)...)
+		metrics.Global.ReadMissErrors.Add(1)
+		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, code)
+	}
+	entry := fpebpf.LookupByIno(ev.Ino)
+	if entry == nil {
+		fail(-2 /* -ENOENT */, "unknown ino")
+		return
+	}
+	if s3c == nil {
+		fail(-61 /* -ENODATA */, "no S3 backend")
+		return
+	}
+	size := int64(partialAdmitChunk)
+	if rest := int64(entry.Fallback) - missChunkOffset; rest < size {
+		size = rest
+	}
+	if size <= 0 {
+		fail(-5 /* -EIO */, "chunk at %d is past the object (%d B)", missChunkOffset, entry.Fallback)
+		return
+	}
+	body, err := s3c.GetRange(ctx, entry.S3Key, missChunkOffset, size)
+	if err != nil {
+		fail(-5, "s3://%s get: %v", entry.S3Key, err)
+		return
+	}
+	for attempt := 0; ; attempt++ {
+		if err := populatePages(devPath, ev.Ino, missChunkOffset, body); err != nil {
+			fail(-5, "populate pages: %v", err)
+			return
+		}
+		fmt.Printf("[upcall] ino=%d %s load-for-write [%d,%d)\n",
+			ev.Ino, entry.Name, missChunkOffset, missChunkOffset+int64(len(body)))
+		err := signalAdmitFlags(devPath, ev.Ino, missChunkOffset, 0, s3fsSignalVerifyPopulated)
+		if !errors.Is(err, unix.EAGAIN) {
+			return // woken, or nobody is waiting (ENOENT)
+		}
+		if attempt >= signalVerifyRetries {
+			_ = signalAdmit(devPath, ev.Ino, missChunkOffset, 0)
+			return
+		}
+		metrics.Global.ReadMissRepopulates.Add(1)
+	}
 }
 
 // signalVerifyRetries bounds how often handleReadMiss re-populates when kmod
@@ -623,6 +681,7 @@ func runReadMissLoop(ctx context.Context, devPath string,
 			Ino:    binary.LittleEndian.Uint64(buf[0:8]),
 			Offset: int64(binary.LittleEndian.Uint64(buf[8:16])),
 			Count:  binary.LittleEndian.Uint32(buf[16:20]),
+			Flags:  binary.LittleEndian.Uint32(buf[20:24]),
 		}
 		fmt.Printf("[upcall] miss ino=%d offset=%d count=%d\n",
 			ev.Ino, ev.Offset, ev.Count)
@@ -685,6 +744,10 @@ func handleReadMiss(ctx context.Context, devPath string,
 	defer func() {
 		metrics.ReadMissLatency.Observe(time.Since(miss_started))
 	}()
+	if ev.Flags&missFlagForWrite != 0 {
+		handleLoadForWrite(ctx, devPath, s3c, ev)
+		return
+	}
 	// U13: compute the aligned chunk boundary that kmod used when creating
 	// the pending entry for this miss (matches pending_get_or_create key).
 	// ALL signalAdmit calls below must use missChunkOffset so they find
