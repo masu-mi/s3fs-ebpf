@@ -1200,3 +1200,32 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 - U10 は不要と判断し削除した (`f44e2b4`、hot path で `fd->lock` を 2 回取る処理がなくなる)。計装とはコミットを分けたので、retry が増えた場合は単独で revert できる。
 - 読み込み停止後に `fd->buf` は 0 まで戻る。skip_reset で解放が遅れた buf が残り続ける状況は観測されなかった。evict-race に「停止後の fd_buf ≤ capacity_bytes」を PASS 条件として追加済み。
 - **容量制限が効いていない本当の原因は U10 ではなく buf の確保サイズ**。ピーク 40 MiB は capacity 4 MiB の 10 倍で、4 ファイル × 9 MiB をそれぞれ 2 MiB 単位に切り上げた 10 MiB ずつに当たる。`s3fs_file_data_reserve` が populate 範囲の終端まで確保するので、末尾 chunk 1 つの populate でファイル全体分の buf ができる。一方 kmod の容量判定 (`live_bytes`) は admit 済み chunk のバイト数しか数えない。対策は backlog AC-41 に記録した。
+
+### 18.11 AC-41 第一案: 容量判定を fd->buf の実確保量で行う (2026-10-16)
+
+§18.10 で見つかった「fd->buf が capacity の 10 倍まで膨らむ」問題に対し、第一案を入れた。
+
+- kmod の容量判定 (`live_bytes`) で、pcache ino を admit 済み chunk のサイズではなく、その ino の `fd->cap` で数える (ino ごとに 1 回)。evict 後は、evict 前後の `fd->cap` の差を解放量として引く (skip_reset で解放されなければ 0)。
+- 読み込み経路の populate では、buf を 4 KiB / 2 MiB 単位に切り上げず、必要なサイズだけ確保する。write / setattr は従来どおり切り上げる。切り上げたままだと 46 B のファイルが 4 KiB 分の容量を消費し、hitrate (capacity 352 B) の pcache モードで 7 policy が 52〜53% → 39〜41% に下がった。
+
+**test-pcache-capacity-tail (新規)**: 9 MiB × 4 ファイルの末尾 chunk [8, 9) MiB だけを順に読み、そのたびに policy eval を回す。capacity は 12 MiB。専用バケットを使い、9 MiB ファイルは prewarm しない (後述の AC-43 / AC-44 を避けるため、9 B の目印ファイルだけ prewarm する)。
+
+| kmod | fd_buf (読み込みごと) | 最終 fd_buf | evictions | 判定 |
+|---|---|---:|---:|---|
+| 修正前 (`d160714`) | 10 → 20 → 30 → 40 MiB | 40 MiB | 0 | ❌ FAIL (capacity の 3.3 倍) |
+| 修正後 | 9 → 9 → 9 → 9 MiB | 9 MiB | 3 | ✅ PASS |
+
+修正前は末尾 chunk 1 MiB ずつしか数えないので、4 ファイルでも合計 4 MiB で「容量内」と判定され、evict されない。修正後は 1 ファイル 9 MiB として数えるので、常に 1 ファイルだけが残る。
+
+**既存ベンチへの影響**:
+
+| 計測 | 結果 |
+|---|---|
+| hitrate pcache (seed=42) | 52.75〜53.70% (§18.1 の 52.35〜53.60% と同水準)、adm_max 7、err 0 |
+| evict-race 30 s | PASS、read_err 0、retry_exh 0。fd_buf peak 36 MiB (切り上げをやめた分 40 → 36 MiB)、settled 0 |
+| make test-regression (6 本) | 全 PASS |
+
+**残る問題 (backlog に記録)**:
+- **AC-45**: evict-race の読み込み中のピーク (36 MiB / capacity 4 MiB) は、この変更では抑えられない。upcall 待ちの ino (pending) と U8 で保護された buf は evict できず、ピークは「残っている buf」ではなく「読み込み中の buf」だからである。抑えるには populate 時の受け入れ制御が要る。
+- **AC-43**: pcache モードで prewarm が 1 件も admit しないと `s3fs_admitted_mm` が設定されず (`kmod/vfs_ops.c` の admit_replace は `count > 0` のときだけ設定する)、upcall が飛ばずに全 read が失敗する。`policies/prewarm-meta-only.cel` で再現した。
+- **AC-44**: `--arena-metadata-only` でも既定の prewarm はファイル全体を arena に stage し、arena admit として capacity を消費する (9 MiB × 4 で 36 MiB)。共用バケットに他のテストの大きなオブジェクトが残っていると、それだけで capacity を超える。
