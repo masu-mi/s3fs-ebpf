@@ -27,6 +27,7 @@
 - 呼ばれる経路: `admit_evict_ino` の中で、`admit_drop_all_ranges` が PCACHE entry を落としたと報告したとき (S4: 判定は write_lock 内で atomic に行う) だけ。
 - `fd->lock` 下で `!dirty && !flushing && buf_readers == 0` のときに限り、PCACHE entry の再 evict (1 件でも消したら `s3fs_admit_gen++`) → `kvfree(buf)`、`size`/`cap`/`populated_chunks` を 0 にする。
 - AC-41: 容量判定 (`live_bytes`) は arena entry のサイズ + pcache ino ごとの `fd->cap` (`s3fs_ino_buf_bytes`、ino 単位で 1 回)。admit 済み chunk のサイズではない (reserve が populate 終端まで確保するため)。evict 後は before/after の `fd->cap` 差分を解放量として引く (skip_reset なら 0)。populate の reserve は `exact=true` で切り上げない (write/setattr は従来どおり切り上げ)。
+- M1/M2: `fd->cap` を変える箇所 (file_data_new / reserve / reset / free) は必ず `s3fs_fd_buf_bytes` も同じだけ増減する。`s3fs_ebpf_fd_buf_audit` (STATS[12/13]) が全 inode を走査した合計と突き合わせる (I/O が止まっていれば gauge == walk)。走査は `s_inode_list_lock` → `i_lock` だけを取り、admits_lock とは入れ子にしない。
 - どれかが偽なら何もしない (skip_reset)。後で再試行する仕組みはなく、次に evict されたときに回収される。inode の `i_size` はクリアしない (Q1)。
 
 ## flush pin (W1)

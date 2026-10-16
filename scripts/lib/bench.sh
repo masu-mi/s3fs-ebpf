@@ -138,6 +138,36 @@ ebpf_nocache() {
 	echo "$1" | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/nocache" >/dev/null
 }
 
+# fd_buf_audit — print one `DETAIL fd_buf_audit ...` line comparing the M1
+# gauge (incremental) with M2's walk over live inodes and the pcache share
+# the AC-41 capacity loop charges. Call before ebpf_stop, with I/O idle.
+# The daemon polls kmod every 2 s, so wait for two identical samples.
+# status: OK (gauge == walk), DRIFT (stable but unequal), NA (no daemon or
+# old kmod). Report-only: never changes the caller's exit status.
+fd_buf_audit() {
+	local url=${METRICS_URL:-http://localhost:9600/metrics}
+	local prev="" cur="" out g w p i
+	for i in 1 2 3 4 5 6; do
+		out=$(curl -sf "$url" 2>/dev/null) || break
+		cur=$(printf '%s\n' "$out" | awk '
+			$1 == "s3fs_ebpf_fd_buf_bytes"        { g = $2 }
+			$1 == "s3fs_ebpf_fd_buf_walk_bytes"   { w = $2 }
+			$1 == "s3fs_ebpf_fd_buf_pcache_bytes" { p = $2 }
+			END { if (g != "" && w != "" && p != "") print g, w, p }')
+		[[ -n "$cur" && "$cur" == "$prev" ]] && break
+		prev=$cur
+		sleep 2.2
+	done
+	if [[ -z "$cur" ]]; then
+		printf 'DETAIL fd_buf_audit status=NA\n'
+		return 0
+	fi
+	read -r g w p <<<"$cur"
+	printf 'DETAIL fd_buf_audit status=%s gauge=%d walk=%d pcache=%d nonpcache=%d drift=%d\n' \
+		"$([[ "$g" == "$w" ]] && echo OK || echo DRIFT)" \
+		"$g" "$w" "$p" $((w - p)) $((g - w))
+}
+
 # --- s3fs-fuse (A/B reference) ------------------------------------------------
 
 # fuse_mount <mp> [extra s3fs args...] — mount $S3_BUCKET with the common

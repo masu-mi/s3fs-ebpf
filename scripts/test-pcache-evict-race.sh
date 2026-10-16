@@ -56,6 +56,10 @@ READER_FAIL="$TMPDIR_LOCAL/reader.fail"   # sha256 content mismatch (data corrup
 READER_ERROR="$TMPDIR_LOCAL/reader.error" # sha256sum exited non-zero (-EIO)
 
 cleanup() {
+    # fd_buf_audit first: ebpf_start_daemon backgrounds the daemon as a job
+    # of this shell, so the kill below would take it down too.  Hammers
+    # and readers are already reaped on the normal path.
+    fd_buf_audit
     # Stop background hammers and readers first
     jobs -p 2>/dev/null | xargs -r kill 2>/dev/null || true
     wait 2>/dev/null || true

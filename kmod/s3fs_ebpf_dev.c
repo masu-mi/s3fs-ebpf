@@ -433,6 +433,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			st.values[10] = (u64)atomic_long_read(&s3fs_fd_buf_bytes);
 		if (st.count > 11)
 			st.values[11] = (u64)atomic_long_read(&s3fs_reset_skipped);
+		if (st.count > 13)
+			s3fs_ebpf_fd_buf_audit(&st.values[12], &st.values[13]);
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;

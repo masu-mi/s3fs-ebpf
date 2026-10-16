@@ -45,6 +45,7 @@ cleanup() {
         "$_RESULT_STATUS" "$( [ "$_RESULT_STATUS" = PASS ] && echo ok || echo mismatch )"
     [ "$_RESULT_STATUS" = FAIL ] && [ -n "$_RESULT_DETAIL" ] && \
         printf 'DETAIL %s\n' "$_RESULT_DETAIL"
+    fd_buf_audit
     ebpf_stop "$MOUNT" 2>/dev/null || true
     rm -rf "$TMPDIR_LOCAL"
 }

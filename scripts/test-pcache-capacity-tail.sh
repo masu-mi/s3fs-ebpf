@@ -54,6 +54,7 @@ log()  { printf '[capacity-tail] %s\n' "$*" >&2; }
 
 TMPDIR_LOCAL=$(mktemp -d /tmp/pcache-capacity-tail-XXXXXX)
 cleanup() {
+    fd_buf_audit
     ebpf_stop "$MOUNT" 2>/dev/null || true
     rm -rf "$TMPDIR_LOCAL"
 }

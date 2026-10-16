@@ -53,6 +53,7 @@ cleanup() {
     printf 'RESULT name=test-large-file-read status=%s file_size_mib=300\n' "$_RESULT_STATUS"
     [ "$_RESULT_STATUS" = FAIL ] && [ -n "$_RESULT_DETAIL" ] && \
         printf 'DETAIL %s\n' "$_RESULT_DETAIL"
+    fd_buf_audit
     ebpf_stop "$MOUNT" 2>/dev/null || true
     rm -rf "$TMPDIR_LOCAL"
 }
