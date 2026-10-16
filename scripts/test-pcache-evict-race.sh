@@ -105,31 +105,37 @@ sleep "$SETTLE"
 # ── S3-1: snapshot eviction counter before the run ───────────────────────────
 # Parse Prometheus text format: handles both 'metric value' and 'metric{...} value'.
 # Daemon exports evictions as s3fs_ebpf_policy_evictions_total (vals[0] from kmod stats).
+# Fetch /metrics into a variable first: piping curl straight into an awk
+# that exits early SIGPIPEs curl, and with pipefail the "|| echo -1"
+# fallback then appends a second line (e.g. "46\n-1"), corrupting the value.
+get_metric() {
+    local out
+    out=$(curl -sf "${METRICS_URL}" 2>/dev/null) || { echo -1; return; }
+    printf '%s\n' "$out" | awk -v m="$1" '
+        index($0, m) == 1 && substr($0, length(m) + 1, 1) ~ /[{ ]/ { v = int($NF) }
+        END { print (v == "" ? -1 : v) }'
+}
+
 get_evict_count() {
-    curl -sf "${METRICS_URL}" 2>/dev/null \
-        | awk '/^s3fs_ebpf_policy_evictions_total[{ ]/{print int($NF); exit}' \
-        || echo "-1"
+    get_metric s3fs_ebpf_policy_evictions_total
 }
 # T4: retry_exhausted counter — non-zero means capacity-pressure -EIO (not corruption).
 get_retry_exhausted_count() {
-    curl -sf "${METRICS_URL}" 2>/dev/null \
-        | awk '/^s3fs_ebpf_upcall_retry_exhausted_total[{ ]/{print int($NF); exit}' \
-        || echo "-1"
+    get_metric s3fs_ebpf_upcall_retry_exhausted_total
 }
 # U11: timeout counter — non-zero confirms goroutine-pool back-pressure is exercised.
 get_upcall_timeout_count() {
-    curl -sf "${METRICS_URL}" 2>/dev/null \
-        | awk '/^s3fs_ebpf_upcall_timeout_total[{ ]/{print int($NF); exit}' \
-        || echo "-1"
+    get_metric s3fs_ebpf_upcall_timeout_total
 }
 # D-diag: gen=0 failure reason counters.
 get_gen0_fail_counts() {
-    curl -sf "${METRICS_URL}" 2>/dev/null | awk '
+    local out
+    out=$(curl -sf "${METRICS_URL}" 2>/dev/null) || { echo "-1 -1 -1"; return; }
+    printf '%s\n' "$out" | awk '
         /^s3fs_ebpf_gen0_fail_buf_null_total[{ ]/ { buf_null=int($NF) }
         /^s3fs_ebpf_gen0_fail_bitmap_total[{ ]/   { bitmap=int($NF) }
         /^s3fs_ebpf_gen0_fail_other_total[{ ]/    { other=int($NF) }
-        END { printf "%d %d %d", buf_null+0, bitmap+0, other+0 }' \
-        || echo "-1 -1 -1"
+        END { printf "%d %d %d", buf_null+0, bitmap+0, other+0 }'
 }
 EVICT_BEFORE=$(get_evict_count)
 RETRY_BEFORE=$(get_retry_exhausted_count)
