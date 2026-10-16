@@ -66,7 +66,7 @@ struct poll_table_struct;
 ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
 			       bool nonblocking);
 __poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt);
-int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err);
+int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err, u32 flags);
 
 /*
  * Write-back queue: kmod → daemon via S3FS_IOC_POP_FLUSH.

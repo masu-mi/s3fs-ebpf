@@ -268,6 +268,62 @@ func refreshAdmits(devPath string) (int, error) {
 	return len(admits), nil
 }
 
+// AC-45 C2: capacity enforcement after a pcache populate.
+//
+// kmod only evicts by capacity inside admit_replace, and a pcache miss
+// (populate ioctls + signal_admit) never calls it, so fd->buf kept growing
+// until a policy eval or sync happened to come along.  After the last
+// populate of a miss, and before signal_admit, handleReadMiss asks kmod to
+// run its admit_replace pass (refreshAdmits).  The chunk just populated is
+// still pending, so the pass cannot take it from the reader that waits for
+// it; older files are evicted by policy score.  Concurrent misses are
+// coalesced: one pass runs, and misses that arrive meanwhile share one
+// follow-up pass.
+
+// capacityEnforceFn is the pass itself; a var so tests can count calls.
+var capacityEnforceFn = refreshAdmits
+
+// capacityBytesFn reads the kmod's capacity_bytes parameter (0 = capacity
+// mode off, legacy softcap voting).  A var so tests need no sysfs.
+var capacityBytesFn = func() (int64, bool) { return getKmodParamInt64("capacity_bytes") }
+
+var (
+	capEnforceMu      sync.Mutex
+	capEnforceRunning bool
+	capEnforceAgain   bool
+)
+
+// enforceCapacityAfterPopulate runs (or joins) a capacity pass when kmod is
+// in capacity mode.  Errors are logged only: the miss itself succeeded and
+// the periodic loops remain the fallback.
+func enforceCapacityAfterPopulate(devPath string) {
+	if c, ok := capacityBytesFn(); !ok || c <= 0 {
+		return
+	}
+	capEnforceMu.Lock()
+	if capEnforceRunning {
+		capEnforceAgain = true
+		capEnforceMu.Unlock()
+		return
+	}
+	capEnforceRunning = true
+	capEnforceMu.Unlock()
+
+	for {
+		if _, err := capacityEnforceFn(devPath); err != nil {
+			fmt.Fprintf(os.Stderr, "[capacity] post-populate pass: %v\n", err)
+		}
+		capEnforceMu.Lock()
+		if !capEnforceAgain {
+			capEnforceRunning = false
+			capEnforceMu.Unlock()
+			return
+		}
+		capEnforceAgain = false
+		capEnforceMu.Unlock()
+	}
+}
+
 // clearAdmits empties the daemon-side snapshot and tells kmod to
 // drop the admit table. Called on daemon shutdown.
 func clearAdmits(devPath string) error {
@@ -472,18 +528,27 @@ type signalAdmitArg struct {
 	Ino         uint64
 	ChunkOffset uint64
 	Err         int32
-	_pad        uint32
+	Flags       uint32
 }
+
+// s3fsSignalVerifyPopulated mirrors S3FS_SIGNAL_VERIFY_POPULATED: kmod only
+// wakes the waiter if the chunk is cached, else returns EAGAIN (AC-45).
+const s3fsSignalVerifyPopulated = 0x1
 
 const s3fsIocSignalAdmit = (1 << 30) | (uint32(unsafe.Sizeof(signalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
 
 func signalAdmit(devPath string, ino uint64, chunkOffset int64, errCode int32) error {
+	return signalAdmitFlags(devPath, ino, chunkOffset, errCode, 0)
+}
+
+// signalAdmitFlags is signalAdmit with S3FS_SIGNAL_* flags.
+func signalAdmitFlags(devPath string, ino uint64, chunkOffset int64, errCode int32, flags uint32) error {
 	f, closeFn, err := devFileOrOpen(devPath)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
-	arg := signalAdmitArg{Ino: ino, ChunkOffset: uint64(chunkOffset), Err: errCode}
+	arg := signalAdmitArg{Ino: ino, ChunkOffset: uint64(chunkOffset), Err: errCode, Flags: flags}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
 		f.Fd(), uintptr(s3fsIocSignalAdmit),
 		uintptr(unsafe.Pointer(&arg))); errno != 0 {
@@ -491,6 +556,10 @@ func signalAdmit(devPath string, ino uint64, chunkOffset int64, errCode int32) e
 	}
 	return nil
 }
+
+// signalVerifyRetries bounds how often handleReadMiss re-populates when kmod
+// reports the chunk was evicted before the success signal (AC-45).
+const signalVerifyRetries = 3
 
 // readMissWorkers is the maximum number of concurrent handleReadMiss
 // goroutines. Bounded to prevent unbounded goroutine growth under
@@ -673,26 +742,44 @@ func handleReadMiss(ctx context.Context, devPath string,
 	// body into partialAdmitChunk-sized pieces; full-admit bodies (seq promote)
 	// can be arbitrarily large.
 	if arenaMetadataOnlyEnabled {
-		off := chunkOffset
-		rem := body
-		for len(rem) > 0 {
-			n := len(rem)
-			if n > partialAdmitChunk {
-				n = partialAdmitChunk
+		for attempt := 0; ; attempt++ {
+			off := chunkOffset
+			rem := body
+			for len(rem) > 0 {
+				n := len(rem)
+				if n > partialAdmitChunk {
+					n = partialAdmitChunk
+				}
+				if err := populatePages(devPath, ev.Ino, off, rem[:n]); err != nil {
+					fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
+					metrics.Global.ReadMissErrors.Add(1)
+					_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
+					return
+				}
+				off += int64(n)
+				rem = rem[n:]
 			}
-			if err := populatePages(devPath, ev.Ino, off, rem[:n]); err != nil {
-				fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
-				metrics.Global.ReadMissErrors.Add(1)
-				_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
+			fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
+				ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
+			// AC-45 C2: enforce capacity while this miss is still pending.
+			enforceCapacityAfterPopulate(devPath)
+			// AC-45: kmod wakes the waiter only if the chunk is still
+			// cached.  Concurrent handlers for one ino and the capacity
+			// pass can evict what we just populated; populate again
+			// (bounded) instead of waking the reader with nothing to read.
+			err := signalAdmitFlags(devPath, ev.Ino, missChunkOffset, 0,
+				s3fsSignalVerifyPopulated)
+			if !errors.Is(err, unix.EAGAIN) {
+				return // woken, or nobody is waiting (ENOENT)
+			}
+			if attempt >= signalVerifyRetries {
+				// Give up verifying: wake the waiter so its own retry /
+				// fallback path takes over rather than hanging.
+				_ = signalAdmit(devPath, ev.Ino, missChunkOffset, 0)
 				return
 			}
-			off += int64(n)
-			rem = rem[n:]
+			metrics.Global.ReadMissRepopulates.Add(1)
 		}
-		fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
-			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, 0)
-		return
 	}
 
 	// Arena path (default).

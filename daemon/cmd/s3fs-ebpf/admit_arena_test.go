@@ -481,3 +481,62 @@ func TestSeqPrefetchNext(t *testing.T) {
 		t.Errorf("fullSize=0: want -1, got %d", got)
 	}
 }
+
+// TestEnforceCapacityAfterPopulate pins the AC-45 C2 policy: no pass when
+// kmod is not in capacity mode, and concurrent misses share a single
+// follow-up pass instead of one pass each.
+func TestEnforceCapacityAfterPopulate(t *testing.T) {
+	origFn, origCap := capacityEnforceFn, capacityBytesFn
+	defer func() { capacityEnforceFn, capacityBytesFn = origFn, origCap }()
+
+	var calls int32
+	capacityEnforceFn = func(string) (int, error) {
+		atomic.AddInt32(&calls, 1)
+		return 0, nil
+	}
+
+	for name, fn := range map[string]func() (int64, bool){
+		"capacity off":    func() (int64, bool) { return 0, true },
+		"param missing":   func() (int64, bool) { return 0, false },
+		"legacy (-1 val)": func() (int64, bool) { return -1, true },
+	} {
+		capacityBytesFn = fn
+		enforceCapacityAfterPopulate("/dev/null")
+		if got := atomic.LoadInt32(&calls); got != 0 {
+			t.Fatalf("%s: %d passes, want 0", name, got)
+		}
+	}
+
+	capacityBytesFn = func() (int64, bool) { return 4 << 20, true }
+	enforceCapacityAfterPopulate("/dev/null")
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("capacity mode: %d passes, want 1", got)
+	}
+
+	// While one pass is running, N more misses must collapse into one
+	// follow-up pass (2 passes total), not N.
+	atomic.StoreInt32(&calls, 0)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	capacityEnforceFn = func(string) (int, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			close(started)
+			<-release
+		}
+		return 0, nil
+	}
+	done := make(chan struct{})
+	go func() { enforceCapacityAfterPopulate("/dev/null"); close(done) }()
+	<-started
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); enforceCapacityAfterPopulate("/dev/null") }()
+	}
+	wg.Wait() // joiners return immediately
+	close(release)
+	<-done
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("coalesced: %d passes, want 2", got)
+	}
+}

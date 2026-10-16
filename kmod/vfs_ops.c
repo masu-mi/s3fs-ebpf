@@ -1617,7 +1617,9 @@ __poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt)
 	return mask;
 }
 
-int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err)
+static bool s3fs_ino_chunk_populated(u64 ino, u64 chunk_offset); /* below */
+
+int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err, u32 flags)
 {
 	struct s3fs_pending *p, *target = NULL;
 	u64 key = pending_hash_key(ino, chunk_offset);
@@ -1634,6 +1636,15 @@ int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err)
 
 	if (!target)
 		return -ENOENT;
+
+	/* AC-45: a success signal must mean the data is there.  The waiter
+	 * registered buf_readers before it created this pending, so once the
+	 * chunk is seen populated here it stays until the waiter is done. */
+	if (err == 0 && (flags & S3FS_SIGNAL_VERIFY_POPULATED) &&
+	    !s3fs_ino_chunk_populated(ino, chunk_offset)) {
+		pending_put(target);
+		return -EAGAIN;
+	}
 
 	target->err = err;
 	complete_all(&target->done);
@@ -2139,6 +2150,33 @@ static long s3fs_fd_copy_out(struct s3fs_file_data *fd, char __user *uaddr,
 		pos += seg;
 	}
 	return (long)n;
+}
+
+/* True if the 4 MiB chunk at chunk_offset of ino is allocated and populated
+ * in its fd.  Takes fd->lock; call with no other lock held. */
+static bool s3fs_ino_chunk_populated(u64 ino, u64 chunk_offset)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+	bool ok = false;
+
+	if (!s3fs_active_sb ||
+	    (chunk_offset >> S3FS_PCACHE_CHUNK_SHIFT) >= S3FS_MAX_CHUNKS)
+		return false;
+	inode = ilookup(s3fs_active_sb, (unsigned long)ino);
+	if (!inode)
+		return false;
+	fd = inode->i_private;
+	if (fd) {
+		u32 ci = (u32)(chunk_offset >> S3FS_PCACHE_CHUNK_SHIFT);
+
+		mutex_lock(&fd->lock);
+		ok = ci < fd->nr_chunks && fd->chunks[ci].p &&
+		     fd->chunks[ci].populated;
+		mutex_unlock(&fd->lock);
+	}
+	iput(inode);
+	return ok;
 }
 
 /* Cut the file down to new_size (< fd->size): free the chunks wholly past
@@ -3520,21 +3558,23 @@ retry:
 	if (mm && upcall_retries < S3FS_UPCALL_MAX_RETRIES) {
 		u64 chunk_offset = ((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT)
 				   << S3FS_PCACHE_CHUNK_SHIFT;
-		struct s3fs_pending *p = pending_get_or_create(inode->i_ino,
-							       chunk_offset);
+		struct s3fs_pending *p;
+
+		/* U8: protect fd->buf against eviction for the whole retry
+		 * window (set once; later retries reuse it).  AC-45: register
+		 * BEFORE the pending exists, so a success signal that finds
+		 * the pending can rely on this reader already being counted. */
+		if (!buf_reader_active && fd) {
+			mutex_lock(&fd->lock);
+			fd->buf_readers++;
+			mutex_unlock(&fd->lock);
+			buf_reader_active = true;
+		}
+		p = pending_get_or_create(inode->i_ino, chunk_offset);
 
 		if (p) {
 			int err;
 			long remaining;
-
-			/* U8: protect fd->buf against eviction for the whole
-			 * retry window (set once; later retries reuse it). */
-			if (!buf_reader_active && fd) {
-				mutex_lock(&fd->lock);
-				fd->buf_readers++;
-				mutex_unlock(&fd->lock);
-				buf_reader_active = true;
-			}
 
 			err = miss_enqueue(inode->i_ino, pos, fs_size);
 			if (err == 0) {

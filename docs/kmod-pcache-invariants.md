@@ -19,6 +19,15 @@
 - refcount は 2 本立て (H-06)。作成時は refs=2 (hash の分 + caller の分)。SIGNAL_ADMIT / shutdown が落とすのは hash の分だけで、waiter は `p->err` を読んだ後に自分の分を `pending_put` で落とす。
 - `pending_exists(ino)` は eviction 側のガードで、pending 中の ino を evict 候補から外す。key=`ino` の bucket を走査し、どのチャンクの pending でも見つける。hash key を変えるときはこの前提を崩さないこと。
 
+## 成功 signal の契約 (AC-45 C2)
+- `S3FS_IOC_SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を付けて `err == 0` で呼ぶと、`s3fs_ebpf_signal_admit` は pending (ino, chunk_offset) を見つけたあと、その chunk が確保済みかつ `populated` であることを `fd->lock` 下で確かめる。なければ **pending を完了させず `-EAGAIN`** を返す。pcache モードの daemon (`handleReadMiss`) だけがこのフラグを付ける (arena の admit は chunk を持たない)。
+- 理由: 同じ ino の miss を複数の handler が同時に処理し、先に終わった handler が pending を完了させたあとで、遅れて動いている handler は pending に守られないまま evict される。その handler が「成功」を signal すると、reader は何もない状態で起こされ、retry (`S3FS_UPCALL_MAX_RETRIES=3`) を古い signal で使い切って gen=0 フォールバック (chunk なし) で EIO になる。C2 で evict が頻繁になって表に出た。
+- 成立条件: reader は **pending を作る前に** `buf_readers++` する (`s3fs_ebpf_read_folio`)。pending があれば reader は登録済みなので、signal の時点で chunk が populated なら、reader が終わるまで reset に解放されない。
+- daemon は `-EAGAIN` なら populate をやり直す (最大 `signalVerifyRetries=3`)。使い切ったら検証なしで signal し、reader 側の retry / フォールバックに任せる。
+
+## populate 後の capacity 強制 (AC-45 C2)
+- pcache の miss (populate ioctl + signal) は kmod の `admit_replace` を呼ばないので、capacity の evict は eval / sync が来るまで動かなかった。daemon は `--cache-capacity` が効いているとき (kmod パラメータ `capacity_bytes` > 0) に限り、**最後の populate のあと、signal の前に** `refreshAdmits` (= `admit_replace` の再実行) を行う (`enforceCapacityAfterPopulate`)。signal の前なので、この miss の chunk は pending に守られる。同時に来た miss は 1 回の追加の pass にまとめる (single-flight)。
+
 ## buf_readers (U8)
 - `fd->buf_readers` は `fd->lock` で保護する。`s3fs_ebpf_read_folio` の中で upcall 経路 (U8) に入るときに 1 回だけ ++ し (`buf_reader_active`)、`done:` で -- する。pcache ヒット経路の ++ (U10) は A/B で不要と確認して削除済み (hot path で fd->lock を取らない)。
 - 意味: 「この reader は retry や gen=0 fallback で `fd->buf` を後から読む可能性がある」。> 0 の間は reset が buf を free しない。

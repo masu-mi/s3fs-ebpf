@@ -29,8 +29,9 @@ type Counters struct {
 
 	// Week 4 (a) C: on-demand read-miss upcall handled by the daemon.
 	// Bumped from admit_arena.go:handleReadMiss.
-	ReadMissUpcalls  atomic.Uint64 // counter
-	ReadMissErrors   atomic.Uint64 // counter (S3 Get failed, admit failed, etc.)
+	ReadMissUpcalls     atomic.Uint64 // counter
+	ReadMissErrors      atomic.Uint64 // counter (S3 Get failed, admit failed, etc.)
+	ReadMissRepopulates atomic.Uint64 // counter (AC-45: chunk evicted before the success signal, populated again)
 
 	// Week 4 (b): dynamic bucket sync loop.
 	SyncRounds         atomic.Uint64 // counter, bumped per successful sync
@@ -214,6 +215,7 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		// Path C read-miss upcalls.
 		{"s3fs_ebpf_read_miss_upcalls_total", "Read-miss upcalls received by daemon.", "counter", Global.ReadMissUpcalls.Load()},
 		{"s3fs_ebpf_read_miss_errors_total", "Read-miss upcalls that failed (S3 Get / admit).", "counter", Global.ReadMissErrors.Load()},
+		{"s3fs_ebpf_read_miss_repopulates_total", "Read-miss populates repeated because kmod found the chunk evicted before the success signal (AC-45).", "counter", Global.ReadMissRepopulates.Load()},
 
 		// Sync loop.
 		{"s3fs_ebpf_sync_rounds_total", "Successful bucket-sync rounds.", "counter", Global.SyncRounds.Load()},

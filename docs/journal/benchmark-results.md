@@ -1434,3 +1434,48 @@ fentry を外すと差は消える。kmod の hit 経路 (`fc_pcache_check` → 
 **make test-regression (9 本)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0 (gauge == walk)。test-write-readback の最後の gauge は 1 MiB から 4 MiB になった。write の倍々で、2 MiB 超の dirty ファイルの chunk を 4 MiB まで確保するため (pcache ではないので capacity の判定には入らない)。
 
 **気づいたこと (AC-50)**: S3 のファイルを一度も読まずに途中へ write / truncate すると、取得していない範囲は 0 のまま flush される。chunk 化の前からの挙動で、C1 でも結果は同じ。backlog に記録した。
+
+### 18.20 AC-45 C2: populate 後に capacity の evict を走らせる (2026-10-16)
+
+**変更**:
+- daemon: pcache の miss の最後の populate のあと、`signalAdmit` の前に `refreshAdmits` (= kmod の `admit_replace`、capacity の evict を含む) を実行する (`enforceCapacityAfterPopulate`)。kmod の `capacity_bytes` が 0 より大きいときだけ。同時に来た miss は 1 回の追加の pass にまとめる。
+- 新しいテスト `scripts/test-pcache-capacity-noeval.sh`: capacity 12 MiB で 9 MiB のファイル 4 つを順に全体読みし、`/policy/eval` を呼ばない。
+
+| daemon | 各ファイルを読んだあとの fd_buf | evictions | 結果 |
+|---|---|---:|---|
+| C1 のみ | 9 → 18 → 28 → 37.7 MiB (settled 37.7 MiB) | 0 | FAIL |
+| C1 + C2 | 9 → 9 → 9 → 9 MiB (settled 9 MiB ≤ 12 MiB) | 3 | PASS |
+
+**C2 で表に出た既存の競合 (evict-race の read_err)**: C2 を入れただけで test-pcache-evict-race-short が不安定になった (5 回中 4 回が read_err 1〜12、retry_exh_delta 約 190)。evict の件数が 418 から約 1250 に増えたため。`trace_printk` で時系列を追うと次のとおりだった。
+1. 同じ ino の miss は、reader ごとに別の event として daemon に届き、複数の handler が同じ ino の全体 populate を並行して行う。
+2. 先に終わった handler が pending (ino, chunk 0) を signal して外す。遅れて動いている handler は、pending に守られないまま populate の途中で evict され (readers=0 の reset)、残りの chunk だけを入れ直して、新しい reader の pending (ino, chunk 0) に **成功** を signal する。
+3. reader は chunk 0 がない状態で起こされ、そのような古い signal で retry を 3 回使い切り、gen=0 フォールバックの時点で chunk 0 がなく EIO になる (`gen0_fail_buf_null`)。
+
+もとからあった競合で、evict が少ないうちは見えなかった。
+
+**修正**:
+- kmod: `S3FS_IOC_SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を追加 (構造体の `_pad` を `flags` にしたのでサイズは同じ)。`err == 0` のとき、chunk が確保済みで populated でなければ、pending を完了させずに `-EAGAIN` を返す。
+- kmod: `s3fs_ebpf_read_folio` は、pending を作る **前** に `buf_readers++` する。pending があれば reader は登録済みなので、signal の時点で chunk があれば、reader が終わるまで解放されない。
+- daemon: `-EAGAIN` なら populate をやり直す (最大 3 回、`s3fs_ebpf_read_miss_repopulates_total` で数える)。使い切ったら検証なしで signal する。
+
+| | read_err (30 s、同じ条件) |
+|---|---|
+| C2 のみ (修正前) | 5 回中 4 回で 1〜12 |
+| C2 + signal の検証 | 7 回すべて 0 (単独 6 回 + make test-regression 内 1 回) |
+
+evict-race の fd_buf_peak は 36 MiB のまま。ピークの削減は C3 (chunk 単位の保護と解放) の対象。
+
+**make test-regression (10 本)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0。go test 全 ok (`TestEnforceCapacityAfterPopulate` 追加)。
+
+**性能**: bench-ab-pcache は a 0.92 (5619k / 6079k) / b PASS (15.1 vs 17.4 ms) / c PASS。b の pcache 側は C1 の 14.2 ms より 0.9 ms 遅い。page cache hit の経路は変えていないので、揺らぎの可能性が高いが、C3 のあとで測り直す。
+
+**bench-hitrate (pcache モード) が 52.5〜54.0% から 26〜34% に下がった (意図した変化)**:
+
+| policy | C1 | C2 |
+|---|---:|---:|
+| observe | 52.55% | 26.15% |
+| lru_ops | 52.80% | 32.15% |
+| sieve_ops | 53.35% | 28.75% |
+| wtinylfu_full_ops | 52.95% | 34.15% |
+
+pcache モードは capacity (352 B ≒ 7 ファイル) を無視して page cache に溜めていたので、capacity 内の hit_rate ではなかった。§16 の記録でも、pcache は arena より 60pp 以上高い 94% (evictions=0) だった。C2 で capacity が効くようになり、arena モードの水準 (27〜35%、§12.3 / §18.1) と同じになった。最適値 (opt) 64% に対して、policy ごとの差が再び意味を持つ。以後、pcache モードの hit_rate は capacity が効いた値として比べること。
