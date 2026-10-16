@@ -15,11 +15,12 @@
 #      promoted to a full-file admit and hide the accounting gap).
 #   3. For each file read only [8 MiB, 9 MiB), verify its sha256, then run a
 #      policy eval round.
-#      A generated CEL policy prewarms only a tiny sentinel object: default
-#      prewarm would stage each 9 MiB file as an arena admit and fill
-#      capacity_bytes by itself.  (Before AC-43, prewarming nothing also
-#      left s3fs_admitted_mm unset so no upcall fired; the sentinel stays.)
+#      The default prewarm policy is used: since AC-44, --arena-metadata-only
+#      prewarm warms metadata only, so the 9 MiB files no longer become arena
+#      admits that fill capacity_bytes by themselves.
 #   4. After a final eval, s3fs_ebpf_fd_buf_bytes must be <= CAPACITY.
+#   5. AC-44: the daemon must report "[admit] 0 entries" — no prewarm body
+#      may be staged into the arena in --arena-metadata-only mode.
 #
 # Usage:
 #   sudo ./scripts/test-pcache-capacity-tail.sh
@@ -45,9 +46,10 @@ CAPACITY=${CAPACITY:-$(( 12 * 1024 * 1024 ))}
 METRICS_URL=${METRICS_URL:-http://localhost:9600/metrics}
 DAEMON_METRICS_URL=${DAEMON_METRICS_URL:-http://localhost:9600}
 TEST_NAME=${TEST_NAME:-test-pcache-capacity-tail}
-# Dedicated bucket: objects other tests leave in the shared bucket are
-# prewarmed as arena admits and push live_bytes over capacity on their own,
-# so every tail would be evicted immediately and the test would pass vacuously.
+# Dedicated bucket: before AC-44, objects other tests leave in the shared
+# bucket were prewarmed as arena admits and pushed live_bytes over capacity
+# on their own (every tail evicted at once, a vacuous pass).  Kept so the
+# test does not depend on what other tests leave behind.
 S3_BUCKET=${CAP_TAIL_BUCKET:-s3fs-capacity-tail}
 
 log()  { printf '[capacity-tail] %s\n' "$*" >&2; }
@@ -97,9 +99,6 @@ for i in $(seq 1 "$N_FILES"); do
         | sha256sum | awk '{print $1}')
     docker exec -i "$MINIO_CONTAINER" mc pipe "local/$S3_BUCKET/$fname" < "$orig" >/dev/null
 done
-printf 'sentinel\n' | docker exec -i "$MINIO_CONTAINER" mc pipe "local/$S3_BUCKET/capacity-tail-sentinel.txt" >/dev/null
-printf 'prewarm: entry.size < 4096\n' > "$TMPDIR_LOCAL/prewarm-sentinel.cel"
-chmod 644 "$TMPDIR_LOCAL/prewarm-sentinel.cel"
 log "seed done"
 
 # ── mount in pcache mode ──────────────────────────────────────────────────────
@@ -109,7 +108,6 @@ ebpf_start_daemon "$OUT/daemon.log" \
     --bucket="$S3_BUCKET" \
     --arena-metadata-only \
     --pattern-aware-admit=false \
-    --policy="$TMPDIR_LOCAL/prewarm-sentinel.cel" \
     --policy-bpf="builtin:policy_observe" \
     --softcap=64 \
     --cache-capacity="${CAPACITY}" \
@@ -141,8 +139,17 @@ sleep 2
 FDBUF_SETTLED=$(get_metric s3fs_ebpf_fd_buf_bytes)
 EVICTIONS=$(get_metric s3fs_ebpf_policy_evictions_total)
 
+PREWARM_ADMITS=$(grep -oE '\[admit\] [0-9]+ entries' "$OUT/daemon.log" | head -1 | awk '{print $2}')
+PREWARM_ADMITS=${PREWARM_ADMITS:--1}
+
 # ── verdict ───────────────────────────────────────────────────────────────────
 overall=PASS
+if [ "$PREWARM_ADMITS" -eq 0 ]; then
+    PREWARM_PASS=PASS
+else
+    PREWARM_PASS=FAIL
+    overall=FAIL
+fi
 TAIL_PASS=PASS
 [ "$TAIL_FAIL" -gt 0 ] && { TAIL_PASS=FAIL; overall=FAIL; }
 if [ "$FDBUF_SETTLED" -lt 0 ]; then
@@ -168,14 +175,18 @@ printf "fd_buf     : peak=%d B settled=%d B  evictions=%s\n" \
 echo ""
 printf "tail sha256: %s\n" "$TAIL_PASS"
 printf "fd_buf     : %s  (settled <= capacity)\n" "$FDBUF_PASS"
+printf "prewarm    : %s  (%d arena admits, want 0)\n" "$PREWARM_PASS" "$PREWARM_ADMITS"
 echo ""
 echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/capacity-tail-report.txt"
 
-printf 'RESULT name=%s status=%s tail_fail=%d fd_buf_peak=%d fd_buf_settled=%d capacity=%d\n' \
-    "$TEST_NAME" "$overall" "$TAIL_FAIL" "$FDBUF_PEAK" "$FDBUF_SETTLED" "$CAPACITY"
+printf 'RESULT name=%s status=%s tail_fail=%d fd_buf_peak=%d fd_buf_settled=%d capacity=%d prewarm_admits=%d\n' \
+    "$TEST_NAME" "$overall" "$TAIL_FAIL" "$FDBUF_PEAK" "$FDBUF_SETTLED" "$CAPACITY" "$PREWARM_ADMITS"
 [[ "$FDBUF_PASS" == FAIL ]] && \
     printf 'DETAIL fd_buf_settled=%d > capacity=%d (fd->buf not bounded by capacity_bytes — AC-41)\n' \
         "$FDBUF_SETTLED" "$CAPACITY"
+[[ "$PREWARM_PASS" == FAIL ]] && \
+    printf 'DETAIL prewarm_admits=%d (prewarm staged bodies into the arena in pcache mode — AC-44)\n' \
+        "$PREWARM_ADMITS"
 [[ "$overall" == FAIL ]] && exit 1 || exit 0

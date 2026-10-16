@@ -1292,3 +1292,25 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 **make test-regression (8 本)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0。evict-race-short は sha256_fail=0、read_err=0、retry_exh_delta=0、fd_buf_peak 36 MiB (AC-45 と同じ値で、悪化していない)。capacity-tail は fd_buf_settled 9 MiB ≤ capacity 12 MiB。
 
 **large-file-read の監査値が 0 → 300 MiB に変わった件**: 回帰ではない。bpftrace で `s3fs_ebpf_evict_inode` を見ると、修正前も修正後も 300 MiB の inode は daemon の `entries_replace` ioctl → `shrink_dcache_sb` → `iput` で回収されている。修正前は read が遅く、`fd_buf_audit` が値の安定を待つ間にこの回収が起きて 0 になっていた。修正後は read が速くなり、監査が先に終わってから回収されるので 300 MiB (= i_size ちょうど) と出る。どちらも gauge == walk。test-evict-readback の監査値 (0 / 9 MiB) は修正前から実行ごとにばらつく。
+
+### 18.15 AC-44: pcache モードの prewarm をメタデータだけにする (2026-10-16)
+
+**修正 (daemon)**: `prewarmEntry` は `--arena-metadata-only` のとき、policy が prewarm=true を返しても本体の S3 Get と `AdmitContent` をしない (log は `content-skip (arena-metadata-only, ...)`)。メタデータの warm (Stat → `WarmCache`) は従来どおり行うので、stat は Path A のまま。本体は最初の read で upcall → `POPULATE_PAGES` で fd->buf に入る。prewarm の時点では inode がまだないので、POPULATE_PAGES で先に入れることはできない。prewarm の admit は常に 0 件になるので、AC-43 の修正が前提。
+
+**test-pcache-capacity-tail の変更**: 目印ファイルだけの prewarm policy をやめ、既定の prewarm で起動する。daemon log の `[admit] N entries` が 0 であることを判定に加えた (`prewarm_admits`)。
+
+| daemon | prewarm_admits | fd_buf_peak | 結果 |
+|---|---:|---:|---|
+| 修正前 (99a8461) | 4 | 0 | FAIL (9 MiB × 4 が arena admit になり、末尾読みも arena から返る) |
+| 修正後 | 0 | 9 MiB | PASS |
+
+**make test-regression (8 本)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0。go test も ok。
+
+**bench-hitrate pcache モード (seed=42、`DAEMON_EXTRA_FLAGS=--arena-metadata-only`)**:
+
+| | hit_rate | rate_arena | adm_max |
+|---|---|---|---:|
+| 修正前 | 53.05〜54.20% | 46.80〜68.80% | 7 |
+| 修正後 | 52.50〜53.70% | 46.30〜47.50% | 0 |
+
+hit_rate は平均で約 0.5pp 下がった。30 ファイルの最初のアクセスが prewarm なしの miss になる分 (最大 30 / 2000 = 1.5pp) の範囲。修正前の rate_arena が高いのは prewarm された arena admit から folio を埋めていたためで、修正後は arena admit がなくなり、policy ごとの差もほぼなくなった (policy 比較には arena モードの bench を使う)。
