@@ -1507,3 +1507,26 @@ evict-race のピークが capacity 4 MiB まで下がらないのは、reader 3
 **C4 (populate 前の受け入れ待ち) は入れない**: ピークは上の目標の範囲内に収まり、read は待たされずに通る。
 
 **make test-regression (11 本、test-pcache-capacity-seq を含む)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0。
+
+### 18.22 AC-50: 既存オブジェクトへの最初の変更で、残る部分を読み込む (2026-10-16)
+
+**症状 (§18.19 で気づいた)**: `open(2)` は中身を読み込まず、flush は fd の全体を PUT する。そのため、S3 にあるファイルを一度も読まずに write / truncate すると、変更していない部分が空のまま S3 に書かれた。新しいテスト `test-write-existing` (6 MiB の乱数オブジェクトを、読まずに変更する) で、修正前は 12 シナリオ (pcache / arena × 6) のうち 10 が壊れた。
+
+| シナリオ | 修正前の S3 のオブジェクト | 修正後 |
+|---|---|---|
+| overwrite (1 MiB と 5 MiB の位置に 4 KiB ずつ) | 書いた範囲まで切り詰められる | 元の内容 + 上書き |
+| shrink (5 MiB へ truncate) | 0 になる | 先頭 5 MiB |
+| extend (8 MiB へ truncate) | 0 になる | 元の内容 + 0 の 2 MiB |
+| append (4 KiB 追記) | 追記分だけになる | 元の内容 + 追記 |
+| empty (`: > f`) | S3 に反映されない (元のまま) | 空 |
+| otrunc (O_TRUNC + 小さい write) | 正しい | 正しい |
+
+**変更**:
+- kmod: `s3fs_fd_load_for_modify`。write / setattr(size) の clean → dirty の最初の変更の前に、変更で残る範囲のうち populated でない chunk を、`S3FS_MISS_FLAG_FOR_WRITE` 付きの miss event で daemon に取りにいかせる。上書きで丸ごと置き換わる chunk と、切り捨てる範囲は読まない。取れなければ -EIO で変更を断る (取れない部分を残したまま flush するとオブジェクトが壊れるため)。
+- kmod: clean な fd の論理サイズは `i_size`。最初の変更で `fd->size` をそこまで広げてから適用する。setattr はサイズが変わるとき必ず dirty にする。
+- daemon: `S3FS_MISS_FLAG_FOR_WRITE` の miss は、admit モードに関係なく POPULATE_PAGES で chunk を fd に入れ、成功の signal は `S3FS_SIGNAL_VERIFY_POPULATED` 付きで行う (`handleLoadForWrite`)。
+- UAPI: `struct s3fs_read_miss_event` の `_pad` を `flags` にした (サイズは同じ)。
+
+**結果**: test-write-existing は 12 シナリオ全部 PASS (S3 のオブジェクトと再読み込みの両方)。`make test-regression` (12 本) は全 PASS、`fd_buf_audit` は全テストで drift 0。
+
+**コスト**: 既存の大きいファイルへの部分的な write は、最初に変更されない chunk を全部読み込む (s3fs-fuse が書き込み前にファイルを手元に落とすのと同じ)。新規作成と O_TRUNC では読み込まない。

@@ -43,6 +43,13 @@
 - dirty / flushing のときは何もしない。pin で残った chunk は、reader が unpin したあと、次に evict されたときに回収される (entry を入れ直しているので capacity の計算に入る)。inode の `i_size` はクリアしない (Q1)。
 - AC-45 C3 (shed): capacity の pass は、miss が in-flight (`pending_exists`) の ino を丸ごとは evict しない (待っている reader の chunk と entry を守る)。代わりに `s3fs_ino_shed_unpinned` で、`readers == 0` の chunk を、重なる PCACHE entry を先に落として free し、その範囲の page cache を落とす。capacity より大きいファイルを順に読んでも、読み終わった chunk が溜まらない。daemon は、capacity より大きいファイルを全体 admit (pattern-aware promote) にしない (`fullAdmitExceedsCapacity`、全体を populate してから evict しても意味がない)。
 
+## 既存ファイルへの最初の変更 (AC-50)
+- `open(2)` は中身を読み込まず、flush は fd の全体を PUT する。だから **clean → dirty の最初の変更** (write / truncate) の前に、変更で残る部分を fd に読み込む (`s3fs_fd_load_for_modify`)。そうしないと、途中への上書きはオブジェクトを書いた範囲まで切り詰め、縮小は 0 を作り、`: > f` は S3 に届かなかった。
+- 読み込む範囲: `[0, min(need_end, i_size))` のうち populated でない chunk。ただし呼び出し側が全部上書きする chunk (write の範囲に丸ごと入る chunk) は読まない。write は `need_end = i_size`、縮小は新しいサイズ、拡張は元のサイズ、0 への truncate は何も読まない。
+- 読み込みの upcall は `S3FS_MISS_FLAG_FOR_WRITE` 付きの miss event。daemon は arena モードでも POPULATE_PAGES で chunk を fd に入れ、`S3FS_SIGNAL_VERIFY_POPULATED` 付きで signal する。待つ側は read_folio と同じく、**先に chunk を pin してから pending を作る**。daemon がいない、または chunk を取れないときは **-EIO で変更を断る** (取れない部分を残したまま flush すると、オブジェクトを壊すため)。
+- clean な fd の論理サイズは `i_size` (S3 のサイズ)。`fd->size` は取得済みの範囲しか表さない。最初の変更で `fd->size = max(fd->size, i_size)` にしてから適用する。setattr は、サイズが変わるとき (`new_size != 現在のサイズ`) は必ず dirty にする (0 への truncate も PUT される)。
+- すでに dirty / flushing の fd は内容を持っているので、読み込まない。
+
 ## flush pin (W1)
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。
 - `read_dirty` が `flush_read_seq = flush_seq` を記録。`signal_flush` は `err≠0 || flush_read_seq==flush_seq` のとき `flushing=false`、さらに `err==0 && !dirty` なら unpin (`iput` は fd->lock 解放後)。seq 不一致 = 後続 enqueue が未 PUT なので flushing/pin を維持。err≠0 は flushing を下ろすが pin は保持。

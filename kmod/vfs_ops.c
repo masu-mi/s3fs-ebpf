@@ -1570,7 +1570,7 @@ static bool pending_exists(u64 ino)
 	return found;
 }
 
-static int miss_enqueue(u64 ino, loff_t offset, size_t count)
+static int miss_enqueue(u64 ino, loff_t offset, size_t count, u32 flags)
 {
 	struct s3fs_miss_node *node = kmalloc(sizeof(*node), GFP_KERNEL);
 
@@ -1580,7 +1580,7 @@ static int miss_enqueue(u64 ino, loff_t offset, size_t count)
 	node->ev.ino    = ino;
 	node->ev.offset = offset;
 	node->ev.count  = (u32)min_t(size_t, count, U32_MAX);
-	node->ev._pad   = 0;
+	node->ev.flags  = flags;
 
 	spin_lock(&s3fs_miss_lock);
 	list_add_tail(&node->link, &s3fs_miss_events);
@@ -3272,6 +3272,103 @@ static bool admit_snapshot(u64 ino, u64 pos,
 	return hit;
 }
 
+/* AC-50: attempts per chunk before giving up with -EIO (each waits up to
+ * S3FS_UPCALL_WAIT_JIFFIES for the daemon). */
+#define S3FS_LOAD_MAX_TRIES	6
+
+/* AC-50: make the fd hold the parts of an existing object that a modification
+ * leaves intact, before the modification is applied.
+ *
+ * open(2) loads nothing and a flush PUTs the whole buffer, so the first
+ * write / truncate on a file nobody read used to start from an empty buffer:
+ * the object was truncated to what was written, a shrink produced zeros and
+ * `: > f` never reached S3.  Only the clean -> dirty transition needs this
+ * (afterwards the fd owns the content).
+ *
+ * Loads chunks [0, min(need_end, i_size)) that are not populated, except
+ * chunks the caller overwrites completely ([ow_lo, ow_hi)).  A chunk is
+ * fetched with an upcall flagged S3FS_MISS_FLAG_FOR_WRITE; the daemon fills
+ * it with POPULATE_PAGES (also in arena mode) and signals with
+ * S3FS_SIGNAL_VERIFY_POPULATED.  Same protocol as .read_folio: pin the chunk
+ * first, then create the pending.  Returns -EIO when a chunk cannot be
+ * loaded (daemon absent or failing): the write is refused rather than
+ * flushed over the object.  Sleeps; call with no lock held. */
+static int s3fs_fd_load_for_modify(struct inode *inode,
+				   struct s3fs_file_data *fd, u64 need_end,
+				   u64 ow_lo, u64 ow_hi)
+{
+	u64 end = min_t(u64, need_end, (u64)i_size_read(inode));
+	u32 nci, ci;
+
+	if (!end)
+		return 0;
+	nci = (u32)DIV_ROUND_UP(end, S3FS_CHUNK_SIZE);
+	for (ci = 0; ci < nci; ci++) {
+		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, end);
+		int tries = 0;
+
+		if (ow_lo <= cs && ow_hi >= ce)
+			continue; /* overwritten completely: nothing to keep */
+		for (;;) {
+			struct s3fs_pending *p;
+			struct mm_struct *mm;
+			bool pinned, owned, have;
+			long rem = 1;
+			int err;
+
+			mutex_lock(&fd->lock);
+			owned = fd->dirty || fd->flushing;
+			have = ci < fd->nr_chunks && fd->chunks[ci].p &&
+			       fd->chunks[ci].populated;
+			if (owned || have) {
+				mutex_unlock(&fd->lock);
+				if (owned)
+					return 0; /* the fd owns the content already */
+				break;
+			}
+			pinned = s3fs_fd_chunk_pin(fd, ci);
+			mutex_unlock(&fd->lock);
+
+			read_lock(&s3fs_admits_lock);
+			mm = s3fs_admitted_mm;
+			read_unlock(&s3fs_admits_lock);
+			if (!mm) {
+				err = -EIO; /* no daemon: cannot fetch the rest */
+				p = NULL;
+			} else {
+				p = pending_get_or_create(inode->i_ino, cs);
+				err = p ? miss_enqueue(inode->i_ino, cs,
+						       S3FS_CHUNK_SIZE,
+						       S3FS_MISS_FLAG_FOR_WRITE)
+					: -ENOMEM;
+			}
+			if (!err) {
+				rem = wait_for_completion_interruptible_timeout(
+					&p->done, S3FS_UPCALL_WAIT_JIFFIES);
+				if (rem < 0)
+					err = (int)rem;	/* -ERESTARTSYS */
+				else if (rem > 0)
+					err = p->err;	/* daemon-side failure */
+			}
+			if (p)
+				pending_put(p);
+			if (pinned) {
+				mutex_lock(&fd->lock);
+				s3fs_fd_chunk_unpin(fd, ci);
+				mutex_unlock(&fd->lock);
+			}
+			if (err == -ERESTARTSYS || err == -EINTR)
+				return err;
+			if (err)
+				return -EIO;
+			if (++tries >= S3FS_LOAD_MAX_TRIES)
+				return -EIO;
+		}
+	}
+	return 0;
+}
+
 static ssize_t s3fs_ebpf_file_write(struct file *file,
 				    const char __user *user_buf,
 				    size_t count, loff_t *pos)
@@ -3286,7 +3383,26 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 	if (!count)
 		return 0;
 
+	/* AC-50: the first modification of a clean file must start from its
+	 * current content, not from an empty buffer.  Chunks the write covers
+	 * completely are not fetched. */
+	if (!READ_ONCE(fd->dirty) && !READ_ONCE(fd->flushing)) {
+		loff_t lstart = (file->f_flags & O_APPEND) ?
+				i_size_read(inode) : *pos;
+
+		if (lstart >= 0) {
+			err = s3fs_fd_load_for_modify(inode, fd,
+						      (u64)i_size_read(inode),
+						      (u64)lstart,
+						      (u64)lstart + count);
+			if (err)
+				return err;
+		}
+	}
+
 	mutex_lock(&fd->lock);
+	if (!fd->dirty && !fd->flushing)
+		fd->size = max_t(size_t, fd->size, (size_t)i_size_read(inode));
 	start = (file->f_flags & O_APPEND) ? (loff_t)fd->size : *pos;
 	if (start < 0) {
 		err = -EINVAL;
@@ -3328,8 +3444,28 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 
 	if ((attr->ia_valid & ATTR_SIZE) && fd) {
 		loff_t new_size = attr->ia_size;
+		bool owned;
+		u64 cur;
+
+		/* AC-50: a clean file's size is the object's (i_size); fd->size
+		 * only covers what was fetched.  Changing it must start from the
+		 * content that survives, and even a truncate that fetches
+		 * nothing (`: > f`) has to mark the file dirty so it is PUT. */
+		mutex_lock(&fd->lock);
+		owned = fd->dirty || fd->flushing;
+		cur = owned ? (u64)fd->size : (u64)i_size_read(inode);
+		mutex_unlock(&fd->lock);
+		if (!owned && (u64)new_size != cur) {
+			err = s3fs_fd_load_for_modify(inode, fd,
+						      min_t(u64, new_size, cur),
+						      0, 0);
+			if (err)
+				return err;
+		}
 
 		mutex_lock(&fd->lock);
+		if (!fd->dirty && !fd->flushing && (u64)new_size != cur)
+			fd->size = max_t(size_t, fd->size, (size_t)cur);
 		if (new_size < (loff_t)fd->size) {
 			/* AC-45: free the chunks past the cut and zero the
 			 * boundary tail; an extension later reads zeros, not
@@ -3715,7 +3851,7 @@ retry:
 			int err;
 			long remaining;
 
-			err = miss_enqueue(inode->i_ino, pos, fs_size);
+			err = miss_enqueue(inode->i_ino, pos, fs_size, 0);
 			if (err == 0) {
 				remaining = wait_for_completion_interruptible_timeout(
 					&p->done, S3FS_UPCALL_WAIT_JIFFIES);

@@ -131,8 +131,18 @@ struct s3fs_read_miss_event {
 	__u64 ino;
 	__s64 offset; /* where the miss was */
 	__u32 count;  /* bytes requested */
-	__u32 _pad;
+	__u32 flags;  /* S3FS_MISS_FLAG_* */
 };
+
+/*
+ * AC-50: the miss is not a read.  kmod is about to modify (write, truncate)
+ * a file whose content it does not hold: open(2) loads nothing, and a
+ * flush PUTs the whole buffer, so the unmodified part must be fetched
+ * first.  The daemon loads the 4 MiB chunk containing `offset` into the
+ * ino's fd with POPULATE_PAGES — in arena mode too — and signals the
+ * waiter; it does not admit anything into the arena.
+ */
+#define S3FS_MISS_FLAG_FOR_WRITE	0x1u
 
 /*
  * S3FS_IOC_SYNC_ENTRIES — replace the kmod's dentry/inode entry table
