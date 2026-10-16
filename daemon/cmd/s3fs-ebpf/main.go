@@ -408,7 +408,8 @@ func runFastpath(args []string) int {
 		"[AB-04] store S3 object data in the kernel page cache (via fd->buf) instead of "+
 			"the BPF arena. Reads are served by generic_file_read_iter from the page "+
 			"cache — no GUP per page. Eliminates the 1.7µs/page GUP overhead at the "+
-			"cost of one extra copy on admit. Does not require BPF arena allocation.")
+			"cost of one extra copy on admit. Does not require BPF arena allocation. "+
+			"Prewarm warms metadata only; bodies are fetched on the first read (AC-44).")
 	wtinylFUAgeInterval := fs.Uint64("wtinylfu-age-interval", 512,
 		"[Z-01] W-TinyLFU CMS aging interval: halve all CMS counters every N on_hit calls. "+
 			"Lower values age faster (suit short bench runs); higher values age slower "+
@@ -1061,6 +1062,15 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 			Size: entry.Fallback, Mode: entry.Mode,
 		})
 	}
+	// AC-44: --arena-metadata-only keeps object bodies out of the arena;
+	// content reaches fd->buf on the first read via upcall + POPULATE_PAGES.
+	// Staging the body here would make it an arena admit that consumes
+	// capacity_bytes (and bypass the pcache path) for every listed object.
+	// POPULATE_PAGES cannot be used instead: the inode does not exist yet.
+	pcacheSkip := wantPrewarm && arenaMetadataOnlyEnabled
+	if pcacheSkip {
+		wantPrewarm = false
+	}
 
 	// Step 1 — metadata warm (unconditional). Prefer S3-authoritative
 	// size/mtime when reachable; fall back to the bootstrap entry
@@ -1103,8 +1113,12 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 
 	// Step 2 — content admit (policy-gated).
 	if !wantPrewarm {
-		fmt.Printf("[prewarm] ino=%d name=%s content-skip (policy=false, stat=warm, cat=PathC)\n",
-			entry.Ino, entry.Name)
+		reason := "policy=false"
+		if pcacheSkip {
+			reason = "arena-metadata-only"
+		}
+		fmt.Printf("[prewarm] ino=%d name=%s content-skip (%s, stat=warm, cat=PathC)\n",
+			entry.Ino, entry.Name, reason)
 		return admitEntry{}, false
 	}
 	if body == nil {
