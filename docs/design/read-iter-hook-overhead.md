@@ -11,7 +11,8 @@ AB-07 の性能 gate (a)「64 jobs の psync read で、ebpf-pcache の IOPS が
   - inode_index の lookup と policy の hit 処理: 約 3%
   - trampoline / rcu / migrate: 約 2%
 - 1 つ目は、ポインタを直接たどる形に変えて解消した (a4e7b0f)。gate (a) は fuse-raw 比で 0.81 から 0.87 になった。挙動は変わらない。
-- 2 つ目と 3 つ目は残っている (AC-47)。
+- 2 つ目は、pattern map を per-CPU (`LRU_PERCPU_HASH`) にして大部分を解消した。gate (a) は 0.87 から 0.93 になった。並列で読むときの sequential の判定は改善した (§18.17)。
+- 3 つ目と、per-CPU map の lookup、フック自体の固定の負担は残っている (AC-47)。
 - gate (b) (100 MiB の warm read) は、今のコードでは PASS している。「FUSE は large folio を使っているので速い」という仮説は、計測カーネル (6.12) では成り立たなかった。
 
 ## 2. 被疑箇所に気づいた経緯
@@ -103,13 +104,13 @@ page cache で hit する read の経路に入るフックや変更は、次の�
 
 | 項目 | 負担 | 案 |
 |---|---|---|
-| pattern map の更新 | 約 8% | `LRU_PERCPU_HASH` にして、daemon 側で CPU ごとの値を合算する (`LastEndPos` は最大値を使う)。または、判断に必要な数に達したら数えるのをやめる |
+| pattern map の更新 | 約 8% → per-CPU map の lookup の約 3% | ✅ `LRU_PERCPU_HASH` にして、daemon 側で CPU ごとの値を合算した (`LastEndPos` は最大値)。残りの lookup を減らすなら、判断に必要な数に達したら数えるのをやめる |
 | inode_index の lookup + policy の hit 処理 | 約 3% | policy に伝える hit を間引く、または page cache で hit したものは伝えない |
 | trampoline などフック自体の固定の負担 | 約 2% | フックを使う限り残る。§5 の 6 の判断が必要 |
 
 ## 関連
 
 - `docs/design/ebpf-hook-gaps.md` §3 — R-01 (`fentry/generic_file_read_iter`) の設計
-- `docs/journal/benchmark-results.md` §18.2 / §18.16 — gate の計測値
+- `docs/journal/benchmark-results.md` §18.2 / §18.16 / §18.17 — gate の計測値
 - `scripts/bench-ab-pcache.sh` — AB-07 gate
 - `scripts/bench-read-iter.sh` — 1 スレッドでのフックの負担

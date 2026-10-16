@@ -95,13 +95,21 @@ struct {
  * Value: struct s3fs_read_pattern — updated by fentry/generic_file_read_iter
  *        on every read call that passes the s_magic filter.
  *
- * LRU_HASH evicts the coldest entry automatically when full, so policy
+ * LRU evicts the coldest entry automatically when full, so policy
  * programs and the daemon always see recent-ish data without GC overhead.
  * Max entries matches S3FS_INDEX_MAX_ENTRIES so both maps age at the same
  * rate; bump together when the working set grows.
+ *
+ * AC-47: per-CPU.  With a shared value, every read of a hot file did three
+ * atomics plus a store on one cacheline, ~8% of CPU in the 64-job fio read
+ * (docs/design/read-iter-hook-overhead.md).  Each CPU now tracks its own
+ * last_end_pos and counters; the daemon sums the counters and takes the
+ * max last_end_pos (ReadAccessPattern).  Sequentiality is judged per CPU,
+ * which also stops concurrent readers of one file from breaking each
+ * other's sequential runs.
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
 	__type(key, __u64);
 	__type(value, struct s3fs_read_pattern);
 	__uint(max_entries, S3FS_INDEX_MAX_ENTRIES);
@@ -286,7 +294,10 @@ int BPF_PROG(s3fs_fp_read_iter,
 	/* Update access pattern: sequential if pos is within slack of
 	 * the previous read's end offset, random otherwise.
 	 * BPF_NOEXIST insert races are harmless — both sides start from
-	 * a zero-value entry and only do atomic increments thereafter. */
+	 * a zero-value entry.  `pat` is this CPU's slot (AC-47), so plain
+	 * updates suffice: migration is disabled while the program runs,
+	 * and an update lost to preemption by another reader on this CPU
+	 * only skews an approximate signal. */
 	pat = bpf_map_lookup_elem(&s3fs_read_pattern_map, &ino);
 	if (!pat) {
 		bpf_map_update_elem(&s3fs_read_pattern_map, &ino, &zero_pat, BPF_NOEXIST);
@@ -296,13 +307,10 @@ int BPF_PROG(s3fs_fp_read_iter,
 		__u64 expected_pos = pat->last_end_pos;
 		if (pos <= expected_pos + S3FS_SEQ_SLACK &&
 		    pos + len > expected_pos)
-			__sync_fetch_and_add(&pat->seq_count, 1);
+			pat->seq_count++;
 		else
-			__sync_fetch_and_add(&pat->rand_count, 1);
-		__sync_fetch_and_add(&pat->total_bytes, len);
-		/* Relaxed store: last_end_pos is best-effort; a torn write
-		 * under concurrent readers is acceptable — the pattern
-		 * counters above are the authoritative signal. */
+			pat->rand_count++;
+		pat->total_bytes += len;
 		pat->last_end_pos = pos + len;
 	}
 

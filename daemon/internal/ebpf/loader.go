@@ -211,19 +211,19 @@ func (p *Programs) AttachFentryReadIter() (link.Link, error) {
 }
 
 // ReadPattern holds the per-ino access pattern snapshot read from
-// s3fs_read_pattern_map. SeqRatio returns the fraction of sequential reads
-// (0.0–1.0); NaN when no reads have been observed yet.
+// s3fs_read_pattern_map, merged across CPUs (see mergeReadPatterns).
+// SeqRatio returns the fraction of sequential reads (0.0–1.0).
 type ReadPattern struct {
 	LastEndPos uint64
-	SeqCount   uint32
-	RandCount  uint32
+	SeqCount   uint64
+	RandCount  uint64
 	TotalBytes uint64
 }
 
 // SeqRatio returns the fraction of sequential reads [0.0, 1.0].
 // Returns 0.0 when no reads have been recorded.
 func (rp ReadPattern) SeqRatio() float64 {
-	total := uint64(rp.SeqCount) + uint64(rp.RandCount)
+	total := rp.SeqCount + rp.RandCount
 	if total == 0 {
 		return 0.0
 	}
@@ -234,16 +234,29 @@ func (rp ReadPattern) SeqRatio() float64 {
 // s3fs_read_pattern_map. Returns (zero, false) when the ino has not been
 // observed by fentry/generic_file_read_iter yet.
 func (p *Programs) ReadAccessPattern(ino uint64) (ReadPattern, bool) {
-	var v s3fsfpS3fsReadPattern
-	if err := p.Objs.S3fsReadPatternMap.Lookup(&ino, &v); err != nil {
+	var vs []s3fsfpS3fsReadPattern
+	if err := p.Objs.S3fsReadPatternMap.Lookup(&ino, &vs); err != nil {
 		return ReadPattern{}, false
 	}
-	return ReadPattern{
-		LastEndPos: v.LastEndPos,
-		SeqCount:   v.SeqCount,
-		RandCount:  v.RandCount,
-		TotalBytes: v.TotalBytes,
-	}, true
+	return mergeReadPatterns(vs), true
+}
+
+// mergeReadPatterns folds the per-CPU slots of s3fs_read_pattern_map
+// (LRU_PERCPU_HASH since AC-47) into one pattern: counters are summed
+// (in 64 bits, so many CPUs' u32 counts cannot wrap), and LastEndPos is
+// the furthest end any CPU has read — the sequential frontier the
+// prefetch loop extends.
+func mergeReadPatterns(vs []s3fsfpS3fsReadPattern) ReadPattern {
+	var rp ReadPattern
+	for _, v := range vs {
+		rp.SeqCount += uint64(v.SeqCount)
+		rp.RandCount += uint64(v.RandCount)
+		rp.TotalBytes += v.TotalBytes
+		if v.LastEndPos > rp.LastEndPos {
+			rp.LastEndPos = v.LastEndPos
+		}
+	}
+	return rp
 }
 
 // rejectDemoObjs targets exactly the reject demo program and its arena
