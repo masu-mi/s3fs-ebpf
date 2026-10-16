@@ -14,9 +14,9 @@
 - T2: `gen != 0` かつ chunk index `ci < 64` のときは `populated_chunks` のビットも要求する (reserve の memset で 0 埋めされた未取得 chunk を返さないため)。`ci >= 64` (256 MiB 超) はビットがないので R1 だけに頼る。dirty/flushing のときはビットマップを見ない (T1)。
 
 ## pending のキー
-- `s3fs_pending` は `(ino, chunk_offset)` 単位で、chunk は 4 MiB (`S3FS_PCACHE_CHUNK_SHIFT=22`)。hash key は `ino ^ (chunk_offset >> 22)`、照合は `p->ino` と `p->chunk_offset` の両方で行う。
+- `s3fs_pending` は `(ino, chunk_offset)` 単位で、chunk は 4 MiB (`S3FS_PCACHE_CHUNK_SHIFT=22`)。hash key は `ino` のみ (P1: 同じ ino の全チャンクが同じ bucket に入る)。照合は `p->ino` と `p->chunk_offset` の両方で行うので、チャンクごとの完了待ちは独立 (U13)。
 - refcount は 2 本立て (H-06)。作成時は refs=2 (hash の分 + caller の分)。SIGNAL_ADMIT / shutdown が落とすのは hash の分だけで、waiter は `p->err` を読んだ後に自分の分を `pending_put` で落とす。
-- `pending_exists(ino)` は eviction 側のガードで、pending 中の ino を evict 候補から外す。**注意:** これは key=`ino` の bucket だけを走査する。chunk_offset≠0 の pending は通常別の bucket に入るため見落とす可能性が高い。そのぶんは buf_readers が buf を守る。
+- `pending_exists(ino)` は eviction 側のガードで、pending 中の ino を evict 候補から外す。key=`ino` の bucket を走査し、どのチャンクの pending でも見つける。hash key を変えるときはこの前提を崩さないこと。
 
 ## buf_readers (U8/U10)
 - `fd->buf_readers` は `fd->lock` で保護する。`s3fs_ebpf_read_folio` の中で pcache 経路 (U10) または upcall 経路 (U8) に入るときに 1 回だけ ++ し (`buf_reader_active`)、`done:` で -- する。
