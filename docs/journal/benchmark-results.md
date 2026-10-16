@@ -1355,3 +1355,30 @@ fentry を外すと差は消える。kmod の hit 経路 (`fc_pcache_check` → 
 **採用**: V1 (直接参照) のみ。挙動は変わらず、s_magic の判定は FUSE を含む全 FS の read で走るので、他の FS の負担も減る。bpf2go の .o は再生成 (変更なしでも手元の toolchain ではバイナリが変わる)。go test 全 ok、test-regression 8 本全 PASS。
 
 **残り (AC-47)**: pattern map の更新 (同じ ino の値に atomic 3 回 + 書き込み 1 回、64 jobs で同じ cacheline) が約 8%。案は `LRU_PERCPU_HASH` にして daemon 側で CPU ごとの値を合算する (LastEndPos は最大値を使う)。inode_index + policy_hit は約 3%。
+
+### 18.17 AC-47: pattern map を per-CPU にする (2026-10-16)
+
+**修正**: `s3fs_read_pattern_map` を `LRU_HASH` から `LRU_PERCPU_HASH` に変えた。fentry は自分の CPU の値だけを、atomic を使わずに更新する。daemon の `ReadAccessPattern` は CPU ごとの値を `mergeReadPatterns` でまとめる (カウンタは 64 bit で合計、`LastEndPos` は最大値)。`ReadPattern.SeqCount` / `RandCount` は uint64 にした。sequential かどうかは CPU ごとに判定するので、同じファイルを並列に読む reader どうしが `last_end_pos` を書き換え合わなくなる。
+
+**64 jobs の fio read (pcache、3 回)**: 変更前 5209k〜5281k → 変更後 5432k〜5556k (約 +5%)。pattern の更新を丸ごと外した §18.16 の V2 (約 5670k) との差は、per-CPU map の lookup の分。
+
+**pattern-aware の判断 (10m.bin、`bench-no-large-prewarm.cel`、upcall 数 / promote 数 / sha256)**:
+
+| ケース | 変更前 | 変更後 |
+|---|---|---|
+| seq-arena (cat 1 回) | 1 / 1 / OK | 1 / 1 / OK |
+| rand-arena (4 KiB を 2 か所読んでから cat) | 2 / 0 / **BAD** | 2 / 0 / **BAD** |
+| par-arena (4 つ並列で cat) | 1 / 0 / **BAD** | 1 / 1 / OK |
+| seq-pcache | 1 / 1 / OK | 1 / 1 / OK |
+| rand-pcache | 3 / 1 / OK | 3 / 1 / OK |
+| par-pcache | 3 / 0 / OK | 1 / 1 / OK |
+
+1 つの reader の判断は変わらない。並列で読むときは、変更前は reader どうしが `last_end_pos` を書き換え合って random と判定されていたが、変更後は sequential と判定され、全体を 1 回で取得する。arena モードの BAD は変更前からある問題で、AC-48 として記録した (promote されると chunk 単位の admit を通らないので par-arena は OK になる)。
+
+**単体テスト**: `TestMergeReadPatterns` (合計が u32 で桁あふれしないこと、`LastEndPos` が最大値になること、1 回 CPU が変わった sequential reader の SeqRatio が 0.70 以上を保つこと)。
+
+**bench-read-pattern-policy.sh**: `--pattern-aware-admit` が既定で有効になっていたので、phase 1 に `--pattern-aware-admit=false` を明示した。サイズの取得を `mc stat --json` に直した (今の `mc stat` の出力ではサイズが取れず、awk が失敗していた)。結果は phase 1 が upcall 1 / promote 0、phase 2 が upcall 1 / promote 1。10 MiB は partial admit の閾値以下なので、phase 1 でも 1 回の upcall で全体を取る (スクリプトの「3 chunk」という期待値は古い)。
+
+**make test-regression (8 本)**: 全 PASS、exit 0。go test 全 ok。
+
+**bench-ab-pcache.sh**: fuse_raw 5969k、pcache 5560k で (a) は **0.93** (変更前 0.87)。(b) pcache 14.038 ms / fuse-cache 17.138 ms で PASS、(c) PASS。1 回目は、回帰テストが s3fs-test バケットに残した object (300 MiB の large-file-read-test.bin など) を prewarm が arena に入れて一杯にし、ab07_large.bin の warm が EIO で止まった。それらを消してから測り直した。

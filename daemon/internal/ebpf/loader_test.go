@@ -179,3 +179,42 @@ func equalChunks(a, b []arenaChunk) bool {
 	sort.Slice(bc, func(i, j int) bool { return bc[i].offset < bc[j].offset })
 	return reflect.DeepEqual(ac, bc)
 }
+
+// TestMergeReadPatterns pins the AC-47 per-CPU merge: counters are
+// summed without u32 wrap, LastEndPos is the furthest end any CPU read,
+// and the merged SeqRatio is the ratio over all CPUs.
+func TestMergeReadPatterns(t *testing.T) {
+	got := mergeReadPatterns([]s3fsfpS3fsReadPattern{
+		{LastEndPos: 4096, SeqCount: 3, RandCount: 1, TotalBytes: 16384},
+		{}, // CPU that never read this ino
+		{LastEndPos: 1 << 20, SeqCount: 1<<32 - 1, RandCount: 0, TotalBytes: 1 << 20},
+	})
+	want := ReadPattern{
+		LastEndPos: 1 << 20,
+		SeqCount:   1<<32 + 2,
+		RandCount:  1,
+		TotalBytes: 16384 + 1<<20,
+	}
+	if got != want {
+		t.Fatalf("merge = %+v, want %+v", got, want)
+	}
+
+	// A single sequential reader that migrated once: one CPU saw only
+	// the first read as sequential, the other counted its first read
+	// (stale last_end_pos) as random. The merged ratio stays above the
+	// 0.70 promote threshold.
+	rp := mergeReadPatterns([]s3fsfpS3fsReadPattern{
+		{LastEndPos: 8 << 20, SeqCount: 16},
+		{LastEndPos: 10 << 20, SeqCount: 7, RandCount: 1},
+	})
+	if r := rp.SeqRatio(); r < 0.70 {
+		t.Fatalf("SeqRatio after one migration = %.2f, want >= 0.70", r)
+	}
+	if rp.LastEndPos != 10<<20 {
+		t.Fatalf("LastEndPos = %d, want %d", rp.LastEndPos, 10<<20)
+	}
+
+	if r := mergeReadPatterns(nil).SeqRatio(); r != 0 {
+		t.Fatalf("empty SeqRatio = %v, want 0", r)
+	}
+}
