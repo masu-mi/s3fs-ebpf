@@ -84,10 +84,19 @@ ebpf_start_daemon "$OUT/daemon.log" \
 log "daemon started, settling ${SETTLE}s"
 sleep "$SETTLE"
 
+# Fetch /metrics into a variable first: piping curl straight into an awk
+# that exits early SIGPIPEs curl, and with pipefail the "|| echo -1"
+# fallback then appends a second line (e.g. "46\n-1"), corrupting the value.
+get_metric() {
+    local out
+    out=$(curl -sf "${METRICS_URL}" 2>/dev/null) || { echo -1; return; }
+    printf '%s\n' "$out" | awk -v m="$1" '
+        index($0, m) == 1 && substr($0, length(m) + 1, 1) ~ /[{ ]/ { v = int($NF) }
+        END { print (v == "" ? -1 : v) }'
+}
+
 get_evict_count() {
-    curl -sf "${METRICS_URL}" 2>/dev/null \
-        | awk '/^s3fs_ebpf_policy_evictions_total[{ ]/{print int($NF); exit}' \
-        || echo "-1"
+    get_metric s3fs_ebpf_policy_evictions_total
 }
 
 # ── step 1: full read to populate all chunks ─────────────────────────────────
