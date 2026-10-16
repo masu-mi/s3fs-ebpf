@@ -546,7 +546,10 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-38 | M1: fd->buf 確保量ゲージ + skip_reset カウンタを常設、evict-race に「停止後 fd_buf ≤ capacity」判定 | P1 | ✅ 実装済 (commit 0c47ff7) |
 | AC-39 | U10 (pcache ヒット経路の buf_readers 増減) を A/B で不要と確認し削除 | P1 | ✅ 削除済 (commit f44e2b4、`br §18.10`) |
 | AC-40 | daemon のディスクキャッシュが size/ETag を検証せず、上書きされた object の古い body を返す (ab-pcache で 10 MiB 版が残り -EIO) | P1 | ⏳ 未着手 (bench 側は cache-dir 初期化で回避済、`br §18.2`) |
-| AC-41 | fd->buf が capacity_bytes の 10 倍まで膨らむ — `s3fs_file_data_reserve` が populate 範囲の終端まで確保し、容量判定 (`live_bytes`) は admit 済み chunk しか数えない | P1 | ⏳ 設計待ち (`br §18.10`)。第一案: 容量判定を fd->cap の合計で行う (小変更、上限が即効く。末尾 chunk だけの populate が弾かれやすくなる)。将来案: chunk 単位確保 (buf 連続前提が崩れ fill/reset に手が入る) |
+| AC-41 | fd->buf が capacity_bytes の 10 倍まで膨らむ — `s3fs_file_data_reserve` が populate 範囲の終端まで確保し、容量判定 (`live_bytes`) は admit 済み chunk しか数えない | P1 | ✅ 第一案で修正 (`br §18.11`): 容量判定を pcache ino の fd->cap で行い、populate は切り上げなし確保。test-pcache-capacity-tail 追加。残: 読み込み中の一時的なピーク (evict-race 36 MiB) は抑えない → AC-45。将来案 (chunk 単位確保) は未着手 |
+| AC-43 | pcache モードで prewarm が 1 件も admit しないと `s3fs_admitted_mm` が未設定のままになり、upcall が飛ばず全 read が失敗する (`prewarm-meta-only.cel` で再現) | P1 | ⏳ 未着手 (`br §18.11`) |
+| AC-44 | `--arena-metadata-only` でも既定の prewarm がファイル全体を arena に stage し、arena admit として capacity を消費する (9 MiB × 4 で 36 MiB) | P2 | ⏳ 未着手 (`br §18.11`) |
+| AC-45 | 読み込み中の fd->buf ピークは capacity で抑えられない (evict-race で 36 MiB / capacity 4 MiB)。pending と U8 保護中の ino は evict できないため。populate 時の受け入れ制御が必要 | P2 | ⏳ 設計待ち (`br §18.11`) |
 | AC-42 | lockdep 未検証 — CONFIG_PROVE_LOCKING=y カーネルで evict-race / write-readback を実行 (W1 で fd->lock 内側の s3fs_flush_pins_lock を追加) | P2 | ⏳ 未着手 |
 
 ### AC-01 受け入れ条件
