@@ -456,7 +456,7 @@ atomic_long_t s3fs_gen0_fail_other    = ATOMIC_LONG_INIT(0); /* pos/ci range */
 atomic_long_t s3fs_fd_buf_bytes = ATOMIC_LONG_INIT(0);
 
 /* M1: s3fs_file_data_reset calls that deferred the fd->buf free because
- * buf_readers > 0 (U8/U10).  Exported via IOC_STATS slot 11. */
+ * buf_readers > 0 (U8).  Exported via IOC_STATS slot 11. */
 atomic_long_t s3fs_reset_skipped = ATOMIC_LONG_INIT(0);
 
 /* Ring buffer of ino values evicted by policy vote since the last
@@ -3153,21 +3153,12 @@ retry:
 	pcache_gen = 0;
 	if (fc_pcache_check(file ? file->private_data : NULL,
 			    inode->i_ino, (u64)pos, &pcache_gen)) {
-		/* U10: protect fd->buf before fill_from_kmalloc.  fill holds
-		 * fd->lock for its entire body; any eviction that races here
-		 * blocks on that lock and sees buf_readers=1 when it finally
-		 * acquires it, triggering skip_reset.  Without this increment
-		 * the window between fill's fd->lock release and the
-		 * upcall-path buf_readers++ allowed eviction to clear fd->buf
-		 * (buf_readers=0), leaving the gen=0 fallback with NULL buf.
-		 * On a hot-path cache hit fill returns true and done: decrements
-		 * buf_readers back to 0 — net state is unchanged in steady state. */
-		if (!buf_reader_active && fd) {
-			mutex_lock(&fd->lock);
-			fd->buf_readers++;
-			mutex_unlock(&fd->lock);
-			buf_reader_active = true;
-		}
+		/* U10 (buf_readers++ on this hit path) was removed: a buf freed
+		 * between a failed fill and the upcall below is re-populated by
+		 * that upcall, and P1 keeps the ino unevictable while it waits.
+		 * A/B on evict-race (120 s, 32 readers): read_err 0 with and
+		 * without it; ab-pcache unchanged.  U8 below still covers the
+		 * retry window. */
 		if (s3fs_folio_fill_from_kmalloc(folio, fs_size, pos,
 						 inode->i_private,
 						 inode->i_ino, pcache_gen)) {
@@ -3220,10 +3211,8 @@ retry:
 			int err;
 			long remaining;
 
-			/* U8/U10: protect fd->buf against eviction.  U10 already
-			 * set buf_reader_active in the pcache path above; this
-			 * increment fires only for the fc-miss path (no prior
-			 * pcache attempt). */
+			/* U8: protect fd->buf against eviction for the whole
+			 * retry window (set once; later retries reuse it). */
 			if (!buf_reader_active && fd) {
 				mutex_lock(&fd->lock);
 				fd->buf_readers++;
@@ -3260,7 +3249,7 @@ retry:
 	}
 
 	/* T4: count retry exhaustion (daemon alive but pcache entry evicted on
-	 * every retry, or U11 timeout retries exhausted).  U8+U10: buf_readers
+	 * every retry, or U11 timeout retries exhausted).  U8: buf_readers
 	 * protects fd->buf for the entire retry window so the gen=0 fallback
 	 * finds valid data if the daemon populated at any point. */
 	if (mm && upcall_retries >= S3FS_UPCALL_MAX_RETRIES)
@@ -3268,7 +3257,7 @@ retry:
 
 	/* Fallback: per-inode bootstrap buffer (gen=0, no TOCTOU re-probe).
 	 * Reached when the daemon is absent, timed out, or all retries are
-	 * exhausted.  U8+U10: buf_readers > 0 prevents eviction from clearing
+	 * exhausted.  U8: buf_readers > 0 prevents eviction from clearing
 	 * fd->buf, so this path finds valid data from the last successful
 	 * populate and returns true rather than -EIO. */
 	filled = s3fs_folio_fill_from_kmalloc(folio, fs_size, pos,

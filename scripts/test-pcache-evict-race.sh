@@ -327,7 +327,7 @@ fi
 
 # ── overall result (computed before the report so the variable survives tee) ──
 # lockdep SKIP is acceptable (not a failure); sha256 corruption + evictions must PASS.
-# READ_ERROR (exit 2) = -EIO: U8+U10 protect fd->buf so the gen=0 fallback should
+# READ_ERROR (exit 2) = -EIO: U8 protect fd->buf so the gen=0 fallback should
 # never fail; any -EIO is a regression and must FAIL.
 # MISMATCH (exit 1 / READER_FAIL_COUNT) = data corruption → FAIL.
 overall=PASS
@@ -378,10 +378,10 @@ else
 fi
 if [ "$READER_ERROR_COUNT" -gt 0 ]; then
     if [ -f "$READER_ERROR" ]; then
-        printf "read_err   : FAIL %d reader(s) got -EIO (%s) — U8+U10 should prevent this\n" \
+        printf "read_err   : FAIL %d reader(s) got -EIO (%s) — U8 should prevent this\n" \
             "$READER_ERROR_COUNT" "$(cat "$READER_ERROR")"
     else
-        printf "read_err   : FAIL %d reader(s) got -EIO — U8+U10 should prevent this\n" \
+        printf "read_err   : FAIL %d reader(s) got -EIO — U8 should prevent this\n" \
             "$READER_ERROR_COUNT"
     fi
 else
@@ -407,7 +407,7 @@ if [[ "$overall" == FAIL ]]; then
     [ "$READER_FAIL_COUNT" -gt 0 ] && \
         printf 'DETAIL sha256_fail=%d (data corruption — non-zero wrong content)\n' "$READER_FAIL_COUNT"
     [ "$READER_ERROR_COUNT" -gt 0 ] && \
-        printf 'DETAIL read_err=%d (-EIO: gen=0 fallback failed — U8+U10 race still present)\n' "$READER_ERROR_COUNT"
+        printf 'DETAIL read_err=%d (-EIO: gen=0 fallback failed — U8 race still present)\n' "$READER_ERROR_COUNT"
     [[ "$EVICT_PASS" == FAIL ]] && printf 'DETAIL evict_delta=0 (no evictions — test vacuous, check capacity_bytes)\n'
     [ "$LOCKDEP_STATUS" = FAIL ] && printf 'DETAIL lockdep=FAIL (kernel WARN/BUG in dmesg during run)\n'
     [[ "$FDBUF_PASS" == FAIL ]] && printf 'DETAIL fd_buf_settled=%d > capacity=%d (fd->buf outlived its admit entry)\n' "$FDBUF_SETTLED" "$CHUNK_BYTES"

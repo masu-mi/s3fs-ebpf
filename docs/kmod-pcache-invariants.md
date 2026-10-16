@@ -18,8 +18,8 @@
 - refcount は 2 本立て (H-06)。作成時は refs=2 (hash の分 + caller の分)。SIGNAL_ADMIT / shutdown が落とすのは hash の分だけで、waiter は `p->err` を読んだ後に自分の分を `pending_put` で落とす。
 - `pending_exists(ino)` は eviction 側のガードで、pending 中の ino を evict 候補から外す。key=`ino` の bucket を走査し、どのチャンクの pending でも見つける。hash key を変えるときはこの前提を崩さないこと。
 
-## buf_readers (U8/U10)
-- `fd->buf_readers` は `fd->lock` で保護する。`s3fs_ebpf_read_folio` の中で pcache 経路 (U10) または upcall 経路 (U8) に入るときに 1 回だけ ++ し (`buf_reader_active`)、`done:` で -- する。
+## buf_readers (U8)
+- `fd->buf_readers` は `fd->lock` で保護する。`s3fs_ebpf_read_folio` の中で upcall 経路 (U8) に入るときに 1 回だけ ++ し (`buf_reader_active`)、`done:` で -- する。pcache ヒット経路の ++ (U10) は A/B で不要と確認して削除済み (hot path で fd->lock を取らない)。
 - 意味: 「この reader は retry や gen=0 fallback で `fd->buf` を後から読む可能性がある」。> 0 の間は reset が buf を free しない。
 - upcall のリトライ上限は `S3FS_UPCALL_MAX_RETRIES=3`。timeout (U11) もこの回数に含める。使い切ったら gen=0 fallback に進む。
 
