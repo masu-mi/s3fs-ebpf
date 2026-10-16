@@ -532,14 +532,22 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-24 | T3: evict ioctl が invalidate_inode_pages2 で folio lock を待ちデッドロック | P1 | ✅ 修正済 |
 | AC-25 | T4: retry 上限到達の -EIO がデータ破損と区別できない (retry_exhausted カウンタ未実装) | P2 | ✅ 修正済 |
 | AC-26 | T5: チャンク単位 bit が部分 populate を有効扱い — fallback 経路の over-count | P2 | ✅ 修正済 (pcache 経路は T2 で解消済) |
-| AC-27 | T6: T1〜T3 修正後ビルドで §18.1〜18.4 を再計測 + §18.5〜18.8 追加 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
+| AC-27 | T6: T1〜T3 修正後ビルドで §18.1〜18.4 を再計測 + §18.5〜18.8 追加 | P0 必須 | ✅ 計測済 (`br §18`, d3d550c) |
 | AC-28 | U1: test-populate-boundary.sh が kmod ソース grep → 実 ioctl 呼び出しに置き換え | P0 必須 | ✅ 修正済 |
 | AC-29 | U2: test-evict-readback.sh の eviction 0 回が WARNING → FAIL（metrics 不可時のみ SKIP） | P0 必須 | ✅ 修正済 |
 | AC-30 | U3: test-write-readback.sh にサブテスト 4（flush+drop_caches 再 read）追加 | P0 必須 | ✅ 修正済 |
 | AC-31 | U4: Makefile test-regression に test-pcache-multiread + test-pcache-evict-race-short 追加 | P0 必須 | ✅ 修正済 |
 | AC-32 | U5: flush 完了時（signal_flush err==0）に fd->size 以下の全 chunk bit を立てる | P1 推奨 | ✅ 修正済 |
 | AC-33 | U6: populate_pages の eof を fd->size → i_size_read(inode) に変更（evict 後 fd->size=0 対策） | P1 推奨 | ✅ 修正済 |
-| AC-34 | U7: U1〜U6 入り後に make test-regression + §18.1/18.2 bench を実行し結果を記録 | P0 必須 | ⏳ 再計測待ち (`br §18`) |
+| AC-34 | U7: U1〜U6 入り後に make test-regression + §18.1/18.2 bench を実行し結果を記録 | P0 必須 | ✅ 計測済 (`br §18`, d3d550c) |
+| AC-35 | W1: close 後・flush PUT 前に inode が evict されると未 PUT の fd->buf を破棄 (書き込み消失) → flush 完了まで ihold で pin | P0 必須 | ✅ 修正済 (commit 25dc831) |
+| AC-36 | pending_exists が chunk_offset≠0 の pending を見落とす → hash key を ino 単独に | P1 | ✅ 修正済 (commit 6846872) |
+| AC-37 | W2: .create したファイルの inode が evict されると再 lookup で i_size=0 → evict 時に i_size をエントリへ書き戻す | P0 必須 | ✅ 修正済 (commit d3d550c) |
+| AC-38 | M1: fd->buf 確保量ゲージ + skip_reset カウンタを常設、evict-race に「停止後 fd_buf ≤ capacity」判定 | P1 | ✅ 実装済 (commit 0c47ff7) |
+| AC-39 | U10 (pcache ヒット経路の buf_readers 増減) を A/B で不要と確認し削除 | P1 | ✅ 削除済 (commit f44e2b4、`br §18.10`) |
+| AC-40 | daemon のディスクキャッシュが size/ETag を検証せず、上書きされた object の古い body を返す (ab-pcache で 10 MiB 版が残り -EIO) | P1 | ⏳ 未着手 (bench 側は cache-dir 初期化で回避済、`br §18.2`) |
+| AC-41 | fd->buf が capacity_bytes の 10 倍まで膨らむ — `s3fs_file_data_reserve` が populate 範囲の終端まで確保し、容量判定 (`live_bytes`) は admit 済み chunk しか数えない | P1 | ⏳ 設計待ち (`br §18.10`)。第一案: 容量判定を fd->cap の合計で行う (小変更、上限が即効く。末尾 chunk だけの populate が弾かれやすくなる)。将来案: chunk 単位確保 (buf 連続前提が崩れ fill/reset に手が入る) |
+| AC-42 | lockdep 未検証 — CONFIG_PROVE_LOCKING=y カーネルで evict-race / write-readback を実行 (W1 で fd->lock 内側の s3fs_flush_pins_lock を追加) | P2 | ⏳ 未着手 |
 
 ### AC-01 受け入れ条件
 2 チャンク以上に分割 admit される大ファイルを 1 fd で先頭〜末尾まで read → sha256 一致。`scripts/test-pcache-multiread.sh` で検証。
