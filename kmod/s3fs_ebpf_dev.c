@@ -429,6 +429,10 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			st.values[8] = (u64)atomic_long_read(&s3fs_gen0_fail_bitmap);
 		if (st.count > 9)
 			st.values[9] = (u64)atomic_long_read(&s3fs_gen0_fail_other);
+		if (st.count > 10)
+			st.values[10] = (u64)atomic_long_read(&s3fs_fd_buf_bytes);
+		if (st.count > 11)
+			st.values[11] = (u64)atomic_long_read(&s3fs_reset_skipped);
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;

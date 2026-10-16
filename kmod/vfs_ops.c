@@ -448,6 +448,17 @@ atomic_long_t s3fs_gen0_fail_buf_null = ATOMIC_LONG_INIT(0); /* buf==NULL    */
 atomic_long_t s3fs_gen0_fail_bitmap   = ATOMIC_LONG_INIT(0); /* bitmap 0     */
 atomic_long_t s3fs_gen0_fail_other    = ATOMIC_LONG_INIT(0); /* pos/ci range */
 
+/* M1: bytes currently allocated for per-inode fd->buf (sum of fd->cap),
+ * maintained at every kvmalloc/kvfree of fd->buf.  capacity_bytes only
+ * bounds admit entries; this shows what fd->buf actually holds, e.g. a
+ * buffer kept alive by skip_reset after its admit entry was dropped.
+ * Exported via IOC_STATS slot 10 (gauge). */
+atomic_long_t s3fs_fd_buf_bytes = ATOMIC_LONG_INIT(0);
+
+/* M1: s3fs_file_data_reset calls that deferred the fd->buf free because
+ * buf_readers > 0 (U8/U10).  Exported via IOC_STATS slot 11. */
+atomic_long_t s3fs_reset_skipped = ATOMIC_LONG_INIT(0);
+
 /* Ring buffer of ino values evicted by policy vote since the last
  * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
  * head/tail. Overflow (queue full) is counted separately so the
@@ -1982,8 +1993,10 @@ static void s3fs_file_data_reset(u64 ino)
 			 * data via the gen=0 fallback after the pcache entry is
 			 * removed.  The next eviction cycle will free it once
 			 * buf_readers drops to zero. */
-			if (fd->buf_readers > 0)
+			if (fd->buf_readers > 0) {
+				atomic_long_inc(&s3fs_reset_skipped);
 				goto skip_reset;
+			}
 			/* R1: re-evict any PCACHE entry inserted between
 			 * admit_drop_all_ranges and this point, before freeing
 			 * fd->buf.  Without this, populate could insert a new
@@ -2005,6 +2018,7 @@ static void s3fs_file_data_reset(u64 ino)
 			if (removed)
 				atomic_inc(&s3fs_admit_gen);
 			write_unlock(&s3fs_admits_lock);
+			atomic_long_sub(fd->cap, &s3fs_fd_buf_bytes);
 			kvfree(fd->buf);
 			fd->buf             = NULL;
 			fd->cap             = 0;
@@ -2590,6 +2604,7 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 		memcpy(fd->buf, initial, initial_size);
 		fd->size = initial_size;
 		fd->cap  = initial_size;
+		atomic_long_add(fd->cap, &s3fs_fd_buf_bytes);
 		/* Mark all chunks populated — initial data is a single contiguous
 		 * load, so every 4-MiB slice is valid. */
 		nchunks = (u32)((initial_size + (1u << S3FS_PCACHE_CHUNK_SHIFT) - 1)
@@ -2604,6 +2619,7 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
 {
 	if (!fd)
 		return;
+	atomic_long_sub(fd->cap, &s3fs_fd_buf_bytes);
 	kvfree(fd->buf);
 	kfree(fd);
 }
@@ -2636,6 +2652,7 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 		memcpy(newbuf, fd->buf, fd->size);
 		kvfree(fd->buf);
 	}
+	atomic_long_add(new_cap - fd->cap, &s3fs_fd_buf_bytes);
 	memset(newbuf + fd->size, 0, new_cap - fd->size);
 	fd->buf = newbuf;
 	fd->cap = new_cap;
