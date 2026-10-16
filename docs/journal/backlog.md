@@ -551,6 +551,7 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-44 | `--arena-metadata-only` でも既定の prewarm がファイル全体を arena に stage し、arena admit として capacity を消費する (9 MiB × 4 で 36 MiB) | P2 | ✅ 修正 (`br §18.15`): `--arena-metadata-only` では prewarm をメタデータの warm だけにし、本体は最初の read で upcall → POPULATE_PAGES で取る。capacity-tail は目印 prewarm をやめて既定の prewarm で `prewarm_admits=0` を判定 (修正前 FAIL / 修正後 PASS)。hitrate pcache 53.05〜54.20% → 52.50〜53.70% |
 | AC-45 | 読み込み中の fd->buf ピークは capacity で抑えられない (evict-race で 36 MiB / capacity 4 MiB)。pending と U8 保護中の ino は evict できないため。populate 時の受け入れ制御が必要 | P2 | ⏳ 設計待ち (`br §18.11`) |
 | AC-46 | 順番に読む populate で chunk ごとに fd->buf を再確保し全体を memcpy (O(n²))。300 MiB の cold read が 100 MiB の 5.7 倍 (2.4 s)。AC-41 前からある問題。案: 再確保の上限を i_size にしたうえで倍々に確保する (AC-41 の末尾 chunk の件と両立させる) | P2 | ✅ 修正 (`br §18.14`): populate の reserve を `max(needed, min(2 × cap, max(end, i_size)))` にした。cold read 300 MiB 2.33 s → 0.78 s、100 MiB 0.42 s → 0.27 s (比 5.6 → 2.9)。容量は最大で読み込み済み範囲の約 2 倍を数える |
+| AC-47 | AB-07 gate (a) (64 jobs psync read) の残り差は `fentry/generic_file_read_iter` の負担。fentry を外すと fuse-raw と同じ IOPS。内訳は probe_read (BPF_CORE_READ) 約 7%、pattern map の更新 約 8%、inode_index + policy_hit 約 3% | P2 | 🔶 一部修正 (`br §18.16`): 直接参照に変えて (a) 0.81 → 0.87。残り: pattern 更新の共有 cacheline (per-CPU map 化などの案)。(b) は現行コードで PASS (14.3 ms vs fuse-cache 17.5 ms)、6.12 では FUSE も ebpf も order-0 folio で large folio 仮説は不成立 |
 | AC-42 | lockdep 未検証 — CONFIG_PROVE_LOCKING=y カーネルで evict-race / write-readback を実行 (W1 で fd->lock 内側の s3fs_flush_pins_lock を追加) | P2 | ⏳ 未着手 |
 
 ### AC-01 受け入れ条件
