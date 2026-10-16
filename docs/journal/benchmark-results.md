@@ -1382,3 +1382,28 @@ fentry を外すと差は消える。kmod の hit 経路 (`fc_pcache_check` → 
 **make test-regression (8 本)**: 全 PASS、exit 0。go test 全 ok。
 
 **bench-ab-pcache.sh**: fuse_raw 5969k、pcache 5560k で (a) は **0.93** (変更前 0.87)。(b) pcache 14.038 ms / fuse-cache 17.138 ms で PASS、(c) PASS。1 回目は、回帰テストが s3fs-test バケットに残した object (300 MiB の large-file-read-test.bin など) を prewarm が arena に入れて一杯にし、ab07_large.bin の warm が EIO で止まった。それらを消してから測り直した。
+
+### 18.18 AC-48: arena の chunk admit でファイルサイズが縮む (2026-10-16)
+
+**症状**: arena モードで 10 MiB の object を chunk 単位 (D-01、4 MiB) に admit させると、次のようになる。
+- 最初に読んだ 4 KiB (chunk 1 の中) が 0 バイトで返る。
+- そのあと全体を読むと、exit 0 のまま 4 MiB で終わる。`stat` のサイズも 4 MiB。
+- 4 つ並列で全体を読んだ場合も、全員の sha256 が合わない。
+- pcache モードでは起きない。§18.17 の rand-arena / par-arena の BAD はこれだった (`10m.bin` は中身が 0 なので、データではなくサイズで不一致になっていた)。
+
+**原因**: `s3fs_ebpf_admit_replace` が、admit した entry ごとに `i_size_write(inode, entries[i].size)` をしていた。306cc9a (read 経路の最初の実装) の時点では entry はいつもファイル全体だったが、D-01 で entry は range になり、`size` は range の長さになった。chunk [4, 8) MiB を admit すると i_size が 4 MiB になり、それより後ろは EOF になる。さらに W2 (`evict_inode` → `s3fs_entry_record_size`) が、この誤ったサイズを entry テーブルに書き戻すので、次の同期までそのまま残る。
+
+**修正**: i_size は、中身が変わった entry (`changed[i]`) の range 終端 (`offset + size`) まで伸ばすだけにして、縮めない。dirty/flushing の inode (`s3fs_fd_buf_owned`) には触らない。S3 側でファイルが小さくなった場合は、`entries_replace` が dcache を縮めて再 lookup させるので、そちらで反映される。ローカルで truncate したあとに admit_replace (miss や eval のたびに呼ばれる) が i_size を S3 のサイズに戻してしまう可能性も、この変更でなくなった。
+
+**test-arena-partial-readback (新規)**: 専用バケットに 10 MiB の乱数 object を置く。arena モード、`prewarm: false`、`--pattern-aware-admit=false` で chunk admit だけを通す。次の 2 つを確かめる。
+- (1) chunk 1 → chunk 0 の 4 KiB を読んでから全体を読み、サイズと sha256 を比べる。
+- (2) 4 つ並列で全体を読み、それぞれの sha256 を比べる。
+
+| kmod | 最初の 4 KiB | 全体読み / stat | sha256 | 並列 4 本 | 結果 |
+|---|---:|---:|---|---|---|
+| 修正前 | 0 B | 4 MiB / 4 MiB | 不一致 | 4 本とも不一致 | FAIL |
+| 修正後 | 4096 B | 10 MiB / 10 MiB | 一致 | 0 本不一致 | PASS |
+
+**make test-regression (9 本、test-arena-partial-readback を含む)**: 全 PASS、exit 0。
+
+**別の非効率 (AC-49)**: arena の chunk admit では、`replaceAdmit` が同じ ino の他の range を落とす。そのため、[0, 4) MiB を admit すると [4, 8) MiB が消え、全体を読むときにもう一度 GET する (ログでは [4, 8) MiB を 2 回 admit している)。正しさには影響しない。
