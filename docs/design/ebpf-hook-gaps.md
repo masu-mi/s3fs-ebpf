@@ -214,6 +214,7 @@ R-01 フックのデータを即座にキャッシュ判断に活用する最適
 
 **評価スクリプト**:
 - `scripts/bench-read-iter.sh` — fentry hook の read latency オーバーヘッド測定 (with / without `--no-read-iter-hook`)
+  - 1 スレッドの遅延しか測らないので、並列 read での共有 cacheline の取り合いは見えない。64 jobs で約 19% の負担があった件と、フックの注意点・採用基準は [`read-iter-hook-overhead.md`](read-iter-hook-overhead.md)
 - `scripts/bench-read-pattern-policy.sh` — pattern-aware admit シナリオ (upcall count と初回 cold-read 時間の比較)
 
 **将来の拡張 (`on_read_miss` pre-filter)**: `rand_count / (seq_count + rand_count) > 0.8` のような条件で `struct_ops.on_read_miss` が refuse を返すことで daemon wake そのものを削減できる (R-02)。

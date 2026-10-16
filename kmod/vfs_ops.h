@@ -19,13 +19,21 @@ int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc);
  * Admit table API — populated by the /dev/s3fs_ebpf ioctl handler,
  * consumed by the read path. `mm` is the daemon's mm_struct (with a
  * reference held by kmod); entries carry userspace addresses into
- * that mm which .read pins via pin_user_pages_remote. Passing
- * count==0 (with mm==NULL) clears the table and drops the mm ref.
+ * that mm which .read pins via pin_user_pages_remote. count==0 clears
+ * the arena entries; a non-NULL mm still replaces the held mm (AC-43),
+ * mm==NULL keeps it. Only admit_shutdown drops the mm ref.
  */
 int  s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			     const struct s3fs_admit_entry *entries,
 			     u32 count);
 void s3fs_ebpf_admit_shutdown(void);
+
+/* AB-04: populate the Linux page cache (via fd->buf) for `ino` with `size`
+ * bytes of file data from user pointer `data_ptr` at file offset `offset`.
+ * Inserts an S3FS_ADMIT_FLAG_PCACHE admit entry so read paths skip the
+ * BPF arena / GUP and fall through to generic_file_read_iter. */
+int  s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
+			      const void __user *data_ptr);
 
 /*
  * Entry table replace — daemon publishes the current bucket snapshot
@@ -58,7 +66,7 @@ struct poll_table_struct;
 ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
 			       bool nonblocking);
 __poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt);
-int s3fs_ebpf_signal_admit(u64 ino, int err);
+int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err, u32 flags);
 
 /*
  * Write-back queue: kmod → daemon via S3FS_IOC_POP_FLUSH.
@@ -107,6 +115,40 @@ extern atomic_t s3fs_admits_count;
 extern unsigned int s3fs_softcap;
 /* `capacity_bytes` module parameter (S-02). 0 = legacy vote mode. */
 extern unsigned long long s3fs_capacity_bytes;
+
+/* AB-02: when non-zero, s3fs_ebpf_read_iter skips the arena fast path
+ * and always falls through to generic_file_read_iter (page-cache path).
+ * Allows bench-ab-arena-vs-pagecache.sh to compare arena vs page-cache
+ * latency under identical conditions without remounting. */
+extern bool s3fs_arena_bypass;
+
+/* AB-01: cumulative GUP (pin_user_pages_remote) call count and total
+ * latency in nanoseconds. Exported via IOC_STATS slots 3/4 so the
+ * bench script can compute mean ns/call without bpftrace. */
+extern atomic_long_t s3fs_gup_calls_total;
+extern atomic_long_t s3fs_gup_ns_total;
+
+/* T4: .read_folio calls that exhausted S3FS_UPCALL_MAX_RETRIES with the
+ * daemon alive. Exported via IOC_STATS slot 5.  Non-zero means capacity
+ * pressure caused -EIO (not data corruption). */
+extern atomic_long_t s3fs_upcall_retry_exhausted;
+
+/* U11: .read_folio upcall waits that timed out before daemon signal.
+ * Exported via IOC_STATS slot 6. */
+extern atomic_long_t s3fs_upcall_timeout;
+
+/* D-diag: gen=0 fallback failure reason counters. Exported via slots 7/8/9. */
+extern atomic_long_t s3fs_gen0_fail_buf_null;
+extern atomic_long_t s3fs_gen0_fail_bitmap;
+extern atomic_long_t s3fs_gen0_fail_other;
+
+/* M1: fd->buf allocated bytes (gauge, slot 10) and deferred-free resets
+ * (counter, slot 11). */
+extern atomic_long_t s3fs_fd_buf_bytes;
+extern atomic_long_t s3fs_reset_skipped;
+
+/* M2: gauge cross-check (slots 12/13) — see vfs_ops.c. */
+void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache);
 
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
  * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */

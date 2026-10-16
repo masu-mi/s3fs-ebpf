@@ -47,6 +47,7 @@ log() { echo "[bench-read-pattern] $*" >&2; }
 
 check_prereq() {
 	need_built
+	need_cmds jq
 	minio_require "$BIG_FILE"
 	[ -f "$POLICY" ] \
 		|| { echo "policy missing: $POLICY"; exit 1; }
@@ -84,7 +85,8 @@ check_prereq
 
 # ── Phase 1: WITHOUT pattern-aware admit (D-01 chunk baseline) ───────────
 log "=== phase 1: WITHOUT --pattern-aware-admit (chunk baseline) ==="
-start_ebpf "without"
+# --pattern-aware-admit defaults to true, so the baseline must opt out.
+start_ebpf "without" "--pattern-aware-admit=false"
 
 log "cold-read $BIG_FILE (expect ceil(size/4MiB) upcalls)"
 T_WITHOUT=$( { time cat "$MP_EBPF/$BIG_FILE" > /dev/null; } 2>&1 )
@@ -112,8 +114,8 @@ stop_ebpf
 trap - EXIT
 
 # ── Get file size from MinIO for reference ────────────────────────────────
-FILE_BYTES=$(docker exec "$MINIO_CONTAINER" mc stat "local/$S3_BUCKET/$BIG_FILE" 2>/dev/null \
-	| awk '/Size:/{gsub(/[^0-9]/,"",$2); print $2+0}')
+FILE_BYTES=$(docker exec "$MINIO_CONTAINER" mc stat --json "local/$S3_BUCKET/$BIG_FILE" 2>/dev/null \
+	| jq -r '.size // 0')
 FILE_MIB=$(awk "BEGIN{printf \"%.1f\", $FILE_BYTES/1048576}")
 EXPECTED_CHUNKS=$(awk "BEGIN{printf \"%d\", int(($FILE_BYTES+4194303)/4194304)}")
 

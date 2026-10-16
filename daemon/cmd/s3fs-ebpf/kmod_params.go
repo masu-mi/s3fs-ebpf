@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
 
 // kmodParamDir is where the s3fs_kfunc module exposes its parameters.
@@ -27,4 +29,18 @@ func setKmodParam(name, value string) error {
 	}
 	fmt.Printf("[kmod] %s=%s\n", name, value)
 	return nil
+}
+
+// getKmodParamInt64 reads one integer module parameter of the loaded kmod.
+// ok is false when the module is not loaded or the value does not parse.
+func getKmodParamInt64(name string) (int64, bool) {
+	b, err := os.ReadFile(filepath.Join(kmodParamDir, name))
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }

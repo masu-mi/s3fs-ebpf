@@ -13,12 +13,16 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type s3fsfpS3fsReadPattern struct {
-	_          structs.HostLayout
-	LastEndPos uint64
-	SeqCount   uint32
-	RandCount  uint32
-	TotalBytes uint64
+type s3fsfpS3fsInoSlot struct {
+	_              structs.HostLayout
+	Ino            uint64
+	LastEndPos     uint64
+	TotalBytes     uint64
+	LastPolicyTick uint64
+	SeqCount       uint32
+	RandCount      uint32
+	Reads          uint32
+	Flags          uint32
 }
 
 // Names of all BPF objects in the ELF.
@@ -28,8 +32,8 @@ const (
 	s3fsfpMapS3fsArena           = "s3fs_arena"
 	s3fsfpMapS3fsCounters        = "s3fs_counters"
 	s3fsfpMapS3fsEvents          = "s3fs_events"
+	s3fsfpMapS3fsInoSlots        = "s3fs_ino_slots"
 	s3fsfpMapS3fsInodeIndex      = "s3fs_inode_index"
-	s3fsfpMapS3fsReadPatternMap  = "s3fs_read_pattern_map"
 	s3fsfpProgS3fsArenaPrealloc  = "s3fs_arena_prealloc"
 	s3fsfpProgS3fsDeepWalkReject = "s3fs_deep_walk_reject"
 	s3fsfpProgS3fsFpGetattr      = "s3fs_fp_getattr"
@@ -90,11 +94,11 @@ type s3fsfpProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type s3fsfpMapSpecs struct {
-	S3fsArena          *ebpf.MapSpec `ebpf:"s3fs_arena"`
-	S3fsCounters       *ebpf.MapSpec `ebpf:"s3fs_counters"`
-	S3fsEvents         *ebpf.MapSpec `ebpf:"s3fs_events"`
-	S3fsInodeIndex     *ebpf.MapSpec `ebpf:"s3fs_inode_index"`
-	S3fsReadPatternMap *ebpf.MapSpec `ebpf:"s3fs_read_pattern_map"`
+	S3fsArena      *ebpf.MapSpec `ebpf:"s3fs_arena"`
+	S3fsCounters   *ebpf.MapSpec `ebpf:"s3fs_counters"`
+	S3fsEvents     *ebpf.MapSpec `ebpf:"s3fs_events"`
+	S3fsInoSlots   *ebpf.MapSpec `ebpf:"s3fs_ino_slots"`
+	S3fsInodeIndex *ebpf.MapSpec `ebpf:"s3fs_inode_index"`
 }
 
 // s3fsfpVariableSpecs contains global variables before they are loaded into the kernel.
@@ -123,11 +127,11 @@ func (o *s3fsfpObjects) Close() error {
 //
 // It can be passed to loadS3fsfpObjects or ebpf.CollectionSpec.LoadAndAssign.
 type s3fsfpMaps struct {
-	S3fsArena          *ebpf.Map `ebpf:"s3fs_arena"`
-	S3fsCounters       *ebpf.Map `ebpf:"s3fs_counters"`
-	S3fsEvents         *ebpf.Map `ebpf:"s3fs_events"`
-	S3fsInodeIndex     *ebpf.Map `ebpf:"s3fs_inode_index"`
-	S3fsReadPatternMap *ebpf.Map `ebpf:"s3fs_read_pattern_map"`
+	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
+	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
+	S3fsEvents     *ebpf.Map `ebpf:"s3fs_events"`
+	S3fsInoSlots   *ebpf.Map `ebpf:"s3fs_ino_slots"`
+	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
 }
 
 func (m *s3fsfpMaps) Close() error {
@@ -135,8 +139,8 @@ func (m *s3fsfpMaps) Close() error {
 		m.S3fsArena,
 		m.S3fsCounters,
 		m.S3fsEvents,
+		m.S3fsInoSlots,
 		m.S3fsInodeIndex,
-		m.S3fsReadPatternMap,
 	)
 }
 

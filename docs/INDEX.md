@@ -14,13 +14,14 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 ---
 
-## 起点 (まずこの 3 本)
+## 起点 (まずこの 3 本 + kmod 作業時 1 本)
 
 | doc | 対象読者 | いつ読むか |
 |---|---|---|
 | [`../README.md`](../README.md) | 新入 dev | Quick start / demo path / 環境構築 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
+| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
 
 ---
 
@@ -44,6 +45,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 |---|---|
 | [`design/design.md`](design/design.md) | 統合設計書 (initial pitch, §0 で現状との相違メモ付き) |
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
+| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
@@ -55,6 +57,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/ebpf-fs-framework-design.md`](design/ebpf-fs-framework-design.md) | 汎用 eBPF FS framework 化の hook 分離設計 (4 role × 4 軸) + security model |
 | [`design/ebpf-fuse-advantages-roadmap.md`](design/ebpf-fuse-advantages-roadmap.md) | FUSE に対する 3 点の構造的優位性の整理と、未実装 4 項目 (cgroup policy / bpf_timer / radix tree readdir / BPF Iterator GC) の実装計画 |
 | [`design/ebpf-hook-gaps.md`](design/ebpf-hook-gaps.md) | eBPF 全移行価値の分析 (12 決定点の現状マップ) と、他 VFS/FUSE と比べた不足フックの詳細 (R-01〜R-06)。R-01 `fentry/generic_file_read_iter` は実装済み |
+| [`design/read-iter-hook-overhead.md`](design/read-iter-hook-overhead.md) | R-01 read fentry が 64 jobs read を約 19% 落としていた件の調査記録 (経緯・試験と結果)、フックを使うときの注意点、hit 経路のフックの採用判断基準 |
 
 ---
 
