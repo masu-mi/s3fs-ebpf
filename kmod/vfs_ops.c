@@ -554,7 +554,9 @@ static struct s3fs_admit *admit_lookup_at_locked(u64 ino, u64 pos)
  * several). Takes the admit lock. Returns how many were dropped.
  */
 /* S4: pcache_out is set to true if at least one PCACHE entry was removed.
- * Callers that don't need the flag pass NULL. */
+ * Callers that don't need the flag pass NULL.
+ * AC-41: *bytes sums arena entries only — a pcache ino's memory is its
+ * fd->buf (fd->cap), which the capacity loop measures directly. */
 static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes, bool *pcache_out)
 {
 	struct s3fs_admit *a;
@@ -571,7 +573,8 @@ static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes, bool *pcache_out)
 			saw_pcache = true;
 		hash_del(&a->node);
 		atomic_dec(&s3fs_admits_count);
-		b += a->size;
+		if (!(a->flags & S3FS_ADMIT_FLAG_PCACHE))
+			b += a->size;
 		kfree(a);
 		n++;
 	}
@@ -902,6 +905,9 @@ static bool admit_evict_ino(u64 ino, u64 *freed)
 	return true;
 }
 
+/* AC-41: defined after struct s3fs_file_data. */
+static u64 s3fs_ino_buf_bytes(u64 ino);
+
 struct s3fs_victim {
 	int score;     /* policy on_evict return value, clamped >= 0 */
 	u64 ino;       /* inode number (P3: replaces entries[] idx so pcache can be included) */
@@ -1145,9 +1151,18 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		if (cap_bytes) {
 			for (i = 0; i < count; i++)
 				live_bytes += entries[i].size;
-			/* P3: add pcache bytes to live_bytes */
-			for (pi = 0; pi < pcache_remaining; pi++)
-				live_bytes += pcache_sizes[pi];
+			/* P3/AC-41: charge each pcache ino once, by its fd->buf
+			 * allocation rather than the admitted chunk sizes. */
+			for (pi = 0; pi < pcache_remaining; pi++) {
+				int pj;
+
+				for (pj = 0; pj < pi; pj++) {
+					if (pcache_inos[pj] == pcache_inos[pi])
+						break;
+				}
+				if (pj == pi)
+					live_bytes += s3fs_ino_buf_bytes(pcache_inos[pi]);
+			}
 			if (live_bytes > cap_bytes) {
 				cand = kcalloc(total_count, sizeof(*cand), GFP_KERNEL);
 				if (!cand)
@@ -1319,12 +1334,19 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			for (k = 0; k < ncand && live_bytes > cap_bytes; k++) {
 				u64 ino = cand[k].ino;
 				u64 freed = 0;
+				u64 buf_before;
 
 				if (pending_exists(ino))
 					continue;
+				buf_before = s3fs_ino_buf_bytes(ino);
 				if (!admit_evict_ino(ino, &freed))
 					continue;
 				evicted++;
+				/* AC-41: arena bytes from the dropped entries plus what
+				 * reset actually released (0 on skip_reset, so the loop
+				 * keeps evicting while still over capacity). */
+				buf_before -= min(s3fs_ino_buf_bytes(ino), buf_before);
+				freed += buf_before;
 				live_bytes -= min(freed, live_bytes);
 			}
 			kfree(cand);
@@ -1906,6 +1928,29 @@ static inline bool s3fs_fd_buf_owned(struct inode *inode)
 	struct s3fs_file_data *fd = inode->i_private;
 
 	return fd && (READ_ONCE(fd->dirty) || READ_ONCE(fd->flushing));
+}
+
+/* AC-41: bytes actually allocated for ino's fd->buf.  The capacity loop
+ * charges pcache inos by this instead of their admitted chunk sizes:
+ * s3fs_file_data_reserve sizes fd->buf to the populate end, so one tail
+ * chunk admits 4 MiB but allocates the whole file.  Lockless read —
+ * accounting only.  Must be called without s3fs_admits_lock held (iput). */
+static u64 s3fs_ino_buf_bytes(u64 ino)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+	u64 cap = 0;
+
+	if (!s3fs_active_sb)
+		return 0;
+	inode = ilookup(s3fs_active_sb, (unsigned long)ino);
+	if (!inode)
+		return 0;
+	fd = inode->i_private;
+	if (fd)
+		cap = READ_ONCE(fd->cap);
+	iput(inode);
+	return cap;
 }
 
 /* W1: inodes pinned by an outstanding flush.  put_super releases any
@@ -2629,8 +2674,13 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
  * Uses kvmalloc + memcpy instead of krealloc so growth beyond the
  * MAX_ORDER (~4 MiB on x86_64) bucket falls back to vmalloc rather
  * than triggering the page allocator's "order too large" WARN. dd
- * bs=10M count=1 was reproducing that WARN with plain krealloc. */
-static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
+ * bs=10M count=1 was reproducing that WARN with plain krealloc.
+ *
+ * AC-41: `exact` allocates exactly `needed` (read-path populate: the size
+ * is final, and capacity is charged by fd->cap, so a 46 B object must not
+ * cost 4 KiB of budget).  Writes keep the rounding for amortized growth. */
+static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed,
+				  bool exact)
 {
 	size_t new_cap;
 	u8 *newbuf;
@@ -2640,7 +2690,9 @@ static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed)
 
 	/* Round up to 4 KiB slab class for small growth; > 4 MiB rounds
 	 * to 2 MiB (vmalloc granularity) to keep amortized alloc cheap. */
-	if (needed >= (4UL << 20))
+	if (exact)
+		new_cap = needed;
+	else if (needed >= (4UL << 20))
 		new_cap = round_up(needed, 2UL << 20);
 	else
 		new_cap = round_up(needed, 4096);
@@ -2709,7 +2761,7 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		goto out_unlock;
 	}
 	/* `end` (= offset + size) was validated above; safe to cast. */
-	err = s3fs_file_data_reserve(fd, (size_t)end);
+	err = s3fs_file_data_reserve(fd, (size_t)end, true);
 	if (err)
 		goto out_unlock;
 
@@ -2837,7 +2889,7 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 		goto out;
 	}
 
-	err = s3fs_file_data_reserve(fd, start + count);
+	err = s3fs_file_data_reserve(fd, start + count, false);
 	if (err)
 		goto out;
 
@@ -2883,7 +2935,7 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 			fd->size = new_size;
 			fd->dirty = true;
 		} else if (new_size > (loff_t)fd->size) {
-			err = s3fs_file_data_reserve(fd, new_size);
+			err = s3fs_file_data_reserve(fd, new_size, false);
 			if (err) {
 				mutex_unlock(&fd->lock);
 				return err;

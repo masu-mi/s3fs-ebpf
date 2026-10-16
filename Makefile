@@ -74,7 +74,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         lint-scripts readme test-arena \
         test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
-        test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short \
+        test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
         clean
 
 ## Help:
@@ -311,7 +311,7 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	 exit $$rc
 
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
-test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short ## Run all regression tests
+test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -340,6 +340,10 @@ test-pcache-evict-race: kmod daemon ## R1/S1/T3: evict-race concurrent stress (d
 test-pcache-evict-race-short: kmod daemon ## R1/S1/T3: evict-race stress (DURATION=30s, for regression suite)
 	@echo "==> test-pcache-evict-race (R1/S1/T3, short, DURATION=30)"
 	@sudo DURATION=30 TEST_NAME=test-pcache-evict-race-short $(SCRIPTS_DIR)/test-pcache-evict-race.sh
+
+test-pcache-capacity-tail: kmod daemon ## AC-41: capacity_bytes bounds fd->buf memory (tail-chunk reads)
+	@echo "==> test-pcache-capacity-tail (AC-41)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-tail.sh
 
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts
