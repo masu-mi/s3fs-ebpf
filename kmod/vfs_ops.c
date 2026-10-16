@@ -509,8 +509,9 @@ void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow)
  * Also gates the read-miss upcall. All entries share this single mm. */
 static struct mm_struct *s3fs_admitted_mm;
 
-/* Set in fill_super so admit_replace can ilookup() cached inodes and
- * refresh their i_size when the daemon publishes a new content size. */
+/* Set in fill_super so admit_replace can ilookup() cached inodes, grow
+ * their i_size to newly admitted range ends (AC-48) and drop stale page
+ * cache. */
 static struct super_block *s3fs_active_sb;
 
 /*
@@ -925,6 +926,8 @@ static int s3fs_victim_cmp(const void *a, const void *b)
 	return x->tiebreak < y->tiebreak ? -1 : (x->tiebreak > y->tiebreak);
 }
 
+static inline bool s3fs_fd_buf_owned(struct inode *inode); /* below */
+
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			    const struct s3fs_admit_entry *entries,
 			    u32 count)
@@ -1076,7 +1079,21 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 						      entries[i].ino);
 			if (!inode)
 				continue;
-			i_size_write(inode, entries[i].size);
+			/* AC-48: an entry is a range (D-01), not the whole
+			 * object — chunk 0 of a 10 MiB file has size 4 MiB.
+			 * Writing entries[i].size shrank i_size to the chunk,
+			 * so reads past it hit EOF (and W2 persisted the
+			 * wrong size on evict).  Only grow i_size to the
+			 * range end, only for new content, and never while
+			 * write/flush owns the size.  Remote shrinks arrive
+			 * via entries_replace (dcache shrink → re-lookup).
+			 * Overflow of offset + size was rejected above. */
+			if (changed[i] && !s3fs_fd_buf_owned(inode)) {
+				u64 end = entries[i].offset + entries[i].size;
+
+				if (end > (u64)i_size_read(inode))
+					i_size_write(inode, end);
+			}
 			/* Drop any stale page cache filled from the kmalloc
 			 * fallback path (or from a prior admit with a
 			 * different size) — only for ranges that are new or

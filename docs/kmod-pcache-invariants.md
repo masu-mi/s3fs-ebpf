@@ -34,4 +34,5 @@
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。
 - `read_dirty` が `flush_read_seq = flush_seq` を記録。`signal_flush` は `err≠0 || flush_read_seq==flush_seq` のとき `flushing=false`、さらに `err==0 && !dirty` なら unpin (`iput` は fd->lock 解放後)。seq 不一致 = 後続 enqueue が未 PUT なので flushing/pin を維持。err≠0 は flushing を下ろすが pin は保持。
 - 残った pin (daemon 不在・PUT 失敗・キュー破棄) は `put_super` の `s3fs_flush_pins_release_all` が解放 (pr_warn)。unpin の所有権はリスト所属で決まるので二重 iput しない。
+- AC-48: `admit_replace` は i_size を、中身が変わった entry の range 終端 (`offset + size`) まで **伸ばすだけ** で縮めない。dirty/flushing の inode には触らない。entry は range なので `size` を i_size に書いてはいけない (縮むと W2 が誤ったサイズを entry に書き戻す)。S3 側の縮小は `entries_replace` の dcache shrink → 再 lookup で入る。
 - W2: `evict_inode` は通常ファイルの `i_size` を `s3fs_entry_record_size` で local/dyn エントリに書き戻す (`s3fs_entries_mtx`)。local entry は lookup でこの size を返す。daemon の periodic sync (`entries_replace`) が来れば S3 のサイズで上書き。`s3fs_entries_mtx` 保持中に iput するパスを作らないこと (evict から同 mutex を取るため自己デッドロックになる)。
