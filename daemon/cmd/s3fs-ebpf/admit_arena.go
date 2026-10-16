@@ -253,6 +253,62 @@ func planReplaceAdmit(admits []admitEntry, entry admitEntry, arenaBase uint64) (
 	return next, freed
 }
 
+// replaceAdmitRange is replaceAdmit for a range of an ino (AC-49): it drops
+// only the ino's entries that OVERLAP entry and frees their arena bytes, and
+// keeps its other ranges.  replaceAdmit drops every entry of the ino, which
+// is right when the new entry is the whole object (prewarm, flush) but made
+// a chunk admit (D-01) evict the ino's other chunks: reading chunk 0 threw
+// away chunk 1, and the next read fetched chunk 1 from S3 again.
+func replaceAdmitRange(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
+	admitMu.Lock()
+	defer admitMu.Unlock()
+	reconcileEvictionsLocked(devPath)
+	var arenaBase uint64
+	if progs != nil {
+		arenaBase = progs.Arena().BaseAddr()
+	}
+	next, freed := planReplaceAdmitRange(admits, entry, arenaBase)
+	admits = next
+	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
+	if progs != nil {
+		for _, r := range freed {
+			progs.FreeArenaChunk(r.offset, r.size)
+		}
+	}
+	return admitArena(devPath, admits)
+}
+
+// planReplaceAdmitRange is the pure core of replaceAdmitRange: entries of
+// entry.Ino whose file range [Offset, Offset+Size) overlaps the new one are
+// removed (and reported in freed, like planReplaceAdmit), everything else is
+// kept, and entry is appended.  A whole-object entry overlaps every range of
+// its ino, so it behaves exactly like planReplaceAdmit.
+func planReplaceAdmitRange(admits []admitEntry, entry admitEntry, arenaBase uint64) (
+	next []admitEntry, freed []arenaChunkPair,
+) {
+	filtered := admits[:0]
+	for _, e := range admits {
+		if e.Ino == entry.Ino && rangesOverlap(e.Offset, e.Size, entry.Offset, entry.Size) {
+			if arenaBase != 0 && e.Uaddr >= arenaBase {
+				freed = append(freed, arenaChunkPair{
+					offset: e.Uaddr - arenaBase,
+					size:   e.Size,
+				})
+			}
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	next = append(filtered, entry)
+	return next, freed
+}
+
+// rangesOverlap reports whether [aOff, aOff+aSize) and [bOff, bOff+bSize)
+// share a byte.  A zero-length range overlaps nothing.
+func rangesOverlap(aOff, aSize, bOff, bSize uint64) bool {
+	return aSize > 0 && bSize > 0 && aOff < bOff+bSize && bOff < aOff+aSize
+}
+
 // refreshAdmits re-pushes the current snapshot to kmod without any
 // mutation. Used by POST /policy/eval to force a policy round when
 // steady state (no admissions, no evictions) would otherwise leave
@@ -870,7 +926,9 @@ func handleReadMiss(ctx context.Context, devPath string,
 	uaddr := progs.Arena().BaseAddr() + off
 	updateArenaHighWater(off, len(body))
 
-	if err := replaceAdmit(devPath, admitEntry{
+	// AC-49: replace only the ranges this admit overlaps — a chunk admit
+	// must not evict the ino's other chunks.
+	if err := replaceAdmitRange(devPath, admitEntry{
 		Ino:    ev.Ino,
 		Uaddr:  uaddr,
 		Size:   uint64(len(body)),

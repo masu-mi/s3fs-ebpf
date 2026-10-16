@@ -1586,3 +1586,20 @@ evict-race のピークが capacity 4 MiB まで下がらないのは、reader 3
 | 5 | 6118k | 6158k | 1.007 | 5865k | 0.959 | OVERALL PASS |
 
 (1〜3 回目は `hook_ratio` の計算が壊れていたため、同じ行の IOPS から計算し直した。)
+
+### 18.25 AC-49: arena の chunk admit が同じ ino の他の chunk を落とす (2026-10-16)
+
+**症状**: arena モードで 10 MiB の object を chunk 単位に admit すると、chunk 1 を読んだあと chunk 0 を読むと chunk 1 の admit が消え、全体を読むときに chunk 1 を S3 からもう一度取得した (3 chunk のファイルに 4 回の upcall)。正しさには影響しない。§18.18 (AC-48) の調査中に daemon のログで気づいた。
+
+**原因**: `handleReadMiss` の arena 経路が `replaceAdmit` を使っていた。`replaceAdmit` は「同じ ino の entry をすべて置き換える」(prewarm や flush のように、新しい entry がオブジェクト全体のとき向け) ため、D-01 の chunk admit (range) でも、ino の他の range を落として arena の領域を解放していた。
+
+**修正 (`daemon/cmd/s3fs-ebpf/admit_arena.go`)**: `replaceAdmitRange` / `planReplaceAdmitRange` を追加した。ino が同じで、**ファイル上の範囲が重なる** entry だけを置き換え (arena の領域は解放)、他の range は残す。オブジェクト全体の entry はその ino の全 range と重なるので、従来の `replaceAdmit` と同じ動きになる。`handleReadMiss` の arena 経路だけをこれに切り替えた (prewarm・flush・sync は全体の admit なので `replaceAdmit` のまま)。
+
+**テスト**: 単体テスト `TestPlanReplaceAdmitRange_KeepsOtherChunks` (他の chunk を残す、同じ chunk の再 admit は 1 件だけ置き換えて解放、全体の admit は全 range を置き換える) と `TestRangesOverlap`。統合テスト `test-arena-partial-readback` に「ランダムに 2 か所を読んでから全体を読んで、upcall が chunk 数以下」を追加した。
+
+| daemon | upcall (3 chunk) | 結果 |
+|---|---:|---|
+| 修正前 | 4 | FAIL |
+| 修正後 | 3 | PASS |
+
+**make test-regression (13 本)**: 全 PASS、`fd_buf_audit` は全テストで drift 0。go test 全 ok。

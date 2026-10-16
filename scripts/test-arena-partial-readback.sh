@@ -13,7 +13,10 @@
 #      --pattern-aware-admit=false so every miss is a 4 MiB chunk admit.
 #   3. Random-first: read 4 KiB inside chunk 1, then 4 KiB inside chunk 0,
 #      then the whole file.  Size and sha256 must match.
-#   4. Parallel: on a fresh daemon, 4 concurrent full reads; every sha256
+#   4. AC-49: that random-first run must fetch each of the file's chunks from
+#      S3 exactly once (3 upcalls for 3 chunks): a chunk admit used to evict
+#      the ino's other chunks, so chunk 1 was fetched again.
+#   5. Parallel: on a fresh daemon, 4 concurrent full reads; every sha256
 #      must match.
 #
 # Usage:
@@ -89,6 +92,9 @@ GOT_SIZE=$(stat -c %s "$TMPDIR_LOCAL/got.bin")
 GOT_HASH=$(sha256sum < "$TMPDIR_LOCAL/got.bin" | awk '{print $1}')
 STAT_SIZE=$(stat -c %s "$MOUNT/$FNAME")
 UPCALLS_RANDOM=$(grep -c '\[upcall\] miss ino=' "$OUT/daemon-random.log" || true)
+N_CHUNKS=$(( (FILE_MIB + 3) / 4 ))
+FETCH_PASS=PASS
+[ "$UPCALLS_RANDOM" -le "$N_CHUNKS" ] || FETCH_PASS=FAIL
 RANDOM_PASS=PASS
 if [ "$PROBE1" -ne 4096 ] || [ "$PROBE0" -ne 4096 ] || \
    [ "$GOT_SIZE" -ne "$WANT_SIZE" ] || [ "$STAT_SIZE" -ne "$WANT_SIZE" ] || \
@@ -117,7 +123,7 @@ log "  mismatched readers=${PAR_BAD}/${N_PAR} → ${PAR_PASS}"
 
 # ── verdict ───────────────────────────────────────────────────────────────────
 overall=PASS
-[ "$RANDOM_PASS" = PASS ] && [ "$PAR_PASS" = PASS ] || overall=FAIL
+[ "$RANDOM_PASS" = PASS ] && [ "$PAR_PASS" = PASS ] && [ "$FETCH_PASS" = PASS ] || overall=FAIL
 
 {
 echo ""
@@ -127,14 +133,20 @@ echo "=============================================================="
 printf "object     : %s (%d MiB random), arena mode, chunk admits only\n" "$FNAME" "$FILE_MIB"
 printf "random     : %s  (probes %d/%d B, read %d B, stat %d B, upcalls %d)\n" \
     "$RANDOM_PASS" "$PROBE1" "$PROBE0" "$GOT_SIZE" "$STAT_SIZE" "$UPCALLS_RANDOM"
+printf "fetches    : %s  (%d upcalls for %d chunks, want <= %d)\n" \
+    "$FETCH_PASS" "$UPCALLS_RANDOM" "$N_CHUNKS" "$N_CHUNKS"
 printf "parallel   : %s  (%d/%d readers mismatched)\n" "$PAR_PASS" "$PAR_BAD" "$N_PAR"
 echo ""
 echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/arena-partial-readback-report.txt"
 
-printf 'RESULT name=%s status=%s random=%s read_size=%d stat_size=%d par_bad=%d\n' \
-    "$TEST_NAME" "$overall" "$RANDOM_PASS" "$GOT_SIZE" "$STAT_SIZE" "$PAR_BAD"
-[[ "$overall" == FAIL ]] && \
+printf 'RESULT name=%s status=%s random=%s read_size=%d stat_size=%d par_bad=%d upcalls=%d chunks=%d\n' \
+    "$TEST_NAME" "$overall" "$RANDOM_PASS" "$GOT_SIZE" "$STAT_SIZE" "$PAR_BAD" \
+    "$UPCALLS_RANDOM" "$N_CHUNKS"
+[[ "$FETCH_PASS" == FAIL ]] && \
+    printf 'DETAIL %d upcalls for %d chunks: a chunk admit evicted another chunk of the ino (AC-49)\n' \
+        "$UPCALLS_RANDOM" "$N_CHUNKS"
+[[ "$RANDOM_PASS" == FAIL || "$PAR_PASS" == FAIL ]] && \
     printf 'DETAIL chunk admit changed the file size or content (AC-48)\n'
 [[ "$overall" == FAIL ]] && exit 1 || exit 0
