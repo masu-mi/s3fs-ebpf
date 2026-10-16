@@ -35,6 +35,11 @@ MICRO_ITERS=${MICRO_ITERS:-2000}
 FIO_JOBS=${FIO_JOBS:-64}
 FIO_RUNTIME=${FIO_RUNTIME:-5}
 
+# The daemon's disk cache serves a key without checking size/ETag, so a body
+# cached by an earlier run (e.g. the old 10 MiB LARGE_BYTES default) survives
+# the re-seed below: full admit then populates only that stale prefix and the
+# pcache warm-up cat hits -EIO past it.  Start from an empty cache.
+sudo rm -rf "$EBPF_CACHE_DIR"
 mkdir -p "$OUT" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
 sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
 # S2: sentinel file for timed_reads fallback detection (survives subshell boundary).

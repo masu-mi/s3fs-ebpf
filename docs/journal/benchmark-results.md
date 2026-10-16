@@ -1027,67 +1027,96 @@ arena モードを同条件 (RUNS=10, 2026-10-13) で再計測したところ:
 
 ---
 
-## 18. R1/T1〜T3 修正後 再計測 (AC-11/AC-13/AC-27、2026-10-14)
+## 18. R1/T1〜T3 修正後 再計測 (AC-11/AC-13/AC-27、計画 2026-10-14 / 計測 2026-10-16)
 
-Q1 修正前ビルド (1271adf〜7ddb0d7) で取得した §16/§17 の数値は evict 後の再 read が EOF になっていた可能性があるため無効と判定。R1 (populate/evict race 修正) を含むビルドで §18.1〜18.4 を再計測。T1〜T3 修正 (AC-22〜AC-24) 後のビルドで §18.5〜18.8 を追加。
+Q1 修正前ビルド (1271adf〜7ddb0d7) で取得した §16/§17 の数値は evict 後の再 read が EOF になっていた可能性があるため無効と判定。R1 (populate/evict race 修正) と T1〜T3 修正 (AC-22〜AC-24) に加え、計測準備中に見つかった W1/P1/W2 を含むビルドで §18.1〜18.8 を計測した。
+
+- **計測ビルド**: `d3d550c` (kmod/daemon)。§18.2 のみ `scripts/bench-ab-pcache.sh` のキャッシュ初期化 (下記) を加えた作業ツリーで実行
+- **環境**: §1 と同じホスト、kernel 6.12.0-061200-generic、MinIO (docker compose)
+- **計測中に修正したもの** (いずれも §18 の計測前に確認済み):
+  - **W1** (`25dc831`): close 後の flush PUT 前に drop_caches / reclaim で inode が evict されると、未 PUT の `fd->buf` が破棄され書き込みが消失していた。flush 完了まで inode を `ihold` で pin する
+  - **P1** (`6846872`): `pending_exists()` が chunk_offset≠0 の pending を見落とし、upcall 待ち中の ino を evict し得た。pending の hash key を ino 単独に変更
+  - **W2** (`d3d550c`): `.create` したファイルの inode が flush 後に evict されると、再 lookup で i_size=0 になり空ファイルとして読めていた。evict 時に i_size をエントリへ書き戻す
+  - テスト側: evict-readback / evict-race の `/metrics` 取得が SIGPIPE で `46\n-1` のような 2 行になり、delta=0 の誤 FAIL を出していた (`6870066`)
 
 ### 18.1 AC-03 bench-hitrate.sh 再計測
 
-`bench-hitrate.sh` を arena モードと `DAEMON_EXTRA_FLAGS=--arena-metadata-only` の両方で実行（seed=42）。
+`bench-hitrate.sh` を arena モードと `DAEMON_EXTRA_FLAGS=--arena-metadata-only` の両方で実行 (seed=42、30 files、2000 accesses、softcap=8、capacity_bytes=352 = 44B × 8 スロット)。Belady 上限 opt = **64.15%** (1283/2000)。
 
 合格条件:
-- `adm_max ≤ capacity_bytes`（容量制限が有効）
-- `hit_rate ≤ opt`（Belady 上限 64.15% を超えない）
+- `adm_max ≤ softcap (8)` (capacity_bytes=352 はスロット数 8 相当)
+- `hit_rate ≤ opt` (64.15%)
 - arena モードの hit_rate が §12.3 の lru/sieve 30.6% から著しく外れていないこと
 
-#### arena モード (seed=42)
-
-| policy | hit_rate | opt | adm_max | capacity_bytes | 判定 |
+| policy | arena hit_rate | arena adm_max | pcache hit_rate | pcache adm_max | 判定 |
 |---|---:|---:|---:|---:|---|
-| ⏳ 実行待ち | — | — | — | — | — |
+| observe | 27.55% | 8 | 53.35% | 7 | ✅ |
+| freq2bit_ops | 31.00% | 8 | 52.75% | 7 | ✅ |
+| lru_ops | 32.55% | 8 | 52.60% | 7 | ✅ |
+| sieve_ops | 32.30% | 8 | 53.40% | 7 | ✅ |
+| s3fifo_ops | 32.05% | 8 | 53.35% | 7 | ✅ |
+| wtinylfu_ops | 34.30% | 8 | 52.65% | 7 | ✅ |
+| wtinylfu_full_ops | 35.75% | 8 | 52.35% | 7 | ✅ |
+| pressure_ops | 30.65% | 8 | 53.60% | 7 | ✅ |
+| time_decay_ops | 34.95% | 8 | 53.15% | 7 | ✅ |
+| size_aware_ops | 32.45% | 8 | 53.25% | 7 | ✅ |
 
-#### pcache モード `--arena-metadata-only` (seed=42)
-
-| policy | hit_rate | opt | adm_max | capacity_bytes | 判定 |
-|---|---:|---:|---:|---:|---|
-| ⏳ 実行待ち | — | — | — | — | — |
+全行 err=0。所見:
+- arena の lru 32.55% / sieve 32.30% は §12.3 (30.6%) から +2pp 以内で、§12.3 と整合する。
+- pcache は全 policy で 52.35〜53.60% (opt 以下)。§16 の 94% 台 (opt 超えで物理的にあり得ない値) は P3/R1 前のバグ由来と確定。
+- pcache は policy 間の差が 1.3pp しかない。eviction の 1 単位が「ino の pcache 全体」で、softcap=8 の小さなワーキングセットでは選択の差が出にくい。policy の比較は arena モードの数値で行う。
 
 ### 18.2 AC-05 bench-ab-pcache.sh 再計測
 
-`bench-ab-pcache.sh`（LARGE_BYTES=104857600、hyperfine、N_READS=5）
+`bench-ab-pcache.sh` (LARGE_BYTES=104857600、hyperfine、N_READS=5、fio 64 jobs × 5s、microbench 2000 iters)。
+
+**計測条件の注意 (2 点)**:
+1. daemon のディスクキャッシュ (`--cache-dir`) は、キャッシュ済みの key をサイズや ETag を確認せずに返す。10/13 の 10 MiB 計測で残った `ab07_large.bin` の 10 MiB 版が再シード後も返され、pcache の full admit が先頭 10 MiB しか埋まらず、warm-up が -EIO で中断した。スクリプト冒頭で `EBPF_CACHE_DIR` を消すよう修正した。daemon 側のキャッシュ整合性の問題 (上書きされた object を検知しない) は未対応で、別途 backlog とする。
+2. arena (128 MiB、BPF 側でコンパイル時固定) に、prewarm で `100m.bin` (100 MiB) が先に入り、`ab07_large.bin` (100 MiB) が `arena cache full` で admit できない。計測中だけバケットから `100m.bin` を外し、`hello.txt` / `big.bin` / `10m.bin` / `ab07_large.bin` の 4 object で計測した。
 
 | 指標 | fuse-raw | fuse-cache | ebpf-arena | ebpf-pcache | gate |
 |---|---:|---:|---:|---:|---|
-| 64-job IOPS (a) | ⏳ | — | ⏳ | ⏳ | — |
-| 100 MiB ms/read (b) | — | ⏳ | ⏳ | ⏳ | — |
-| microbench ops/s (c) | — | — | ⏳ | ⏳ | — |
+| 64-job IOPS (a) | 6,044k | — | 4,014k | 3,988k | ❌ FAIL (pcache/fuse-raw = 0.66×) |
+| 100 MiB ms/read (b) | — | 17.168 | 19.851 | 20.651 | ❌ FAIL (pcache/fuse-cache = 1.20×) |
+| microbench ops/s (c) | — | — | 274,290 | 267,915 | ❌ FAIL (pcache/arena = 0.977×) |
 
-`AB07-RESULT` 行: ⏳ 実行待ち
+microbench p50 / p95 / p99: arena 3.490 / 3.639 / 6.559 µs、pcache 3.588 / 3.741 / 6.245 µs。
+
+`AB07-RESULT  date=2026-10-16  fuse_raw_iops=6044k  arena_iops=4014k  pcache_iops=3988k  fuse_cache_ms=17.168  arena_ms=19.851  pcache_ms=20.651  arena_ops=274290  pcache_ops=267915  gate_a=FAIL  gate_b=FAIL  gate_c=FAIL  method=hyperfine`
+
+所見:
+- (a) は §14.1 (3,879k、0.64×) とほぼ同じ水準で、改善も悪化もしていない。
+- (b) は 100 MiB 条件での初めての計測で、§14.2 (10 MiB で PASS) とは直接比較できない。100 MiB では fuse-cache に対して arena も pcache も遅い。
+- (c) は 2.3% 差で、§14.3 (pcache が +0.9%) から逆転した。差は小さく、p99 は pcache の方が低いので、ノイズの範囲かは反復計測で確認が必要。
 
 ### 18.3 test-pcache-multiread.sh (AC-01 回帰確認)
 
-分割 admit (> 8 MiB ファイル) の sha256 一致確認。
+分割 admit (> 8 MiB ファイル、8,388,609 B) の sha256 一致確認。
 
 | 結果 | 備考 |
 |---|---|
-| ⏳ 実行待ち | — |
+| ✅ PASS | `sha256=ok` |
 
 ### 18.4 test-pcache-evict-race.sh (AC-11/T3 ストレステスト)
 
-DURATION=120s、N_FILES=4、N_READERS=**8**（T3 で増加）、capacity_bytes=4 MiB (eviction 強制)。
-`blocked for more than` パターンを DMESG_PATTERN に追加済み（T3 対応）。
+DURATION=120s、N_FILES=4 (9 MiB each)、N_READERS=**8** (32 readers 計)、capacity_bytes=4 MiB (eviction 強制)。
+`blocked for more than` パターンを DMESG_PATTERN に追加済み (T3 対応)。
 
-| sha256 整合性 | lockdep 警告 | hung task 警告 | 総合 |
-|---|---|---|---|
-| ⏳ 実行待ち | ⏳ | ⏳ | — |
+| sha256 整合性 | read -EIO | evictions | retry_exhausted / upcall_timeout | lockdep 警告 | hung task 警告 | 総合 |
+|---|---|---:|---:|---|---|---|
+| ✅ PASS (sha256_fail=0) | ✅ 0 | 1,719 | 0 / 0 | SKIP (CONFIG_PROVE_LOCKING 無効) | ✅ なし | **PASS** |
+
+gen0_fail (buf_null / bitmap / other) = 0 / 0 / 0。
 
 ### 18.5 test-write-readback.sh (AC-22/T1 回帰確認)
 
-T1 修正後ビルドで実行: echo/cat 新規ファイル、4 MiB 跨ぎ追記 sha256、truncate-extend + write + read。
+T1 回帰に加え、W1/W2 回帰の sub-test 4・5 を追加した。sub-test 4・5 は daemon 起動前に MinIO の対象 object を消し (.create 経路を通すため)、`--sync-every=0` で実行する (periodic sync によるエントリの昇格が W2 を覆い隠すため)。
 
-| sub-test 1 (echo/cat) | sub-test 2 (4 MiB+ append) | sub-test 3 (truncate-extend) | 総合 |
-|---|---|---|---|
-| ⏳ 実行待ち | ⏳ | ⏳ | — |
+| sub-test 1 (echo/cat) | sub-test 2 (4 MiB+ append) | sub-test 3 (truncate-extend) | sub-test 4 (flush → drop_caches → re-read) | sub-test 5 (PUT 前に drop_caches) | 総合 |
+|---|---|---|---|---|---|
+| ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS | ✅ PASS | **PASS** |
+
+修正前ビルドでの再現確認: W1 なしでは sub-test 5 が re-read mismatch で FAIL。W2 なしでは sub-test 4 の再読込が空 (sha256 `e3b0c442…`) で FAIL。W2 ありでは 3/3 回 PASS。
 
 ### 18.6 test-large-file-read.sh (AC-23/T2 回帰確認)
 
@@ -1095,48 +1124,50 @@ T1 修正後ビルドで実行: echo/cat 新規ファイル、4 MiB 跨ぎ追記
 
 | sha256 一致 | ファイルサイズ一致 | 総合 |
 |---|---|---|
-| ⏳ 実行待ち | ⏳ | — |
+| ✅ PASS | ✅ PASS (314,572,800 B) | **PASS** |
 
 ### 18.7 test-evict-readback.sh (AC-24/Q1/S8 回帰確認)
 
 9 MiB ファイルを pcache モードで evict 後に stat + sha256 確認。
 
-| Q1 (i_size 保持) | sha256 一致 | S8 (再 populate 後サイズ) | 総合 |
-|---|---|---|---|
-| ⏳ 実行待ち | ⏳ | ⏳ | — |
+| Q1 (i_size 保持) | sha256 一致 | S8 (再 populate 後サイズ) | evictions | 総合 |
+|---|---|---|---:|---|
+| ✅ PASS (9,437,184 → 9,437,184) | ✅ PASS | ✅ PASS (9,437,184) | delta=1 | **PASS** |
 
 ### 18.8 test-populate-boundary.sh (AC-02/Q3 回帰確認)
 
-size=0、64 MiB 超、offset overflow の 3 境界値ガードが kmod ソースに存在することを確認。
+size=0、64 MiB 超、offset overflow の 3 境界値ガードに加え、5 GiB+4 MiB の正常系 (EINVAL にならないこと) を ioctl で確認。
 
-| size=0 ガード | 64 MiB cap | overflow ガード | 総合 |
-|---|---|---|---|
-| ⏳ 実行待ち | ⏳ | ⏳ | — |
+| size=0 ガード | 64 MiB cap | overflow ガード | 5 GiB+4 MiB (非 EINVAL) | 1 MiB 通常 read | dmesg | 総合 |
+|---|---|---|---|---|---|---|
+| ✅ EINVAL | ✅ EINVAL | ✅ EINVAL | ✅ ENOENT | ✅ sha256 一致 | ✅ WARN/BUG なし | **PASS** |
 
 ### 18.9 gate 判定まとめ
 
 | 条件 | 結果 |
 |---|---|
-| AC-03: adm_max ≤ capacity_bytes (両モード) | ⏳ |
-| AC-03: hit_rate ≤ opt=64.15% (両モード) | ⏳ |
-| AC-03: arena hit_rate が §12.3 と概ね一致 | ⏳ |
-| AC-05: AB-07 gate (a)(b)(c) | ⏳ |
-| AC-13: sha256 全一致 (multiread + evict-race) | ⏳ |
-| AC-22/T1: write-readback 全 sub-test PASS | ⏳ |
-| AC-23/T2: 300 MiB ファイル sha256 一致 | ⏳ |
-| AC-24/T3: evict-race に hung task 警告なし | ⏳ |
-| lockdep 警告なし | ⏳ |
-| **総合** | **⏳ 実行待ち** |
+| AC-03: adm_max ≤ softcap (両モード) | ✅ PASS (arena 8 / pcache 7) |
+| AC-03: hit_rate ≤ opt=64.15% (両モード) | ✅ PASS (最大 arena 35.75% / pcache 53.60%) |
+| AC-03: arena hit_rate が §12.3 と概ね一致 | ✅ PASS (lru 32.55%、sieve 32.30% vs 30.6%) |
+| AC-05: AB-07 gate (a)(b)(c) | ❌ FAIL (a 0.66× / b 1.20× / c 0.977×) |
+| AC-13: sha256 全一致 (multiread + evict-race) | ✅ PASS |
+| AC-22/T1: write-readback 全 sub-test PASS | ✅ PASS (W1/W2 回帰の sub-test 4・5 を含む) |
+| AC-23/T2: 300 MiB ファイル sha256 一致 | ✅ PASS |
+| AC-24/T3: evict-race に hung task 警告なし | ✅ PASS |
+| lockdep 警告なし | ⏸ SKIP (計測カーネルが CONFIG_PROVE_LOCKING 無効) |
+| **総合** | **正しさの gate は全 PASS。性能 gate AC-05 は FAIL。lockdep は未検証** |
 
-> 計測はこのセクションに数値を直接書き込んでください。  
+AC-05 の (a) は §14 以来の未達が続いている。(b)(c) は今回の 100 MiB 条件で初めて FAIL になった。正しさの問題ではないので、AB-07 の性能課題として別途追う。lockdep は CONFIG_PROVE_LOCKING=y のカーネルで evict-race / write-readback を回すまで未検証 (W1 で `fd->lock` の内側で取る `s3fs_flush_pins_lock` を追加しているため、対象に含める)。
+
 > 実行コマンド:
 > ```
 > sudo ./scripts/bench-hitrate.sh          # arena モード (§18.1)
 > sudo DAEMON_EXTRA_FLAGS=--arena-metadata-only ./scripts/bench-hitrate.sh  # pcache モード (§18.1)
+> # bench-hitrate はバケットを空にするので、§18.2 の前に hello.txt / big.bin / 10m.bin を再シードし、100m.bin は外しておく
 > sudo ./scripts/bench-ab-pcache.sh        # AC-05 (§18.2)
 > sudo ./scripts/test-pcache-multiread.sh  # AC-01 回帰 (§18.3)
 > sudo ./scripts/test-pcache-evict-race.sh # AC-11/T3 ストレス (§18.4)
-> sudo ./scripts/test-write-readback.sh    # T1 回帰 (§18.5)
+> sudo ./scripts/test-write-readback.sh    # T1/W1/W2 回帰 (§18.5)
 > sudo ./scripts/test-large-file-read.sh   # T2 回帰 (§18.6)
 > sudo ./scripts/test-evict-readback.sh    # Q1/S8 回帰 (§18.7)
 > sudo ./scripts/test-populate-boundary.sh # P2/Q3 境界値 (§18.8)
