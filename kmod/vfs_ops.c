@@ -1842,6 +1842,19 @@ struct s3fs_file_data {
 	 * path can serve correct data even after the pcache entry was evicted.
 	 * Protected by fd->lock.  Set on first upcall, cleared at done. */
 	u32   buf_readers;
+	/* W1: unflushed-data pin.  maybe_enqueue_flush takes one inode ref
+	 * (ihold) per fd while a flush is outstanding so evict_inode cannot
+	 * free fd->buf before the daemon has read and PUT it (drop_caches or
+	 * memory pressure after close would otherwise lose the write).
+	 * flush_seq counts enqueues; read_dirty snapshots it into
+	 * flush_read_seq.  signal_flush releases the pin only when the PUT
+	 * succeeded and covered the latest enqueue (seqs equal, !dirty).
+	 * Pinned iff pin_link is on s3fs_flush_pins (s3fs_flush_pins_lock);
+	 * the seqs are protected by fd->lock. */
+	u64   flush_seq;
+	u64   flush_read_seq;
+	struct list_head pin_link;
+	struct inode *pin_inode;
 };
 
 /* True when fd->buf is owned by the write/flush path and the arena may
@@ -1853,6 +1866,62 @@ static inline bool s3fs_fd_buf_owned(struct inode *inode)
 	struct s3fs_file_data *fd = inode->i_private;
 
 	return fd && (READ_ONCE(fd->dirty) || READ_ONCE(fd->flushing));
+}
+
+/* W1: inodes pinned by an outstanding flush.  put_super releases any
+ * that remain (daemon gone, PUT failed) so umount does not leak them. */
+static LIST_HEAD(s3fs_flush_pins);
+static DEFINE_SPINLOCK(s3fs_flush_pins_lock);
+
+/* Caller holds fd->lock and a reference on inode.  No-op if pinned. */
+static void s3fs_flush_pin(struct inode *inode, struct s3fs_file_data *fd)
+{
+	spin_lock(&s3fs_flush_pins_lock);
+	if (list_empty(&fd->pin_link)) {
+		ihold(inode);
+		fd->pin_inode = inode;
+		list_add_tail(&fd->pin_link, &s3fs_flush_pins);
+	}
+	spin_unlock(&s3fs_flush_pins_lock);
+}
+
+/* Returns true if the caller now owns the pin reference and must iput
+ * the inode (after dropping fd->lock — the iput may evict it).  List
+ * membership decides ownership so this cannot race release_all into a
+ * double iput. */
+static bool s3fs_flush_unpin(struct s3fs_file_data *fd)
+{
+	bool owned = false;
+
+	spin_lock(&s3fs_flush_pins_lock);
+	if (!list_empty(&fd->pin_link)) {
+		list_del_init(&fd->pin_link);
+		owned = true;
+	}
+	spin_unlock(&s3fs_flush_pins_lock);
+	return owned;
+}
+
+static void s3fs_flush_pins_release_all(void)
+{
+	struct s3fs_file_data *fd;
+	struct inode *inode;
+
+	for (;;) {
+		spin_lock(&s3fs_flush_pins_lock);
+		fd = list_first_entry_or_null(&s3fs_flush_pins,
+					      struct s3fs_file_data, pin_link);
+		if (!fd) {
+			spin_unlock(&s3fs_flush_pins_lock);
+			return;
+		}
+		list_del_init(&fd->pin_link);
+		inode = fd->pin_inode;
+		spin_unlock(&s3fs_flush_pins_lock);
+		pr_warn_ratelimited("s3fs_ebpf: ino=%lu released with unacknowledged flush\n",
+				    inode->i_ino);
+		iput(inode);
+	}
 }
 
 /*
@@ -2061,18 +2130,32 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 		if (inode) {
 			fd = inode->i_private;
 			if (fd) {
-				mutex_lock(&fd->lock);
-				fd->flushing = false;
-				if (err == 0 && !fd->dirty &&
-				    fd->buf && fd->size > 0) {
-					u32 last_ci = (u32)((fd->size - 1) >>
-						      S3FS_PCACHE_CHUNK_SHIFT);
-					u32 ci;
+				bool unpin = false;
 
-					for (ci = 0; ci <= last_ci && ci < 64; ci++)
-						fd->populated_chunks |= (1ULL << ci);
+				mutex_lock(&fd->lock);
+				/* W1: a successful PUT whose read_dirty predates
+				 * the latest enqueue does not cover it — keep
+				 * flushing (and the pin) until that one lands.
+				 * On error keep the pin: the daemon has restored
+				 * dirty and the data must survive until a later
+				 * flush succeeds (or umount releases it). */
+				if (err != 0 || fd->flush_read_seq == fd->flush_seq) {
+					fd->flushing = false;
+					if (err == 0 && !fd->dirty &&
+					    fd->buf && fd->size > 0) {
+						u32 last_ci = (u32)((fd->size - 1) >>
+							      S3FS_PCACHE_CHUNK_SHIFT);
+						u32 ci;
+
+						for (ci = 0; ci <= last_ci && ci < 64; ci++)
+							fd->populated_chunks |= (1ULL << ci);
+					}
+					if (err == 0 && !fd->dirty)
+						unpin = s3fs_flush_unpin(fd);
 				}
 				mutex_unlock(&fd->lock);
+				if (unpin)
+					iput(inode); /* pin ref; ilookup ref below keeps it live */
 			}
 			iput(inode);
 		}
@@ -2423,6 +2506,8 @@ long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
 	}
 
 	mutex_lock(&fd->lock);
+	/* W1: this read covers every enqueue so far (writes precede enqueue). */
+	fd->flush_read_seq = fd->flush_seq;
 	n = min_t(size_t, fd->size, cap);
 	if (n && copy_to_user(uaddr, fd->buf, n)) {
 		ret = -EFAULT;
@@ -2464,6 +2549,7 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 	if (!fd)
 		return NULL;
 	mutex_init(&fd->lock);
+	INIT_LIST_HEAD(&fd->pin_link);
 	if (initial_size) {
 		u32 nchunks, ci;
 
@@ -3273,6 +3359,9 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 	 * signal_flush clears this flag and marks the bitmap once the daemon
 	 * confirms the PUT succeeded. */
 	fd->flushing = true;
+	/* W1: hold the inode until the daemon acknowledges this flush. */
+	fd->flush_seq++;
+	s3fs_flush_pin(inode, fd);
 	mutex_unlock(&fd->lock);
 
 	ino = inode->i_ino;
@@ -3725,6 +3814,9 @@ static void s3fs_ebpf_put_super(struct super_block *sb)
 	flush_queue_drain();
 	delete_queue_drain();
 	rename_queue_drain();
+	/* W1: evict_inodes already skipped pinned inodes; drop their pin
+	 * refs here so the busy-inodes check after put_super passes. */
+	s3fs_flush_pins_release_all();
 }
 
 static const struct super_operations s3fs_ebpf_super_ops = {

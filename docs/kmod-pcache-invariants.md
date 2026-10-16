@@ -4,7 +4,7 @@
 
 ## ロック順 (外 → 内)
 - `fd->lock` (mutex, per-inode `s3fs_file_data`) → `s3fs_admits_lock` (rwlock)。逆順で取るパスは存在しない (R1 はこれに依存)。
-- `s3fs_pending_lock` / `s3fs_miss_lock` / `s3fs_flush_*_lock` は spinlock で末端。保持中に `fd->lock` や `s3fs_admits_lock` を取らない。
+- `s3fs_pending_lock` / `s3fs_miss_lock` / `s3fs_flush_*_lock` / `s3fs_flush_pins_lock` は spinlock で末端 (`flush_pins_lock` は fd->lock 下で取る)。保持中に `fd->lock` や `s3fs_admits_lock` を取らない。
 - `admit_evict_ino` は `admit_drop_all_ranges` (admits write_lock) を解放した後に `s3fs_evict_page_cache` → `s3fs_file_data_reset` (fd->lock → admits write_lock) を呼ぶ。
 
 ## R1 不変条件
@@ -27,3 +27,8 @@
 - 呼ばれる経路: `admit_evict_ino` の中で、`admit_drop_all_ranges` が PCACHE entry を落としたと報告したとき (S4: 判定は write_lock 内で atomic に行う) だけ。
 - `fd->lock` 下で `!dirty && !flushing && buf_readers == 0` のときに限り、PCACHE entry の再 evict (1 件でも消したら `s3fs_admit_gen++`) → `kvfree(buf)`、`size`/`cap`/`populated_chunks` を 0 にする。
 - どれかが偽なら何もしない (skip_reset)。後で再試行する仕組みはなく、次に evict されたときに回収される。inode の `i_size` はクリアしない (Q1)。
+
+## flush pin (W1)
+- close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。
+- `read_dirty` が `flush_read_seq = flush_seq` を記録。`signal_flush` は `err≠0 || flush_read_seq==flush_seq` のとき `flushing=false`、さらに `err==0 && !dirty` なら unpin (`iput` は fd->lock 解放後)。seq 不一致 = 後続 enqueue が未 PUT なので flushing/pin を維持。err≠0 は flushing を下ろすが pin は保持。
+- 残った pin (daemon 不在・PUT 失敗・キュー破棄) は `put_super` の `s3fs_flush_pins_release_all` が解放 (pr_warn)。unpin の所有権はリスト所属で決まるので二重 iput しない。
