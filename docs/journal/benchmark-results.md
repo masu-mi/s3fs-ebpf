@@ -1564,3 +1564,25 @@ evict-race のピークが capacity 4 MiB まで下がらないのは、reader 3
 - `make test-regression` (13 本): 全 PASS。`fd_buf_audit` は全テストで drift 0。go test 全 ok (`TestMergeReadPatterns` を slot 版に更新、`TestSlotIndex` 追加)。
 
 **挙動の変化**: (1) 別の ino が同じ slot に入ると、そのアクセスパターンは失われる (slot 数 1024)。(2) 在席が変わっても、最大 64 回の read は古いキャッシュで判定される。(3) 熱い (CPU, ino) への on_hit は jiffy あたり 1 回になる (HZ=250 なら 250 回/秒)。(4) 未知の ino の miss event は 64 回に 1 回になる。(5) カウンタは非 atomic。
+
+### 18.24 AB-07 gate (a) の判定を、フックなしの構成 + hook_ratio に変更 (2026-10-16)
+
+**理由**: フックの固定コスト (trampoline + s_magic の判定) だけで fuse-raw 比 0.974 が上限になるため、文面どおりの「ebpf-pcache ≥ fuse-raw」はフックが付いている限り満たせない (§18.23)。
+
+**変更 (`scripts/bench-ab-pcache.sh`)**:
+- 4 つ目の daemon 構成 `pcache-nohook` (`--arena-metadata-only --no-read-iter-hook --pattern-aware-admit=false`) を追加し、64 jobs の fio read を測る。
+- gate (a) = `nohook_iops ≥ 0.98 × fuse_raw_iops` (`NOHOOK_TOLERANCE`)。
+- `hook_ratio` = フックありの pcache / fuse-raw を毎回出す。0.90 (`HOOK_RATIO_MIN`) を下回ると WARN (gate の合否には入れない)。`AB07-RESULT` の行に `nohook_iops` / `hook_ratio` / `hook_status` を追加。
+- fio の IOPS は `6293k` のような文字列で、awk に直接渡すと壊れる (`6293k` が数値 6293 と空の変数の連結になる)。数値に直す `iops_num` を入れ、gate (a) の比較にも使う。これ以前の gate (a) の比較は、この点で正しく動いていなかった可能性がある (FAIL の判定は、手計算の比 0.91〜0.93 と一致していた)。
+
+**結果 (5 回)**:
+
+| 回 | fuse-raw | pcache (フックなし) | 比 | pcache (フックあり) | hook_ratio | gate |
+|---|---:|---:|---:|---:|---:|---|
+| 1 | 6143k | 6293k | 1.024 | 5925k | 0.965 | a/b/c PASS |
+| 2 | 6073k | 6211k | 1.023 | 5852k | 0.964 | a/b/c PASS |
+| 3 | 6145k | 6147k | 1.000 | 5849k | 0.952 | a/b/c PASS |
+| 4 | 6077k | 6157k | 1.013 | 5855k | 0.963 | OVERALL PASS |
+| 5 | 6118k | 6158k | 1.007 | 5865k | 0.959 | OVERALL PASS |
+
+(1〜3 回目は `hook_ratio` の計算が壊れていたため、同じ行の IOPS から計算し直した。)

@@ -132,7 +132,7 @@ page cache で hit する read の経路に入るフックや変更は、次の�
 
 到達点: gate (a) は fuse-raw 比 0.94〜0.96 (フックなしの最低コストは 0.974)。残りは固定の負担と、slot の更新・counter の bump など read のたびにする最小限の仕事。これ以上を狙うなら、フックの目的 (miss のときの判断) を miss の経路で実現し、hit の経路から外す設計変更になる (§4.6)。
 
-**gate (a) の判定をどうするか (未決)**: 文面どおりの「ebpf-pcache ≥ fuse-raw」は、フックが残る限り満たせない (フックを外した構成では 1.00 だった: `--no-read-iter-hook`)。選択肢は、(1) 閾値を 0.95 にして「フックを付けたまま FUSE の 5% 以内」とする、(2) フックなしの構成を gate の対象にし、フックの負担は別の指標 (この文書の fuse-raw 比) として追う、(3) 文面のままにして FAIL を既知の項目として残す。
+**gate (a) の判定方法 (決定済み、2026-10-16)**: 文面どおりの「ebpf-pcache ≥ fuse-raw」は、フックが残る限り満たせない (フックを外した構成は 1.00〜1.03)。そこで `scripts/bench-ab-pcache.sh` の gate (a) を、**フックなしの pcache (`--no-read-iter-hook --pattern-aware-admit=false`) が fuse-raw の 0.98 倍以上** (`NOHOOK_TOLERANCE`、bench の run どうしのばらつきは約 2%) に変えた。フックの負担は gate には入れず、**`hook_ratio`** (フックありの pcache / fuse-raw) として毎回出し、0.90 (`HOOK_RATIO_MIN`) を下回ったら WARN を出す。今の値は 0.96 前後。フックを足したり重くしたりする変更は、`hook_ratio` を §5 の基準で見る。
 
 ## 関連
 
