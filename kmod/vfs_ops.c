@@ -1384,12 +1384,16 @@ static LIST_HEAD(s3fs_miss_events);
 static DEFINE_SPINLOCK(s3fs_miss_lock);
 static DECLARE_WAIT_QUEUE_HEAD(s3fs_miss_wq);
 
-/* U13: hash key combines ino and chunk index so readers for different
- * chunks of the same ino get independent completions.
- * 22 = S3FS_PCACHE_CHUNK_SHIFT (defined later in this file). */
-static u64 pending_hash_key(u64 ino, u64 chunk_offset)
+/* U13: readers for different chunks of the same ino get independent
+ * completions — every lookup matches on (ino, chunk_offset).
+ * P1: the bucket key is the ino alone so all chunks of an ino share a
+ * bucket and pending_exists(ino) sees them.  The former
+ * ino ^ (chunk_offset >> 22) key scattered chunk != 0 entries into other
+ * buckets, letting eviction pick an ino with a reader still blocked on
+ * a non-first chunk. */
+static u64 pending_hash_key(u64 ino, u64 chunk_offset __always_unused)
 {
-	return ino ^ (chunk_offset >> 22);
+	return ino;
 }
 
 /* Look up an existing pending entry for (ino, chunk_offset) and bump
