@@ -67,15 +67,32 @@ mkdir -p "$OUT"
 need_cmds docker sha256sum
 need_built
 
+# ── fresh keys for sub-tests 4/5 (must precede daemon start: prewarm) ──────
+docker exec "$MINIO_CONTAINER" mc alias set local http://localhost:9000 \
+    minioadmin minioadmin >/dev/null 2>&1
+# Remove leftover objects so the files are new to the daemon's entry table
+# and the write goes through .create (local entry) — the W2 path.  A
+# leftover from an earlier run would be prewarmed as a dyn entry instead.
+minio_rm() {
+    docker exec "$MINIO_CONTAINER" mc rm --force "local/$S3_BUCKET/$1" >/dev/null 2>&1 || true
+}
+
+minio_rm t4-flush-reread.bin
+minio_rm t5-evict-before-flush.bin
+
 # ── mount (no S3 files needed for this test) ──────────────────────────────────
 log "mounting s3fs-ebpf"
 ebpf_mount "$MOUNT"
+# --sync-every=0: startup-only sync.  A periodic sync promotes .create'd
+# files into the dyn table (with their S3 size), which masks W2 whenever a
+# round lands between the PUT and drop_caches — keep sub-tests 4/5 on the
+# local-entry path deterministically.
 ebpf_start_daemon "$OUT/daemon.log" \
     --arena-metadata-only \
     --policy-bpf="builtin:policy_observe" \
     --softcap=8 --cache-capacity=0 \
     --metrics-addr=:9600 \
-    --sample-every=1s --sync-every=5s
+    --sample-every=1s --sync-every=0
 log "daemon started, settling ${SETTLE}s"
 sleep "$SETTLE"
 
@@ -169,6 +186,8 @@ wait_minio_sha() {
 # daemon's PUT to land with the new content, then drops the VFS page cache so
 # the next read must go through the miss path (dirty=false, bitmap possibly
 # empty).  Verifies that content is still correct after a cold re-read.
+# W2: the inode is evicted after the PUT; the re-created inode must take its
+# size from the local entry (it read back empty before W2).
 log "sub-test 4: flush → drop_caches → re-read (bitmap-empty path)"
 TEST4_FILE="$MOUNT/t4-flush-reread.bin"
 TEST4_KEY="t4-flush-reread.bin"
@@ -203,8 +222,7 @@ fi
 # holds the flush event.  Before W1, drop_caches evicted the inode and
 # evict_inode freed the unflushed fd->buf: the PUT never happened (daemon log
 # "read dirty: no such file or directory") and the re-read returned whatever
-# S3/arena held before.  Overwrites an existing object so stale content is
-# distinguishable from the new write.
+# S3 held before (nothing, for a new file).
 log "sub-test 5: write → close → drop_caches before PUT → S3 + re-read"
 TEST5_FILE="$MOUNT/t5-evict-before-flush.bin"
 TEST5_KEY="t5-evict-before-flush.bin"

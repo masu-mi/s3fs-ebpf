@@ -130,6 +130,7 @@ struct s3fs_local_entry {
 	unsigned long ino;
 	unsigned long parent_ino; /* G-01: dir the file was .create'd under */
 	umode_t mode;
+	u64 size;   /* W2: last i_size seen at evict_inode (0 until then) */
 	u32 name_len;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 };
@@ -189,7 +190,9 @@ static bool resolve_entry_by_name(unsigned long parent_ino,
 			continue;
 		out->ino = le->ino;
 		out->parent_ino = want_parent;
-		out->size = 0; /* .create starts empty; fd->size covers subsequent writes */
+		/* .create starts empty and fd->size covers writes while the
+		 * inode lives; W2: after eviction le->size carries it. */
+		out->size = le->size;
 		out->mode = le->mode;
 		out->name_len = le->name_len;
 		memcpy(out->name, le->name, le->name_len);
@@ -249,6 +252,28 @@ static bool resolve_entry_by_name(unsigned long parent_ino,
 	}
 	mutex_unlock(&s3fs_entries_mtx);
 	return false;
+}
+
+/* W2: persist an evicted inode's size into its entry so the next lookup
+ * re-creates the inode with the right i_size.  Without this a .create'd
+ * file (local entry, size 0) read back empty once its inode was evicted
+ * after flush, and an overwritten S3 file kept its stale dyn size until
+ * the daemon's next entries_replace. */
+static void s3fs_entry_record_size(unsigned long ino, u64 size)
+{
+	struct s3fs_local_entry *le;
+	size_t i;
+
+	mutex_lock(&s3fs_entries_mtx);
+	list_for_each_entry(le, &s3fs_local_entries, link) {
+		if (le->ino == ino)
+			le->size = size;
+	}
+	for (i = 0; s3fs_dyn_entries && i < s3fs_dyn_nr; i++) {
+		if (s3fs_dyn_entries[i].ino == ino)
+			s3fs_dyn_entries[i].size = size;
+	}
+	mutex_unlock(&s3fs_entries_mtx);
 }
 
 /* -- Admit table: ino -> daemon user_vm backing --------------------------- */
@@ -3802,6 +3827,9 @@ static void s3fs_ebpf_evict_inode(struct inode *inode)
 	struct s3fs_file_data *fd = inode->i_private;
 
 	truncate_inode_pages_final(&inode->i_data);
+	/* W2: s3fs_entries_mtx holders never iput, so no self-deadlock. */
+	if (S_ISREG(inode->i_mode))
+		s3fs_entry_record_size(inode->i_ino, (u64)i_size_read(inode));
 	clear_inode(inode);
 	if (fd) {
 		s3fs_file_data_free(fd);
