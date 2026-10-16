@@ -1229,3 +1229,29 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 - **AC-45**: evict-race の読み込み中のピーク (36 MiB / capacity 4 MiB) は、この変更では抑えられない。upcall 待ちの ino (pending) と U8 で保護された buf は evict できず、ピークは「残っている buf」ではなく「読み込み中の buf」だからである。抑えるには populate 時の受け入れ制御が要る。
 - **AC-43**: pcache モードで prewarm が 1 件も admit しないと `s3fs_admitted_mm` が設定されず (`kmod/vfs_ops.c` の admit_replace は `count > 0` のときだけ設定する)、upcall が飛ばずに全 read が失敗する。`policies/prewarm-meta-only.cel` で再現した。
 - **AC-44**: `--arena-metadata-only` でも既定の prewarm はファイル全体を arena に stage し、arena admit として capacity を消費する (9 MiB × 4 で 36 MiB)。共用バケットに他のテストの大きなオブジェクトが残っていると、それだけで capacity を超える。
+
+### 18.12 AC-41 の追加検証: 回帰テスト一式・カウンタ照合・切り上げ廃止の影響 (2026-10-16)
+
+**make test-regression (7 本、test-pcache-capacity-tail を含む)**: 全 PASS、exit 0。capacity-tail は専用バケット (`s3fs-capacity-tail`) と目印だけの prewarm policy を使い、共用バケット `s3fs-test` には触れない。daemon の `--cache-dir` は既定で空 (disk cache 無効) なので、毎回乱数で作り直す同名 object が古い body を返す問題 (AC-40) も踏まない。前後のテストとの干渉は見つからなかった。
+
+**カウンタ照合 (M2)**: `S3FS_IOC_STATS` に 2 スロットを追加した。[12] は全 inode を走査して足した `fd->cap` の合計 (walk)、[13] は容量判定が数える pcache ino 分の合計。metrics では `s3fs_ebpf_fd_buf_walk_bytes` / `_pcache_bytes` として出る。各回帰テストの cleanup で `fd_buf_audit` (`scripts/lib/bench.sh`) を呼び、`DETAIL fd_buf_audit` を出す。判定は表示だけで、テストの合否は変えない。
+
+| テスト | gauge | walk | pcache | 非 pcache | drift |
+|---|---:|---:|---:|---:|---:|
+| write-readback | 1 MiB | 1 MiB | 0 | 1 MiB | 0 |
+| large-file-read / evict-readback / populate-boundary / multiread | 0 | 0 | 0 | 0 | 0 |
+| evict-race-short | 0 | 0 | 0 | 0 | 0 |
+| capacity-tail | 9 MiB | 9 MiB | 9 MiB | 0 | 0 |
+
+容量判定の `live_bytes` は admit_replace のたびに `fd->cap` から計算し直す局所変数なので、呼び出しをまたいでずれることはない。ずれる可能性があるのは増減を積み上げる M1 ゲージのほうで、`fd->cap` / `fd->buf` を変える 4 箇所 (file_data_new, reserve, reset, free) はすべてゲージを更新している。truncate の縮小は `cap` を変えない。終了時に 0 まで戻るテストでは、増減の合計がちょうど打ち消し合っていることも確かめられる。evict-race で最初 NA になったのは、cleanup の `jobs -p | xargs kill` が daemon (この shell のジョブ) を先に止めていたためで、照合を kill より前に移した。
+
+**populate の切り上げをやめた影響 (cold read、pcache モード、目印だけの prewarm、3 回)**:
+
+| populate の reserve | 100 MiB | 300 MiB |
+|---|---:|---:|
+| exact (現行) | 0.419〜0.441 s | 2.378〜2.410 s |
+| 切り上げあり (AC-41 前) | 0.415〜0.434 s | 2.409〜2.475 s |
+
+差はない。populate の終端は 4 MiB の倍数なので、2 MiB 単位に切り上げても同じサイズになり、結果は同じになる (差が出るのは末尾の端数 chunk だけ)。一方で、chunk ごとに `kvmalloc` + 全体の memcpy が起きるのはどちらでも同じで、サイズを 3 倍にすると時間は 5.7 倍になる (O(n²)。300 MiB で memcpy の合計は約 11 GiB)。これは AC-41 以前からある問題なので、AC-46 として記録する。AC-05 (b) のゲートは hyperfine の warmup 後 (page cache 上) を測るので、この影響は出ない。
+
+**hit 側コピーのロック**: `s3fs_folio_fill_from_kmalloc` は検証 (`buf_valid`、S1 の再検証) から `memcpy(fkva, fd->buf + pos, avail)` までを `fd->lock` の中で行う。`fd->buf` を差し替える reserve (populate/write/setattr) と reset もすべて `fd->lock` の中なので、U10 を外しても、再確保で古いポインタからコピーすることはない。`read_dirty` の `copy_to_user` も `fd->lock` の中。

@@ -146,6 +146,9 @@ extern atomic_long_t s3fs_gen0_fail_other;
 extern atomic_long_t s3fs_fd_buf_bytes;
 extern atomic_long_t s3fs_reset_skipped;
 
+/* M2: gauge cross-check (slots 12/13) — see vfs_ops.c. */
+void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache);
+
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
  * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */
 u64 s3fs_admit_size(u64 ino);

@@ -113,6 +113,12 @@ type Counters struct {
 	FdBufBytes   atomic.Uint64 // gauge, bytes allocated for fd->buf
 	ResetSkipped atomic.Uint64 // counter, resets that deferred the buf free
 
+	// M2: S3FS_IOC_STATS[12/13]. Walk = sum of fd->cap over live inodes
+	// (must equal FdBufBytes at rest); Pcache = what the AC-41 capacity
+	// loop charges (sum of fd->cap over distinct pcache inos).
+	FdBufWalkBytes   atomic.Uint64 // gauge
+	FdBufPcacheBytes atomic.Uint64 // gauge
+
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
 	// ReadIterMisses counts reads where the ino was unknown (triggers
@@ -256,6 +262,8 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_gen0_fail_bitmap_total", "D-diag: gen=0 fallback failures where bitmap bit not set (chunk not yet populated in fd->buf).", "counter", Global.Gen0FailBitmap.Load()},
 		{"s3fs_ebpf_gen0_fail_other_total", "D-diag: gen=0 fallback failures for other reasons (pos >= fd->size or ci >= 64).", "counter", Global.Gen0FailOther.Load()},
 		{"s3fs_ebpf_fd_buf_bytes", "M1: bytes allocated for kmod per-inode fd->buf. capacity_bytes bounds admit entries only; compare against it to spot buffers outliving their admit.", "gauge", Global.FdBufBytes.Load()},
+		{"s3fs_ebpf_fd_buf_walk_bytes", "M2: sum of fd->cap over live inodes, recomputed per poll. Differs from s3fs_ebpf_fd_buf_bytes at rest only if the gauge drifted.", "gauge", Global.FdBufWalkBytes.Load()},
+		{"s3fs_ebpf_fd_buf_pcache_bytes", "M2: fd->buf bytes the capacity loop charges (sum of fd->cap over distinct pcache inos).", "gauge", Global.FdBufPcacheBytes.Load()},
 		{"s3fs_ebpf_reset_skipped_total", "M1: fd->buf frees deferred because buf_readers > 0 (U8/U10).", "counter", Global.ResetSkipped.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.

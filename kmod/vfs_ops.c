@@ -1953,6 +1953,74 @@ static u64 s3fs_ino_buf_bytes(u64 ino)
 	return cap;
 }
 
+static int s3fs_u64_cmp(const void *a, const void *b)
+{
+	u64 x = *(const u64 *)a, y = *(const u64 *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+/* M2: cross-check for the M1 gauge, exported via IOC_STATS slots 12/13.
+ *   *walk   = sum of fd->cap over every live regular inode on the sb.  The
+ *             gauge is maintained incrementally, so gauge != walk at rest
+ *             means a cap change that skipped the gauge.
+ *   *pcache = sum of fd->cap over distinct pcache inos — exactly what the
+ *             AC-41 capacity loop charges.  walk - pcache is fd->buf held
+ *             by non-pcache inos (written files, skip_reset leftovers).
+ * Lockless cap reads, so only meaningful when I/O is quiescent.  The walk
+ * holds i_lock while reading i_private: evict frees fd only after
+ * I_FREEING is set, which we check under the same lock. */
+void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache)
+{
+	struct super_block *sb = s3fs_active_sb;
+	struct inode *inode;
+	struct s3fs_admit *a;
+	unsigned int bkt, n = 0, i;
+	u64 *inos;
+
+	*walk = 0;
+	*pcache = 0;
+	if (!sb)
+		return;
+
+	spin_lock(&sb->s_inode_list_lock);
+	list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+		struct s3fs_file_data *fd;
+
+		spin_lock(&inode->i_lock);
+		if (!(inode->i_state & (I_FREEING | I_WILL_FREE | I_NEW)) &&
+		    S_ISREG(inode->i_mode)) {
+			fd = inode->i_private;
+			if (fd)
+				*walk += READ_ONCE(fd->cap);
+		}
+		spin_unlock(&inode->i_lock);
+	}
+	spin_unlock(&sb->s_inode_list_lock);
+
+	read_lock(&s3fs_admits_lock);
+	hash_for_each(s3fs_admits, bkt, a, node)
+		if (a->flags & S3FS_ADMIT_FLAG_PCACHE)
+			n++;
+	inos = n ? kmalloc_array(n, sizeof(*inos), GFP_ATOMIC) : NULL;
+	if (inos) {
+		i = 0;
+		hash_for_each(s3fs_admits, bkt, a, node)
+			if ((a->flags & S3FS_ADMIT_FLAG_PCACHE) && i < n)
+				inos[i++] = a->ino;
+		n = i;
+	}
+	read_unlock(&s3fs_admits_lock);
+	if (!inos)
+		return;
+
+	sort(inos, n, sizeof(*inos), s3fs_u64_cmp, NULL);
+	for (i = 0; i < n; i++)
+		if (i == 0 || inos[i] != inos[i - 1])
+			*pcache += s3fs_ino_buf_bytes(inos[i]);
+	kfree(inos);
+}
+
 /* W1: inodes pinned by an outstanding flush.  put_super releases any
  * that remain (daemon gone, PUT failed) so umount does not leak them. */
 static LIST_HEAD(s3fs_flush_pins);
