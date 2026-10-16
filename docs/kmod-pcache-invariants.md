@@ -8,10 +8,11 @@
 - `admit_evict_ino` は `admit_drop_all_ranges` (admits write_lock) を解放した後に `s3fs_evict_page_cache` → `s3fs_file_data_reset` (fd->lock → admits write_lock) を呼ぶ。
 
 ## R1 不変条件
-- **ino の PCACHE admit entry が hash にあれば、その ino の `fd->buf != NULL`。**
-- 保守する側: `s3fs_ebpf_populate_pages` は copy と `populated_chunks` のビットセットに続けて、`fd->lock` を保持したまま `admit_insert_pcache` を呼ぶ。`s3fs_file_data_reset` は `fd->lock` 下で残っている PCACHE entry を再 evict してから buf を free する (drop と reset の間に populate が挟まるケースへの対策)。
+- **ino の PCACHE admit entry が hash にあれば、その範囲の各 chunk は確保済み (`chunks[ci].p != NULL`)。** `populated` は別で、T2 が chunk ごとに見る (部分的にしか埋まっていない chunk も entry の範囲に入りうる)。(AC-45 C1 より前は「`fd->buf != NULL`」。fd の中身は連続した 1 本の buf ではなく 4 MiB の chunk の表になった。)
+- 例外: `setattr` の縮小 (truncate) は切った先の chunk を free するので、dirty の間は entry の下に chunk がないことがある。chunk へのアクセスはすべて `p != NULL` を確認するので、読むと upcall に戻るだけで壊れない。
+- 保守する側: `s3fs_ebpf_populate_pages` は copy と chunk の `populated` フラグのセットに続けて、`fd->lock` を保持したまま `admit_insert_pcache` を呼ぶ。`s3fs_file_data_reset` は `fd->lock` 下で残っている PCACHE entry を再 evict してから chunk を free する (drop と reset の間に populate が挟まるケースへの対策)。
 - S1: R1 が成り立つのは `fd->lock` 下だけ。`fc_pcache_check` (lockless) から `s3fs_folio_fill_from_kmalloc` が lock を取るまでに `s3fs_admit_gen` が進んでいたら、entry を read_lock で再検証する。`gen == 0` は検証なしの fallback を意味する。
-- T2: `gen != 0` かつ chunk index `ci < 64` のときは `populated_chunks` のビットも要求する (reserve の memset で 0 埋めされた未取得 chunk を返さないため)。`ci >= 64` (256 MiB 超) はビットがないので R1 だけに頼る。dirty/flushing のときはビットマップを見ない (T1)。
+- T2: `gen != 0` のときも `gen == 0` のときも、確保済みの chunk に `populated` フラグが立っていることを要求する (未取得の chunk の 0 を返さないため)。フラグは chunk ごとにあるので、256 MiB を超えるファイルも同じ判定になる (旧: `ci >= 64` は R1 だけに頼っていた)。dirty/flushing のときは見ない (T1): 確保されていない chunk は hole で、0 として読める。
 
 ## pending のキー
 - `s3fs_pending` は `(ino, chunk_offset)` 単位で、chunk は 4 MiB (`S3FS_PCACHE_CHUNK_SHIFT=22`)。hash key は `ino` のみ (P1: 同じ ino の全チャンクが同じ bucket に入る)。照合は `p->ino` と `p->chunk_offset` の両方で行うので、チャンクごとの完了待ちは独立 (U13)。
@@ -26,8 +27,9 @@
 ## reset の条件 (`s3fs_file_data_reset`)
 - 呼ばれる経路: `admit_evict_ino` の中で、`admit_drop_all_ranges` が PCACHE entry を落としたと報告したとき (S4: 判定は write_lock 内で atomic に行う) だけ。
 - `fd->lock` 下で `!dirty && !flushing && buf_readers == 0` のときに限り、PCACHE entry の再 evict (1 件でも消したら `s3fs_admit_gen++`) → `kvfree(buf)`、`size`/`cap`/`populated_chunks` を 0 にする。
-- AC-41: 容量判定 (`live_bytes`) は arena entry のサイズ + pcache ino ごとの `fd->cap` (`s3fs_ino_buf_bytes`、ino 単位で 1 回)。admit 済み chunk のサイズではない (reserve が populate 終端まで確保するため)。evict 後は before/after の `fd->cap` 差分を解放量として引く (skip_reset なら 0)。populate の reserve は `grow_limit` (= max(populate 終端, i_size)) を渡し、`max(needed, min(2 × cap, grow_limit))` で倍々に確保する (AC-46: 順番に読むときの memcpy を O(n) にする)。初回 (cap=0) と i_size に届いたときは needed ちょうどなので小さいファイルは切り上げない。容量は最大で読み込み済み範囲の約 2 倍を数える。write/setattr は `grow_limit=0` で従来どおり切り上げ。
-- M1/M2: `fd->cap` を変える箇所 (file_data_new / reserve / reset / free) は必ず `s3fs_fd_buf_bytes` も同じだけ増減する。`s3fs_ebpf_fd_buf_audit` (STATS[12/13]) が全 inode を走査した合計と突き合わせる (I/O が止まっていれば gauge == walk)。走査は `s_inode_list_lock` → `i_lock` だけを取り、admits_lock とは入れ子にしない。
+- AC-41: 容量判定 (`live_bytes`) は arena entry のサイズ + pcache ino ごとの `fd->cap` (`s3fs_ino_buf_bytes`、ino 単位で 1 回)。`fd->cap` は確保済み chunk の `cap` の合計。admit 済み chunk のサイズではない。evict 後は before/after の `fd->cap` 差分を解放量として引く (skip_reset なら 0)。
+- AC-45 (C1): fd の中身は 4 MiB の chunk の表 (`fd->chunks[]`、`S3FS_CHUNK_SIZE`)。populate は、足りない chunk を `min(4 MiB, max(終端, i_size) - chunk 先頭)` ちょうどで確保する (AC-41: 46 B のファイルは 46 B。AC-46 の倍々と全体の memcpy はなくなり、触った chunk の分だけ確保する)。write は chunk の中で倍々 (最小 4 KiB、上限 4 MiB) に伸ばす (非 pcache の dirty ファイルは最大で 2 倍まで確保する)。確保済み chunk のうち fd->size 以降のバイトは 0 (縮小は境界 chunk の後半を 0 にして、後ろの chunk を free)。setattr の拡張は chunk を確保しない (hole、dirty の間は 0 として読める)。`populated` は signal_flush でも確保済み chunk にだけ立つ (hole は次の read で取り直す)。chunk の上限は `S3FS_MAX_CHUNKS` (1 TiB)、超えたら -EFBIG。
+- M1/M2: `fd->cap` を変える箇所は `s3fs_fd_chunk_ensure` と `s3fs_fd_chunk_free` の 2 つだけで、そこで `s3fs_fd_buf_bytes` も同じだけ増減する (file_data_new / write / populate / reset / free / truncate はすべてこの 2 つを経由する)。`s3fs_ebpf_fd_buf_audit` (STATS[12/13]) が全 inode を走査した合計と突き合わせる (I/O が止まっていれば gauge == walk)。走査は `s_inode_list_lock` → `i_lock` だけを取り、admits_lock とは入れ子にしない。
 - どれかが偽なら何もしない (skip_reset)。後で再試行する仕組みはなく、次に evict されたときに回収される。inode の `i_size` はクリアしない (Q1)。
 
 ## flush pin (W1)

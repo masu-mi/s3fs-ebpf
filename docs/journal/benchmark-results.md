@@ -1407,3 +1407,30 @@ fentry を外すと差は消える。kmod の hit 経路 (`fc_pcache_check` → 
 **make test-regression (9 本、test-arena-partial-readback を含む)**: 全 PASS、exit 0。
 
 **別の非効率 (AC-49)**: arena の chunk admit では、`replaceAdmit` が同じ ino の他の range を落とす。そのため、[0, 4) MiB を admit すると [4, 8) MiB が消え、全体を読むときにもう一度 GET する (ログでは [4, 8) MiB を 2 回 admit している)。正しさには影響しない。
+
+### 18.19 AC-45 C1: fd の中身を 4 MiB の chunk の表にする (2026-10-16)
+
+**背景**: AC-45 (読み込み中の fd->buf が capacity で抑えられない) の原因は 3 つあった。(1) pcache の populate 後に capacity の evict が走らない、(2) fd->buf がファイル全体の連続領域で、末尾 1 chunk の読みでもファイル全体を確保する、(3) pending / buf_readers の ino は丸ごと evict できない。計画は C1〜C4 の 4 段階 (C1: chunk 化、C2: populate 後の evict、C3: chunk 単位の保護と解放、C4: 必要なら短い受け入れ待ち)。この節は C1。
+
+**変更 (`kmod/vfs_ops.c`)**: `struct s3fs_file_data` の `buf` / `cap` / `populated_chunks` を、`struct s3fs_chunk { p, cap, populated }` の表 (`chunks`、`nr_chunks`) と合計 `cap` に置き換えた。
+- 確保: populate は足りない chunk を `min(4 MiB, max(終端, i_size) - chunk 先頭)` ちょうどで確保し、使わない範囲だけ 0 にする (これから上書きする範囲は memset しない)。write は chunk の中で倍々に伸ばす。AC-46 の「全体の memcpy」はなくなり、1 回のコピーは 1 chunk (4 MiB) 以下。
+- `fd->cap` と `s3fs_fd_buf_bytes` を変えるのは `s3fs_fd_chunk_ensure` / `s3fs_fd_chunk_free` の 2 つだけ (M1)。
+- T2 のビットマップ (64 chunk 上限) は chunk ごとの `populated` フラグになり、256 MiB を超えるファイルも同じ判定になった。
+- setattr の拡張は chunk を確保しない (hole、dirty の間は 0 として読める)。縮小は境界 chunk の後半を 0 にして、後ろの chunk を free する。これまでは縮小しても古いバイトが残り、あとで拡張すると見えてしまっていた。
+- 範囲外の offset は `S3FS_MAX_CHUNKS` (1 TiB) で -EFBIG。
+- evict と reset の単位はまだ ino ごと (C3 で chunk 単位にする)。
+
+**結果**:
+
+| 項目 | 変更前 | C1 |
+|---|---|---|
+| test-pcache-capacity-tail の fd_buf (settled) | 9 MiB | **4 MiB** (4 ファイル × 末尾 chunk の 1 MiB) |
+| cold read 100 MiB | 0.266〜0.277 s | 0.235〜0.274 s |
+| cold read 300 MiB | 0.770〜0.793 s | 0.650〜0.789 s |
+| bench-ab-pcache | a 0.93 / b PASS / c PASS | a 0.91 / b PASS (14.2 vs 17.2 ms) / c PASS |
+| bench-hitrate pcache (seed=42) | 52.50〜53.70% | 52.55〜54.00% |
+| evict-race-short の fd_buf_peak | 36 MiB | 36 MiB (C1 では変わらない。C2・C3 の対象) |
+
+**make test-regression (9 本)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0 (gauge == walk)。test-write-readback の最後の gauge は 1 MiB から 4 MiB になった。write の倍々で、2 MiB 超の dirty ファイルの chunk を 4 MiB まで確保するため (pcache ではないので capacity の判定には入らない)。
+
+**気づいたこと (AC-50)**: S3 のファイルを一度も読まずに途中へ write / truncate すると、取得していない範囲は 0 のまま flush される。chunk 化の前からの挙動で、C1 でも結果は同じ。backlog に記録した。

@@ -1903,21 +1903,37 @@ void s3fs_ebpf_entries_shutdown(void)
 
 /* -- Per-inode content buffer -------------------------------------------- */
 
-/* S11: daemon always fetches in 4 MiB chunks (partialAdmitChunk=4MiB=2^22).
- * 64 bits covers 256 MiB, well above any test file used here. */
+/* S11: daemon always fetches in 4 MiB chunks (partialAdmitChunk=4MiB=2^22). */
 #define S3FS_PCACHE_CHUNK_SHIFT	22u
+#define S3FS_CHUNK_SIZE		(1UL << S3FS_PCACHE_CHUNK_SHIFT)
+/* Upper bound on the chunk table (1 TiB of file offset): keeps a bogus
+ * populate/write offset from asking for a huge table. */
+#define S3FS_MAX_CHUNKS		(1u << 18)
+
+/* AC-45: fd content is a table of 4 MiB chunks instead of one contiguous
+ * buffer, so only the chunks a reader touched are allocated (a tail read
+ * of a 9 MiB file costs its chunk, not 9 MiB) and growth never copies
+ * more than one chunk.
+ *
+ * Invariants (all under fd->lock):
+ *  - chunk ci covers file bytes [ci << SHIFT, (ci + 1) << SHIFT).
+ *  - p == NULL means "not allocated": a hole that reads as zeros while the
+ *    file is dirty/flushing, and "not cached" otherwise.
+ *  - bytes of an allocated chunk at or beyond fd->size are zero.
+ *  - fd->cap == sum of chunks[].cap, and s3fs_fd_buf_bytes moves with it
+ *    (M1): only s3fs_fd_chunk_ensure / s3fs_fd_chunk_free change either. */
+struct s3fs_chunk {
+	u8   *p;
+	u32   cap;       /* allocated bytes, <= S3FS_CHUNK_SIZE */
+	bool  populated; /* S11: holds valid S3 data (T2 uses it for every ci) */
+};
 
 struct s3fs_file_data {
 	struct mutex lock;
-	u8    *buf;
+	struct s3fs_chunk *chunks;
+	u32   nr_chunks;  /* length of the chunks table (entries may be empty) */
 	size_t size;
 	size_t cap;
-	/* S11: one bit per 4-MiB chunk — bit i is set when buf[i*4M..(i+1)*4M)
-	 * (capped at fd->size) has been populated with valid S3 data.  Replaces
-	 * the old contiguous-watermark (buf_valid_end) which failed when daemon
-	 * goroutines delivered chunks out-of-order or when a single chunk was
-	 * re-populated after eviction reset the watermark to 0. */
-	u64   populated_chunks;
 	bool  dirty;    /* set by .write, cleared after successful daemon flush */
 	bool  flushing; /* flush enqueued; cleared by signal_flush on PUT ACK */
 	/* U8: readers currently in the pcache upcall retry loop.  While > 0,
@@ -1939,6 +1955,207 @@ struct s3fs_file_data {
 	struct list_head pin_link;
 	struct inode *pin_inode;
 };
+
+/* Grow the chunk table so index ci is valid.  Caller holds fd->lock. */
+static int s3fs_fd_chunks_grow(struct s3fs_file_data *fd, u32 ci)
+{
+	struct s3fs_chunk *nt;
+	u32 n;
+
+	if (ci < fd->nr_chunks)
+		return 0;
+	if (ci >= S3FS_MAX_CHUNKS)
+		return -EFBIG;
+	n = clamp_t(u32, max(ci + 1, fd->nr_chunks * 2), 8, S3FS_MAX_CHUNKS);
+	nt = kvcalloc(n, sizeof(*nt), GFP_KERNEL);
+	if (!nt)
+		return -ENOMEM;
+	if (fd->chunks)
+		memcpy(nt, fd->chunks, fd->nr_chunks * sizeof(*nt));
+	kvfree(fd->chunks);
+	fd->chunks = nt;
+	fd->nr_chunks = n;
+	return 0;
+}
+
+/* Make chunk ci at least `want` bytes (<= S3FS_CHUNK_SIZE).  The caller is
+ * about to overwrite [lo, hi) of the chunk, so only the rest of the new
+ * space is zeroed (a freshly populated chunk is not memset and then copied
+ * over).  *old_cap is the previous allocation (0 if none).  This and
+ * s3fs_fd_chunk_free are the only places that change fd->cap and
+ * s3fs_fd_buf_bytes (M1).  Caller holds fd->lock. */
+static int s3fs_fd_chunk_ensure(struct s3fs_file_data *fd, u32 ci, u32 want,
+				u32 lo, u32 hi, u32 *old_cap)
+{
+	struct s3fs_chunk *c;
+	u32 oc;
+	u8 *np;
+	int err;
+
+	err = s3fs_fd_chunks_grow(fd, ci);
+	if (err)
+		return err;
+	c = &fd->chunks[ci];
+	oc = c->p ? c->cap : 0;
+	*old_cap = oc;
+	if (oc >= want)
+		return 0;
+	np = kvmalloc(want, GFP_KERNEL);
+	if (!np)
+		return -ENOMEM;
+	if (oc)
+		memcpy(np, c->p, oc);
+	if (lo > oc)
+		memset(np + oc, 0, min(lo, want) - oc);
+	if (hi < want)
+		memset(np + max(hi, oc), 0, want - max(hi, oc));
+	kvfree(c->p);
+	atomic_long_add(want - oc, &s3fs_fd_buf_bytes);
+	fd->cap += want - oc;
+	c->p = np;
+	c->cap = want;
+	return 0;
+}
+
+/* Release chunk ci (data, accounting and populated flag).  fd->lock held. */
+static void s3fs_fd_chunk_free(struct s3fs_file_data *fd, u32 ci)
+{
+	struct s3fs_chunk *c;
+
+	if (ci >= fd->nr_chunks)
+		return;
+	c = &fd->chunks[ci];
+	if (c->p) {
+		atomic_long_sub(c->cap, &s3fs_fd_buf_bytes);
+		fd->cap -= c->cap;
+		kvfree(c->p);
+	}
+	memset(c, 0, sizeof(*c));
+}
+
+/* Release every chunk and the table.  Leaves fd->size alone.  fd->lock held
+ * (or the fd is unreachable). */
+static void s3fs_fd_free_all(struct s3fs_file_data *fd)
+{
+	u32 ci;
+
+	for (ci = 0; ci < fd->nr_chunks; ci++)
+		s3fs_fd_chunk_free(fd, ci);
+	kvfree(fd->chunks);
+	fd->chunks = NULL;
+	fd->nr_chunks = 0;
+}
+
+/* Copy [off, off + len) into the chunks from `kbuf` (kernel) or `ubuf`
+ * (user); exactly one is non-NULL.  The caller checked off + len for
+ * overflow.  Chunks are allocated as needed:
+ *  - alloc_limit != 0 (populate, initial content): a missing chunk gets
+ *    exactly min(S3FS_CHUNK_SIZE, alloc_limit - chunk start) bytes, so a
+ *    46 B object costs 46 B of capacity (AC-41) and a tail read costs only
+ *    its chunk (AC-45).  alloc_limit is max(populate end, i_size).
+ *  - alloc_limit == 0 (write): grow by doubling within the chunk, so
+ *    sequential writes copy at most one chunk per growth (cf. AC-46).
+ * On -EFAULT the part of the new memory that was not copied is zeroed, so
+ * the "zero at or beyond fd->size" invariant survives a failed copy.
+ * Caller holds fd->lock. */
+static int s3fs_fd_store(struct s3fs_file_data *fd, u64 off, const void *kbuf,
+			 const char __user *ubuf, u64 len, u64 alloc_limit)
+{
+	u64 pos = off, end = off + len;
+
+	while (pos < end) {
+		u32 seg_off, seg_len, want, cur, old_cap;
+		struct s3fs_chunk *c;
+		u64 cs;
+		u32 ci;
+		int err;
+
+		if ((pos >> S3FS_PCACHE_CHUNK_SHIFT) >= S3FS_MAX_CHUNKS)
+			return -EFBIG;
+		ci = (u32)(pos >> S3FS_PCACHE_CHUNK_SHIFT);
+		cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+		seg_off = (u32)(pos - cs);
+		seg_len = (u32)min_t(u64, S3FS_CHUNK_SIZE - seg_off, end - pos);
+
+		if (alloc_limit) {
+			want = (u32)min_t(u64, S3FS_CHUNK_SIZE, alloc_limit - cs);
+		} else {
+			cur = ci < fd->nr_chunks && fd->chunks[ci].p ?
+			      fd->chunks[ci].cap : 0;
+			want = max_t(u32, round_up(seg_off + seg_len, 4096),
+				     min_t(u32, S3FS_CHUNK_SIZE, cur * 2));
+		}
+		want = max_t(u32, want, seg_off + seg_len);
+
+		err = s3fs_fd_chunk_ensure(fd, ci, want, seg_off,
+					   seg_off + seg_len, &old_cap);
+		if (err)
+			return err;
+		c = &fd->chunks[ci];
+		if (kbuf) {
+			memcpy(c->p + seg_off, (const u8 *)kbuf + (pos - off),
+			       seg_len);
+		} else {
+			unsigned long rem = copy_from_user(c->p + seg_off,
+							   ubuf + (pos - off),
+							   seg_len);
+
+			if (rem) {
+				u32 zfrom = max(seg_off + seg_len - (u32)rem,
+						old_cap);
+
+				if (zfrom < seg_off + seg_len)
+					memset(c->p + zfrom, 0,
+					       seg_off + seg_len - zfrom);
+				return -EFAULT;
+			}
+		}
+		pos += seg_len;
+	}
+	return 0;
+}
+
+/* Copy the first n bytes of the file to user space; missing chunks and
+ * the unallocated tail of a short chunk read as zeros.  fd->lock held. */
+static long s3fs_fd_copy_out(struct s3fs_file_data *fd, char __user *uaddr,
+			     size_t n)
+{
+	size_t pos = 0;
+
+	while (pos < n) {
+		u32 ci = (u32)(pos >> S3FS_PCACHE_CHUNK_SHIFT);
+		u32 off = (u32)(pos & (S3FS_CHUNK_SIZE - 1));
+		size_t seg = min_t(size_t, S3FS_CHUNK_SIZE - off, n - pos);
+		size_t have = 0;
+
+		if (ci < fd->nr_chunks && fd->chunks[ci].p &&
+		    fd->chunks[ci].cap > off)
+			have = min_t(size_t, seg, fd->chunks[ci].cap - off);
+		if (have && copy_to_user(uaddr + pos, fd->chunks[ci].p + off,
+					 have))
+			return -EFAULT;
+		if (seg > have && clear_user(uaddr + pos + have, seg - have))
+			return -EFAULT;
+		pos += seg;
+	}
+	return (long)n;
+}
+
+/* Cut the file down to new_size (< fd->size): free the chunks wholly past
+ * it and zero the tail of the boundary chunk, so the "zero beyond size"
+ * invariant holds when the file is extended again.  fd->lock held. */
+static void s3fs_fd_truncate(struct s3fs_file_data *fd, size_t new_size)
+{
+	u32 ci = (u32)(new_size >> S3FS_PCACHE_CHUNK_SHIFT);
+	u32 off = (u32)(new_size & (S3FS_CHUNK_SIZE - 1));
+	u32 i;
+
+	if (off && ci < fd->nr_chunks && fd->chunks[ci].p &&
+	    fd->chunks[ci].cap > off)
+		memset(fd->chunks[ci].p + off, 0, fd->chunks[ci].cap - off);
+	for (i = off ? ci + 1 : ci; i < fd->nr_chunks; i++)
+		s3fs_fd_chunk_free(fd, i);
+}
 
 /* True when fd->buf is owned by the write/flush path and the arena may
  * hold stale prewarm content.  Lockless READ_ONCE is intentional: a
@@ -2153,12 +2370,8 @@ static void s3fs_file_data_reset(u64 ino)
 			if (removed)
 				atomic_inc(&s3fs_admit_gen);
 			write_unlock(&s3fs_admits_lock);
-			atomic_long_sub(fd->cap, &s3fs_fd_buf_bytes);
-			kvfree(fd->buf);
-			fd->buf             = NULL;
-			fd->cap             = 0;
+			s3fs_fd_free_all(fd); /* S11: no chunk valid after eviction */
 			fd->size            = 0;
-			fd->populated_chunks = 0; /* S11: no chunks valid after eviction */
 			/* Q1: do NOT clear inode i_size — it reflects the S3 object
 			 * size and must survive eviction so stat(2) and read_iter
 			 * keep returning the correct file size. */
@@ -2319,14 +2532,18 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 				 * flush succeeds (or umount releases it). */
 				if (err != 0 || fd->flush_read_seq == fd->flush_seq) {
 					fd->flushing = false;
-					if (err == 0 && !fd->dirty &&
-					    fd->buf && fd->size > 0) {
+					if (err == 0 && !fd->dirty && fd->size > 0) {
 						u32 last_ci = (u32)((fd->size - 1) >>
 							      S3FS_PCACHE_CHUNK_SHIFT);
 						u32 ci;
 
-						for (ci = 0; ci <= last_ci && ci < 64; ci++)
-							fd->populated_chunks |= (1ULL << ci);
+						/* Only allocated chunks hold the data
+						 * that was just PUT; a hole is
+						 * re-fetched on its next read. */
+						for (ci = 0; ci <= last_ci &&
+						     ci < fd->nr_chunks; ci++)
+							if (fd->chunks[ci].p)
+								fd->chunks[ci].populated = true;
 					}
 					if (err == 0 && !fd->dirty)
 						unpin = s3fs_flush_unpin(fd);
@@ -2687,11 +2904,7 @@ long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
 	/* W1: this read covers every enqueue so far (writes precede enqueue). */
 	fd->flush_read_seq = fd->flush_seq;
 	n = min_t(size_t, fd->size, cap);
-	if (n && copy_to_user(uaddr, fd->buf, n)) {
-		ret = -EFAULT;
-	} else {
-		ret = (long)n;
-	}
+	ret = n ? s3fs_fd_copy_out(fd, uaddr, n) : 0;
 	mutex_unlock(&fd->lock);
 	iput(inode);
 	return ret;
@@ -2729,23 +2942,19 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 	mutex_init(&fd->lock);
 	INIT_LIST_HEAD(&fd->pin_link);
 	if (initial_size) {
-		u32 nchunks, ci;
+		u32 ci;
 
-		fd->buf = kvmalloc(initial_size, GFP_KERNEL);
-		if (!fd->buf) {
+		/* Initial data is a single contiguous load, so every chunk it
+		 * covers is valid (populated) and sized to the data. */
+		if (s3fs_fd_store(fd, 0, initial, NULL, initial_size,
+				  initial_size)) {
+			s3fs_fd_free_all(fd);
 			kfree(fd);
 			return NULL;
 		}
-		memcpy(fd->buf, initial, initial_size);
 		fd->size = initial_size;
-		fd->cap  = initial_size;
-		atomic_long_add(fd->cap, &s3fs_fd_buf_bytes);
-		/* Mark all chunks populated — initial data is a single contiguous
-		 * load, so every 4-MiB slice is valid. */
-		nchunks = (u32)((initial_size + (1u << S3FS_PCACHE_CHUNK_SHIFT) - 1)
-				>> S3FS_PCACHE_CHUNK_SHIFT);
-		for (ci = 0; ci < nchunks && ci < 64; ci++)
-			fd->populated_chunks |= (1ULL << ci);
+		for (ci = 0; ci * S3FS_CHUNK_SIZE < initial_size; ci++)
+			fd->chunks[ci].populated = true;
 	}
 	return fd;
 }
@@ -2754,57 +2963,8 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
 {
 	if (!fd)
 		return;
-	atomic_long_sub(fd->cap, &s3fs_fd_buf_bytes);
-	kvfree(fd->buf);
+	s3fs_fd_free_all(fd);
 	kfree(fd);
-}
-
-/* Ensure `fd->cap >= needed`. Caller holds fd->lock.
- *
- * Uses kvmalloc + memcpy instead of krealloc so growth beyond the
- * MAX_ORDER (~4 MiB on x86_64) bucket falls back to vmalloc rather
- * than triggering the page allocator's "order too large" WARN. dd
- * bs=10M count=1 was reproducing that WARN with plain krealloc.
- *
- * AC-41/AC-46: a non-zero `grow_limit` selects read-path populate growth:
- * max(needed, min(2 * cap, grow_limit)), with grow_limit = the file size.
- * Doubling keeps the copies of a chunk-by-chunk sequential populate O(n)
- * (exact growth copied the whole buf per 4 MiB chunk: ~11 GiB for 300 MiB).
- * The first populate (cap 0) and anything capped by the file size get
- * exactly what is needed, so a 46 B object still costs 46 B of capacity
- * (charged by fd->cap).  grow_limit == 0 (write/setattr) keeps the
- * rounding for amortized growth. */
-static int s3fs_file_data_reserve(struct s3fs_file_data *fd, size_t needed,
-				  size_t grow_limit)
-{
-	size_t new_cap;
-	u8 *newbuf;
-
-	if (needed <= fd->cap)
-		return 0;
-
-	/* Round up to 4 KiB slab class for small growth; > 4 MiB rounds
-	 * to 2 MiB (vmalloc granularity) to keep amortized alloc cheap. */
-	if (grow_limit)
-		new_cap = max(needed, fd->cap < grow_limit / 2 ?
-				      fd->cap * 2 : grow_limit);
-	else if (needed >= (4UL << 20))
-		new_cap = round_up(needed, 2UL << 20);
-	else
-		new_cap = round_up(needed, 4096);
-
-	newbuf = kvmalloc(new_cap, GFP_KERNEL);
-	if (!newbuf)
-		return -ENOMEM;
-	if (fd->buf) {
-		memcpy(newbuf, fd->buf, fd->size);
-		kvfree(fd->buf);
-	}
-	atomic_long_add(new_cap - fd->cap, &s3fs_fd_buf_bytes);
-	memset(newbuf + fd->size, 0, new_cap - fd->size);
-	fd->buf = newbuf;
-	fd->cap = new_cap;
-	return 0;
 }
 
 /* Q3: limit applies to per-call *size*, not offset+size, so large files can
@@ -2856,26 +3016,23 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		err = -EBUSY;
 		goto out_unlock;
 	}
-	/* `end` (= offset + size) was validated above; safe to cast.
-	 * AC-46: grow toward the file size; `end` keeps the limit non-zero
-	 * (and covers a stale i_size smaller than the populate range). */
-	err = s3fs_file_data_reserve(fd, (size_t)end,
-				     (size_t)max_t(u64, end, i_size_read(inode)));
+	/* AC-45: store into 4 MiB chunks.  A missing chunk is allocated to
+	 * min(4 MiB, max(end, i_size) - chunk start): exactly what the file
+	 * needs (AC-41), and `end` keeps the limit above the range even when
+	 * i_size is stale and smaller. */
+	err = s3fs_fd_store(fd, offset, NULL, (const char __user *)data_ptr, size,
+			    max_t(u64, end, (u64)i_size_read(inode)));
 	if (err)
 		goto out_unlock;
-
-	if (copy_from_user(fd->buf + offset, data_ptr, (size_t)size)) {
-		err = -EFAULT;
-		goto out_unlock;
-	}
 	/* S11: mark chunks covered by [offset, end) as populated.
 	 * T5: only mark a chunk if it is FULLY covered by [offset, end), or if
 	 * it is the last chunk and end reaches the file's EOF (so no valid
 	 * content exists beyond end — the partial tail is safe to serve from
-	 * fd->buf because pos < fd->size already guards the read limit).
+	 * the chunk because pos < fd->size already guards the read limit).
 	 * Marking partially-covered inner chunks would expose stale/zero data in
-	 * the fallback (gen==0) path for positions below offset. The pcache path
-	 * (gen!=0) bypasses the bitmap entirely via the T2 fix. */
+	 * the fallback (gen==0) path for positions below offset.  T2: the flag
+	 * exists for every chunk now, so the pcache path no longer skips the
+	 * check for chunks >= 64 (files > 256 MiB). */
 	{
 		u64 chunk_size = (u64)1 << S3FS_PCACHE_CHUNK_SHIFT;
 		u32 ci;
@@ -2889,12 +3046,12 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		 * across evictions (Q1/S8 invariant). */
 		u64 eof = max_t(u64, end, (u64)i_size_read(inode));
 
-		for (ci = first_ci; ci <= last_ci && ci < 64; ci++) {
+		for (ci = first_ci; ci <= last_ci; ci++) {
 			u64 chunk_start = (u64)ci * chunk_size;
 			u64 chunk_end   = chunk_start + chunk_size;
 			if ((offset <= chunk_start && chunk_end <= end) ||
 			    (ci == last_ci && end >= eof))
-				fd->populated_chunks |= (1ULL << ci);
+				fd->chunks[ci].populated = true;
 		}
 	}
 	if (end > (u64)fd->size)
@@ -2988,14 +3145,9 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 		goto out;
 	}
 
-	err = s3fs_file_data_reserve(fd, start + count, 0);
+	err = s3fs_fd_store(fd, (u64)start, NULL, user_buf, count, 0);
 	if (err)
 		goto out;
-
-	if (copy_from_user(fd->buf + start, user_buf, count)) {
-		err = -EFAULT;
-		goto out;
-	}
 	if (start + count > (loff_t)fd->size) {
 		fd->size = start + count;
 		i_size_write(inode, fd->size);
@@ -3031,13 +3183,19 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 
 		mutex_lock(&fd->lock);
 		if (new_size < (loff_t)fd->size) {
+			/* AC-45: free the chunks past the cut and zero the
+			 * boundary tail; an extension later reads zeros, not
+			 * the bytes that were cut off. */
+			s3fs_fd_truncate(fd, new_size);
 			fd->size = new_size;
 			fd->dirty = true;
 		} else if (new_size > (loff_t)fd->size) {
-			err = s3fs_file_data_reserve(fd, new_size, 0);
-			if (err) {
+			/* Sparse extension: the new range is a hole (no chunk
+			 * allocated) that reads as zeros while dirty. */
+			if (((u64)new_size >> S3FS_PCACHE_CHUNK_SHIFT) >=
+			    S3FS_MAX_CHUNKS) {
 				mutex_unlock(&fd->lock);
-				return err;
+				return -EFBIG;
 			}
 			fd->size = new_size;
 			fd->dirty = true;
@@ -3170,36 +3328,30 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 	 * fd->lock) without needing a bitmap for ci >= 64. */
 	{
 		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
+		struct s3fs_chunk *c = ci < fd->nr_chunks ? &fd->chunks[ci] : NULL;
+
 		if (fd->dirty || fd->flushing) {
-			/* T1: dirty or in-flight flush — buf is owned by the
-			 * write/flush path; bypass the bitmap entirely. */
-			buf_valid = fd->buf != NULL && (size_t)pos < fd->size;
+			/* T1: dirty or in-flight flush — the chunks are owned by
+			 * the write/flush path; bypass the populated flags.  A
+			 * missing chunk is a hole and reads as zeros. */
+			buf_valid = (size_t)pos < fd->size;
 		} else if (gen != 0) {
-			/* T2: for ci >= 64 (files > 256 MiB) the bitmap has no
-			 * bit, so skip it — R1 invariant ensures fd->buf covers
-			 * any range with a live pcache entry.
-			 * For ci < 64 restore the bitmap guard: after eviction +
-			 * partial re-populate the reserve() memset leaves chunks
-			 * not yet fetched as zeros; the pcache entry is only
-			 * inserted after copy_from_user succeeds, so a set bit
-			 * is the reliable proof that the data is present. */
-			if (ci < 64)
-				buf_valid = fd->buf != NULL &&
-					    (size_t)pos < fd->size &&
-					    (fd->populated_chunks & (1ULL << ci));
-			else
-				buf_valid = fd->buf != NULL &&
-					    (size_t)pos < fd->size;
+			/* T2: after reset()/partial re-populate a chunk may be
+			 * allocated but not yet fetched (its tail is zero); the
+			 * pcache entry is only inserted after the copy succeeds
+			 * and the populated flag is the reliable proof that the
+			 * data is present.  Every chunk has a flag, so files
+			 * > 256 MiB are checked like any other. */
+			buf_valid = c && c->p && c->populated &&
+				    (size_t)pos < fd->size;
 		} else {
-			buf_valid = fd->buf != NULL &&
-				    (size_t)pos < fd->size &&
-				    ci < 64 &&
-				    (fd->populated_chunks & (1ULL << ci));
+			buf_valid = c && c->p && c->populated &&
+				    (size_t)pos < fd->size;
 			/* D-diag: instrument gen=0 failure reason */
 			if (!buf_valid) {
-				if (fd->buf == NULL)
+				if (!c || !c->p)
 					atomic_long_inc(&s3fs_gen0_fail_buf_null);
-				else if ((size_t)pos >= fd->size || ci >= 64)
+				else if ((size_t)pos >= fd->size)
 					atomic_long_inc(&s3fs_gen0_fail_other);
 				else
 					atomic_long_inc(&s3fs_gen0_fail_bitmap);
@@ -3223,8 +3375,21 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 		avail = min_t(size_t, fs_size, chunk_end - (size_t)pos);
 	}
 	fkva = kmap_local_folio(folio, 0);
-	if (avail > 0)
-		memcpy(fkva, fd->buf + pos, avail);
+	if (avail > 0) {
+		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
+		u32 off = (u32)((u64)pos & (S3FS_CHUNK_SIZE - 1));
+		size_t have = 0;
+
+		/* A chunk can be shorter than fd->size reaches (sparse
+		 * extension, or a short tail): the rest reads as zeros. */
+		if (ci < fd->nr_chunks && fd->chunks[ci].p &&
+		    fd->chunks[ci].cap > off)
+			have = min_t(size_t, avail, fd->chunks[ci].cap - off);
+		if (have)
+			memcpy(fkva, fd->chunks[ci].p + off, have);
+		if (have < avail)
+			memset((u8 *)fkva + have, 0, avail - have);
+	}
 	if (avail < fs_size)
 		memset((u8 *)fkva + avail, 0, fs_size - avail);
 	kunmap_local(fkva);
