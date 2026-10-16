@@ -13,6 +13,37 @@
 
 ---
 
+## 2026-10-16 更新: 現行スライドの構成と、後から加わった知見
+
+スライドの正本は claude.ai の Slides アーティファクト (27 枚)。この節は、下のアウトライン (2026-10-02 時点) から変わった点だけをまとめる。
+
+### 構成 (27 枚)
+
+| 区切り | スライド | 要点 |
+|---|---|---|
+| 導入 | cover / intro | arena の使いどころを間違えた話をする、と最初に言う |
+| bpf_arena | arena-what / arena-who / **arena-map** / arena-design | arena-map (新規): 同じ物理ページを daemon の user_vm と kernel の kern_vm に二重にマップしている。BPF は JIT が `r12 = kern_vm_start` を使うので、フック時のマップ切り替えはない |
+| KFunc | kfunc / **arena-loop** | arena-loop (新規): コストを決めるのはループの書き方ではなく「arena を読むのが BPF か普通のカーネル C か」 |
+| struct_ops | so-concept / so-sieve / so-swap / so-pitfall / so-fix | 変更なし |
+| 勝てるところ | **perf** / **fs-usecases** | perf を「速いのは read ではなく、open と fsync」に作り直し (open+read+close 3.2× / 169×、durable write 1.7×、100 MiB warm read 1.1×、open 済み fd の 64 jobs は互角)。fs-usecases (新規): 小さいファイルを大量に開く、短命なプロセスが多い、fsync で確実に書く、キャッシュの判断を変えたい。大きいファイルを開いたまま並列に読む使い方は互角で勝てない |
+| 失敗談 | fail-title / fail-plan / fail-result / fail-why / **fail-found** / **hook-tips** | fail-found (新規): 64 jobs の律速は daemon の `fentry/generic_file_read_iter` だった。hook-tips (新規): hot path にフックを置くときの注意 6 項目 |
+| まとめ | lessons / next / **usecases** / takeaway / end | usecases (新規): 判断は struct_ops、共有する状態は arena。takeaway に fentry の行を追加 |
+
+### 後から加わった知見 (根拠)
+
+- **64 jobs の律速は read の fentry** (`docs/design/read-iter-hook-overhead.md`、`docs/journal/benchmark-results.md` §18.16 / §18.23 / §18.24)
+  - フックなしの ebpf-pcache は fuse-raw の 1.00〜1.02 倍。フックありは 0.81 倍だった。
+  - 内訳は BPF_CORE_READ の probe_read 約 7%、同じ ino の値への atomic 約 8%、lookup と policy 約 3%、trampoline ほか約 2%。
+  - 直接参照 (0.87)、per-CPU 化 (0.93)、slot 配列と間引き (0.94〜0.96) で戻した。フックの固定費だけで上限 0.974。
+  - 以前の計測は 1 スレッドの遅延 (1 µs 未満) しか見ておらず、共有値の取り合いが見えなかった。
+  - 「FUSE は large folio を使うので速い」という仮説は、計測カーネル 6.12 で両方とも order 0 だったので外れた。
+- **100 MiB の warm read は fuse-cache より速い** (9.5 ms / 10.5 ms、§18.16 T6)。§18.2 の 1.20 倍は再現しない。
+- **kmod が kern_vm を使えない理由** (v6.12 `kernel/bpf/arena.c`): `bpf_arena_get_kern_vm_start` は未 export。この PoC は `struct bpf_arena` のレイアウトを BTF から複製して番地を取っている (`kmod/s3fs_ebpf_dev.c`) が、普通のカーネル C には BPF のような例外テーブルがないので、未割り当てのページや `bpf_arena_free_pages` と競合したときに oops になる。read 経路が GUP を使う決め手はこちら。
+- **勝てるところの数字の注意**: open+read+close と durable write の数字は 2026-10-11 の arena モードでの計測。pcache モードと AC-50 (既存ファイルを書き換える前に残りを読み込む) の後では測り直していない。既存ファイルの途中への write は、その読み込みのぶん遅くなるはず。cold read の FUSE との比較もまだない。
+- **arena を BPF でループする場合**: `can_loop` / `bpf_for` / `bpf_loop` のコールバックは、どれも BPF のコードとして kern_vm を直接読むので GUP はない。KFunc に走査させるなら、リンクは kernel メモリに置き、arena には payload だけを置く。BPF のコールバックを取る kfunc を外部モジュールが定義できるかは未確認。
+
+---
+
 ## ネタ採否
 
 ### 採用
