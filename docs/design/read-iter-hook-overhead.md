@@ -12,7 +12,8 @@ AB-07 の性能 gate (a)「64 jobs の psync read で、ebpf-pcache の IOPS が
   - trampoline / rcu / migrate: 約 2%
 - 1 つ目は、ポインタを直接たどる形に変えて解消した (a4e7b0f)。gate (a) は fuse-raw 比で 0.81 から 0.87 になった。挙動は変わらない。
 - 2 つ目は、pattern map を per-CPU (`LRU_PERCPU_HASH`) にして大部分を解消した。gate (a) は 0.87 から 0.93 になった。並列で読むときの sequential の判定は改善した (§18.17)。
-- 3 つ目と、per-CPU map の lookup、フック自体の固定の負担は残っている (AC-47)。
+- 3 つ目 (AC-47 の続き): pattern と inode_index の hash の lookup をやめ、CPU ごとの direct-mapped な slot 配列 (`s3fs_ino_slots`) 1 回の添字参照にまとめた。inode_index の在席は slot にキャッシュして 64 回に 1 回だけ確かめ直し、policy への on_hit は (CPU, ino) あたり jiffy に 1 回に間引き、カウンタは非 atomic にした。gate (a) は 0.93 から 0.94〜0.96 になった。
+- **フック自体の固定の負担 (trampoline と s_magic の判定) だけで fuse-raw 比 0.974 が上限**で、フックを付ける限り「fuse-raw 以上」には届かない。今の到達点 (0.94〜0.96) は、その上限から 1.5〜3.5% 下。gate (a) をどう判定するかは §5 の 6 のとおり決めが必要。
 - gate (b) (100 MiB の warm read) は、今のコードでは PASS している。「FUSE は large folio を使っているので速い」という仮説は、計測カーネル (6.12) では成り立たなかった。
 
 ## 2. 被疑箇所に気づいた経緯
@@ -86,6 +87,22 @@ fentry / fexit / tp_btf の引数には BTF の型が付いているので、`io
 
 page cache で hit する read は、kmod の処理がほとんどなく、とても軽い。そのため、フックの負担がそのまま全体の速さの差として見える。フックの目的が miss のときの判断 (例: pattern-aware admit) なら、すべての read で集めるのではなく、miss の経路 (`.read_folio` や upcall) で集める形にできないかを先に考える。
 
+### 4.7 per-CPU の slot 配列は hash の lookup より安いが、約束事が増える (AC-47)
+
+read のたびに引く状態 (アクセスパターン、在席のキャッシュ) は、ino をキーにした hash map ではなく、ino の hash を添字にした **PERCPU_ARRAY** (direct-mapped) に置くと、hash 計算と bucket の探索が 1 回の添字参照になる。代わりに次を受け入れる。
+
+- 別の ino が同じ slot に入ると追い出される (そのパターンは失われる)。近似の信号なので許容した。slot 数は `S3FS_SLOT_BITS` (1024)。
+- daemon は全 CPU の slot を読み、`ino` が一致するものだけを合算する (`ReadAccessPattern`)。添字の計算 (`s3fs_slot_index`) は BPF 側とカーネルヘッダ、daemon の 3 か所で一致させる (テストで範囲と散らばりを確認)。
+- 在席のようなキャッシュした答えは、一定回数ごとに確かめ直す。確かめ直す時にだけ副作用 (miss event の送信) を行うと、副作用の頻度も下がる。
+
+### 4.8 フックの中で時刻を読むのは、仮想環境では高い (AC-47)
+
+KVM ゲストでは `bpf_ktime_get_ns()` が pvclock の読み出しになり、64 jobs の read bench で単独で約 2% かかった。ktime で間引きをすると、間引いて得た分が帳消しになる。間引きの目安には `bpf_jiffies64()` (変数を読むだけ) を使う。tick 単位 (HZ=250 なら 4 ms) の粗い間引きで足りる用途に限る。
+
+### 4.9 per-CPU のカウンタに locked add は要らない (AC-47)
+
+`PERCPU_ARRAY` の値は他の CPU が触らないので、`__sync_fetch_and_add` (lock 付き) は効果がなく、read のたびに数える場合は約 1% かかる。非 atomic の増分に変えた。失われうるのは、プログラムがその CPU で load と store の間に preempt された場合の更新だけで、統計用の補助的な値としては許容した。プログラムの間で正確さが必要な値 (判断に使うもの) には使わない。
+
 ## 5. フックを採用するかどうかの判断基準
 
 page cache で hit する read の経路に入るフックや変更は、次の基準で採否を決める。
@@ -102,15 +119,24 @@ page cache で hit する read の経路に入るフックや変更は、次の�
 
 ## 6. 残りの課題 (AC-47)
 
-| 項目 | 負担 | 案 |
+| 項目 | 負担 (fuse-raw 比) | 状態 |
 |---|---|---|
-| pattern map の更新 | 約 8% → per-CPU map の lookup の約 3% | ✅ `LRU_PERCPU_HASH` にして、daemon 側で CPU ごとの値を合算した (`LastEndPos` は最大値)。残りの lookup を減らすなら、判断に必要な数に達したら数えるのをやめる |
-| inode_index の lookup + policy の hit 処理 | 約 3% | policy に伝える hit を間引く、または page cache で hit したものは伝えない |
-| trampoline などフック自体の固定の負担 | 約 2% | フックを使う限り残る。§5 の 6 の判断が必要 |
+| `BPF_CORE_READ` の probe_read | 約 7% | ✅ 直接参照に変更 (a4e7b0f) |
+| pattern map の共有 cacheline | 約 8% | ✅ per-CPU map (956f1cd)、さらに slot 配列へ (AC-47 続き) |
+| pattern の hash lookup | 約 2.5% | ✅ slot 配列の添字参照に置き換え |
+| inode_index の lookup | 約 1.6% | ✅ slot にキャッシュ (64 回に 1 回確かめ直す) |
+| policy の kfunc (on_hit) | 約 1.7% | ✅ (CPU, ino) あたり jiffy に 1 回に間引き |
+| ktime の読み出し (KVM) | 約 2% (間引きに使った場合) | ✅ jiffies に変更 |
+| per-CPU カウンタの locked add | 約 1% | ✅ 非 atomic に変更 |
+| trampoline と s_magic の判定 (固定) | 約 2.6% | フックを付ける限り残る |
+
+到達点: gate (a) は fuse-raw 比 0.94〜0.96 (フックなしの最低コストは 0.974)。残りは固定の負担と、slot の更新・counter の bump など read のたびにする最小限の仕事。これ以上を狙うなら、フックの目的 (miss のときの判断) を miss の経路で実現し、hit の経路から外す設計変更になる (§4.6)。
+
+**gate (a) の判定をどうするか (未決)**: 文面どおりの「ebpf-pcache ≥ fuse-raw」は、フックが残る限り満たせない (フックを外した構成では 1.00 だった: `--no-read-iter-hook`)。選択肢は、(1) 閾値を 0.95 にして「フックを付けたまま FUSE の 5% 以内」とする、(2) フックなしの構成を gate の対象にし、フックの負担は別の指標 (この文書の fuse-raw 比) として追う、(3) 文面のままにして FAIL を既知の項目として残す。
 
 ## 関連
 
 - `docs/design/ebpf-hook-gaps.md` §3 — R-01 (`fentry/generic_file_read_iter`) の設計
-- `docs/journal/benchmark-results.md` §18.2 / §18.16 / §18.17 — gate の計測値
+- `docs/journal/benchmark-results.md` §18.2 / §18.16 / §18.17 / §18.23 — gate の計測値
 - `scripts/bench-ab-pcache.sh` — AB-07 gate
 - `scripts/bench-read-iter.sh` — 1 スレッドでのフックの負担

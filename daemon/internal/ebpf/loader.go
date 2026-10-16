@@ -72,13 +72,13 @@ type runtimeObjs struct {
 	S3fsCounters       *ebpf.Map `ebpf:"s3fs_counters"`
 	S3fsEvents         *ebpf.Map `ebpf:"s3fs_events"`
 	S3fsInodeIndex     *ebpf.Map `ebpf:"s3fs_inode_index"`
-	S3fsReadPatternMap *ebpf.Map `ebpf:"s3fs_read_pattern_map"`
+	S3fsInoSlots *ebpf.Map `ebpf:"s3fs_ino_slots"`
 }
 
 func (o *runtimeObjs) Close() error {
 	return _S3fsfpClose(
 		o.S3fsFpGetattr, o.S3fsFpReadIter, o.S3fsTestShared, o.S3fsArenaPrealloc,
-		o.S3fsArena, o.S3fsCounters, o.S3fsEvents, o.S3fsInodeIndex, o.S3fsReadPatternMap,
+		o.S3fsArena, o.S3fsCounters, o.S3fsEvents, o.S3fsInodeIndex, o.S3fsInoSlots,
 	)
 }
 
@@ -210,9 +210,10 @@ func (p *Programs) AttachFentryReadIter() (link.Link, error) {
 	return l, nil
 }
 
-// ReadPattern holds the per-ino access pattern snapshot read from
-// s3fs_read_pattern_map, merged across CPUs (see mergeReadPatterns).
-// SeqRatio returns the fraction of sequential reads (0.0–1.0).
+// ReadPattern holds the per-ino access pattern snapshot read from the
+// per-CPU slots of s3fs_ino_slots, merged across CPUs (see
+// mergeReadPatterns).  SeqRatio returns the fraction of sequential reads
+// (0.0–1.0).
 type ReadPattern struct {
 	LastEndPos uint64
 	SeqCount   uint64
@@ -230,25 +231,39 @@ func (rp ReadPattern) SeqRatio() float64 {
 	return float64(rp.SeqCount) / float64(total)
 }
 
-// ReadAccessPattern looks up the access pattern for ino from
-// s3fs_read_pattern_map. Returns (zero, false) when the ino has not been
-// observed by fentry/generic_file_read_iter yet.
-func (p *Programs) ReadAccessPattern(ino uint64) (ReadPattern, bool) {
-	var vs []s3fsfpS3fsReadPattern
-	if err := p.Objs.S3fsReadPatternMap.Lookup(&ino, &vs); err != nil {
-		return ReadPattern{}, false
-	}
-	return mergeReadPatterns(vs), true
+// slotBits and slotIndex mirror S3FS_SLOT_BITS / s3fs_slot_index in
+// include/s3fs_shared_types.h: the fentry keeps an inode's read pattern in
+// slot slotIndex(ino) of a per-CPU array, so a lookup is one array read.
+const slotBits = 10
+
+func slotIndex(ino uint64) uint32 {
+	return uint32((ino * 0x9E3779B97F4A7C15) >> (64 - slotBits))
 }
 
-// mergeReadPatterns folds the per-CPU slots of s3fs_read_pattern_map
-// (LRU_PERCPU_HASH since AC-47) into one pattern: counters are summed
-// (in 64 bits, so many CPUs' u32 counts cannot wrap), and LastEndPos is
-// the furthest end any CPU has read — the sequential frontier the
-// prefetch loop extends.
-func mergeReadPatterns(vs []s3fsfpS3fsReadPattern) ReadPattern {
-	var rp ReadPattern
+// ReadAccessPattern looks up the access pattern for ino from s3fs_ino_slots.
+// Returns (zero, false) when no CPU's slot is currently owned by ino — it was
+// not seen by fentry/generic_file_read_iter yet, or another inode took the
+// slot over.
+func (p *Programs) ReadAccessPattern(ino uint64) (ReadPattern, bool) {
+	var vs []s3fsfpS3fsInoSlot
+	key := slotIndex(ino)
+	if err := p.Objs.S3fsInoSlots.Lookup(&key, &vs); err != nil {
+		return ReadPattern{}, false
+	}
+	return mergeReadPatterns(ino, vs)
+}
+
+// mergeReadPatterns folds the per-CPU slots (AC-47: s3fs_ino_slots, a
+// direct-mapped PERCPU_ARRAY) that belong to ino into one pattern: counters
+// are summed (in 64 bits, so many CPUs' u32 counts cannot wrap), and
+// LastEndPos is the furthest end any CPU has read — the sequential frontier
+// the prefetch loop extends.  ok is false when no slot is owned by ino.
+func mergeReadPatterns(ino uint64, vs []s3fsfpS3fsInoSlot) (rp ReadPattern, ok bool) {
 	for _, v := range vs {
+		if v.Ino != ino {
+			continue
+		}
+		ok = true
 		rp.SeqCount += uint64(v.SeqCount)
 		rp.RandCount += uint64(v.RandCount)
 		rp.TotalBytes += v.TotalBytes
@@ -256,7 +271,7 @@ func mergeReadPatterns(vs []s3fsfpS3fsReadPattern) ReadPattern {
 			rp.LastEndPos = v.LastEndPos
 		}
 	}
-	return rp
+	return rp, ok
 }
 
 // rejectDemoObjs targets exactly the reject demo program and its arena

@@ -89,31 +89,26 @@ struct {
 } s3fs_counters SEC(".maps");
 
 /*
- * Per-inode read access pattern map (R-01).
- *
- * Key: inode number (u64).
- * Value: struct s3fs_read_pattern — updated by fentry/generic_file_read_iter
- *        on every read call that passes the s_magic filter.
- *
- * LRU evicts the coldest entry automatically when full, so policy
- * programs and the daemon always see recent-ish data without GC overhead.
- * Max entries matches S3FS_INDEX_MAX_ENTRIES so both maps age at the same
- * rate; bump together when the working set grows.
- *
- * AC-47: per-CPU.  With a shared value, every read of a hot file did three
- * atomics plus a store on one cacheline, ~8% of CPU in the 64-job fio read
- * (docs/design/read-iter-hook-overhead.md).  Each CPU now tracks its own
- * last_end_pos and counters; the daemon sums the counters and takes the
- * max last_end_pos (ReadAccessPattern).  Sequentiality is judged per CPU,
- * which also stops concurrent readers of one file from breaking each
- * other's sequential runs.
+ * Per-CPU read slots (R-01 access pattern + AC-47 hook state), see
+ * struct s3fs_ino_slot.  Replaced the LRU_PERCPU_HASH s3fs_read_pattern_map:
+ * an array index is cheaper than a hash lookup, and the slot also caches the
+ * inode_index membership and rate-limits the policy on_hit forward.
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_PERCPU_HASH);
-	__type(key, __u64);
-	__type(value, struct s3fs_read_pattern);
-	__uint(max_entries, S3FS_INDEX_MAX_ENTRIES);
-} s3fs_read_pattern_map SEC(".maps");
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, __u32);
+	__type(value, struct s3fs_ino_slot);
+	__uint(max_entries, S3FS_SLOT_COUNT);
+} s3fs_ino_slots SEC(".maps");
+
+/* AC-47: re-check inode_index membership every this many reads of a slot
+ * (power of two); in between the cached answer is used. */
+#define S3FS_SLOT_REVALIDATE	64
+/* AC-47: forward on_hit to the policy at most once per jiffy per (CPU,
+ * inode).  The signal is advisory; hot loops no longer pay a kfunc call +
+ * struct_ops dispatch per read.  jiffies, not bpf_ktime_get_ns(): in a KVM
+ * guest the latter reads the pvclock (~2% of the 64-job read bench on its
+ * own), the former reads a variable. */
 
 /*
  * KFunc provided by kmod/tree_traversal.c, registered against
@@ -157,8 +152,13 @@ static __always_inline void s3fs_arena_pin(void)
 static __always_inline void bump_counter(__u32 slot)
 {
 	__u64 *c = bpf_map_lookup_elem(&s3fs_counters, &slot);
+	/* AC-47: s3fs_counters is PERCPU_ARRAY, so no other CPU touches this
+	 * value and a locked add buys nothing (~1% of the 64-job read bench:
+	 * the hook bumps a counter on every read).  A plain increment can only
+	 * lose an update if the program is preempted on this CPU between its
+	 * load and store; these are advisory statistics. */
 	if (c)
-		__sync_fetch_and_add(c, 1);
+		(*c)++;
 }
 
 /*
@@ -239,7 +239,8 @@ int BPF_PROG(s3fs_fp_getattr, const struct path *path, struct kstat *stat,
  * generic_file_read_iter. Responsibilities:
  *
  *   1. Filter by s_magic so we only track our own filesystem.
- *   2. Update s3fs_read_pattern_map[ino] with sequential/random signal.
+ *   2. Update the per-CPU slot of the ino (s3fs_ino_slots) with the
+ *      sequential/random signal.
  *   3. Count read_iter_hits (ino already in inode_index) and
  *      read_iter_misses (ino unknown) separately from stat counters so
  *      the daemon can compute a true page-cache hit rate.
@@ -259,8 +260,9 @@ int BPF_PROG(s3fs_fp_read_iter,
 	struct super_block *sb;
 	unsigned long magic;
 	__u64 ino, pos, len;
-	__u32 *offp;
-	struct s3fs_read_pattern *pat, zero_pat = {};
+	__u32 slot_idx;
+	bool refresh;
+	struct s3fs_ino_slot *slot;
 	struct s3fs_miss_event *ev;
 
 	if (!iocb)
@@ -291,33 +293,43 @@ int BPF_PROG(s3fs_fp_read_iter,
 	pos = (__u64)iocb->ki_pos;
 	len = (__u64)to->count;
 
-	/* Update access pattern: sequential if pos is within slack of
-	 * the previous read's end offset, random otherwise.
-	 * BPF_NOEXIST insert races are harmless — both sides start from
-	 * a zero-value entry.  `pat` is this CPU's slot (AC-47), so plain
-	 * updates suffice: migration is disabled while the program runs,
-	 * and an update lost to preemption by another reader on this CPU
-	 * only skews an approximate signal. */
-	pat = bpf_map_lookup_elem(&s3fs_read_pattern_map, &ino);
-	if (!pat) {
-		bpf_map_update_elem(&s3fs_read_pattern_map, &ino, &zero_pat, BPF_NOEXIST);
-		pat = bpf_map_lookup_elem(&s3fs_read_pattern_map, &ino);
-	}
-	if (pat) {
-		__u64 expected_pos = pat->last_end_pos;
-		if (pos <= expected_pos + S3FS_SEQ_SLACK &&
-		    pos + len > expected_pos)
-			pat->seq_count++;
-		else
-			pat->rand_count++;
-		pat->total_bytes += len;
-		pat->last_end_pos = pos + len;
+	slot_idx = s3fs_slot_index(ino);
+	slot = bpf_map_lookup_elem(&s3fs_ino_slots, &slot_idx);
+	if (!slot)
+		return 0;
+	/* `slot` is this CPU's copy: migration is disabled while the program
+	 * runs, so plain updates suffice; one lost to preemption by another
+	 * reader on this CPU only skews an approximate signal. */
+	if (slot->ino != ino) {
+		__builtin_memset(slot, 0, sizeof(*slot));
+		slot->ino = ino;
 	}
 
-	/* Count hit vs miss against inode_index and optionally emit an
-	 * event so the daemon can prewarm the read range. */
-	offp = bpf_map_lookup_elem(&s3fs_inode_index, &ino);
-	if (offp) {
+	/* Access pattern: sequential if pos is within slack of the previous
+	 * read's end offset, random otherwise. */
+	{
+		__u64 expected_pos = slot->last_end_pos;
+
+		if (pos <= expected_pos + S3FS_SEQ_SLACK &&
+		    pos + len > expected_pos)
+			slot->seq_count++;
+		else
+			slot->rand_count++;
+		slot->total_bytes += len;
+		slot->last_end_pos = pos + len;
+	}
+
+	/* inode_index membership: looked up when the slot is claimed and every
+	 * S3FS_SLOT_REVALIDATE reads after that, cached in between. */
+	refresh = (slot->reads++ & (S3FS_SLOT_REVALIDATE - 1)) == 0;
+	if (refresh) {
+		if (bpf_map_lookup_elem(&s3fs_inode_index, &ino))
+			slot->flags |= S3FS_SLOT_IN_INDEX;
+		else
+			slot->flags &= ~S3FS_SLOT_IN_INDEX;
+	}
+
+	if (slot->flags & S3FS_SLOT_IN_INDEX) {
 		bump_counter(S3FS_STAT_READ_ITER_HITS);
 		/* Y-06: count first reads (pos==0) separately so bench tooling
 		 * can detect the ~2× multiplier from data+EOF read_iter calls
@@ -328,15 +340,27 @@ int BPF_PROG(s3fs_fp_read_iter,
 		 * that bypass .read_folio (and therefore miss the on_hit call
 		 * in s3fs_ebpf_read_folio). Harmless double-dispatch on the
 		 * arena-fill path — all current policies are idempotent or
-		 * cap-bounded on repeated on_hit for the same ino. */
-		s3fs_kfunc_policy_hit(ino);
+		 * cap-bounded on repeated on_hit for the same ino.  AC-47:
+		 * rate-limited per (CPU, ino); the first read after a slot is
+		 * claimed always goes through. */
+		{
+			__u64 tick = bpf_jiffies64();
+
+			if (tick != slot->last_policy_tick) {
+				slot->last_policy_tick = tick;
+				s3fs_kfunc_policy_hit(ino);
+			}
+		}
 		return 0;
 	}
 
 	bump_counter(S3FS_STAT_READ_ITER_MISSES);
 
-	/* Emit a read miss so the daemon can warm the arena for this ino.
+	/* Emit a read miss so the daemon can warm the arena for this ino —
+	 * once per membership check, not on every read of an unknown inode.
 	 * Re-uses the existing s3fs_miss_event shape with op=S3FS_OP_READ. */
+	if (!refresh)
+		return 0;
 	ev = bpf_ringbuf_reserve(&s3fs_events, sizeof(*ev), 0);
 	if (!ev)
 		return 0;
