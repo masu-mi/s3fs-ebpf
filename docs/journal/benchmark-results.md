@@ -1530,3 +1530,37 @@ evict-race のピークが capacity 4 MiB まで下がらないのは、reader 3
 **結果**: test-write-existing は 12 シナリオ全部 PASS (S3 のオブジェクトと再読み込みの両方)。`make test-regression` (12 本) は全 PASS、`fd_buf_audit` は全テストで drift 0。
 
 **コスト**: 既存の大きいファイルへの部分的な write は、最初に変更されない chunk を全部読み込む (s3fs-fuse が書き込み前にファイルを手元に落とすのと同じ)。新規作成と O_TRUNC では読み込まない。
+
+### 18.23 AC-47 続き: slot 配列と間引きで read の fentry を軽くする (2026-10-16)
+
+**フックの内訳を測り直した (64 jobs psync read、pcache、各 4 回の平均、fuse-raw = 約 6100〜6200k)**:
+
+| 構成 | IOPS | fuse-raw 比 |
+|---|---:|---:|
+| フックの最低コスト (s_magic の判定だけで return) | 約 5945k | 0.974 |
+| pattern だけ (inode_index と policy なし) | 約 5786k | 0.948 |
+| inode_index + policy だけ (pattern なし) | 約 5740k | 0.940 |
+| 修正前 (per-CPU pattern map、前節の到達点) | 約 5585k | 0.915 |
+| policy の kfunc だけ外した構成 | 約 5629k (修正前は約 5535k) | — |
+
+**変更 (`bpf/s3fs_fastpath.bpf.c`、`include/s3fs_shared_types.h`、`daemon/internal/ebpf/loader.go`)**:
+1. `s3fs_read_pattern_map` (LRU_PERCPU_HASH) をやめ、`s3fs_ino_slots` (PERCPU_ARRAY、1024 slot、ino の hash が添字) に変えた。slot はアクセスパターンに加えて、inode_index の在席のキャッシュと、policy への最後の通知の tick を持つ。別の ino が同じ slot に入ると追い出される。daemon は全 CPU の slot から ino が一致するものを合算する。
+2. inode_index の lookup は slot の確保時と 64 回に 1 回だけ。miss event (ringbuf) の送信もそのときだけ (これまでは未知の ino を読むたびに送っていた)。
+3. policy の on_hit は (CPU, ino) あたり jiffy に 1 回。ktime ではなく `bpf_jiffies64()` を使う (KVM ゲストでは ktime が pvclock の読み出しで、単独で約 2% かかり、間引いた分が帳消しになった: 5752k → 5944k)。
+4. per-CPU カウンタの `__sync_fetch_and_add` を非 atomic の増分に変更 (約 +0.9%: 5909k → 5960k)。
+
+| 段階 (同じ条件で連続して測定) | IOPS | fuse-raw 比 |
+|---|---:|---:|
+| 修正前 | 約 5553k | 0.90 |
+| 1〜3 (ktime で間引き) | 約 5648k〜5752k | 0.926〜0.93 |
+| 1〜3 (jiffies で間引き) | 約 5909k〜5944k | 0.953〜0.957 |
+| 1〜4 (カウンタを非 atomic に) | 約 5960k | 0.963 |
+
+**bench-ab-pcache.sh (2 回)**: fuse_raw 6239k / 6259k に対し pcache 5967k / 5877k で (a) は **0.956 / 0.939** (修正前 0.91〜0.93)。(b) PASS (14.1 / 14.0 ms vs 17.3 / 17.4 ms)、(c) PASS。(a) はフックの固定コスト (0.974) が上限のため FAIL のまま。
+
+**挙動を変える部分の確認** (read-iter-hook-overhead.md §5 の 4):
+- 新しい `test-pattern-aware-admit` (順次読み、散らばった 4 KiB、4 並列、`--pattern-aware-admit=false`): すべて期待どおり。seq は 1 upcall で全体 admit に昇格、散らばった読みは昇格しない、並列も昇格し全員のバイトが一致、オフでは昇格しない。
+- bench-hitrate pcache (seed=42): 25.6〜30.7% (前回 25.7〜34.7%。wtinylfu 系は run どうしのばらつきが ±7pp ある)。arena: 29.0〜39.9% (§18.1 の arena の値と同じ水準)。policy の on_hit を間引いた影響は見えない。
+- `make test-regression` (13 本): 全 PASS。`fd_buf_audit` は全テストで drift 0。go test 全 ok (`TestMergeReadPatterns` を slot 版に更新、`TestSlotIndex` 追加)。
+
+**挙動の変化**: (1) 別の ino が同じ slot に入ると、そのアクセスパターンは失われる (slot 数 1024)。(2) 在席が変わっても、最大 64 回の read は古いキャッシュで判定される。(3) 熱い (CPU, ino) への on_hit は jiffy あたり 1 回になる (HZ=250 なら 250 回/秒)。(4) 未知の ino の miss event は 64 回に 1 回になる。(5) カウンタは非 atomic。
