@@ -57,6 +57,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/ebpf-fs-framework-design.md`](design/ebpf-fs-framework-design.md) | 汎用 eBPF FS framework 化の hook 分離設計 (4 role × 4 軸) + security model |
 | [`design/ebpf-fuse-advantages-roadmap.md`](design/ebpf-fuse-advantages-roadmap.md) | FUSE に対する 3 点の構造的優位性の整理と、未実装 4 項目 (cgroup policy / bpf_timer / radix tree readdir / BPF Iterator GC) の実装計画 |
 | [`design/ebpf-hook-gaps.md`](design/ebpf-hook-gaps.md) | eBPF 全移行価値の分析 (12 決定点の現状マップ) と、他 VFS/FUSE と比べた不足フックの詳細 (R-01〜R-06)。R-01 `fentry/generic_file_read_iter` は実装済み |
+| [`design/read-iter-hook-overhead.md`](design/read-iter-hook-overhead.md) | R-01 read fentry が 64 jobs read を約 19% 落としていた件の調査記録 (経緯・試験と結果)、フックを使うときの注意点、hit 経路のフックの採用判断基準 |
 
 ---
 
