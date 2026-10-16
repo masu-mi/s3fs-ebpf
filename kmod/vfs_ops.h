@@ -141,6 +141,11 @@ extern atomic_long_t s3fs_gen0_fail_buf_null;
 extern atomic_long_t s3fs_gen0_fail_bitmap;
 extern atomic_long_t s3fs_gen0_fail_other;
 
+/* M1: fd->buf allocated bytes (gauge, slot 10) and deferred-free resets
+ * (counter, slot 11). */
+extern atomic_long_t s3fs_fd_buf_bytes;
+extern atomic_long_t s3fs_reset_skipped;
+
 /* Per-ino size lookup. Returns 0 when the ino is not admitted.
  * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */
 u64 s3fs_admit_size(u64 ino);

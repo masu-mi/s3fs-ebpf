@@ -109,6 +109,10 @@ type Counters struct {
 	Gen0FailBitmap  atomic.Uint64 // counter — bitmap bit not set
 	Gen0FailOther   atomic.Uint64 // counter — pos/ci range
 
+	// M1: kmod fd->buf memory vs capacity_bytes.
+	FdBufBytes   atomic.Uint64 // gauge, bytes allocated for fd->buf
+	ResetSkipped atomic.Uint64 // counter, resets that deferred the buf free
+
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
 	// ReadIterMisses counts reads where the ino was unknown (triggers
@@ -251,6 +255,8 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_gen0_fail_buf_null_total", "D-diag: gen=0 fallback failures where fd->buf==NULL (never populated or eviction cleared buf before U10 set buf_readers).", "counter", Global.Gen0FailBufNull.Load()},
 		{"s3fs_ebpf_gen0_fail_bitmap_total", "D-diag: gen=0 fallback failures where bitmap bit not set (chunk not yet populated in fd->buf).", "counter", Global.Gen0FailBitmap.Load()},
 		{"s3fs_ebpf_gen0_fail_other_total", "D-diag: gen=0 fallback failures for other reasons (pos >= fd->size or ci >= 64).", "counter", Global.Gen0FailOther.Load()},
+		{"s3fs_ebpf_fd_buf_bytes", "M1: bytes allocated for kmod per-inode fd->buf. capacity_bytes bounds admit entries only; compare against it to spot buffers outliving their admit.", "gauge", Global.FdBufBytes.Load()},
+		{"s3fs_ebpf_reset_skipped_total", "M1: fd->buf frees deferred because buf_readers > 0 (U8/U10).", "counter", Global.ResetSkipped.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},

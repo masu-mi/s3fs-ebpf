@@ -137,7 +137,15 @@ get_gen0_fail_counts() {
         /^s3fs_ebpf_gen0_fail_other_total[{ ]/    { other=int($NF) }
         END { printf "%d %d %d", buf_null+0, bitmap+0, other+0 }'
 }
+# M1: kmod fd->buf memory (gauge) and deferred-free resets (counter).
+get_fd_buf_bytes() {
+    get_metric s3fs_ebpf_fd_buf_bytes
+}
+get_reset_skipped_count() {
+    get_metric s3fs_ebpf_reset_skipped_total
+}
 EVICT_BEFORE=$(get_evict_count)
+RESET_SKIP_BEFORE=$(get_reset_skipped_count)
 RETRY_BEFORE=$(get_retry_exhausted_count)
 TIMEOUT_BEFORE=$(get_upcall_timeout_count)
 GEN0_BEFORE=$(get_gen0_fail_counts)
@@ -168,6 +176,23 @@ hammer_policy_eval() {
 hammer_policy_eval &
 HAMMER_PID=$!
 log "policy/eval hammer started (pid=${HAMMER_PID})"
+
+# M1: sample the fd->buf gauge every second; keep the peak.
+FDBUF_PEAK_FILE="$TMPDIR_LOCAL/fdbuf.peak"
+echo 0 > "$FDBUF_PEAK_FILE"
+sample_fd_buf() {
+    local peak=0 v
+    while true; do
+        v=$(get_fd_buf_bytes)
+        if [ "$v" -gt "$peak" ]; then
+            peak=$v
+            echo "$peak" > "$FDBUF_PEAK_FILE"
+        fi
+        sleep 1
+    done
+}
+sample_fd_buf &
+SAMPLER_PID=$!
 
 # ── background: concurrent readers ────────────────────────────────────────────
 reader_loop() {
@@ -236,6 +261,23 @@ for pid in "${READER_PIDS[@]}"; do
     esac
 done
 
+# M1: readers are gone — drive a few eviction rounds, let the 1s stats
+# sampler catch up, then read the settled gauge.  Without a leak it falls
+# back to about capacity_bytes (one chunk) or below.
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
+for _ in 1 2 3 4 5; do
+    curl -sf -X POST "${DAEMON_METRICS_URL}/policy/eval" \
+        -H 'Content-Type: application/json' \
+        -d '{"file":"/mnt/s3demo/evict-race-test-1.bin"}' >/dev/null 2>&1 || true
+    sleep 0.5
+done
+sleep 3
+FDBUF_PEAK=$(cat "$FDBUF_PEAK_FILE")
+FDBUF_SETTLED=$(get_fd_buf_bytes)
+RESET_SKIP_AFTER=$(get_reset_skipped_count)
+RESET_SKIP_DELTA=$(( RESET_SKIP_AFTER - RESET_SKIP_BEFORE ))
+
 # ── S3-1: verify evictions actually occurred ─────────────────────────────────
 EVICT_AFTER=$(get_evict_count)
 RETRY_AFTER=$(get_retry_exhausted_count)
@@ -294,6 +336,16 @@ overall=PASS
 [ "$READER_ERROR_COUNT" -gt 0 ] && overall=FAIL
 [[ "$EVICT_PASS" == FAIL ]] && overall=FAIL
 [ "$LOCKDEP_STATUS" = FAIL ] && overall=FAIL
+# M1: once readers stop and eviction has run, fd->buf must shrink back to
+# capacity_bytes or below — anything above is buffer memory that outlived
+# its admit entry (skip_reset) and escapes the capacity limit.
+FDBUF_PASS=PASS
+if [ "$FDBUF_SETTLED" -lt 0 ]; then
+    FDBUF_PASS="SKIP(metrics unavailable)"
+elif [ "$FDBUF_SETTLED" -gt "$CHUNK_BYTES" ]; then
+    FDBUF_PASS=FAIL
+    overall=FAIL
+fi
 
 # ── report ────────────────────────────────────────────────────────────────────
 {
@@ -313,6 +365,9 @@ printf "upcall_tmo : before=%s after=%s delta=%d  (U11: goroutine-pool timeout r
     "$TIMEOUT_BEFORE" "$TIMEOUT_AFTER" "$TIMEOUT_DELTA"
 printf "gen0_fail  : buf_null=%d bitmap=%d other=%d  (D-diag: gen=0 fallback breakdown)\n" \
     "$GEN0_NULL_DELTA" "$GEN0_BMAP_DELTA" "$GEN0_OTHER_DELTA"
+printf "fd_buf     : peak=%d MiB settled=%d MiB  capacity=%d MiB  reset_skipped=%d  (M1)\n" \
+    "$(( FDBUF_PEAK / 1048576 ))" "$(( FDBUF_SETTLED / 1048576 ))" \
+    "$(( CHUNK_BYTES / 1048576 ))" "$RESET_SKIP_DELTA"
 echo ""
 if [ -f "$READER_FAIL" ]; then
     printf "sha256     : FAIL (%s)\n" "$(cat "$READER_FAIL")"
@@ -333,6 +388,8 @@ else
     echo "read_err   : PASS (no -EIO observed)"
 fi
 printf "evictions  : %s\n" "$EVICT_PASS"
+printf "fd_buf     : %s  (settled %d B <= capacity %d B after readers stop)\n" \
+    "$FDBUF_PASS" "$FDBUF_SETTLED" "$CHUNK_BYTES"
 printf "lockdep    : %s\n" "$LOCKDEP_STATUS"
 if [ "$LOCKDEP_AVAIL" -eq 0 ]; then
     echo "  (rerun with CONFIG_PROVE_LOCKING=y for full lockdep coverage)"
@@ -342,9 +399,10 @@ echo "OVERALL: $overall"
 echo "=============================================================="
 } | tee "$OUT/evict-race-report.txt"
 
-printf 'RESULT name=%s status=%s sha256_fail=%d read_err=%d evict_delta=%d retry_exh_delta=%d timeout_delta=%d lockdep=%s\n' \
+printf 'RESULT name=%s status=%s sha256_fail=%d read_err=%d evict_delta=%d retry_exh_delta=%d timeout_delta=%d fd_buf_peak=%d fd_buf_settled=%d reset_skipped=%d lockdep=%s\n' \
     "$TEST_NAME" "$overall" "$READER_FAIL_COUNT" "$READER_ERROR_COUNT" \
-    "$EVICT_DELTA" "$RETRY_DELTA" "$TIMEOUT_DELTA" "$LOCKDEP_STATUS"
+    "$EVICT_DELTA" "$RETRY_DELTA" "$TIMEOUT_DELTA" \
+    "$FDBUF_PEAK" "$FDBUF_SETTLED" "$RESET_SKIP_DELTA" "$LOCKDEP_STATUS"
 if [[ "$overall" == FAIL ]]; then
     [ "$READER_FAIL_COUNT" -gt 0 ] && \
         printf 'DETAIL sha256_fail=%d (data corruption — non-zero wrong content)\n' "$READER_FAIL_COUNT"
@@ -352,6 +410,7 @@ if [[ "$overall" == FAIL ]]; then
         printf 'DETAIL read_err=%d (-EIO: gen=0 fallback failed — U8+U10 race still present)\n' "$READER_ERROR_COUNT"
     [[ "$EVICT_PASS" == FAIL ]] && printf 'DETAIL evict_delta=0 (no evictions — test vacuous, check capacity_bytes)\n'
     [ "$LOCKDEP_STATUS" = FAIL ] && printf 'DETAIL lockdep=FAIL (kernel WARN/BUG in dmesg during run)\n'
+    [[ "$FDBUF_PASS" == FAIL ]] && printf 'DETAIL fd_buf_settled=%d > capacity=%d (fd->buf outlived its admit entry)\n' "$FDBUF_SETTLED" "$CHUNK_BYTES"
     [ "$RETRY_DELTA" -gt 0 ] && \
         printf 'DETAIL retry_exh_delta=%d (upcall retries exhausted under capacity pressure)\n' "$RETRY_DELTA"
 fi

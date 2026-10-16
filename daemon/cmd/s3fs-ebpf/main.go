@@ -1271,6 +1271,12 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 					if len(vals) >= 10 {
 						metrics.Global.Gen0FailOther.Store(vals[9])
 					}
+					if len(vals) >= 11 {
+						metrics.Global.FdBufBytes.Store(vals[10])
+					}
+					if len(vals) >= 12 {
+						metrics.Global.ResetSkipped.Store(vals[11])
+					}
 				}
 			}
 
