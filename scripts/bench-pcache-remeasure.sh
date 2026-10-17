@@ -9,7 +9,7 @@
 #   C  既存オブジェクトの途中への 4 KiB write + fsync (1/10/100 MiB)。fuse-raw と比較
 #      (C_EXTRA=--partial-modify で AC-51 の multipart flush を有効にして測る)
 #   D  cold read (1 回目) 10/100/300 MiB。fuse-raw / fuse-cache / mount-s3 / ebpf
-#      (D_BACKENDS="ebpf fuse-raw" で対象と順番を選べる)
+#      (D_BACKENDS="ebpf fuse-raw" で対象と順番を選べる。D_DROP_EACH=1 で毎回 drop_caches する: §18.39)
 #   E  小さいファイル 10,000 個 (4 KiB): ls -l / cat 全部 (cold と warm)
 #
 # 出力は $OUT/*.txt (生の値)。中央値は awk で出す。
@@ -199,7 +199,9 @@ step_D() {
 			      start_ebpf D-ebpf.log --cache-dir="$EBPF_CACHE_DIR"; mp=$MP_EBPF;;
 		esac
 		for sz in 10 100 300; do for i in $(seq 1 "$RUNS_COLD"); do
-			local t ms; t=$(now)
+			local t ms
+			[ -n "${D_DROP_EACH:-}" ] && { sync; sudo sysctl -q -w vm.drop_caches=3; }
+			t=$(now)
 			cat "$mp/cold-$sz-$i.bin" > /dev/null
 			ms=$(ms_since "$t")
 			echo "$sz $be $ms" >> "$OUT/D.txt"

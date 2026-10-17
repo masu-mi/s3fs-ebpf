@@ -1807,3 +1807,24 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 - **GET の待ちの 92〜93% は MinIO の応答時間**。client の所要時間は MinIO の所要時間より 2〜3.5 ms (最大 10 ms) 長いだけで、その内訳 (接続・送信・Go 側の読み込み) は小さい。リクエストが MinIO に届くまでの遅れも 2〜3.5 ms。TTFB は 3 ms で、残りは本体の転送 (16 MiB で約 31 ms、1 本あたり約 500 MB/s)。
 - 同じ条件の単独 run では **ebpf のほうが fuse-raw より速い** (253 対 315 ms)。
 - 一方、`bench-pcache-remeasure.sh` の step D では ebpf が 380〜417 ms で、fuse-raw (310〜317 ms) より遅い。backend の順番を入れ替えても同じで、単独 run でも `--cache-dir` の有無、10 / 100 MiB を先に読む、daemon 起動直後に読む、のどれを足しても再現しない。**bench でだけ遅い理由は未解明**。残る差は、bench が 3 サイズ × n 個 (4.5 GB 超) の object を先に作る点と、bench の MinIO / ホストの状態。
+
+### 18.39 cold read: bench でだけ遅い理由 — ホストのメモリ回収 (n=10、ローカル MinIO)
+
+§18.38 の続き。bench と同じ量の object を先に作る (300 MiB を 15 個、100 MiB を 10〜20 個を先に読む、など) 単独 run を試したが、**量では再現しなかった**。代わりに、同じ run の中で **読む順番に従って遅くなる**ことが分かった。ebpf の 300 MiB を 5 個続けて読むと、1・2 個目は 217〜250 ms で、3 個目から 300〜400 ms になる (読む object を入れ替えても、毎回 1・2 個目だけが速い。fuse-raw は最初から 290〜320 ms で一定)。
+
+原因の切り分け:
+- 各 read の前後で `/proc/vmstat` を見ると、遅い read だけ **メモリ回収が起きている** (3 個目以降、kswapd が約 23 万ページ ≈ 900 MiB を回収、direct reclaim の stall が 27〜56 回)。速い read は全部 0。
+- 各 read の前に `drop_caches=3` をすると、5 個とも 217〜251 ms で揃い、回収は 0。object 1 個分の page だけを `fadvise(DONTNEED)` で落としても直らない。
+- Go の GC は無関係 (停止は 1〜4 ms、heap は 130 MB 前後、`GOGC=off` でも変わらない)。daemon の RSS も増えない。
+- MinIO の container にメモリ制限はない。ホストは 8 GB で、MinIO が読んだ data の page cache と pcache の page (どちらも 300 MiB / object) が溜まり、2 object 目あたりで空きが回収の閾値に届く。
+
+つまり、step D の ebpf が遅かった分は **ホストの page cache の回収待ち**で、daemon の GET や populate の経路ではない。pcache は読んだ page を残す (これが warm の速さの元) ので、その分 fuse-raw より早くメモリが埋まる。
+
+`D_DROP_EACH=1` (毎回 `sync` と `drop_caches=3` をしてから測る) を `bench-pcache-remeasure.sh` に足して測り直した (n=10、中央値):
+
+| サイズ | 通常の run: fuse-raw / ebpf | drop_caches あり: fuse-raw / ebpf | ebpf / fuse-raw (drop あり) |
+|---:|---:|---:|---:|
+| 100 MiB | 99.8 / 111.2 ms | 111.3 / **92.9 ms** | 1.20× 速い |
+| 300 MiB | 329.6 / 394.6 ms | 290.1 / **230.2 ms** | **1.26× 速い** |
+
+読み取りごとに状態を揃えれば、300 MiB の cold read は fuse-raw の 0.9× 以上 (1.26×) という目標を満たす。連続して大きい file を読み続ける場面では、メモリが逼迫したホストで回収待ちが入り、0.8× 前後まで落ちる (実 S3 では MinIO 側の page cache がないので、この圧は半分になるはず。未計測)。
