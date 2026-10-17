@@ -259,3 +259,10 @@ E-01 〜 D-02 で: 「PoC → shell-scriptable POSIX FS」
 
 これは「PoC の実用範囲を拡げる週」で、Meetup narrative の
 "policy engine" 主軸を補強する形。
+
+## 大きいオブジェクトの途中の書き換え (`--partial-modify`)
+
+S3 バックエンドで daemon を `--partial-modify` 付きで起動すると、16 MiB 以上の既存オブジェクトへの途中の書き込みは、触れた 4 MiB chunk だけを読み込み、flush では変更のない範囲を multipart upload の server-side copy (`UploadPartCopy`) で運ぶ。GCS では効かない (従来どおり全体を PUT)。
+
+- flush が途中で失敗すると未完了の multipart upload が残ることがある。daemon は失敗時に abort するが、プロセスが落ちた場合は残るので、bucket に `AbortIncompleteMultipartUpload` の lifecycle rule (数日) を入れておく。
+- copy 元は読み込み時の ETag に固定する。別のクライアントが途中で上書きしていた場合 (412) は、現在のオブジェクトから変更のない範囲を取り直して全体を PUT する (最後に書いた者が勝つ)。

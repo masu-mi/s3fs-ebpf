@@ -7,6 +7,7 @@
 #   A  open+read+close p50 (microbench): fuse-raw / ebpf-nocache / fuse-cache / ebpf / mount-s3
 #   B  durable write (dd conv=fsync) 1/10/100 MiB、新規ファイル
 #   C  既存オブジェクトの途中への 4 KiB write + fsync (1/10/100 MiB)。fuse-raw と比較
+#      (C_EXTRA=--partial-modify で AC-51 の multipart flush を有効にして測る)
 #   D  cold read (1 回目) 10/100/300 MiB。fuse-raw / fuse-cache / mount-s3 / ebpf
 #   E  小さいファイル 10,000 個 (4 KiB): ls -l / cat 全部 (cold と warm)
 #
@@ -58,6 +59,7 @@ put_random() { # <bucket> <key> <MiB> [localfile-out]
 
 stop_everything() {
 	ebpf_nocache 0 2>/dev/null || true
+	echo 0 | sudo tee /sys/module/s3fs_kfunc/parameters/partial_modify >/dev/null 2>&1 || true
 	ebpf_stop "$MP_EBPF" >/dev/null 2>&1 || true
 	for m in "$MP_FUSE_CACHE" "$MP_FUSE_RAW" "$MP_MOUNT_S3"; do umount_hard "$m"; done
 }
@@ -149,7 +151,7 @@ step_C() {
 	head -c 4096 /dev/urandom > "$OUT/patch4k"
 	start_fuse
 	sudo rm -rf "$EBPF_CACHE_DIR"; mkdir -p "$EBPF_CACHE_DIR"
-	start_ebpf C-ebpf.log --cache-dir="$EBPF_CACHE_DIR"
+	start_ebpf C-ebpf.log --cache-dir="$EBPF_CACHE_DIR" ${C_EXTRA:-}
 	for sz in 1 10 100; do for be in fuse-raw ebpf; do
 		local mp=$MP_FUSE_RAW; [ "$be" = ebpf ] && mp=$MP_EBPF
 		for i in $(seq 0 "$RUNS_W"); do

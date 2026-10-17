@@ -1751,3 +1751,23 @@ arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準
 退行なし。gate (a) (b) (c) は 4 回とも PASS。warm の経路は kmod だけで完結し、daemon は通らない (手順 3 は miss の経路だけを変える)。100 MiB cat の +2% は run 間のばらつきの範囲。ここの 13.4〜13.7 ms は `bench-ab-pcache.sh` の `timed_reads` の値で、§18.2 の 9.5 ms (`hyperfine -N cat`) とは測り方が違い、直接比べない。
 
 計測の注意: この環境の bucket `s3fs-test` には過去の bench の 100 MiB のオブジェクトが残っており、arena (128 MiB) の prewarm が埋まって `ab07_large.bin` が admit できず、arena フェーズの warm-up が EIO で失敗する (変更前の daemon でも同じ)。一時 bucket に必要な 3 object だけをコピーし、`S3FS_BUCKET` と `S3_BUCKET` の両方を渡して測った (bucket は測定後に削除)。
+
+### 18.36 AC-51 — 既存オブジェクトの途中への 4 KiB write、`--partial-modify` (n=10、ローカル MinIO)
+
+§18.29 と同じ手順。daemon を `--partial-modify` で起動すると、変更に触れる chunk だけを読み込み、flush は変更のない範囲を multipart の `UploadPartCopy` で運ぶ。
+
+| オブジェクト | fuse-raw | ebpf (§18.29、AC-50) | ebpf (`--partial-modify`) |
+|---:|---:|---:|---:|
+| 1 MiB | 27.9 ms | 17.6 ms (別の回) | 28.2 ms (しきい値未満、挙動は同じ) |
+| 10 MiB | 51.5 ms | 70.6 ms | 84.2 ms (しきい値 16 MiB 未満、挙動は同じ。差は回ごとの揺れ) |
+| 100 MiB | 175.4 ms | 389.3 ms | **179.2 ms** |
+
+100 MiB は fuse-raw と同じ (2.46× 遅い → 1.02×)。経過:
+- 最初の実装 (part を順に送る): 259〜398 ms。内訳は flush の multipart が 250〜290 ms。MinIO の `UploadPartCopy` は流すバイト数に比例して時間がかかり (48 MiB の copy が 2 つ)、直列だと足し算になる。
+- part を 4 並列にした: multipart が 150〜180 ms、全体 179 ms。
+- kmod が fd から送る分は 4〜5 ms (8 MiB)。
+
+残る課題:
+- 10 MiB はまだ 1.6× 遅い。`partial_modify_min` (16 MiB) 未満で全体を読み書きしている。しきい値を下げた計測は未実施。
+- 実 S3 (EC2) では `UploadPartCopy` が MinIO より速いはずなので、100 MiB はさらに有利になる見込み (未計測)。
+- 変更の最初に chunk を読み込まない書き込み (chunk 境界にそろう書き込み) は、ETag を flush 時に `Stat` して固定する。最初の変更から flush までの間に別クライアントが上書きしても検出できない (設計 §8 の代案の弱い側。upcall を足せば解消する)。
