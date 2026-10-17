@@ -29,6 +29,7 @@
 #include <linux/hash.h>
 #include <linux/hashtable.h>
 #include <linux/highmem.h>
+#include <linux/jhash.h>
 #include <linux/jiffies.h>
 #include <linux/list.h>
 #include <linux/mm.h>
@@ -116,6 +117,30 @@ static struct s3fs_entry_dyn *s3fs_dyn_entries;
 static size_t s3fs_dyn_nr;
 
 /*
+ * AC-55: indexes over s3fs_dyn_entries, built by s3fs_ebpf_entries_replace
+ * before it takes the mutex and swapped in with the array.  Without them a
+ * lookup scanned the whole table, so `ls -l` of a directory with N entries
+ * cost O(N^2) (every lookup, plus a rescan per readdir position).
+ *
+ *  by_name  open-addressing table of entry index + 1 (0 = empty), keyed by
+ *           (parent_ino, name); load factor <= 1/2.
+ *  by_ino   the same keyed by ino.  Duplicates are all kept (probe until an
+ *           empty slot), because record_size updates every match.
+ *  order    entry indexes sorted by (parent_ino, index): the children of one
+ *           directory are contiguous and keep the daemon's order, so readdir
+ *           position `idx` is order[first_child + idx].
+ *
+ * Protected by s3fs_entries_mtx like the array it indexes.
+ */
+struct s3fs_dyn_index {
+	u32 mask;      /* slots - 1; slots is a power of two >= 2 * nr */
+	u32 *by_name;
+	u32 *by_ino;
+	u32 *order;
+};
+static struct s3fs_dyn_index *s3fs_dyn_idx;
+
+/*
  * Locally-created entries (via .create) live here until the next
  * SYNC round from the daemon promotes them into the dynamic table.
  * The daemon-side ino allocator is nudged after a successful PUT so
@@ -171,6 +196,117 @@ static inline unsigned long norm_parent(unsigned long p)
 	return p ? p : (unsigned long)S3FS_ROOT_INO;
 }
 
+static u32 dyn_name_hash(unsigned long parent, const char *name, u32 len)
+{
+	return jhash(name, len, (u32)parent);
+}
+
+static u32 dyn_ino_hash(unsigned long ino)
+{
+	return hash_long(ino, 32);
+}
+
+static void dyn_index_free(struct s3fs_dyn_index *ix)
+{
+	if (!ix)
+		return;
+	kvfree(ix->by_name);
+	kvfree(ix->by_ino);
+	kvfree(ix->order);
+	kfree(ix);
+}
+
+static int dyn_order_cmp(const void *a, const void *b, const void *priv)
+{
+	const struct s3fs_entry_dyn *e = priv;
+	u32 x = *(const u32 *)a, y = *(const u32 *)b;
+	unsigned long px = norm_parent(e[x].parent_ino);
+	unsigned long py = norm_parent(e[y].parent_ino);
+
+	if (px != py)
+		return px < py ? -1 : 1;
+	return x < y ? -1 : x > y;
+}
+
+static struct s3fs_dyn_index *dyn_index_build(const struct s3fs_entry_dyn *e,
+					      u32 n)
+{
+	struct s3fs_dyn_index *ix;
+	u32 slots = roundup_pow_of_two(max_t(u32, 2 * n, 16)), i;
+
+	ix = kzalloc(sizeof(*ix), GFP_KERNEL);
+	if (!ix)
+		return NULL;
+	ix->mask = slots - 1;
+	ix->by_name = kvcalloc(slots, sizeof(u32), GFP_KERNEL);
+	ix->by_ino = kvcalloc(slots, sizeof(u32), GFP_KERNEL);
+	ix->order = kvmalloc_array(n, sizeof(u32), GFP_KERNEL);
+	if (!ix->by_name || !ix->by_ino || !ix->order) {
+		dyn_index_free(ix);
+		return NULL;
+	}
+	for (i = 0; i < n; i++) {
+		u32 h = dyn_name_hash(norm_parent(e[i].parent_ino), e[i].name,
+				      e[i].name_len) & ix->mask;
+
+		while (ix->by_name[h])
+			h = (h + 1) & ix->mask;
+		ix->by_name[h] = i + 1;
+		h = dyn_ino_hash(e[i].ino) & ix->mask;
+		while (ix->by_ino[h])
+			h = (h + 1) & ix->mask;
+		ix->by_ino[h] = i + 1;
+		ix->order[i] = i;
+	}
+	sort_r(ix->order, n, sizeof(u32), dyn_order_cmp, NULL, e);
+	return ix;
+}
+
+/* s3fs_entries_mtx held, s3fs_dyn_entries non-NULL. */
+static const struct s3fs_entry_dyn *dyn_find_name(unsigned long parent,
+						  const char *name, size_t len)
+{
+	u32 h = dyn_name_hash(parent, name, len) & s3fs_dyn_idx->mask, v;
+
+	while ((v = s3fs_dyn_idx->by_name[h])) {
+		const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[v - 1];
+
+		if (norm_parent(e->parent_ino) == parent &&
+		    e->name_len == len && memcmp(e->name, name, len) == 0)
+			return e;
+		h = (h + 1) & s3fs_dyn_idx->mask;
+	}
+	return NULL;
+}
+
+/* The children of `parent` are order[*first, *first + *cnt). */
+static void dyn_children(unsigned long parent, u32 *first, u32 *cnt)
+{
+	const u32 *order = s3fs_dyn_idx->order;
+	u32 lo = 0, hi = s3fs_dyn_nr, up;
+
+	while (lo < hi) {
+		u32 mid = lo + (hi - lo) / 2;
+
+		if (norm_parent(s3fs_dyn_entries[order[mid]].parent_ino) < parent)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	*first = lo;
+	hi = s3fs_dyn_nr;
+	up = lo;
+	while (up < hi) {
+		u32 mid = up + (hi - up) / 2;
+
+		if (norm_parent(s3fs_dyn_entries[order[mid]].parent_ino) <= parent)
+			up = mid + 1;
+		else
+			hi = mid;
+	}
+	*cnt = up - lo;
+}
+
 static bool resolve_entry_by_name(unsigned long parent_ino,
 				  const char *name, size_t name_len,
 				  struct s3fs_entry_snap *out)
@@ -204,13 +340,10 @@ static bool resolve_entry_by_name(unsigned long parent_ino,
 	}
 
 	if (s3fs_dyn_entries) {
-		for (i = 0; i < s3fs_dyn_nr; i++) {
-			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[i];
+		const struct s3fs_entry_dyn *e =
+			dyn_find_name(want_parent, name, name_len);
 
-			if (norm_parent(e->parent_ino) != want_parent ||
-			    e->name_len != name_len ||
-			    memcmp(e->name, name, name_len) != 0)
-				continue;
+		if (e) {
 			out->ino = e->ino;
 			out->parent_ino = norm_parent(e->parent_ino);
 			out->size = e->size;
@@ -262,16 +395,20 @@ static bool resolve_entry_by_name(unsigned long parent_ino,
 static void s3fs_entry_record_size(unsigned long ino, u64 size)
 {
 	struct s3fs_local_entry *le;
-	size_t i;
 
 	mutex_lock(&s3fs_entries_mtx);
 	list_for_each_entry(le, &s3fs_local_entries, link) {
 		if (le->ino == ino)
 			le->size = size;
 	}
-	for (i = 0; s3fs_dyn_entries && i < s3fs_dyn_nr; i++) {
-		if (s3fs_dyn_entries[i].ino == ino)
-			s3fs_dyn_entries[i].size = size;
+	if (s3fs_dyn_entries) {
+		u32 h = dyn_ino_hash(ino) & s3fs_dyn_idx->mask, v;
+
+		while ((v = s3fs_dyn_idx->by_ino[h])) {
+			if (s3fs_dyn_entries[v - 1].ino == ino)
+				s3fs_dyn_entries[v - 1].size = size;
+			h = (h + 1) & s3fs_dyn_idx->mask;
+		}
 	}
 	mutex_unlock(&s3fs_entries_mtx);
 }
@@ -1751,25 +1888,28 @@ static bool find_entry(unsigned long parent_ino, const struct qstr *qname,
  * additions with a mismatched ino stay put so a rogue basename
  * collision doesn't silently eat someone's write. */
 static void local_prune_promoted_locked(const struct s3fs_entry_dyn *entries,
-					size_t count)
+					const struct s3fs_dyn_index *ix)
 {
 	struct s3fs_local_entry *le, *tmp;
-	size_t i;
 
 	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
-		for (i = 0; i < count; i++) {
-			if (entries[i].ino != le->ino)
+		u32 h = dyn_ino_hash(le->ino) & ix->mask, v;
+
+		while ((v = ix->by_ino[h])) {
+			const struct s3fs_entry_dyn *e = &entries[v - 1];
+
+			h = (h + 1) & ix->mask;
+			if (e->ino != le->ino)
 				continue;
 			/* G-01: name equality alone is not enough — two files
 			 * with basename "foo.txt" under different parents must
 			 * not cross-promote. Match parent_ino too. */
-			if (norm_parent(entries[i].parent_ino) !=
+			if (norm_parent(e->parent_ino) !=
 			    norm_parent(le->parent_ino))
 				continue;
-			if (entries[i].name_len != le->name_len)
+			if (e->name_len != le->name_len)
 				continue;
-			if (memcmp(entries[i].name, le->name,
-				   le->name_len) != 0)
+			if (memcmp(e->name, le->name, le->name_len) != 0)
 				continue;
 			list_del(&le->link);
 			s3fs_local_nr--;
@@ -1782,20 +1922,32 @@ static void local_prune_promoted_locked(const struct s3fs_entry_dyn *entries,
 int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 {
 	struct s3fs_entry_dyn *prev;
+	struct s3fs_dyn_index *ix = NULL, *prev_ix;
 
+	/* Built before the mutex: it is O(count log count). */
+	if (count && entries) {
+		ix = dyn_index_build(entries, count);
+		if (!ix)
+			return -ENOMEM;
+	}
 	mutex_lock(&s3fs_entries_mtx);
 	prev = s3fs_dyn_entries;
-	if (count && entries) {
+	prev_ix = s3fs_dyn_idx;
+	if (ix) {
 		s3fs_dyn_entries = entries;
 		s3fs_dyn_nr      = count;
-		local_prune_promoted_locked(entries, count);
+		s3fs_dyn_idx     = ix;
+		local_prune_promoted_locked(entries, ix);
 	} else {
 		s3fs_dyn_entries = NULL;
 		s3fs_dyn_nr      = 0;
+		s3fs_dyn_idx     = NULL;
 	}
 	mutex_unlock(&s3fs_entries_mtx);
 
-	kfree(prev);
+	/* allocated with kvcalloc by the ioctl */
+	kvfree(prev);
+	dyn_index_free(prev_ix);
 
 	if (s3fs_active_sb)
 		shrink_dcache_sb(s3fs_active_sb);
@@ -4885,21 +5037,19 @@ static bool emit_one_entry(struct dir_context *ctx, unsigned long want_parent,
 
 	mutex_lock(&s3fs_entries_mtx);
 	if (s3fs_dyn_entries) {
-		size_t i;
+		u32 first, cnt;
 
-		for (i = 0; i < s3fs_dyn_nr; i++) {
-			const struct s3fs_entry_dyn *e = &s3fs_dyn_entries[i];
+		dyn_children(want_parent, &first, &cnt);
+		matched = cnt;
+		if (idx < cnt) {
+			const struct s3fs_entry_dyn *e =
+				&s3fs_dyn_entries[s3fs_dyn_idx->order[first + idx]];
 
-			if (norm_parent(e->parent_ino) != want_parent)
-				continue;
-			if (matched++ != idx)
-				continue;
 			ino      = e->ino;
 			dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
 			name_len = e->name_len;
 			memcpy(name, e->name, name_len);
 			ok = true;
-			break;
 		}
 	} else if (want_parent == (unsigned long)S3FS_ROOT_INO) {
 		size_t i;

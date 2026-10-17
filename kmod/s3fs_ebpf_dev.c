@@ -221,10 +221,11 @@ static long s3fs_dev_sync_entries(void __user *uarg)
 	if (hdr.count == 0)
 		return s3fs_ebpf_entries_replace(NULL, 0);
 
-	/* Lookups scan this array linearly, so the cap stays modest; 4096 was
+	/* Lookups go through hash indexes (AC-55), so the cap bounds memory only
+	 * (~0.3 KB per entry, held twice while the ioctl copies); 4096 was
 	 * too small for a bucket with 10,000 small objects (the startup sync
 	 * failed and the mount showed only the bootstrap entries). */
-	if (hdr.count > 65536)
+	if (hdr.count > 262144)
 		return -E2BIG;
 
 	ubuf = kvcalloc(hdr.count, sizeof(*ubuf), GFP_KERNEL);
