@@ -3847,6 +3847,15 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 	inode->i_mtime = inode->i_ctime = current_time(inode);
 #endif
 	mutex_unlock(&fd->lock);
+	/* The page cache still holds the pre-write content of the range (it
+	 * was filled by an earlier read); a later read would be served from
+	 * it and miss this write.  Drop those folios so .read_folio refills
+	 * them from the fd.  After the unlock: .read_folio takes fd->lock
+	 * under the folio lock that invalidate waits for.  Folios that cannot
+	 * be dropped (mmap'ed) stay; same as before. */
+	invalidate_inode_pages2_range(inode->i_mapping,
+				      start >> PAGE_SHIFT,
+				      (start + count - 1) >> PAGE_SHIFT);
 	return count;
 out:
 	mutex_unlock(&fd->lock);
@@ -3930,6 +3939,11 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 		}
 		i_size_write(inode, new_size);
 		mutex_unlock(&fd->lock);
+		/* Folios cached before the size change hold the old tail (or
+		 * the pre-truncate bytes of a later extension).  After the
+		 * unlock for the same reason as in .write. */
+		if ((u64)new_size != cur)
+			truncate_pagecache(inode, new_size);
 	}
 	setattr_copy(idmap, inode, attr);
 

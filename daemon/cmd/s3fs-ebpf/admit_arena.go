@@ -409,6 +409,15 @@ func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
 	return dropAdmitsLocked(evicted, progs)
 }
 
+// dropAdmitIno removes every admit of ino and pushes the table to kmod.
+func dropAdmitIno(devPath string, ino uint64, progs *fpebpf.Programs) {
+	admitMu.Lock()
+	defer admitMu.Unlock()
+	if dropAdmitsLocked([]uint64{ino}, progs) > 0 {
+		_ = admitArena(devPath, admits)
+	}
+}
+
 // dropAdmitsLocked is dropAdmits with admitMu already held.
 // Returns the number of admit entries actually removed (not the count of
 // freed arena chunks, which may be smaller when progs==nil or Uaddr is
@@ -654,7 +663,20 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 		fail(-5 /* -EIO */, "chunk at %d is past the object (%d B)", missChunkOffset, entry.Fallback)
 		return
 	}
-	body, err := s3c.GetRange(ctx, entry.S3Key, missChunkOffset, size)
+	var body []byte
+	var err error
+	if mc, ok := s3c.(objstore.MultipartCopier); ok {
+		// AC-51: the chunks loaded in one modify cycle must come from the
+		// same object the flush copies the rest from.
+		etag, perr := pinETag(ctx, s3c, ev.Ino, entry.S3Key)
+		if perr != nil {
+			fail(-5, "s3://%s stat: %v", entry.S3Key, perr)
+			return
+		}
+		body, err = mc.GetRangeMatch(ctx, entry.S3Key, missChunkOffset, size, etag)
+	} else {
+		body, err = s3c.GetRange(ctx, entry.S3Key, missChunkOffset, size)
+	}
 	if err != nil {
 		fail(-5, "s3://%s get: %v", entry.S3Key, err)
 		return
