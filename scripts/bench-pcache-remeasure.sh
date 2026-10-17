@@ -9,6 +9,7 @@
 #   C  既存オブジェクトの途中への 4 KiB write + fsync (1/10/100 MiB)。fuse-raw と比較
 #      (C_EXTRA=--partial-modify で AC-51 の multipart flush を有効にして測る)
 #   D  cold read (1 回目) 10/100/300 MiB。fuse-raw / fuse-cache / mount-s3 / ebpf
+#      (D_BACKENDS="ebpf fuse-raw" で対象と順番を選べる)
 #   E  小さいファイル 10,000 個 (4 KiB): ls -l / cat 全部 (cold と warm)
 #
 # 出力は $OUT/*.txt (生の値)。中央値は awk で出す。
@@ -187,7 +188,7 @@ step_D() {
 		rm -f "$OUT/cold-$sz-$i.local"
 	done; done
 	local be mp
-	for be in fuse-raw fuse-cache mount-s3 ebpf; do
+	for be in ${D_BACKENDS:-fuse-raw fuse-cache mount-s3 ebpf}; do
 		stop_everything
 		sync; sudo sysctl -q -w vm.drop_caches=3
 		case $be in
@@ -210,7 +211,7 @@ step_D() {
 		done
 	done
 	stop_everything
-	for sz in 10 100 300; do for be in fuse-raw fuse-cache mount-s3 ebpf; do
+	for sz in 10 100 300; do for be in ${D_BACKENDS:-fuse-raw fuse-cache mount-s3 ebpf}; do
 		printf 'D cold %3s MiB %-10s median=%s ms min=%s ms\n' "$sz" "$be" \
 			"$(awk -v s=$sz -v b=$be '$1==s&&$2==b{print $3}' "$OUT/D.txt" | median)" \
 			"$(awk -v s=$sz -v b=$be '$1==s&&$2==b{print $3}' "$OUT/D.txt" | minimum)"
