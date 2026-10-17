@@ -76,3 +76,7 @@
 - AC-57: dirty / flushing な fd に PCACHE entry を入れない。AC-45 C3 の entry の入れ直し (`s3fs_folio_fill_from_kmalloc` の `quiet`) は、clean な fd で chunk が確保済みかつ `populated` のときだけ (dirty の穴は `buf_valid` が true になるが、entry を入れると容量を水増しする)。
 - W2: `evict_inode` は通常ファイルの `i_size` を `s3fs_entry_record_size` で local/dyn エントリに書き戻す (`s3fs_entries_mtx`)。local entry は lookup でこの size を返す。daemon の periodic sync (`entries_replace`) が来れば S3 のサイズで上書き。`s3fs_entries_mtx` 保持中に iput するパスを作らないこと (evict から同 mutex を取るため自己デッドロックになる)。
 - F1: `flush_enqueue` は、WAIT (fsync) の event を積むとき、同じ ino の通常 queue の未処理 item を捨てる。WAIT queue は即座に処理され、通常 queue は daemon の ticker (100 ms) と debounce (200 ms) を通るため、`.create` が積む 0 byte の placeholder が fsync の PUT の後に PUT され、オブジェクトが 0 byte になっていた。PUT は実行時に buffer を読むので、WAIT の event が捨てた item の分も含む。
+
+## policy の pick_victim (AC-58)
+- 設計は `docs/design/ac58-pick-victim.md`。vtable の `on_insert` / `on_remove` / `pick_victim` は、**vtable が `pick_victim` を持つときだけ**、`s3fs_ebpf_admit_replace` の eviction block が `s3fs_policy_evict_lock` (mutex) を取って呼ぶ。この mutex は `fd->lock` / `s3fs_admits_lock` より外側 (admit_replace は他のロックを持たずに入る)。mutex の中で `admit_evict_ino` (fd->lock → admits write_lock) を呼ぶ。
+- 容量超過のとき、まず `pick_victim` が返した ino を (`cand[]` にあり、未試行なら) `s3fs_capacity_evict_one` で処理する。0 / `cand[]` にない / 試行済みが返ったら、残りは score 順 (`on_evict` + tiebreak) に戻る。pending 中の ino は丸ごとは evict せず shed になる (AC-45 C3 のまま)。丸ごと evict したときだけ `on_remove` を呼ぶ。

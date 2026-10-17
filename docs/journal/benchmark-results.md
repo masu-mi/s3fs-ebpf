@@ -1870,3 +1870,19 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 既存バグの修正: `s3fs_ebpf_entries_replace` が kvcalloc の表を `kfree` で解放していた。表が大きい (約 4 MB 超、50k 件で約 15 MB) と vmalloc になり oops する。`kvfree` に修正。
 
 回帰テスト (`make test-regression`) は 17 件すべて PASS。dmesg に oops なし。
+
+### 18.41 AC-58: `pick_victim` で SIEVE を本来の形にした (bench-hitrate、capacity mode)
+
+`scripts/bench-hitrate.sh` (30 files、softcap 8、2000 access、Zipf α=0.7、`POLICIES="lru_ops sieve_ops sieve_pick_ops"`、各 seed 1 回)。`sieve_pick_ops` は FIFO と hand を BPF が持ち、capacity 超過のときに kmod が `pick_victim` で次の victim を聞く (`docs/design/ac58-pick-victim.md`)。
+
+| seed | lru_ops | sieve_ops (旧、visited bit のみ) | sieve_pick_ops | 参考: trace-replay の lru / sieve / opt |
+|---|---|---|---|---|
+| 42 | 30.90% | 29.25% | 34.95% | 39.20 / 43.80 / 64.15% |
+| 7 | 32.75% | 31.95% | 37.10% | 41.70 / 47.95 / 65.75% |
+| 123 | 30.65% | 30.55% | 35.50% | 39.15 / 46.80 / 65.25% |
+
+- 3 seed とも `sieve_pick_ops` が LRU より +4.3〜4.9 ポイント、旧 sieve_ops より +5.0〜5.7 ポイント高い。順位は一貫している。
+- trace-replay の SIEVE (43.8〜48.0%) には届かない (差 約 8〜11 ポイント)。ライブは eval を 25 access ごとにしか回さず、eviction の粒度が違う。同じ差は LRU にも出ている (live 約 31% / replay 約 40%)。
+- 各 run は 1 回。seed 間のばらつきは 2 ポイント程度で、policy 間の差 (4〜5 ポイント) より小さいが、n は小さい。
+- **測っていない**: `pick_victim` 1 回の時間、mutex の保持時間、`on_hit` の read 経路へのコスト (hash lookup が 1 回増える)。hit-rate bench は 1 ino = 44 B の小さい file で、read 経路の負担は見えない。次の計測で `bench-ab-pcache` / 64 jobs の退行を確かめる。
+- `make test-regression` 17 件 PASS (既定 policy は `pick_victim` を持たないので、元の score 順の経路)。
