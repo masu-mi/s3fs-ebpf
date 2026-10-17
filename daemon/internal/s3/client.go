@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
+	"time"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"github.com/minio/minio-go/v7"
@@ -178,3 +180,89 @@ func toMeta(o minio.ObjectInfo) objstore.ObjectMeta {
 		ContentType:  o.ContentType,
 	}
 }
+
+// -- AC-51: multipart upload with server-side copy --------------------------
+
+func isPreconditionFailed(err error) bool {
+	r := minio.ToErrorResponse(err)
+	return r.StatusCode == http.StatusPreconditionFailed || r.Code == "PreconditionFailed"
+}
+
+// GetRangeMatch is GetRange with If-Match: a changed object is
+// ErrSourceChanged, not silently different bytes.
+func (c *Client) GetRangeMatch(ctx context.Context, key string, offset, size int64, etag string) ([]byte, error) {
+	opts := minio.GetObjectOptions{}
+	if err := opts.SetRange(offset, offset+size-1); err != nil {
+		return nil, fmt.Errorf("s3 range set: %w", err)
+	}
+	if err := opts.SetMatchETag(etag); err != nil {
+		return nil, fmt.Errorf("s3 match etag: %w", err)
+	}
+	obj, err := c.mc.GetObject(ctx, c.cfg.Bucket, key, opts)
+	if err != nil {
+		return nil, fmt.Errorf("s3 range get %q: %w", key, err)
+	}
+	defer obj.Close()
+	buf, err := io.ReadAll(obj)
+	if err != nil {
+		if isPreconditionFailed(err) {
+			return nil, objstore.ErrSourceChanged
+		}
+		return nil, fmt.Errorf("s3 range get %q read: %w", key, err)
+	}
+	return buf, nil
+}
+
+// PutWithCopy builds `key` from parts: uploads carry their bytes, copies
+// are server-side UploadPartCopy of the current object pinned to
+// ifMatchETag.  Any failure aborts the multipart upload.
+func (c *Client) PutWithCopy(ctx context.Context, key, ifMatchETag string, parts []objstore.Part) (string, error) {
+	core := minio.Core{Client: c.mc}
+	uploadID, err := core.NewMultipartUpload(ctx, c.cfg.Bucket, key, minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+	})
+	if err != nil {
+		return "", fmt.Errorf("s3 multipart init %q: %w", key, err)
+	}
+	fail := func(err error) (string, error) {
+		// ctx may be what failed; abort on a fresh one.
+		actx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = core.AbortMultipartUpload(actx, c.cfg.Bucket, key, uploadID)
+		return "", err
+	}
+	done := make([]minio.CompletePart, 0, len(parts))
+	for i, p := range parts {
+		num := i + 1
+		switch p.Kind {
+		case objstore.PartCopy:
+			cp, err := core.CopyObjectPart(ctx, c.cfg.Bucket, key, c.cfg.Bucket, key, uploadID,
+				num, p.Off, p.Len, map[string]string{"x-amz-copy-source-if-match": ifMatchETag})
+			if err != nil {
+				if isPreconditionFailed(err) {
+					return fail(objstore.ErrSourceChanged)
+				}
+				return fail(fmt.Errorf("s3 copy part %d of %q: %w", num, key, err))
+			}
+			done = append(done, minio.CompletePart{PartNumber: num, ETag: cp.ETag})
+		default:
+			if int64(len(p.Data)) != p.Len {
+				return fail(fmt.Errorf("s3 upload part %d of %q: have %d bytes, want %d", num, key, len(p.Data), p.Len))
+			}
+			up, err := core.PutObjectPart(ctx, c.cfg.Bucket, key, uploadID, num,
+				bytes.NewReader(p.Data), p.Len, minio.PutObjectPartOptions{})
+			if err != nil {
+				return fail(fmt.Errorf("s3 upload part %d of %q: %w", num, key, err))
+			}
+			done = append(done, minio.CompletePart{PartNumber: num, ETag: up.ETag})
+		}
+	}
+	info, err := core.CompleteMultipartUpload(ctx, c.cfg.Bucket, key, uploadID, done, minio.PutObjectOptions{})
+	if err != nil {
+		return fail(fmt.Errorf("s3 multipart complete %q: %w", key, err))
+	}
+	c.cache.Invalidate(key)
+	return info.ETag, nil
+}
+
+var _ objstore.MultipartCopier = (*Client)(nil)

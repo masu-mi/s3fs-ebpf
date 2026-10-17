@@ -801,7 +801,7 @@ func runFastpath(args []string) int {
 	metrics.Global.ArenaCapacityBytes.Store(progs.Arena().Size())
 	if s3c != nil {
 		prefixStr := ""
-		if p, ok := s3c.(*objstore.Prefixed); ok {
+		if p, ok := s3c.(interface{ Prefix() string }); ok {
 			prefixStr = " key-prefix=" + p.Prefix()
 		}
 		fmt.Printf("[fastpath] object backend: bucket=%s%s (will warm arena on miss)\n",
