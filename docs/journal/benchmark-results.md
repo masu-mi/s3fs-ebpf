@@ -1847,3 +1847,26 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 - ext4 など他の FS で同じ連続読みをしたときに、同じ遅くなり方をするか。
 
 次の確認案: ext4 の 300 MiB file を同じ手順 (5 個連続、`/proc/vmstat` の前後差) で読み、回収と所要時間を比べる。同じ遅くなり方なら FS 共通のカーネルの挙動、ebpf だけ重ければ設計 (容量の扱い、populate) の問題。後者なら、容量の既定値をホストのメモリに応じて決める、populate の並列数を回収の状況で絞る、を検討する。
+
+### 18.40 AC-55: 1 ディレクトリの件数スケール (SYNC_ENTRIES に索引を追加)
+
+`scripts/bench-sync-entries.sh`。4 KiB の object を N 個、1 bucket に置き、sync 後の `ls -l`、dentry を落としたあとの全件 stat、2000 件の random stat を計測した (ローカル MinIO、1 回計測)。
+
+変更: kmod の SYNC_ENTRIES に (parent_ino, name) と ino の hash 表、(parent_ino, 並び順) の整列配列を追加。lookup / record_size は O(1)、readdir の idx 番目は O(log n)。件数の上限は 65536 から 262144 に上げた。
+
+| 件数 | 版 | ls -l cold | ls -l warm | 全件 stat (drop 後) |
+|---|---|---|---|---|
+| 10,000 | 旧 | 344 ms | 73 ms | 388 ms |
+| 10,000 | 新 | 64 ms | 35 ms | 25 ms (find) |
+| 50,000 | 旧 | 15,075 ms | 3,063 ms | 13,967 ms |
+| 50,000 | 新 | 212 ms | 118 ms | 114 ms (find) |
+| 100,000 | 新 | 379 ms | 253 ms | 244 ms (find) |
+
+- 旧は 5 倍の件数で約 44 倍 (2 乗)。新は件数にほぼ比例する。2000 件の random stat は件数に関わらず 8〜9 ms。
+- 新の全件 stat 列は `find -printf %s` の値で、旧の列 (全件 stat) と手順が少し違う。比較は桁の目安として読むこと。
+- 100k 件でも daemon 起動から全件が見えるまで 13 s (daemon 側の sync が支配的で kmod ではない)。
+- 上限 262144 は kmod のメモリ保護として残す。100k で問題がなかったため、外す根拠はまだない。
+
+既存バグの修正: `s3fs_ebpf_entries_replace` が kvcalloc の表を `kfree` で解放していた。表が大きい (約 4 MB 超、50k 件で約 15 MB) と vmalloc になり oops する。`kvfree` に修正。
+
+回帰テスト (`make test-regression`) は 17 件すべて PASS。dmesg に oops なし。
