@@ -1700,7 +1700,26 @@ arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準
 
 ### 18.33 AC-50 の race 修正 (部分的に未対応の項目を含む)
 
-- **修正した**: `s3fs_fd_load_for_modify` の pin を、書き込みが dirty にするまで持つ (`struct s3fs_mpin`)。write / setattr は `fd->lock` 下で必要な chunk が populated かを確かめ、足りなければ読み込みからやり直す。pin を unpin してから lock を取る方式 (最初の修正案) は、capacity (12 MiB) より大きい 24 MiB のファイルを 8 並列で変更すると、必要な chunk を全部同時に持てず -EIO になったので採らなかった。変更中のファイルは capacity を一時的に超える。回帰テストは `test-write-existing-capacity` (capacity 12 MiB、24 MiB のオブジェクト 8 個の途中への write と truncate を並列に、40 MiB の読みを背景で回し続け、3 ラウンドで sha256 を比較)。**修正前のコードで FAIL することは確認していない** (途中の「unpin する版」では全件 EIO で落ちた)。
+- **修正した**: `s3fs_fd_load_for_modify` の pin を、書き込みが dirty にするまで持つ (`struct s3fs_mpin`)。write / setattr は `fd->lock` 下で必要な chunk が populated かを確かめ、足りなければ読み込みからやり直す。pin を unpin してから lock を取る方式 (最初の修正案) は、capacity (12 MiB) より大きい 24 MiB のファイルを 8 並列で変更すると、必要な chunk を全部同時に持てず -EIO になったので採らなかった。変更中のファイルは capacity を一時的に超える。回帰テストは `test-write-existing-capacity` (capacity 12 MiB、24 MiB のオブジェクト 8 個の途中への write と truncate を並列に、40 MiB の読みを背景で回し続け、3 ラウンドで sha256 を比較)。修正前のコード (`84ebf2f^` の kmod と daemon) では round 1 で 12 件中 10 件が FAIL し、HEAD は 3 ラウンド全件 PASS (AC-53 で確認)。
 - **修正した**: 2 つの write が同時に clean なファイルに来たときの EIO。後の loader が daemon の -EBUSY を受けたとき、fd がすでに dirty なら 0 を返す。`test-write-existing-capacity` に 1 object 2 writer のケースを入れた。
 - **修正した**: i_size > Fallback の EIO (§18.26 の 2)。
 - **未対応 (LOW)**: AC-48 の `i_size_write` が同時の truncate を巻き戻す窓、dirty の fd に PCACHE エントリが穴の上に入り容量を水増しする件。
+
+### 18.34 cold read の切り分け (AC-52 手順 1〜2、n=5、ローカル MinIO)
+
+**手順 1: cache-dir への書き込みを非同期にした** (`DiskCache.WriteAsync`、`9d369f3`)。cold read の中央値 (ebpf、前 → 後): 10 MiB 23.6 → 19.7 ms (fuse-raw 19.9)、100 MiB 247 → 149 ms (fuse-raw 99)、300 MiB 805 → 765 ms (fuse-raw 312)。300 MiB はほとんど動かない。
+
+**手順 2: 段階ごとの時間** (daemon の `handleReadMiss` に一時的に時計を入れた。コミットしていない)。sequential read は pattern-aware で **全体 admit** になり、`s3c.Get` 1 本で全体を読んだあと POPULATE し、そのあとで reader が起きる。
+
+| サイズ | GET | POPULATE | enforce | 合計 |
+|---:|---:|---:|---:|---:|
+| 10 MiB | 15〜21 ms | 2 ms | 0.1 ms | ≈ 19〜23 ms |
+| 100 MiB | 106〜192 ms | 20〜52 ms | 0.1〜0.4 ms | ≈ 130〜240 ms |
+| 300 MiB | 435〜591 ms | 100〜284 ms | 0.1〜7.5 ms | ≈ 540〜870 ms |
+
+- **GET と POPULATE は直列。** GET だけで fuse-raw の全体 (298〜314 ms) を超える。reader は全体が揃うまで何も受け取れない。fuse-raw は範囲 GET を並列に出しながら読みを返している。
+- **GET 自体が遅い。** daemon の外で同じ 300 MiB を測ると (中央値): `io.ReadAll` 212 ms、サイズを先に確保して `ReadFull` 148 ms、4 並列の range GET 86 ms (8 / 16 並列は 92 / 93 ms で頭打ち)。daemon の中は ReadAll より遅い (435〜591 ms) ので、GC や他の処理との競合も乗っている (未切り分け)。
+- **POPULATE** は 300 MiB で 100〜284 ms とばらつく。64 MiB 単位の ioctl を直列に回している。
+- enforce (capacity の pass) は無視できる。
+
+次の手順 (3): range GET を並列に出し、chunk ごとに POPULATE して chunk ごとに signal する (reader は最初の chunk だけで起きる)。全体 admit でも、先頭の chunk が揃った時点で reader を進められる。
