@@ -15,19 +15,19 @@
 
 ## 2026-10-16 更新: 現行スライドの構成と、後から加わった知見
 
-スライドの正本は claude.ai の Slides アーティファクト (27 枚)。この節は、下のアウトライン (2026-10-02 時点) から変わった点だけをまとめる。
+スライドの正本は claude.ai の Slides アーティファクト (28 枚、2026-10-17 更新)。この節は、下のアウトライン (2026-10-02 時点) から変わった点だけをまとめる。
 
-### 構成 (27 枚)
+### 構成 (28 枚)
 
 | 区切り | スライド | 要点 |
 |---|---|---|
 | 導入 | cover / intro | arena の使いどころを間違えた話をする、と最初に言う |
 | bpf_arena | arena-what / arena-who / **arena-map** / arena-design | arena-map (新規): 同じ物理ページを daemon の user_vm と kernel の kern_vm に二重にマップしている。BPF は JIT が `r12 = kern_vm_start` を使うので、フック時のマップ切り替えはない |
 | KFunc | kfunc / **arena-loop** | arena-loop (新規): コストを決めるのはループの書き方ではなく「arena を読むのが BPF か普通のカーネル C か」 |
-| struct_ops | so-concept / so-sieve / so-swap / so-pitfall / so-fix | 変更なし |
-| 勝てるところ | **perf** / **fs-usecases** | perf を「速いのは read ではなく、open と fsync」に作り直し (open+read+close 3.2× / 169×、durable write 1.7×、100 MiB warm read 1.1×、open 済み fd の 64 jobs は互角)。fs-usecases (新規): 小さいファイルを大量に開く、短命なプロセスが多い、fsync で確実に書く、キャッシュの判断を変えたい。大きいファイルを開いたまま並列に読む使い方は互角で勝てない |
+| struct_ops | so-concept / so-sieve / so-swap / so-pitfall / so-fix / **so-real** | so-real (新規): 案B (`pick_victim`) を実装し、実機の bench-hitrate で SIEVE が LRU より +4〜5 pt (3 seed) |
+| 勝てるところ | **perf** / **perf-lose** / **fs-usecases** | perf: pcache モードで測り直した数字 (open+read+close 3.3× / 172×、4 KiB × 10,000 個の cat 2 回目 93×、`ls -l` 初回 11×、新規の durable write 1.37×)。perf-lose (新規): 負けていた大きいファイルの 2 場面を直した前後 (既存 100 MiB の途中の書き換えは互角、cold read 300 MiB は毎回キャッシュを空にすると 1.26×、続けて読むと 0.80×)。fs-usecases: 小さいファイルを大量に開く、短命なプロセスが多い、fsync で確実に書く、キャッシュの判断を変えたい。向かないのはメモリの少ないホストで大きいファイルを次々に読む使い方 |
 | 失敗談 | fail-title / fail-plan / fail-result / fail-why / **fail-found** / **hook-tips** | fail-found (新規): 64 jobs の律速は daemon の `fentry/generic_file_read_iter` だった。hook-tips (新規): hot path にフックを置くときの注意 6 項目 |
-| まとめ | lessons / next / **usecases** / takeaway / end | usecases (新規): 判断は struct_ops、共有する状態は arena。takeaway に fentry の行を追加 |
+| まとめ | lessons / next / **usecases** / takeaway / end | usecases (新規): 判断は struct_ops、共有する状態は arena。takeaway に fentry の行を追加。next の 3 を「案B を実装」に |
 
 ### 後から加わった知見 (根拠)
 
@@ -39,7 +39,12 @@
   - 「FUSE は large folio を使うので速い」という仮説は、計測カーネル 6.12 で両方とも order 0 だったので外れた。
 - **100 MiB の warm read は fuse-cache より速い** (9.5 ms / 10.5 ms、§18.16 T6)。§18.2 の 1.20 倍は再現しない。
 - **kmod が kern_vm を使えない理由** (v6.12 `kernel/bpf/arena.c`): `bpf_arena_get_kern_vm_start` は未 export。この PoC は `struct bpf_arena` のレイアウトを BTF から複製して番地を取っている (`kmod/s3fs_ebpf_dev.c`) が、普通のカーネル C には BPF のような例外テーブルがないので、未割り当てのページや `bpf_arena_free_pages` と競合したときに oops になる。read 経路が GUP を使う決め手はこちら。
-- **勝てるところの数字の注意**: open+read+close と durable write の数字は 2026-10-11 の arena モードでの計測。pcache モードと AC-50 (既存ファイルを書き換える前に残りを読み込む) の後では測り直していない。既存ファイルの途中への write は、その読み込みのぶん遅くなるはず。cold read の FUSE との比較もまだない。
+- **勝てる・負けるところの数字** (§18.27〜18.41、2026-10-17、ローカル MinIO)
+  - open+read+close と durable write は pcache モードで測り直した (§18.27 / 18.28)。arena モードと同じ水準。
+  - 既存の大きいオブジェクトの途中の書き換えは、AC-50 の読み込みで一度 2.46× 遅くなった (§18.29)。AC-51 (`--partial-modify`、既定では無効) で、触れる chunk だけを読み、残りを `UploadPartCopy` で運ぶようにして、100 MiB で fuse-raw と互角 (§18.36)。16 MiB 未満は全体を読み書きするので、10 MiB はまだ 0.61×。
+  - cold read は AC-52 (ディスクキャッシュを非同期に、4 並列の range GET と chunk ごとの populate) で直した (§18.34〜18.37)。bench で続けて読むと遅いのはホストのメモリ回収待ちで (§18.39)、毎回 `drop_caches` すると 300 MiB で fuse-raw の 1.26×。pcache の容量の既定値が無制限でホストのメモリを見ないのは設計の課題 (§18.39.1)。
+  - 実際の S3 での計測はまだ。
+- **pick_victim** (`docs/design/ac58-pick-victim.md`、§18.41): vtable の末尾に `on_insert` / `on_remove` / `pick_victim` を足した。SIEVE の FIFO と hand は BPF の map に持ち、kmod は返った ino を確かめて evict する (使えなければ score 順に戻る)。3 seed で sieve_pick_ops 35.0〜37.1%、lru_ops 30.7〜32.8%、旧 sieve_ops 29.3〜32.0%。`pick_victim` の時間と read 経路のコストは未計測。
 - **arena を BPF でループする場合**: `can_loop` / `bpf_for` / `bpf_loop` のコールバックは、どれも BPF のコードとして kern_vm を直接読むので GUP はない。KFunc に走査させるなら、リンクは kernel メモリに置き、arena には payload だけを置く。BPF のコールバックを取る kfunc を外部モジュールが定義できるかは未確認。
 
 ---
