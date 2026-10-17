@@ -63,12 +63,12 @@ stop_everything() {
 }
 trap stop_everything EXIT
 
-start_fuse()  { fuse_mount_raw "$MP_FUSE_RAW"; fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; }
+start_fuse()  { sudo rm -rf "$FUSE_CACHE_DIR"; fuse_mount_raw "$MP_FUSE_RAW"; fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; }
 start_mount_s3() { sudo rm -rf "$MOUNT_S3_CACHE_DIR"; mount_s3_mount "$MP_MOUNT_S3" "$MOUNT_S3_CACHE_DIR"; }
 start_ebpf() { # <log> [flags]
 	local l=$1; shift
 	ebpf_mount "$MP_EBPF"
-	ebpf_start_daemon "$OUT/$l" --arena-metadata-only --sample-every=60s --sync-every=0 "$@"
+	ebpf_start_daemon "$OUT/$l" --bucket="$S3_BUCKET" --arena-metadata-only --sample-every=60s --sync-every=0 "$@"
 }
 
 # ── A: open+read+close ────────────────────────────────────────────────────────
@@ -190,7 +190,7 @@ step_D() {
 		sync; sudo sysctl -q -w vm.drop_caches=3
 		case $be in
 			fuse-raw) fuse_mount_raw "$MP_FUSE_RAW"; mp=$MP_FUSE_RAW;;
-			fuse-cache) fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; mp=$MP_FUSE_CACHE;;
+			fuse-cache) sudo rm -rf "$FUSE_CACHE_DIR"; fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; mp=$MP_FUSE_CACHE;;
 			mount-s3) start_mount_s3 || continue; mp=$MP_MOUNT_S3;;
 			ebpf) sudo rm -rf "$EBPF_CACHE_DIR"; mkdir -p "$EBPF_CACHE_DIR"
 			      start_ebpf D-ebpf.log --cache-dir="$EBPF_CACHE_DIR"; mp=$MP_EBPF;;
@@ -219,23 +219,25 @@ step_D() {
 # ── E: many small files ──────────────────────────────────────────────────────
 step_E() {
 	log "E: $SMALL_N x 4 KiB files"
-	: > "$OUT/E.txt"
+	: > "${E_OUT:-$OUT/E.txt}"
 	stop_everything
 	S3_BUCKET=$SMALL_BUCKET
+	if [ -z "${E_SKIP_SEED:-}" ]; then
 	seed_bucket "$SMALL_BUCKET"
 	local d="$OUT/small"; rm -rf "$d"; mkdir -p "$d"
 	head -c $((SMALL_N * 4096)) /dev/urandom | split -b 4096 -a 5 -d - "$d/f"
 	docker exec "$MINIO_CONTAINER" rm -rf /tmp/small
 	docker cp "$d" "$MINIO_CONTAINER:/tmp/small"
 	mc cp --recursive /tmp/small/ "local/$SMALL_BUCKET/" >/dev/null
-	log "uploaded: $(mc ls "local/$SMALL_BUCKET/" | wc -l) objects"
+	fi
+	log "bucket has: $(mc ls "local/$SMALL_BUCKET/" | wc -l) objects"
 	local be mp t ms
-	for be in fuse-raw fuse-cache mount-s3 ebpf; do
+	for be in ${E_BACKENDS:-fuse-raw fuse-cache mount-s3 ebpf}; do
 		stop_everything
 		sync; sudo sysctl -q -w vm.drop_caches=3
 		case $be in
 			fuse-raw) fuse_mount_raw "$MP_FUSE_RAW"; mp=$MP_FUSE_RAW;;
-			fuse-cache) fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; mp=$MP_FUSE_CACHE;;
+			fuse-cache) sudo rm -rf "$FUSE_CACHE_DIR"; fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; mp=$MP_FUSE_CACHE;;
 			mount-s3) start_mount_s3 || continue; mp=$MP_MOUNT_S3;;
 			ebpf) sudo rm -rf "$EBPF_CACHE_DIR"; mkdir -p "$EBPF_CACHE_DIR"
 			      start_ebpf E-ebpf.log --cache-dir="$EBPF_CACHE_DIR" --softcap=20000; mp=$MP_EBPF;;
@@ -248,7 +250,7 @@ step_E() {
 				cat-*) timeout 1800 bash -c "find '$mp' -maxdepth 1 -type f -name 'f*' -print0 | sort -z | xargs -0 cat | wc -c" > "$OUT/E.bytes" ;;
 			esac
 			ms=$(ms_since "$t")
-			echo "$be $ph $ms files=$(cat "$OUT/E.lines" 2>/dev/null) bytes=$(cat "$OUT/E.bytes" 2>/dev/null)" | tee -a "$OUT/E.txt" >&2
+			echo "$be $ph $ms files=$(cat "$OUT/E.lines" 2>/dev/null) bytes=$(cat "$OUT/E.bytes" 2>/dev/null)" | tee -a "${E_OUT:-$OUT/E.txt}" >&2
 		done
 	done
 	stop_everything

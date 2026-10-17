@@ -643,6 +643,13 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 	if rest := int64(entry.Fallback) - missChunkOffset; rest < size {
 		size = rest
 	}
+	// kmod sends the length the chunk must hold up to its i_size. The
+	// entry's size is older when the file was appended and flushed since the
+	// last sync; a chunk cut at the old size never becomes populated and the
+	// write fails with EIO.
+	if want := int64(ev.Count); want > size && want <= partialAdmitChunk {
+		size = want
+	}
 	if size <= 0 {
 		fail(-5 /* -EIO */, "chunk at %d is past the object (%d B)", missChunkOffset, entry.Fallback)
 		return

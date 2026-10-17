@@ -17,6 +17,9 @@
 #   append    : 4 KiB appended
 #   empty     : `: > f` (truncate to 0)
 #   otrunc    : O_TRUNC open + small write (replaces the content)
+#   append2   : append, drop caches, append again.  The daemon's size for the
+#               object is the pre-append one (--sync-every=0), so the load must
+#               follow the kmod's i_size or the second append fails with EIO.
 #
 # Run in both admit modes (MODES="pcache arena"): the loader fills the fd
 # through POPULATE_PAGES either way.
@@ -60,7 +63,7 @@ mkdir -p "$OUT"
 need_cmds docker sha256sum
 need_built
 
-SCENARIOS=(overwrite shrink extend append empty otrunc)
+SCENARIOS=(overwrite shrink extend append empty otrunc append2)
 
 head -c 4096 /dev/urandom > "$TMPDIR_LOCAL/patch1"
 head -c 4096 /dev/urandom > "$TMPDIR_LOCAL/patch2"
@@ -94,6 +97,7 @@ run_mode() {
             append)  cat "$TMPDIR_LOCAL/append" >> "$f" ;;
             empty)   : > "$f" ;;
             otrunc)  cp "$TMPDIR_LOCAL/small" "$f" ;;
+            append2) cat "$TMPDIR_LOCAL/append" "$TMPDIR_LOCAL/append" >> "$f" ;;
         esac
         WANT[$sc]=$(sha256sum < "$f" | awk '{print $1}')
     done
@@ -124,6 +128,9 @@ run_mode() {
             append)  sudo sh -c "cat '$TMPDIR_LOCAL/append' >> '$p'" ;;
             empty)   sudo sh -c ": > '$p'" ;;
             otrunc)  sudo sh -c "cat '$TMPDIR_LOCAL/small' > '$p'" ;;
+            append2) sudo sh -c "cat '$TMPDIR_LOCAL/append' >> '$p'"
+                     sleep 2; sudo sysctl -q -w vm.drop_caches=3; sleep 1
+                     sudo sh -c "cat '$TMPDIR_LOCAL/append' >> '$p'" ;;
         esac
     done
 
