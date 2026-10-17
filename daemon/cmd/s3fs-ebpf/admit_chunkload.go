@@ -30,13 +30,17 @@ import (
 // MinIO levels off at 4 (docs/journal/benchmark-results.md §18.34).
 const chunkLoadWorkers = 4
 
+// chunkLoadGroup is how many contiguous chunks one range GET fetches (16 MiB);
+// they are populated and signalled one by one.  Fewer, larger requests cut
+// the per-request cost on the object store (§18.37).
+const chunkLoadGroup = 4
+
 type chunkLoad struct {
 	size int64
 	n    int
 	done []chan struct{} // closed once chunk i is populated or the load failed
 
 	mu   sync.Mutex
-	data [][]byte // fetched chunk bodies, kept for a re-populate after a shed
 	ok   []bool   // chunk i was populated
 	err  error
 }
@@ -55,7 +59,7 @@ var chunkLoads sync.Map
 func newChunkLoad(size int64) *chunkLoad {
 	n := int((size + partialAdmitChunk - 1) / partialAdmitChunk)
 	l := &chunkLoad{size: size, n: n, done: make([]chan struct{}, n),
-		data: make([][]byte, n), ok: make([]bool, n)}
+		ok: make([]bool, n)}
 	for i := range l.done {
 		l.done[i] = make(chan struct{})
 	}
@@ -101,7 +105,11 @@ func (l *chunkLoad) populateAndSignal(ops chunkLoadOps, i int, data []byte, enfo
 }
 
 // run fetches every chunk (starting at missIdx, then wrapping) and populates
-// them in that order.  The caller is the handler of the first miss.
+// them.  The caller is the handler of the first miss.  Each worker fetches a
+// chunk, populates it and wakes its waiter before taking the next one, so the
+// GETs and the populate ioctls (page allocation and copy in kmod) overlap and
+// both run chunkLoadWorkers wide; chunks complete roughly in file order from
+// the miss.
 func (l *chunkLoad) run(ctx context.Context, ops chunkLoadOps, missIdx int) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -109,58 +117,64 @@ func (l *chunkLoad) run(ctx context.Context, ops chunkLoadOps, missIdx int) erro
 	for k := 0; k < l.n; k++ {
 		order = append(order, (missIdx+k)%l.n)
 	}
-	ready := make([]chan struct{}, l.n)
-	for i := range ready {
-		ready[i] = make(chan struct{})
+	// groups of up to chunkLoadGroup chunks that are contiguous in the file
+	// (a wrap past the end of the file ends a group), as {position, count}.
+	var groups [][2]int
+	for k := 0; k < l.n; {
+		cnt := 1
+		for cnt < chunkLoadGroup && k+cnt < l.n && order[k+cnt] == order[k]+cnt {
+			cnt++
+		}
+		groups = append(groups, [2]int{k, cnt})
+		k += cnt
 	}
 	var next atomic.Int64
 	var wg sync.WaitGroup
-	for w := 0; w < chunkLoadWorkers && w < l.n; w++ {
+	for w := 0; w < chunkLoadWorkers && w < len(groups); w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for {
-				k := int(next.Add(1)) - 1
-				if k >= l.n {
+				gi := int(next.Add(1)) - 1
+				if gi >= len(groups) || ctx.Err() != nil {
 					return
 				}
-				i := order[k]
-				b, err := ops.getRange(ctx, int64(i)*partialAdmitChunk, l.chunkLen(i))
-				if err == nil && int64(len(b)) != l.chunkLen(i) {
+				k, cnt := groups[gi][0], groups[gi][1]
+				first := order[k]
+				goff := int64(first) * partialAdmitChunk
+				var glen int64
+				for j := 0; j < cnt; j++ {
+					glen += l.chunkLen(first + j)
+				}
+				b, err := ops.getRange(ctx, goff, glen)
+				if err == nil && int64(len(b)) != glen {
 					err = io.ErrUnexpectedEOF
 				}
 				if err != nil {
-					l.setErr(fmt.Errorf("chunk %d: %w", i, err))
+					l.setErr(fmt.Errorf("chunks %d-%d: %w", first, first+cnt-1, err))
 					cancel()
+					return
 				}
-				l.mu.Lock()
-				l.data[i] = b
-				l.mu.Unlock()
-				close(ready[i])
+				for j := 0; j < cnt; j++ {
+					i := first + j
+					cb := b[int64(j)*partialAdmitChunk : int64(j)*partialAdmitChunk+l.chunkLen(i)]
+					// enforce the capacity once the miss chunk is in and once the
+					// last chunk is in, before their signals (still pending-protected).
+					perr := l.populateAndSignal(ops, i, cb, k+j == 0 || k+j == l.n-1)
+					if perr != nil {
+						l.setErr(perr)
+						cancel()
+						return
+					}
+					l.mu.Lock()
+					l.ok[i] = true
+					l.mu.Unlock()
+					close(l.done[i])
+				}
 			}
 		}()
 	}
-	defer wg.Wait()
-
-	for k, i := range order {
-		<-ready[i]
-		l.mu.Lock()
-		failure, data := l.err, l.data[i]
-		l.mu.Unlock()
-		if failure == nil {
-			// enforce the capacity once the miss chunk is in and once the
-			// last chunk is in, before their signals (still pending-protected).
-			failure = l.populateAndSignal(ops, i, data, k == 0 || k == l.n-1)
-		}
-		if failure != nil {
-			l.setErr(failure)
-			break
-		}
-		l.mu.Lock()
-		l.ok[i] = true
-		l.mu.Unlock()
-		close(l.done[i])
-	}
+	wg.Wait()
 	// Release every follower: chunks that were not populated stay !ok.
 	l.mu.Lock()
 	for i := range l.done {
@@ -183,7 +197,7 @@ func (l *chunkLoad) follow(ctx context.Context, ops chunkLoadOps, ci int) {
 		return
 	}
 	l.mu.Lock()
-	ok, data := l.ok[ci], l.data[ci]
+	ok := l.ok[ci]
 	l.mu.Unlock()
 	off := int64(ci) * partialAdmitChunk
 	if !ok {
@@ -200,6 +214,12 @@ func (l *chunkLoad) follow(ctx context.Context, ops chunkLoadOps, ci int) {
 			return
 		}
 		metrics.Global.ReadMissRepopulates.Add(1)
+		// the body is not kept (a 300 MiB load would hold it all): refetch
+		data, gerr := ops.getRange(ctx, off, l.chunkLen(ci))
+		if gerr != nil {
+			_ = ops.signal(off, 0, 0)
+			return
+		}
 		if err := ops.populate(off, data); err != nil {
 			_ = ops.signal(off, 0, 0)
 			return

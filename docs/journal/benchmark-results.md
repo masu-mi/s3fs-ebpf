@@ -1771,3 +1771,26 @@ arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準
 - 10 MiB はまだ 1.6× 遅い。`partial_modify_min` (16 MiB) 未満で全体を読み書きしている。しきい値を下げた計測は未実施。
 - 実 S3 (EC2) では `UploadPartCopy` が MinIO より速いはずなので、100 MiB はさらに有利になる見込み (未計測)。
 - 変更の最初に chunk を読み込まない書き込み (chunk 境界にそろう書き込み) は、ETag を flush 時に `Stat` して固定する。最初の変更から flush までの間に別クライアントが上書きしても検出できない (設計 §8 の代案の弱い側。upcall を足せば解消する)。
+
+### 18.37 cold read の残り (AC-52 の仕上げ、n=10、ローカル MinIO)
+
+§18.35 の後に切り分けて、次の 3 つを入れた (`admit_chunkload.go`、`s3/client.go`)。
+- worker が「range GET → populate → signal」を 1 つずつ進める (以前は GET の worker と、順番に populate する 1 本の consumer に分かれていた)。populate の ioctl も 4 並列になる。
+- range GET を 4 chunk (16 MiB) ずつにまとめる。populate / signal は 4 MiB ごとのまま。
+- range GET の本体を、サイズを先に確保して `ReadFull` で読む (`io.ReadAll` は buffer を伸ばしながらコピーする)。chunk の本体は保持しない (shed のあとの再 populate は取り直す)。
+
+最終 run (n=10): 
+
+| サイズ | fuse-raw | ebpf | ebpf / fuse-raw |
+|---:|---:|---:|---:|
+| 10 MiB | 19.2 ms | 20.5 ms | 0.94× |
+| 100 MiB | 100.3 ms | 114.7 ms (min 92.3) | 0.87× |
+| 300 MiB | 309.6 ms | 385.1 ms (min 309.8) | 0.80× |
+
+sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× 以上) は中央値では届かない。** 最小値は fuse-raw と同じ。
+
+切り分けで分かったこと:
+- 300 MiB の load 全体 (≈ 350 ms) の大半は range GET で、worker の GET 時間の合計が約 1,200 ms (4 並列で約 300 ms)。populate の合計は 150〜380 ms で、4 並列にしたので全体には効かない。GC は無関係 (`GOGC=off` / 400 で変わらない)。
+- GET の並列数は 4 が最良 (8 で 1.2×、16 で 4× ほどばらつく)。まとめる単位は 1 / 2 / 4 / 8 chunk で比べ、4 を選んだが、run 間のばらつき (同じ設定で中央値 340〜395 ms) のほうが差より大きく、4 と 8 は区別できない。
+- ebpf の 300 MiB は run ごとに 295 ms から 2 秒超まで散らばる (fuse-raw は 289〜335 ms で安定)。外れ値は GET の時間が伸びた run で、MinIO (docker、同じ 6 CPU) 側の揺れと見ている。daemon の中の原因は見つかっていない。
+- `--cache-dir` には、この経路では全体が書かれない (§18.35 のまま)。再起動後の cold read には効かなくなっている。復元するなら、chunk を集め直す必要があり 300 MiB を保持するため、今回は見送った。

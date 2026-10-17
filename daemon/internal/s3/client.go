@@ -131,11 +131,21 @@ func (c *Client) GetRange(ctx context.Context, key string, offset int64, size in
 			key, offset, offset+size, err)
 	}
 	defer obj.Close()
-	buf, err := io.ReadAll(obj)
-	if err != nil {
-		return nil, fmt.Errorf("s3 range get %q read: %w", key, err)
+	return readRange(obj, size, func(err error) error {
+		return fmt.Errorf("s3 range get %q read: %w", key, err)
+	})
+}
+
+// readRange reads a range response into a buffer sized up front: io.ReadAll
+// grows (and copies) its buffer, which cost ~40% of a 4 MiB chunk's time.  A
+// body shorter than `size` (range past the end) returns what arrived.
+func readRange(r io.Reader, size int64, wrap func(error) error) ([]byte, error) {
+	buf := make([]byte, size)
+	n, err := io.ReadFull(r, buf)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, wrap(err)
 	}
-	return buf, nil
+	return buf[:n], nil
 }
 
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
@@ -206,14 +216,12 @@ func (c *Client) GetRangeMatch(ctx context.Context, key string, offset, size int
 		return nil, fmt.Errorf("s3 range get %q: %w", key, err)
 	}
 	defer obj.Close()
-	buf, err := io.ReadAll(obj)
-	if err != nil {
+	return readRange(obj, size, func(err error) error {
 		if isPreconditionFailed(err) {
-			return nil, objstore.ErrSourceChanged
+			return objstore.ErrSourceChanged
 		}
-		return nil, fmt.Errorf("s3 range get %q read: %w", key, err)
-	}
-	return buf, nil
+		return fmt.Errorf("s3 range get %q read: %w", key, err)
+	})
 }
 
 // PutWithCopy builds `key` from parts: uploads carry their bytes, copies
