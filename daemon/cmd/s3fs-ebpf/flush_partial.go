@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
@@ -149,6 +150,7 @@ func flushPartial(ctx context.Context, mc objstore.MultipartCopier, put func(ctx
 	}
 	parts := make([]objstore.Part, len(specs))
 	var sent int64
+	t0 := time.Now()
 	for i, sp := range specs {
 		parts[i] = objstore.Part{PartSpec: sp}
 		if sp.Kind == objstore.PartUpload {
@@ -159,10 +161,13 @@ func flushPartial(ctx context.Context, mc objstore.MultipartCopier, put func(ctx
 			sent += sp.Len
 		}
 	}
+	t1 := time.Now()
 	if err == nil {
 		_, err = mc.PutWithCopy(ctx, key, etag, parts)
 	}
 	if err == nil {
+		fmt.Printf("[flush] s3://%s %d parts: fill %.1f ms, multipart %.1f ms\n", key, len(parts),
+			float64(t1.Sub(t0).Microseconds())/1000, float64(time.Since(t1).Microseconds())/1000)
 		return sent, nil
 	}
 	if !errors.Is(err, objstore.ErrSourceChanged) {

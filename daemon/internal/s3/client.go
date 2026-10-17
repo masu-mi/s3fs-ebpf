@@ -7,9 +7,12 @@ package s3
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
@@ -231,31 +234,70 @@ func (c *Client) PutWithCopy(ctx context.Context, key, ifMatchETag string, parts
 		_ = core.AbortMultipartUpload(actx, c.cfg.Bucket, key, uploadID)
 		return "", err
 	}
-	done := make([]minio.CompletePart, 0, len(parts))
-	for i, p := range parts {
-		num := i + 1
-		switch p.Kind {
-		case objstore.PartCopy:
-			cp, err := core.CopyObjectPart(ctx, c.cfg.Bucket, key, c.cfg.Bucket, key, uploadID,
-				num, p.Off, p.Len, map[string]string{"x-amz-copy-source-if-match": ifMatchETag})
-			if err != nil {
-				if isPreconditionFailed(err) {
-					return fail(objstore.ErrSourceChanged)
+	// Parts are independent; MinIO's copy cost grows with the bytes copied,
+	// so run a few at a time.
+	done := make([]minio.CompletePart, len(parts))
+	errs := make([]error, len(parts))
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workers := min(4, len(parts))
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(next.Add(1)) - 1
+				if i >= len(parts) || pctx.Err() != nil {
+					return
 				}
-				return fail(fmt.Errorf("s3 copy part %d of %q: %w", num, key, err))
+				p, num := parts[i], i+1
+				switch p.Kind {
+				case objstore.PartCopy:
+					cp, err := core.CopyObjectPart(pctx, c.cfg.Bucket, key, c.cfg.Bucket, key, uploadID,
+						num, p.Off, p.Len, map[string]string{"x-amz-copy-source-if-match": ifMatchETag})
+					if err != nil {
+						if isPreconditionFailed(err) {
+							errs[i] = objstore.ErrSourceChanged
+						} else {
+							errs[i] = fmt.Errorf("s3 copy part %d of %q: %w", num, key, err)
+						}
+					} else {
+						done[i] = minio.CompletePart{PartNumber: num, ETag: cp.ETag}
+					}
+				default:
+					if int64(len(p.Data)) != p.Len {
+						errs[i] = fmt.Errorf("s3 upload part %d of %q: have %d bytes, want %d", num, key, len(p.Data), p.Len)
+					} else if up, err := core.PutObjectPart(pctx, c.cfg.Bucket, key, uploadID, num,
+						bytes.NewReader(p.Data), p.Len, minio.PutObjectPartOptions{}); err != nil {
+						errs[i] = fmt.Errorf("s3 upload part %d of %q: %w", num, key, err)
+					} else {
+						done[i] = minio.CompletePart{PartNumber: num, ETag: up.ETag}
+					}
+				}
+				if errs[i] != nil {
+					cancel()
+				}
 			}
-			done = append(done, minio.CompletePart{PartNumber: num, ETag: cp.ETag})
-		default:
-			if int64(len(p.Data)) != p.Len {
-				return fail(fmt.Errorf("s3 upload part %d of %q: have %d bytes, want %d", num, key, len(p.Data), p.Len))
-			}
-			up, err := core.PutObjectPart(ctx, c.cfg.Bucket, key, uploadID, num,
-				bytes.NewReader(p.Data), p.Len, minio.PutObjectPartOptions{})
-			if err != nil {
-				return fail(fmt.Errorf("s3 upload part %d of %q: %w", num, key, err))
-			}
-			done = append(done, minio.CompletePart{PartNumber: num, ETag: up.ETag})
+		}()
+	}
+	wg.Wait()
+	// ErrSourceChanged wins over the cancellations it caused.
+	var firstErr error
+	for _, e := range errs {
+		if errors.Is(e, objstore.ErrSourceChanged) {
+			return fail(e)
 		}
+		if firstErr == nil && e != nil {
+			firstErr = e
+		}
+	}
+	if firstErr != nil {
+		return fail(firstErr)
+	}
+	if err := ctx.Err(); err != nil {
+		return fail(err)
 	}
 	info, err := core.CompleteMultipartUpload(ctx, c.cfg.Bucket, key, uploadID, done, minio.PutObjectOptions{})
 	if err != nil {
