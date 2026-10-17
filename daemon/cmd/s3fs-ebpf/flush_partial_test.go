@@ -136,12 +136,13 @@ func TestFlushPartial_NoCopyRunFallsBackToPut(t *testing.T) {
 type etagBackend struct {
 	objstore.Backend
 	etag    string
+	body    []byte // for Stat's size and GetRange
 	onMatch func(etag string) // runs before each pinned read
 	reads   int
 }
 
 func (b *etagBackend) Stat(context.Context, string) (objstore.ObjectMeta, error) {
-	return objstore.ObjectMeta{ETag: b.etag}, nil
+	return objstore.ObjectMeta{ETag: b.etag, Size: int64(len(b.body))}, nil
 }
 
 func (b *etagBackend) GetRangeMatch(_ context.Context, _ string, off, n int64, etag string) ([]byte, error) {
@@ -153,6 +154,13 @@ func (b *etagBackend) GetRangeMatch(_ context.Context, _ string, off, n int64, e
 		return nil, objstore.ErrSourceChanged
 	}
 	return make([]byte, n), nil
+}
+
+func (b *etagBackend) GetRange(_ context.Context, _ string, off, n int64) ([]byte, error) {
+	if off+n > int64(len(b.body)) {
+		return nil, errors.New("range past the end")
+	}
+	return b.body[off : off+n], nil
 }
 
 func (b *etagBackend) PutWithCopy(context.Context, string, string, []objstore.Part) (string, error) {
@@ -197,4 +205,38 @@ func TestGetPinned(t *testing.T) {
 		}
 		objETags.Delete(uint64(ino))
 	})
+}
+
+// Someone truncated the object after we pinned it: a remote chunk reaches
+// past the new end.  The fallback put writes what is left and zeros for the
+// rest, instead of failing on every retry.
+func TestFlushPartial_ObjectTruncatedUnderTheCopy(t *testing.T) {
+	const chunk = 4 << 20
+	const size = 4 * chunk
+	cur := make([]byte, chunk+1000) // the object now: 1 chunk + 1000 bytes
+	for i := range cur {
+		cur[i] = byte(i*3 + 1)
+	}
+	kinds := []objstore.ChunkKind{objstore.ChunkRemote, objstore.ChunkRemote, objstore.ChunkData, objstore.ChunkRemote}
+	data := bytes.Repeat([]byte{0xBB}, chunk)
+	b := &etagBackend{etag: "E3", body: cur}
+	io := partialIO{
+		readDirty: func(off int64, buf []byte) error { copy(buf, data); return nil },
+		getMatch: func(ctx context.Context, off, n int64) ([]byte, error) {
+			return b.GetRangeMatch(ctx, "k", off, n, "E1") // pinned to the old object
+		},
+		getNow: func(ctx context.Context, off, n int64) ([]byte, error) { return getNowClamped(ctx, b, "k", off, n) },
+	}
+	var put []byte
+	sent, etag, err := flushPartial(context.Background(), b,
+		func(_ context.Context, d []byte) error { put = d; return nil }, io, "k", "E1", kinds, chunk, size)
+	if err != nil || sent != size || etag != "" || int64(len(put)) != size {
+		t.Fatalf("err=%v sent=%d etag=%q len=%d", err, sent, etag, len(put))
+	}
+	want := make([]byte, size)
+	copy(want, cur)
+	copy(want[2*chunk:], data)
+	if !bytes.Equal(put, want) {
+		t.Fatal("content: surviving bytes, then zeros past the object's end, then kmod's chunk")
+	}
 }
