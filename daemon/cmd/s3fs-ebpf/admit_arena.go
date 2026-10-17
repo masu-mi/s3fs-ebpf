@@ -858,6 +858,11 @@ func handleReadMiss(ctx context.Context, devPath string,
 				ev.Ino, entry.Name, pat.SeqRatio(), fullSize)
 		}
 	}
+	if useFullAdmit && isLarge && arenaMetadataOnlyEnabled {
+		// AC-52 step 3: parallel range GETs, populated and signalled per chunk.
+		serveChunkLoad(ctx, devPath, s3c, ev, entry.S3Key, entry.Name, fullSize, missChunkOffset)
+		return
+	}
 	if useFullAdmit {
 		body, err = s3c.Get(ctx, entry.S3Key)
 	} else {

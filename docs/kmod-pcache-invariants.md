@@ -25,6 +25,8 @@
 - 成立条件: reader は **pending を作る前に** `buf_readers++` する (`s3fs_ebpf_read_folio`)。pending があれば reader は登録済みなので、signal の時点で chunk が populated なら、reader が終わるまで reset に解放されない。
 - daemon は `-EAGAIN` なら populate をやり直す (最大 `signalVerifyRetries=3`)。使い切ったら検証なしで signal し、reader 側の retry / フォールバックに任せる。
 
+- chunk load (AC-52 手順 3、daemon の `admit_chunkload.go`): pcache モードで大きいファイルが全体 admit になるとき、daemon は 4 MiB ごとの range GET (4 並列) を、miss した chunk から順に **chunk ごとに populate して、その chunk の pending に signal** する。契約は変わらない: signal は chunk ごとに `S3FS_SIGNAL_VERIFY_POPULATED` 付きで、pending のない chunk は ENOENT (無視)、EAGAIN なら再 populate (最大 `signalVerifyRetries`)。reader は先の chunk で miss して別の handler を立てるので、daemon は ino ごとに進行中の load を登録し、後から来た handler はその chunk の完了を待って signal だけを行う (GET を二重に出さない)。load が失敗したら待っている handler に -EIO を返す。先の chunk は pin されていないので shed されうるが、そのときの reader は通常の miss として次の load をやり直す。
+
 ## populate 後の capacity 強制 (AC-45 C2)
 - pcache の miss (populate ioctl + signal) は kmod の `admit_replace` を呼ばないので、capacity の evict は eval / sync が来るまで動かなかった。daemon は `--cache-capacity` が効いているとき (kmod パラメータ `capacity_bytes` > 0) に限り、**最後の populate のあと、signal の前に** `refreshAdmits` (= `admit_replace` の再実行) を行う (`enforceCapacityAfterPopulate`)。signal の前なので、この miss の chunk は pending に守られる。同時に来た miss は 1 回の追加の pass にまとめる (single-flight)。
 
