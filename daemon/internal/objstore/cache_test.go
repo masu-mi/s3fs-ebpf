@@ -201,3 +201,31 @@ func TestDiskCache_EvictionDisabled(t *testing.T) {
 	}
 	_ = os.RemoveAll(dir)
 }
+
+// TestDiskCache_WriteAsync checks the write-behind path (AC-52): the body
+// lands after WaitAsync, and an Invalidate that races with it wins, so a
+// Put/Delete is never followed by a stale cached body.
+func TestDiskCache_WriteAsync(t *testing.T) {
+	dir := t.TempDir()
+	cache, err := NewDiskCache(dir, KindS3, "bucket", 1<<20)
+	if err != nil {
+		t.Fatalf("NewDiskCache: %v", err)
+	}
+	cache.WriteAsync("k", []byte("BODY"))
+	cache.WaitAsync()
+	if got, ok := cache.Read("k"); !ok || string(got) != "BODY" {
+		t.Fatalf("Read after WriteAsync = %q, %v", got, ok)
+	}
+
+	for i := 0; i < 200; i++ {
+		cache.WriteAsync("race", []byte("STALE"))
+		cache.Invalidate("race")
+		cache.WaitAsync()
+		if _, ok := cache.Read("race"); ok {
+			t.Fatalf("iteration %d: Invalidate lost to an async write", i)
+		}
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("leftover files in cache dir: %d, want 1", len(ents))
+	}
+}

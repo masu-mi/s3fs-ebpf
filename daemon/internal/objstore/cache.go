@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -42,7 +43,27 @@ type DiskCache struct {
 	highWMFrac float64 // trigger threshold (0.0–1.0); default 0.90
 	lowWMFrac  float64 // eviction target (0.0–1.0);  default 0.70
 	usedBytes  *int64  // nil when eviction disabled; atomic via sync/atomic ops
+	async      *asyncState
 }
+
+// maxAsyncWrites bounds the number of write-behind goroutines (and so the
+// bodies they pin in memory). A WriteAsync past the bound is dropped: the
+// cache is best-effort and the next Get simply refetches.
+const maxAsyncWrites = 4
+
+// asyncState is shared by every copy of a DiskCache (the struct is
+// returned and stored by value). mu orders a write-behind commit against
+// Invalidate: a commit that lost the race is discarded, so an async write
+// can never resurrect a body that Put / Delete / Rename just invalidated.
+type asyncState struct {
+	mu      sync.Mutex
+	pending map[string]*pendingWrite
+	sem     chan struct{}
+	wg      sync.WaitGroup
+	seq     atomic.Uint64 // unique tmp suffix
+}
+
+type pendingWrite struct{ cancelled bool }
 
 // NewDiskCache returns a cache rooted at `dir`. `tag` prefixes stderr
 // log lines so operators can tell which backend logged a
@@ -57,6 +78,10 @@ func NewDiskCache(dir, tag, bucket string, maxBytes int64) (DiskCache, error) {
 	}
 	if dir == "" {
 		return c, nil
+	}
+	c.async = &asyncState{
+		pending: make(map[string]*pendingWrite),
+		sem:     make(chan struct{}, maxAsyncWrites),
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return c, fmt.Errorf("%s cache mkdir %s: %w", tag, dir, err)
@@ -118,6 +143,53 @@ func (c *DiskCache) Write(key string, buf []byte) {
 	if !c.enabled() {
 		return
 	}
+	c.write(key, buf, nil)
+}
+
+// WriteAsync is Write moved off the caller's path (AC-52: the disk write
+// used to sit inside the cold read's latency). buf must not be modified
+// afterwards. The write is dropped when maxAsyncWrites are already in
+// flight, and discarded if Invalidate runs before it commits.
+func (c *DiskCache) WriteAsync(key string, buf []byte) {
+	if !c.enabled() {
+		return
+	}
+	st := c.async
+	select {
+	case st.sem <- struct{}{}:
+	default:
+		return
+	}
+	pw := &pendingWrite{}
+	st.mu.Lock()
+	if old := st.pending[key]; old != nil {
+		old.cancelled = true
+	}
+	st.pending[key] = pw
+	st.mu.Unlock()
+	st.wg.Add(1)
+	go func() {
+		defer st.wg.Done()
+		defer func() { <-st.sem }()
+		c.write(key, buf, pw)
+		st.mu.Lock()
+		if st.pending[key] == pw {
+			delete(st.pending, key)
+		}
+		st.mu.Unlock()
+	}()
+}
+
+// WaitAsync blocks until every WriteAsync issued so far has finished.
+func (c *DiskCache) WaitAsync() {
+	if c.enabled() {
+		c.async.wg.Wait()
+	}
+}
+
+// write stores buf under key. A non-nil pw makes the final commit
+// conditional on pw not having been cancelled by Invalidate.
+func (c *DiskCache) write(key string, buf []byte, pw *pendingWrite) {
 	c.evictIfNeeded(int64(len(buf)))
 
 	// Capture the old file size before overwriting (0 for new keys).
@@ -129,10 +201,19 @@ func (c *DiskCache) Write(key string, buf []byte) {
 		}
 	}
 
-	tmp := c.path(key) + ".tmp"
+	tmp := fmt.Sprintf("%s.%d.tmp", c.path(key), c.async.seq.Add(1))
 	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "%s cache write %s: %v\n", c.tag, tmp, err)
+		_ = os.Remove(tmp)
 		return
+	}
+	if pw != nil {
+		c.async.mu.Lock()
+		defer c.async.mu.Unlock()
+		if pw.cancelled {
+			_ = os.Remove(tmp)
+			return
+		}
 	}
 	if err := os.Rename(tmp, c.path(key)); err != nil {
 		fmt.Fprintf(os.Stderr, "%s cache rename %s: %v\n", c.tag, tmp, err)
@@ -151,6 +232,11 @@ func (c *DiskCache) Invalidate(key string) {
 		return
 	}
 	p := c.path(key)
+	c.async.mu.Lock()
+	defer c.async.mu.Unlock()
+	if pw := c.async.pending[key]; pw != nil {
+		pw.cancelled = true
+	}
 	if c.usedBytes != nil {
 		if info, err := os.Stat(p); err == nil {
 			atomic.AddInt64(c.usedBytes, -info.Size())
