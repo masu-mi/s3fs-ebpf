@@ -390,6 +390,20 @@ module_param_named(capacity_bytes, s3fs_capacity_bytes, ullong, 0644);
 MODULE_PARM_DESC(capacity_bytes,
 	"Admit-set byte capacity; >0 enables capacity mode (evict by policy score until it fits). 0 = legacy vote mode");
 
+/* AC-51: leave the chunks a first write / truncate does not touch in S3
+ * (struct s3fs_chunk.remote) instead of loading them; the daemon flushes
+ * them with a server-side copy.  Off by default: it needs the daemon's
+ * multipart flush (docs/design/ac51-partial-modify.md). */
+bool s3fs_partial_modify __read_mostly;
+module_param_named(partial_modify, s3fs_partial_modify, bool, 0644);
+MODULE_PARM_DESC(partial_modify,
+	"AC-51: keep untouched chunks of a modified existing object remote (default off)");
+
+unsigned long long s3fs_partial_modify_min __read_mostly = 16ULL << 20;
+module_param_named(partial_modify_min, s3fs_partial_modify_min, ullong, 0644);
+MODULE_PARM_DESC(partial_modify_min,
+	"AC-51: smallest object size (bytes) that uses partial_modify (default 16 MiB)");
+
 /* AB-02: bench-only bypass — skip arena fast path, always use page cache. */
 bool s3fs_arena_bypass __read_mostly;
 module_param_named(arena_bypass, s3fs_arena_bypass, bool, 0644);
@@ -1950,6 +1964,11 @@ struct s3fs_chunk {
 	u8   *p;
 	u32   cap;       /* allocated bytes, <= S3FS_CHUNK_SIZE */
 	bool  populated; /* S11: holds valid S3 data (T2 uses it for every ci) */
+	/* AC-51: only in a dirty fd.  The chunk is unchanged from the object
+	 * in S3 and not held here (p may be stale or NULL); it reads through a
+	 * load upcall and flushes as a server-side copy.  Counted in
+	 * fd->nr_remote; cleared by a store, a free and a successful flush. */
+	bool  remote;
 	/* U8 (per chunk): pcache readers in the upcall retry loop waiting on
 	 * this chunk.  While > 0 s3fs_file_data_reset keeps the chunk, so the
 	 * data-based fill still finds what the daemon populated for them even
@@ -1966,6 +1985,7 @@ struct s3fs_file_data {
 	size_t cap;
 	bool  dirty;    /* set by .write, cleared after successful daemon flush */
 	bool  flushing; /* flush enqueued; cleared by signal_flush on PUT ACK */
+	u32   nr_remote; /* AC-51: chunks with .remote set */
 	/* U8 is per chunk now (struct s3fs_chunk.readers). */
 	/* W1: unflushed-data pin.  maybe_enqueue_flush takes one inode ref
 	 * (ihold) per fd while a flush is outstanding so evict_inode cannot
@@ -2051,6 +2071,8 @@ static void s3fs_fd_chunk_free(struct s3fs_file_data *fd, u32 ci)
 	if (ci >= fd->nr_chunks)
 		return;
 	c = &fd->chunks[ci];
+	if (c->remote)
+		fd->nr_remote--;
 	if (c->p) {
 		atomic_long_sub(c->cap, &s3fs_fd_buf_bytes);
 		fd->cap -= c->cap;
@@ -2140,6 +2162,10 @@ static int s3fs_fd_store(struct s3fs_file_data *fd, u64 off, const void *kbuf,
 		if (err)
 			return err;
 		c = &fd->chunks[ci];
+		if (c->remote) {
+			c->remote = false;
+			fd->nr_remote--;
+		}
 		if (kbuf) {
 			memcpy(c->p + seg_off, (const u8 *)kbuf + (pos - off),
 			       seg_len);
@@ -2165,14 +2191,15 @@ static int s3fs_fd_store(struct s3fs_file_data *fd, u64 off, const void *kbuf,
 
 /* Copy the first n bytes of the file to user space; missing chunks and
  * the unallocated tail of a short chunk read as zeros.  fd->lock held. */
-static long s3fs_fd_copy_out(struct s3fs_file_data *fd, char __user *uaddr,
-			     size_t n)
+static long s3fs_fd_copy_out_at(struct s3fs_file_data *fd, char __user *uaddr,
+				size_t base, size_t n)
 {
 	size_t pos = 0;
 
 	while (pos < n) {
-		u32 ci = (u32)(pos >> S3FS_PCACHE_CHUNK_SHIFT);
-		u32 off = (u32)(pos & (S3FS_CHUNK_SIZE - 1));
+		size_t fpos = base + pos;
+		u32 ci = (u32)(fpos >> S3FS_PCACHE_CHUNK_SHIFT);
+		u32 off = (u32)(fpos & (S3FS_CHUNK_SIZE - 1));
 		size_t seg = min_t(size_t, S3FS_CHUNK_SIZE - off, n - pos);
 		size_t have = 0;
 
@@ -2187,6 +2214,12 @@ static long s3fs_fd_copy_out(struct s3fs_file_data *fd, char __user *uaddr,
 		pos += seg;
 	}
 	return (long)n;
+}
+
+static long s3fs_fd_copy_out(struct s3fs_file_data *fd, char __user *uaddr,
+			     size_t n)
+{
+	return s3fs_fd_copy_out_at(fd, uaddr, 0, n);
 }
 
 /* True if the 4 MiB chunk at chunk_offset of ino is allocated and populated
@@ -2692,6 +2725,15 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 						     ci < fd->nr_chunks; ci++)
 							if (fd->chunks[ci].p)
 								fd->chunks[ci].populated = true;
+						/* AC-51: the object now equals
+						 * the fd, so a remote chunk is
+						 * just a chunk we do not hold. */
+						for (ci = 0; fd->nr_remote &&
+						     ci < fd->nr_chunks; ci++)
+							if (fd->chunks[ci].remote) {
+								fd->chunks[ci].remote = false;
+								fd->nr_remote--;
+							}
 					}
 					if (err == 0 && !fd->dirty)
 						unpin = s3fs_flush_unpin(fd);
@@ -3076,6 +3118,91 @@ long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
 	return ret;
 }
 
+/* AC-51: S3FS_IOC_READ_DIRTY_RANGE -- copy [offset, offset + cap) of the fd's
+ * content (clamped to fd->size).  Remote chunks read as zeros here; the
+ * daemon asks for data chunks only (S3FS_IOC_DIRTY_LAYOUT says which). */
+long s3fs_ebpf_read_dirty_range(u64 ino, void __user *uaddr, u64 offset, u64 cap)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+	size_t n;
+	long ret;
+
+	if (!s3fs_active_sb)
+		return -ENODEV;
+	inode = ilookup(s3fs_active_sb, ino);
+	if (!inode)
+		return -ENOENT;
+	fd = inode->i_private;
+	if (!fd) {
+		iput(inode);
+		return -EIO;
+	}
+	mutex_lock(&fd->lock);
+	n = offset < fd->size ? min_t(u64, cap, fd->size - offset) : 0;
+	ret = n ? s3fs_fd_copy_out_at(fd, uaddr, (size_t)offset, n) : 0;
+	mutex_unlock(&fd->lock);
+	iput(inode);
+	return ret;
+}
+
+/* AC-51: S3FS_IOC_DIRTY_LAYOUT -- one byte per chunk of the fd's content
+ * (S3FS_DIRTY_CHUNK_*), so the daemon can flush remote chunks as server-side
+ * copies.  Like READ_DIRTY it claims every enqueue so far: the write that
+ * enqueued the flush is in this layout (W1), and a later write enqueues its
+ * own flush.  -ENOSPC (with *nr set) when `cap` is too small. */
+long s3fs_ebpf_dirty_layout(u64 ino, u8 __user *states, u32 cap, u64 *size,
+			    u32 *nr)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+	u32 n, ci;
+	long ret = 0;
+
+	BUILD_BUG_ON(S3FS_DIRTY_CHUNK_BYTES != S3FS_CHUNK_SIZE);
+	if (!s3fs_active_sb)
+		return -ENODEV;
+	inode = ilookup(s3fs_active_sb, ino);
+	if (!inode)
+		return -ENOENT;
+	fd = inode->i_private;
+	if (!fd) {
+		iput(inode);
+		return -EIO;
+	}
+	mutex_lock(&fd->lock);
+	*size = fd->size;
+	n = (u32)DIV_ROUND_UP(fd->size, S3FS_CHUNK_SIZE);
+	*nr = n;
+	if (n > cap) {
+		ret = -ENOSPC;
+		goto out;
+	}
+	for (ci = 0; ci < n;) {
+		u8 tmp[128];
+		u32 k, m = min_t(u32, n - ci, sizeof(tmp));
+
+		for (k = 0; k < m; k++) {
+			struct s3fs_chunk *c = ci + k < fd->nr_chunks ?
+					       &fd->chunks[ci + k] : NULL;
+
+			tmp[k] = c && c->remote ? S3FS_DIRTY_CHUNK_REMOTE :
+				 (c && c->p ? S3FS_DIRTY_CHUNK_DATA :
+				  S3FS_DIRTY_CHUNK_HOLE);
+		}
+		if (copy_to_user(states + ci, tmp, m)) {
+			ret = -EFAULT;
+			goto out;
+		}
+		ci += m;
+	}
+	fd->flush_read_seq = fd->flush_seq;
+out:
+	mutex_unlock(&fd->lock);
+	iput(inode);
+	return ret;
+}
+
 int s3fs_ebpf_mark_dirty(u64 ino)
 {
 	struct inode *inode;
@@ -3148,12 +3275,35 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
  *
  * Refuses to overwrite a dirty inode (user-written content takes
  * precedence over S3 data until the flush completes). */
+/* AC-51: [offset, end) is made of whole remote chunks (up to i_size).  fd->lock
+ * held.  The only populate a dirty fd accepts. */
+static bool s3fs_fd_remote_covered(struct inode *inode, struct s3fs_file_data *fd,
+				   u64 offset, u64 end)
+{
+	u64 eof = max_t(u64, end, (u64)i_size_read(inode));
+	u32 ci, first = (u32)(offset >> S3FS_PCACHE_CHUNK_SHIFT);
+	u32 last = (u32)((end - 1) >> S3FS_PCACHE_CHUNK_SHIFT);
+
+	if (!fd->nr_remote)
+		return false;
+	for (ci = first; ci <= last; ci++) {
+		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, eof);
+
+		if (ci >= fd->nr_chunks || !fd->chunks[ci].remote ||
+		    offset > cs || end < ce)
+			return false;
+	}
+	return true;
+}
+
 int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 			     const void __user *data_ptr)
 {
 	struct inode *inode;
 	struct s3fs_file_data *fd;
 	u64 end;
+	bool owned;
 	int err = 0;
 
 	/* P2/Q3: reject degenerate or oversized requests before any allocation.
@@ -3176,9 +3326,12 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 	}
 
 	mutex_lock(&fd->lock);
-	if (fd->dirty || fd->flushing) {
+	owned = fd->dirty || fd->flushing;
+	if (owned && !s3fs_fd_remote_covered(inode, fd, offset, end)) {
 		/* Never overwrite buf with stale S3 data when user content is
-		 * pending (dirty) or a flush PUT is still in-flight (flushing). */
+		 * pending (dirty) or a flush PUT is still in-flight (flushing).
+		 * AC-51 exception: chunks that are still the S3 object's own
+		 * bytes (remote) may be loaded into a dirty fd, whole. */
 		err = -EBUSY;
 		goto out_unlock;
 	}
@@ -3220,12 +3373,12 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 				fd->chunks[ci].populated = true;
 		}
 	}
-	if (end > (u64)fd->size)
+	if (!owned && end > (u64)fd->size)
 		fd->size = (size_t)end;
 	/* S8: only grow i_size, never shrink it.  Eviction zeroes fd->size (Q1)
 	 * but preserves i_size at the S3 object size so that a partial
 	 * re-populate does not truncate the file visible to user-space. */
-	if ((loff_t)fd->size > i_size_read(inode))
+	if (!owned && (loff_t)fd->size > i_size_read(inode))
 		i_size_write(inode, (loff_t)fd->size);
 	/* Invalidate any stale page-cache folios for this range so the
 	 * next read triggers .read_folio and picks up the new fd->buf data.
@@ -3238,7 +3391,8 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 	 * eviction can free fd->buf between the copy above and the insert
 	 * below.  kzalloc inside admit_insert_pcache runs before write_lock,
 	 * so sleeping with fd->lock (mutex) held is safe. */
-	err = admit_insert_pcache(ino, offset, size);
+	if (!owned)	/* a dirty fd is not capacity-managed */
+		err = admit_insert_pcache(ino, offset, size);
 out_unlock:
 	mutex_unlock(&fd->lock);
 out_iput:
@@ -3294,15 +3448,98 @@ static bool admit_snapshot(u64 ino, u64 pos,
  * S3FS_UPCALL_WAIT_JIFFIES for the daemon). */
 #define S3FS_LOAD_MAX_TRIES	6
 
+/* AC-51: what a modification of the file does, for the loader.  Callers
+ * describe it; s3fs_mop_prepare adapts it to the fd's current state. */
+struct s3fs_mop {
+	u64  end;	/* [0, end) of the current content must survive */
+	u64  ow_lo, ow_hi; /* chunks inside this range are overwritten completely */
+	u64  t_lo, t_hi;   /* bytes whose new value the change decides */
+	bool partial;	/* chunks outside [t_lo, t_hi) may stay remote */
+};
+
+static bool s3fs_partial_wanted(struct inode *inode)
+{
+	return READ_ONCE(s3fs_partial_modify) &&
+	       (u64)i_size_read(inode) >= READ_ONCE(s3fs_partial_modify_min);
+}
+
+/* The chunks [first, last] a partial op can need data for; with !partial,
+ * every chunk of [0, end).  false: none. */
+static bool s3fs_mop_range(const struct s3fs_mop *op, u32 *first, u32 *last)
+{
+	u64 nci = DIV_ROUND_UP(op->end, S3FS_CHUNK_SIZE);
+	u64 lo = 0, hi;
+
+	if (!nci)
+		return false;
+	hi = nci - 1;
+	if (op->partial) {
+		if (op->t_hi <= op->t_lo)
+			return false;
+		lo = max(lo, op->t_lo >> S3FS_PCACHE_CHUNK_SHIFT);
+		hi = min(hi, (op->t_hi - 1) >> S3FS_PCACHE_CHUNK_SHIFT);
+		if (lo > hi)
+			return false;
+	}
+	*first = (u32)lo;
+	*last = (u32)hi;
+	return true;
+}
+
+/* Does the op need chunk ci to hold the object's bytes?  Not when it
+ * overwrites the chunk completely, and in partial mode not when the change
+ * does not reach into it. */
+static bool s3fs_mop_needs_data(const struct s3fs_mop *op, u32 ci)
+{
+	u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+	u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, op->end);
+
+	if (cs >= op->end)
+		return false;
+	if (op->ow_lo <= cs && op->ow_hi >= ce)
+		return false;
+	if (op->partial &&
+	    (cs + S3FS_CHUNK_SIZE <= op->t_lo || cs >= op->t_hi))
+		return false;
+	return true;
+}
+
+/* fd->lock held.  Adapts the caller's op to the fd: end is limited to the
+ * object size; a dirty fd only ever needs its remote chunks.  false: there is
+ * nothing for the loader to do. */
+static bool s3fs_mop_prepare(struct inode *inode, struct s3fs_file_data *fd,
+			     const struct s3fs_mop *in, struct s3fs_mop *op)
+{
+	*op = *in;
+	op->end = min_t(u64, in->end, (u64)i_size_read(inode));
+	if (fd->dirty || fd->flushing) {
+		if (!fd->nr_remote)
+			return false;
+		op->partial = true;
+	}
+	return op->end != 0;
+}
+
+/* fd->lock held: chunk ci holds what the op needs of it.  A clean fd must
+ * have it populated; a dirty fd owns its content, apart from remote chunks. */
+static bool s3fs_mop_chunk_ready(const struct s3fs_file_data *fd, u32 ci)
+{
+	const struct s3fs_chunk *c = ci < fd->nr_chunks ? &fd->chunks[ci] : NULL;
+
+	if (fd->dirty || fd->flushing)
+		return !(c && c->remote);
+	return c && c->p && c->populated;
+}
+
 /* AC-50: pins held on the chunks a modification needs, from the start of
  * the load until the caller has applied the change under fd->lock.  A pinned
  * chunk is not freed by reset / shed (readers != 0), so what the load put in
  * stays until the fd is dirty and owns the content.  Unpinning between the
  * load and the write let a capacity pass free the chunk again, and a file
  * larger than capacity_bytes could never hold all its chunks that way.
- * Covers [0, end) except chunks [ow_lo, ow_hi) overwrites completely. */
+ * Pins exactly the chunks s3fs_mop_needs_data() selects. */
 struct s3fs_mpin {
-	u64 end, ow_lo, ow_hi;
+	struct s3fs_mop op;
 	bool held;
 };
 
@@ -3310,19 +3547,14 @@ struct s3fs_mpin {
 static void s3fs_mpin_release_locked(struct s3fs_file_data *fd,
 				     struct s3fs_mpin *mp)
 {
-	u32 nci, ci;
+	u32 ci, first, last;
 
 	if (!mp->held)
 		return;
-	nci = (u32)DIV_ROUND_UP(mp->end, S3FS_CHUNK_SIZE);
-	for (ci = 0; ci < nci; ci++) {
-		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
-		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, mp->end);
-
-		if (mp->ow_lo <= cs && mp->ow_hi >= ce)
-			continue;
-		s3fs_fd_chunk_unpin(fd, ci);
-	}
+	if (s3fs_mop_range(&mp->op, &first, &last))
+		for (ci = first; ci <= last; ci++)
+			if (s3fs_mop_needs_data(&mp->op, ci))
+				s3fs_fd_chunk_unpin(fd, ci);
 	mp->held = false;
 }
 
@@ -3335,23 +3567,21 @@ static void s3fs_mpin_release(struct s3fs_file_data *fd, struct s3fs_mpin *mp)
 
 /* fd->lock held.  Returns 0 with the pins held, or -errno with none. */
 static int s3fs_mpin_acquire_locked(struct s3fs_file_data *fd,
-				    struct s3fs_mpin *mp, u64 end,
-				    u64 ow_lo, u64 ow_hi)
+				    struct s3fs_mpin *mp,
+				    const struct s3fs_mop *op)
 {
-	u32 nci = (u32)DIV_ROUND_UP(end, S3FS_CHUNK_SIZE), ci;
+	u32 ci, first, last;
 
-	mp->end = end;
-	mp->ow_lo = ow_lo;
-	mp->ow_hi = ow_hi;
+	mp->op = *op;
 	mp->held = true;
-	for (ci = 0; ci < nci; ci++) {
-		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
-		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, end);
-
-		if (ow_lo <= cs && ow_hi >= ce)
+	if (!s3fs_mop_range(op, &first, &last))
+		return 0;
+	for (ci = first; ci <= last; ci++) {
+		if (!s3fs_mop_needs_data(op, ci))
 			continue;
 		if (!s3fs_fd_chunk_pin(fd, ci)) {
-			mp->end = cs;	/* release what was pinned so far */
+			/* release what was pinned so far: chunks below ci */
+			mp->op.end = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
 			s3fs_mpin_release_locked(fd, mp);
 			return -ENOMEM;
 		}
@@ -3359,36 +3589,70 @@ static int s3fs_mpin_acquire_locked(struct s3fs_file_data *fd,
 	return 0;
 }
 
-/* AC-50: true when, with fd->lock held, a modification may be applied: the
- * fd already owns the content, or every chunk of [0, min(need_end, i_size))
- * that the caller does not overwrite completely is allocated and populated.
- * s3fs_fd_load_for_modify returns with the chunks still pinned (struct
- * s3fs_mpin), so a shed / evict -> reset cannot free them between the load
- * and the change.  The pins are not enough on their own, though: a loader
- * can return with a short set (a concurrent reset before it pinned, a
- * partial load).  Callers therefore check here under fd->lock, keep that
- * lock through s3fs_mpin_release_locked, the change and the dirty mark,
+/* AC-50: true when, with fd->lock held, a modification may be applied: every
+ * chunk the op needs holds the object's bytes (clean fd: populated; dirty fd:
+ * not remote).  s3fs_fd_load_for_modify returns with those chunks still
+ * pinned (struct s3fs_mpin), so a shed / evict -> reset cannot free them
+ * between the load and the change.  The pins are not enough on their own,
+ * though: a loader can return with a short set (a concurrent reset before it
+ * pinned, a partial load).  Callers therefore check here under fd->lock, keep
+ * that lock through s3fs_mpin_release_locked, the change and the dirty mark,
  * and go back to loading when the check fails. */
 static bool s3fs_fd_modify_ready_locked(struct inode *inode,
-					struct s3fs_file_data *fd, u64 need_end,
-					u64 ow_lo, u64 ow_hi)
+					struct s3fs_file_data *fd,
+					const struct s3fs_mop *in)
 {
-	u64 end = min_t(u64, need_end, (u64)i_size_read(inode));
-	u32 nci = (u32)DIV_ROUND_UP(end, S3FS_CHUNK_SIZE), ci;
+	struct s3fs_mop op;
+	u32 ci, first, last;
+
+	if (!s3fs_mop_prepare(inode, fd, in, &op) ||
+	    !s3fs_mop_range(&op, &first, &last))
+		return true;
+	for (ci = first; ci <= last; ci++)
+		if (s3fs_mop_needs_data(&op, ci) &&
+		    !s3fs_mop_chunk_ready(fd, ci))
+			return false;
+	return true;
+}
+
+/* AC-51: fd->lock held, the fd clean and s3fs_fd_modify_ready_locked() true.
+ * In partial mode, the chunks below op->end that the change neither needs nor
+ * overwrites and that the fd does not hold become remote: the object keeps
+ * them and the flush copies them.  Done before the change is applied, so a
+ * failure leaves the fd as it was. */
+static int s3fs_fd_mark_remote_locked(struct inode *inode,
+				      struct s3fs_file_data *fd,
+				      const struct s3fs_mop *in)
+{
+	struct s3fs_mop op;
+	u32 nci, ci;
+	int err;
 
 	if (fd->dirty || fd->flushing)
-		return true;
+		return 0;
+	if (!s3fs_mop_prepare(inode, fd, in, &op) || !op.partial)
+		return 0;
+	nci = (u32)DIV_ROUND_UP(op.end, S3FS_CHUNK_SIZE);
+	err = s3fs_fd_chunks_grow(fd, nci - 1);
+	if (err)
+		return err;
 	for (ci = 0; ci < nci; ci++) {
 		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
-		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, end);
+		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, op.end);
+		struct s3fs_chunk *c = &fd->chunks[ci];
 
-		if (ow_lo <= cs && ow_hi >= ce)
-			continue;
-		if (ci >= fd->nr_chunks || !fd->chunks[ci].p ||
-		    !fd->chunks[ci].populated)
-			return false;
+		if (op.ow_lo <= cs && op.ow_hi >= ce)
+			continue;	/* the write fills it */
+		if (s3fs_mop_needs_data(&op, ci))
+			continue;	/* loaded */
+		if (c->p && c->populated)
+			continue;	/* held: flushed as data */
+		if (!c->remote) {
+			c->remote = true;
+			fd->nr_remote++;
+		}
 	}
-	return true;
+	return 0;
 }
 
 /* AC-50: make the fd hold the parts of an existing object that a modification
@@ -3398,58 +3662,53 @@ static bool s3fs_fd_modify_ready_locked(struct inode *inode,
  * write / truncate on a file nobody read used to start from an empty buffer:
  * the object was truncated to what was written, a shrink produced zeros and
  * `: > f` never reached S3.  Only the clean -> dirty transition needs this
- * (afterwards the fd owns the content).
+ * (afterwards the fd owns the content) -- except, AC-51, a dirty fd's remote
+ * chunks, which a later change may need.
  *
- * Loads chunks [0, min(need_end, i_size)) that are not populated, except
- * chunks the caller overwrites completely ([ow_lo, ow_hi)).  A chunk is
- * fetched with an upcall flagged S3FS_MISS_FLAG_FOR_WRITE; the daemon fills
+ * Loads the chunks s3fs_mop_needs_data() selects that are not there.  A chunk
+ * is fetched with an upcall flagged S3FS_MISS_FLAG_FOR_WRITE; the daemon fills
  * it with POPULATE_PAGES (also in arena mode) and signals with
  * S3FS_SIGNAL_VERIFY_POPULATED.  Same protocol as .read_folio: pin the chunk
  * first, then create the pending.  Returns -EIO when a chunk cannot be
  * loaded (daemon absent or failing): the write is refused rather than
  * flushed over the object.  Sleeps; call with no lock held. */
 static int s3fs_fd_load_for_modify(struct inode *inode,
-				   struct s3fs_file_data *fd, u64 need_end,
-				   u64 ow_lo, u64 ow_hi, struct s3fs_mpin *mp)
+				   struct s3fs_file_data *fd,
+				   const struct s3fs_mop *in,
+				   struct s3fs_mpin *mp)
 {
-	u64 end = min_t(u64, need_end, (u64)i_size_read(inode));
-	u32 nci, ci;
+	struct s3fs_mop op;
+	u32 ci, first, last;
 	int err;
 
 	mutex_lock(&fd->lock);
 	s3fs_mpin_release_locked(fd, mp);
-	if (!end || fd->dirty || fd->flushing) {
+	if (!s3fs_mop_prepare(inode, fd, in, &op) ||
+	    !s3fs_mop_range(&op, &first, &last)) {
 		mutex_unlock(&fd->lock);
 		return 0;
 	}
-	err = s3fs_mpin_acquire_locked(fd, mp, end, ow_lo, ow_hi);
+	err = s3fs_mpin_acquire_locked(fd, mp, &op);
 	mutex_unlock(&fd->lock);
 	if (err)
 		return err;
 
-	nci = (u32)DIV_ROUND_UP(end, S3FS_CHUNK_SIZE);
-	for (ci = 0; ci < nci; ci++) {
+	for (ci = first; ci <= last; ci++) {
 		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
-		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, end);
 		int tries = 0;
 
-		if (ow_lo <= cs && ow_hi >= ce)
-			continue; /* overwritten completely: nothing to keep */
+		if (!s3fs_mop_needs_data(&op, ci))
+			continue;
 		for (;;) {
 			struct s3fs_pending *p;
 			struct mm_struct *mm;
-			bool owned, have;
+			bool have;
 			long rem = 1;
 
+			err = 0;
 			mutex_lock(&fd->lock);
-			owned = fd->dirty || fd->flushing;
-			have = ci < fd->nr_chunks && fd->chunks[ci].p &&
-			       fd->chunks[ci].populated;
-			if (owned)
-				s3fs_mpin_release_locked(fd, mp);
+			have = s3fs_mop_chunk_ready(fd, ci);
 			mutex_unlock(&fd->lock);
-			if (owned)
-				return 0; /* the fd owns the content already */
 			if (have)
 				break;
 
@@ -3483,23 +3742,24 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 			}
 			if (p)
 				pending_put(p);
-			if (err || ++tries >= S3FS_LOAD_MAX_TRIES) {
-				bool done = false;
-
-				if (err && err != -ERESTARTSYS && err != -EINTR) {
-					/* A concurrent write made the fd dirty
-					 * first: the daemon refuses to populate
-					 * a dirty fd (-EBUSY), but there is
-					 * nothing left to load. */
-					mutex_lock(&fd->lock);
-					done = fd->dirty || fd->flushing;
-					mutex_unlock(&fd->lock);
-				}
+			if (err == -ERESTARTSYS || err == -EINTR) {
 				s3fs_mpin_release(fd, mp);
-				if (done)
-					return 0;
-				if (err == -ERESTARTSYS || err == -EINTR)
-					return err;
+				return err;
+			}
+			if (err) {
+				/* The daemon refused (it will not populate a
+				 * chunk a concurrent writer already holds,
+				 * -EBUSY): fine if the chunk is there now. */
+				mutex_lock(&fd->lock);
+				have = s3fs_mop_chunk_ready(fd, ci);
+				mutex_unlock(&fd->lock);
+				if (have)
+					break;
+				s3fs_mpin_release(fd, mp);
+				return -EIO;
+			}
+			if (++tries >= S3FS_LOAD_MAX_TRIES) {
+				s3fs_mpin_release(fd, mp);
 				return -EIO;
 			}
 		}
@@ -3514,6 +3774,7 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 	struct inode *inode = file_inode(file);
 	struct s3fs_file_data *fd = inode->i_private;
 	struct s3fs_mpin mp = {};
+	struct s3fs_mop op;
 	loff_t start;
 	int err, tries;
 
@@ -3531,22 +3792,24 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 	for (tries = 0;; tries++) {
 		loff_t lstart = (file->f_flags & O_APPEND) ?
 				i_size_read(inode) : *pos;
+		u64 isz = (u64)i_size_read(inode);
 
+		op = (struct s3fs_mop){
+			.end = isz,
+			.ow_lo = (u64)max_t(loff_t, lstart, 0),
+			.ow_hi = (u64)max_t(loff_t, lstart, 0) + count,
+			.t_lo = min_t(u64, (u64)max_t(loff_t, lstart, 0), isz),
+			.t_hi = (u64)max_t(loff_t, lstart, 0) + count,
+			.partial = s3fs_partial_wanted(inode),
+		};
 		mutex_lock(&fd->lock);
-		if (lstart < 0 ||
-		    s3fs_fd_modify_ready_locked(inode, fd,
-						(u64)i_size_read(inode),
-						(u64)lstart,
-						(u64)lstart + count))
+		if (lstart < 0 || s3fs_fd_modify_ready_locked(inode, fd, &op))
 			break;
 		mutex_unlock(&fd->lock);
 		if (tries >= S3FS_LOAD_MAX_TRIES)
 			err = -EIO;
 		else
-			err = s3fs_fd_load_for_modify(inode, fd,
-						(u64)i_size_read(inode),
-						(u64)lstart,
-						(u64)lstart + count, &mp);
+			err = s3fs_fd_load_for_modify(inode, fd, &op, &mp);
 		if (err) {
 			s3fs_mpin_release(fd, &mp);
 			return err;
@@ -3555,6 +3818,11 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 	/* fd->lock is held from the check to the dirty mark below, so the pins
 	 * are no longer needed. */
 	s3fs_mpin_release_locked(fd, &mp);
+	err = s3fs_fd_mark_remote_locked(inode, fd, &op);
+	if (err) {
+		mutex_unlock(&fd->lock);
+		return err;
+	}
 	if (!fd->dirty && !fd->flushing)
 		fd->size = max_t(size_t, fd->size, (size_t)i_size_read(inode));
 	start = (file->f_flags & O_APPEND) ? (loff_t)fd->size : *pos;
@@ -3600,6 +3868,7 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 		loff_t new_size = attr->ia_size;
 		bool owned;
 		struct s3fs_mpin mp = {};
+		struct s3fs_mop op;
 		u64 cur;
 		int tries;
 
@@ -3611,17 +3880,20 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 			mutex_lock(&fd->lock);
 			owned = fd->dirty || fd->flushing;
 			cur = owned ? (u64)fd->size : (u64)i_size_read(inode);
-			if (owned || (u64)new_size == cur ||
-			    s3fs_fd_modify_ready_locked(inode, fd,
-						min_t(u64, new_size, cur), 0, 0))
+			op = (struct s3fs_mop){
+				.end = min_t(u64, new_size, cur),
+				.t_lo = min_t(u64, new_size, cur),
+				.t_hi = max_t(u64, new_size, cur),
+				.partial = s3fs_partial_wanted(inode),
+			};
+			if ((u64)new_size == cur ||
+			    s3fs_fd_modify_ready_locked(inode, fd, &op))
 				break;
 			mutex_unlock(&fd->lock);
 			if (tries >= S3FS_LOAD_MAX_TRIES)
 				err = -EIO;
 			else
-				err = s3fs_fd_load_for_modify(inode, fd,
-						min_t(u64, new_size, cur),
-						0, 0, &mp);
+				err = s3fs_fd_load_for_modify(inode, fd, &op, &mp);
 			if (err) {
 				s3fs_mpin_release(fd, &mp);
 				return err;
@@ -3629,6 +3901,13 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 		}
 		/* fd->lock stays held until the size change is applied. */
 		s3fs_mpin_release_locked(fd, &mp);
+		if ((u64)new_size != cur) {
+			err = s3fs_fd_mark_remote_locked(inode, fd, &op);
+			if (err) {
+				mutex_unlock(&fd->lock);
+				return err;
+			}
+		}
 		if (!fd->dirty && !fd->flushing && (u64)new_size != cur)
 			fd->size = max_t(size_t, fd->size, (size_t)cur);
 		if (new_size < (loff_t)fd->size) {
@@ -3783,7 +4062,8 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 			/* T1: dirty or in-flight flush — the chunks are owned by
 			 * the write/flush path; bypass the populated flags.  A
 			 * missing chunk is a hole and reads as zeros. */
-			buf_valid = (size_t)pos < fd->size;
+			buf_valid = (size_t)pos < fd->size &&
+				    !(c && c->remote);
 		} else if (gen != 0) {
 			/* T2: after reset()/partial re-populate a chunk may be
 			 * allocated but not yet fetched (its tail is zero); the
@@ -3995,6 +4275,20 @@ retry:
 	mm = s3fs_admitted_mm;
 	read_unlock(&s3fs_admits_lock);
 
+	/* A dirty / flushing fd owns its content: a chunk it has (or a hole)
+	 * is served from the fd, the daemon has nothing to add and would only
+	 * be refused (populate -EBUSY) after a timeout per folio.  The
+	 * exception is a remote chunk (AC-51), which the daemon loads. */
+	if (mm && fd) {
+		u32 lci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
+
+		mutex_lock(&fd->lock);
+		if ((fd->dirty || fd->flushing) &&
+		    !(lci < fd->nr_chunks && fd->chunks[lci].remote))
+			mm = NULL;
+		mutex_unlock(&fd->lock);
+	}
+
 	if (mm && upcall_retries < S3FS_UPCALL_MAX_RETRIES) {
 		u64 chunk_offset = ((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT)
 				   << S3FS_PCACHE_CHUNK_SHIFT;
@@ -4015,8 +4309,34 @@ retry:
 		if (p) {
 			int err;
 			long remaining;
+			loff_t mpos = pos;
+			size_t mcount = fs_size;
+			u32 mflags = 0;
 
-			err = miss_enqueue(inode->i_ino, pos, fs_size, 0);
+			/* AC-51: a remote chunk of a dirty fd is the S3
+			 * object's own bytes that the fd does not hold: have
+			 * the daemon load the whole chunk (same request as a
+			 * load for write; kmod accepts it because the chunk is
+			 * remote). */
+			if (fd) {
+				u32 mci = (u32)(chunk_offset >>
+						S3FS_PCACHE_CHUNK_SHIFT);
+
+				mutex_lock(&fd->lock);
+				if ((fd->dirty || fd->flushing) &&
+				    mci < fd->nr_chunks &&
+				    fd->chunks[mci].remote) {
+					u64 isz = i_size_read(inode);
+
+					mflags = S3FS_MISS_FLAG_FOR_WRITE;
+					mpos = chunk_offset;
+					mcount = min_t(u64, S3FS_CHUNK_SIZE,
+						       isz > chunk_offset ?
+						       isz - chunk_offset : 1);
+				}
+				mutex_unlock(&fd->lock);
+			}
+			err = miss_enqueue(inode->i_ino, mpos, mcount, mflags);
 			if (err == 0) {
 				remaining = wait_for_completion_interruptible_timeout(
 					&p->done, S3FS_UPCALL_WAIT_JIFFIES);

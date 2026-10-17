@@ -55,6 +55,16 @@
 - 読み込みの miss event の `Count` は「chunk が i_size まで持つべき長さ」(`min(4 MiB, i_size - chunk 先頭)`)。daemon が持つオブジェクトのサイズ (`Fallback`) は append + flush のあと sync まで古いので、daemon は `Count` が長ければそれに合わせる。短いと chunk が populated にならず、-EIO になる。
 - 同時に来た 2 つの write: 後の loader は daemon から -EBUSY (dirty な fd は populate しない) を受けるが、fd がすでに dirty なら 0 を返して続ける (-EIO にしない)。
 
+## 途中の変更で運ばない部分 (AC-51、`partial_modify`、既定は off)
+設計は `docs/design/ac51-partial-modify.md`。kmod は `partial_modify=1` かつ `i_size >= partial_modify_min` (既定 16 MiB) のときだけ、次のように変わる。off のときは上の AC-50 のまま。**daemon の multipart flush (設計 §7) がつながるまで on にしない**: 今の `handleFlush` は fd 全体を `READ_DIRTY` で PUT するので、remote の chunk は 0 で上書きされる。
+- **dirty な fd の chunk は data / hole / remote のどれか。** remote (`chunks[ci].remote`、`fd->nr_remote` に数える) は、S3 のオブジェクトと同じバイトで fd が持たない chunk。remote があるのは dirty (または flushing) な fd だけ。
+- **何を読み込むか (`struct s3fs_mop`):** 変更が決めるバイト範囲 `[t_lo, t_hi)` に触れ、かつ全部は上書きされない chunk だけが「データが要る」(`s3fs_mop_needs_data`)。それ以外は fd に持たず、clean → dirty の瞬間に `s3fs_fd_mark_remote_locked` が remote にする (すでに populated な chunk は data のまま)。write は `t = [min(開始, i_size), 終端)`、縮小は `[新サイズ, 元のサイズ)`、拡張は `[元のサイズ, 新サイズ)`。chunk 全体の範囲で交差を見る (境界の chunk は、元のサイズより手前にあっても触れたと数える)。
+- **ready の判定は chunk ごと:** clean な fd は「populated」、dirty な fd は「remote でない」。dirty で `nr_remote == 0` なら何もしない (大きな dirty ファイルの write で全 chunk を走査しない)。pin は `s3fs_mop_needs_data` が選ぶ chunk だけ (acquire と release が同じ関数を使う)。
+- **remote が消える所:** `s3fs_fd_store` (書いた chunk は data)、`s3fs_fd_chunk_free` (truncate)、flush 成功 (`signal_flush`、`flush_read_seq == flush_seq` かつ `!dirty` のとき。dirty に戻っていたら remote のまま残す: 次の flush の copy 元になる)。
+- **remote の chunk を読む / 書く:** `s3fs_folio_fill_from_kmalloc` の dirty 側は remote の chunk を「データなし」にする。`read_folio` はその chunk に `S3FS_MISS_FLAG_FOR_WRITE` の miss (chunk 全体、Count = i_size までの長さ) を出す。`s3fs_ebpf_populate_pages` は dirty な fd でも、**範囲が remote の chunk を丸ごと (i_size まで) 覆うときだけ** 受け付ける。このとき `fd->size` / `i_size` を動かさず、PCACHE entry を入れず (dirty な fd は capacity の対象外)、store が remote を外す。それ以外の dirty への populate は今までどおり -EBUSY。load が daemon の失敗を受けたら、そのときの状態で chunk が揃っていれば成功とする (同時に来た writer がすでに持っている)。
+- **dirty な fd の読み出しは upcall しない (remote を除く):** `s3fs_ebpf_read_folio` は、dirty / flushing な fd で remote でない chunk (持っている chunk と穴) の miss では daemon を呼ばず、fd から直接読む (`gen=0` の fill)。daemon は dirty な fd に populate できず (-EBUSY)、folio ごとに timeout を待っていた (AC-51 の煙テストで、旧終端より先を `drop_caches` 後に読むと数十秒かかった)。
+- **flush 側の ioctl:** `S3FS_IOC_DIRTY_LAYOUT` が chunk ごとの状態 (data / hole / remote) と `fd->size` を返し、`flush_read_seq = flush_seq` を記録する (READ_DIRTY と同じく、ここまでの enqueue を覆う)。`S3FS_IOC_READ_DIRTY_RANGE` は `[offset, offset+size)` を読む。data / hole の chunk だけ読むこと (remote は 0 が返る)。
+
 ## flush pin (W1)
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。
 - `read_dirty` が `flush_read_seq = flush_seq` を記録。`signal_flush` は `err≠0 || flush_read_seq==flush_seq` のとき `flushing=false`、さらに `err==0 && !dirty` なら unpin (`iput` は fd->lock 解放後)。seq 不一致 = 後続 enqueue が未 PUT なので flushing/pin を維持。err≠0 は flushing を下ろすが pin は保持。
