@@ -375,6 +375,43 @@ static long s3fs_dev_read_dirty(void __user *uarg)
 	return 0;
 }
 
+/* AC-51 */
+static long s3fs_dev_read_dirty_range(void __user *uarg)
+{
+	struct s3fs_read_dirty_range req;
+	long copied;
+
+	if (copy_from_user(&req, uarg, sizeof(req)))
+		return -EFAULT;
+	copied = s3fs_ebpf_read_dirty_range(req.ino,
+					    (void __user *)(uintptr_t)req.uaddr,
+					    req.offset, req.size);
+	if (copied < 0)
+		return copied;
+	req.out_bytes = (u64)copied;
+	if (copy_to_user(uarg, &req, sizeof(req)))
+		return -EFAULT;
+	return 0;
+}
+
+static long s3fs_dev_dirty_layout(void __user *uarg)
+{
+	struct s3fs_dirty_layout req;
+	long ret;
+
+	if (copy_from_user(&req, uarg, sizeof(req)))
+		return -EFAULT;
+	req.chunk_size = S3FS_DIRTY_CHUNK_BYTES;
+	ret = s3fs_ebpf_dirty_layout(req.ino,
+				     (u8 __user *)(uintptr_t)req.states_uaddr,
+				     req.cap, &req.size, &req.nr_chunks);
+	if (ret < 0 && ret != -ENOSPC)
+		return ret;
+	if (copy_to_user(uarg, &req, sizeof(req)))
+		return -EFAULT;
+	return ret;
+}
+
 static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	void __user *uarg = (void __user *)arg;
@@ -400,6 +437,10 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_pop_flush_wait(uarg);
 	case S3FS_IOC_READ_DIRTY:
 		return s3fs_dev_read_dirty(uarg);
+	case S3FS_IOC_READ_DIRTY_RANGE:
+		return s3fs_dev_read_dirty_range(uarg);
+	case S3FS_IOC_DIRTY_LAYOUT:
+		return s3fs_dev_dirty_layout(uarg);
 	case S3FS_IOC_MARK_DIRTY: {
 		struct s3fs_mark_dirty req;
 

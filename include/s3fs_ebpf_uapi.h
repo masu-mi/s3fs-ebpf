@@ -143,6 +143,9 @@ struct s3fs_read_miss_event {
  * waiter; it does not admit anything into the arena.
  */
 #define S3FS_MISS_FLAG_FOR_WRITE	0x1u
+/* AC-51: also sent for a read of a remote chunk of a dirty file: load the
+ * whole chunk at `offset` into the fd (kmod accepts it because the chunk is
+ * remote; the daemon needs nothing else). */
 
 /*
  * S3FS_IOC_SYNC_ENTRIES — replace the kmod's dentry/inode entry table
@@ -420,5 +423,41 @@ struct s3fs_populate_pages {
 
 #define S3FS_IOC_POPULATE_PAGES \
 	_IOW(S3FS_IOC_MAGIC, 0x0E, struct s3fs_populate_pages)
+
+/*
+ * AC-51: S3FS_IOC_DIRTY_LAYOUT -- the chunk states of a dirty file, so the
+ * daemon can flush the unchanged ("remote") chunks with a server-side copy
+ * (UploadPartCopy) and only send the others.  `states` gets one byte per
+ * chunk; -ENOSPC with nr_chunks set when `cap` is too small.  Like
+ * READ_DIRTY it claims the flush events enqueued so far.
+ */
+#define S3FS_DIRTY_CHUNK_BYTES  (4U << 20)  /* = S3FS_CHUNK_SIZE in kmod */
+#define S3FS_DIRTY_CHUNK_DATA   0  /* kmod holds the bytes (READ_DIRTY_RANGE) */
+#define S3FS_DIRTY_CHUNK_HOLE   1  /* zeros: past the original object */
+#define S3FS_DIRTY_CHUNK_REMOTE 2  /* unchanged from the object in S3 */
+
+struct s3fs_dirty_layout {
+	__u64 ino;
+	__u64 states_uaddr;  /* in:  one byte per chunk */
+	__u32 cap;           /* in:  capacity of states, in chunks */
+	__u32 nr_chunks;     /* out: chunks in the file */
+	__u64 size;          /* out: file size */
+	__u64 chunk_size;    /* out: bytes per chunk */
+};
+
+#define S3FS_IOC_DIRTY_LAYOUT \
+	_IOWR(S3FS_IOC_MAGIC, 0x0F, struct s3fs_dirty_layout)
+
+/* AC-51: READ_DIRTY from `offset`; used for the data / hole chunks. */
+struct s3fs_read_dirty_range {
+	__u64 ino;
+	__u64 uaddr;      /* in:  daemon-side buffer address */
+	__u64 offset;     /* in:  file offset to start at */
+	__u64 size;       /* in:  buffer capacity */
+	__u64 out_bytes;  /* out: bytes copied */
+};
+
+#define S3FS_IOC_READ_DIRTY_RANGE \
+	_IOWR(S3FS_IOC_MAGIC, 0x10, struct s3fs_read_dirty_range)
 
 #endif /* _S3FS_EBPF_UAPI_H */
