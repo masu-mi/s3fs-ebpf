@@ -1794,3 +1794,16 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 - GET の並列数は 4 が最良 (8 で 1.2×、16 で 4× ほどばらつく)。まとめる単位は 1 / 2 / 4 / 8 chunk で比べ、4 を選んだが、run 間のばらつき (同じ設定で中央値 340〜395 ms) のほうが差より大きく、4 と 8 は区別できない。
 - ebpf の 300 MiB は run ごとに 295 ms から 2 秒超まで散らばる (fuse-raw は 289〜335 ms で安定)。外れ値は GET の時間が伸びた run で、MinIO (docker、同じ 6 CPU) 側の揺れと見ている。daemon の中の原因は見つかっていない。
 - `--cache-dir` には、この経路では全体が書かれない (§18.35 のまま)。再起動後の cold read には効かなくなっている。復元するなら、chunk を集め直す必要があり 300 MiB を保持するため、今回は見送った。
+
+### 18.38 cold read の GET 待ちを MinIO の trace と突き合わせた
+
+300 MiB の cold read を、daemon 側の range GET (開始時刻と所要時間を一時的に出力、コミットなし) と `mc admin trace --json --call s3 --method GET` で同時に取った (5 object、bench を挟まない単独の run)。
+
+| | リクエスト | 1 件の所要時間 (平均) | TTFB | cat 全体 |
+|---|---|---|---|---|
+| ebpf (daemon) | 19 × 16 MiB | client 35.8〜44.7 ms / MinIO 33.6〜41.2 ms | 3.0〜3.6 ms | 222〜321 ms (中央値 253) |
+| fuse-raw (s3fs) | 30 × 10 MiB | MinIO 25.7〜27.6 ms | 2.7〜3.0 ms | 281〜346 ms (中央値 315) |
+
+- **GET の待ちの 92〜93% は MinIO の応答時間**。client の所要時間は MinIO の所要時間より 2〜3.5 ms (最大 10 ms) 長いだけで、その内訳 (接続・送信・Go 側の読み込み) は小さい。リクエストが MinIO に届くまでの遅れも 2〜3.5 ms。TTFB は 3 ms で、残りは本体の転送 (16 MiB で約 31 ms、1 本あたり約 500 MB/s)。
+- 同じ条件の単独 run では **ebpf のほうが fuse-raw より速い** (253 対 315 ms)。
+- 一方、`bench-pcache-remeasure.sh` の step D では ebpf が 380〜417 ms で、fuse-raw (310〜317 ms) より遅い。backend の順番を入れ替えても同じで、単独 run でも `--cache-dir` の有無、10 / 100 MiB を先に読む、daemon 起動直後に読む、のどれを足しても再現しない。**bench でだけ遅い理由は未解明**。残る差は、bench が 3 サイズ × n 個 (4.5 GB 超) の object を先に作る点と、bench の MinIO / ホストの状態。
