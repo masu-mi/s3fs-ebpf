@@ -385,7 +385,9 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 
 	// AC-51: unchanged chunks of a large file are copied server-side.
 	{
-		pctx, pcancel := context.WithTimeout(ctx, 120*time.Second)
+		// AC-65: fill and upload share this deadline (they overlap now); a
+		// large object gets 1 s more per 8 MiB.
+		pctx, pcancel := context.WithTimeout(ctx, 120*time.Second+time.Duration(ev.Size>>23)*time.Second)
 		handled, sent, size, perr := tryFlushPartial(pctx, devFd, s3c, s3key, ev.Ino)
 		pcancel()
 		if handled {

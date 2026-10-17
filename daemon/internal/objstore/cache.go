@@ -1,12 +1,14 @@
 package objstore
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,10 +16,18 @@ import (
 )
 
 // DiskCache is the local staging store both backends use to satisfy
-// whole-object Get without a round-trip. Freshness check is
-// timestamp-of-file only (no ETag / If-None-Match); good enough to
-// match s3fs-fuse's -o use_cache behavior. Cache poisoning is out of
-// scope — same trust boundary as arena admits.
+// whole-object Get without a round-trip.  Cache poisoning is out of scope —
+// same trust boundary as arena admits.
+//
+// AC-40: each file starts with a header (format tag, the ETag and size of the
+// object the body came from).  The backends report what they see of the
+// object — List, Stat, and the Get that filled the entry — through Observe;
+// Read refuses (and removes) a body whose ETag or size differs from the last
+// observation, or whose length is not the recorded size.  So an object
+// overwritten by someone else is noticed at the next listing (the daemon
+// lists at startup, before any Get, and then every --sync-every), and a cache
+// left on disk by an earlier run cannot serve the old body.  A key never
+// observed is trusted: that is the window before the first listing.
 //
 // Zero value is a valid no-op cache: all operations short-circuit
 // when dir is empty.
@@ -44,6 +54,7 @@ type DiskCache struct {
 	lowWMFrac  float64 // eviction target (0.0–1.0);  default 0.70
 	usedBytes  *int64  // nil when eviction disabled; atomic via sync/atomic ops
 	async      *asyncState
+	remote     *sync.Map // key -> remoteState, see Observe
 }
 
 // maxAsyncWrites bounds the number of write-behind goroutines (and so the
@@ -79,6 +90,7 @@ func NewDiskCache(dir, tag, bucket string, maxBytes int64) (DiskCache, error) {
 	if dir == "" {
 		return c, nil
 	}
+	c.remote = &sync.Map{}
 	c.async = &asyncState{
 		pending: make(map[string]*pendingWrite),
 		sem:     make(chan struct{}, maxAsyncWrites),
@@ -122,35 +134,92 @@ func (c *DiskCache) scanDir() int64 {
 	return total
 }
 
+// remoteState is what the backend last reported for a key.
+type remoteState struct {
+	etag string
+	size int64
+}
+
+// Observe records the ETag and size the backend reports for key.  Read uses
+// the latest one to tell whether a cached body is still the object.
+func (c *DiskCache) Observe(key, etag string, size int64) {
+	if !c.enabled() || etag == "" {
+		return
+	}
+	c.remote.Store(key, remoteState{etag: etag, size: size})
+}
+
 // Read returns the cached body for `key`. ok=false on any error
-// (missing file, permission denied, etc) — the caller falls through
-// to the origin fetch.
+// (missing file, permission denied, a file without a valid header, a body
+// that does not match the recorded size, or one the backend has since
+// reported as a different object) — the caller falls through to the origin
+// fetch.
 func (c *DiskCache) Read(key string) ([]byte, bool) {
 	if !c.enabled() {
 		return nil, false
 	}
-	buf, err := os.ReadFile(c.path(key))
+	p := c.path(key)
+	raw, err := os.ReadFile(p)
 	if err != nil {
 		return nil, false
 	}
-	return buf, true
+	etag, size, body, ok := parseCacheFile(raw)
+	if ok && int64(len(body)) == size {
+		if v, seen := c.remote.Load(key); !seen {
+			return body, true
+		} else if rs := v.(remoteState); rs.etag == etag && rs.size == size {
+			return body, true
+		}
+	}
+	// Stale or unreadable: drop it so the refetch replaces it.
+	c.Invalidate(key)
+	return nil, false
+}
+
+const cacheMagic = "s3fscache1\n"
+
+// cacheHeader is what precedes the body in a cache file.
+func cacheHeader(etag string, size int64) []byte {
+	return []byte(cacheMagic + etag + "\n" + strconv.FormatInt(size, 10) + "\n")
+}
+
+func parseCacheFile(raw []byte) (etag string, size int64, body []byte, ok bool) {
+	if !bytes.HasPrefix(raw, []byte(cacheMagic)) {
+		return "", 0, nil, false
+	}
+	rest := raw[len(cacheMagic):]
+	i := bytes.IndexByte(rest, '\n')
+	if i < 0 {
+		return "", 0, nil, false
+	}
+	etag = string(rest[:i])
+	rest = rest[i+1:]
+	j := bytes.IndexByte(rest, '\n')
+	if j < 0 {
+		return "", 0, nil, false
+	}
+	n, err := strconv.ParseInt(string(rest[:j]), 10, 64)
+	if err != nil || n < 0 {
+		return "", 0, nil, false
+	}
+	return etag, n, rest[j+1:], true
 }
 
 // Write persists `buf` under `key`. Best-effort: any failure is
 // logged and swallowed so the origin fetch's result still reaches
 // the caller.
-func (c *DiskCache) Write(key string, buf []byte) {
+func (c *DiskCache) Write(key string, buf []byte, etag string) {
 	if !c.enabled() {
 		return
 	}
-	c.write(key, buf, nil)
+	c.write(key, buf, etag, nil)
 }
 
 // WriteAsync is Write moved off the caller's path (AC-52: the disk write
 // used to sit inside the cold read's latency). buf must not be modified
 // afterwards. The write is dropped when maxAsyncWrites are already in
 // flight, and discarded if Invalidate runs before it commits.
-func (c *DiskCache) WriteAsync(key string, buf []byte) {
+func (c *DiskCache) WriteAsync(key string, buf []byte, etag string) {
 	if !c.enabled() {
 		return
 	}
@@ -171,7 +240,7 @@ func (c *DiskCache) WriteAsync(key string, buf []byte) {
 	go func() {
 		defer st.wg.Done()
 		defer func() { <-st.sem }()
-		c.write(key, buf, pw)
+		c.write(key, buf, etag, pw)
 		st.mu.Lock()
 		if st.pending[key] == pw {
 			delete(st.pending, key)
@@ -189,8 +258,9 @@ func (c *DiskCache) WaitAsync() {
 
 // write stores buf under key. A non-nil pw makes the final commit
 // conditional on pw not having been cancelled by Invalidate.
-func (c *DiskCache) write(key string, buf []byte, pw *pendingWrite) {
-	c.evictIfNeeded(int64(len(buf)))
+func (c *DiskCache) write(key string, buf []byte, etag string, pw *pendingWrite) {
+	hdr := cacheHeader(etag, int64(len(buf)))
+	c.evictIfNeeded(int64(len(hdr) + len(buf)))
 
 	// Capture the old file size before overwriting (0 for new keys).
 	// Needed to keep usedBytes accurate when the same key is re-written.
@@ -202,7 +272,7 @@ func (c *DiskCache) write(key string, buf []byte, pw *pendingWrite) {
 	}
 
 	tmp := fmt.Sprintf("%s.%d.tmp", c.path(key), c.async.seq.Add(1))
-	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
+	if err := writeFileParts(tmp, hdr, buf); err != nil {
 		fmt.Fprintf(os.Stderr, "%s cache write %s: %v\n", c.tag, tmp, err)
 		_ = os.Remove(tmp)
 		return
@@ -221,8 +291,23 @@ func (c *DiskCache) write(key string, buf []byte, pw *pendingWrite) {
 		return
 	}
 	if c.usedBytes != nil {
-		atomic.AddInt64(c.usedBytes, int64(len(buf))-oldSize)
+		atomic.AddInt64(c.usedBytes, int64(len(hdr)+len(buf))-oldSize)
 	}
+}
+
+// writeFileParts writes head then body to path without joining them.
+func writeFileParts(path string, head, body []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(head); err == nil {
+		_, err = f.Write(body)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // Invalidate drops the cached body for `key`. Called from Put /

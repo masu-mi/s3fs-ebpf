@@ -73,8 +73,13 @@ func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, err
 	if err != nil {
 		return objstore.ObjectMeta{}, fmt.Errorf("gcs stat %q: %w", key, err)
 	}
+	c.cache.Observe(key, cacheTag(attrs), attrs.Size) // AC-40
 	return attrsToMeta(attrs), nil
 }
+
+// cacheTag is what the disk cache compares: the object generation changes with
+// every overwrite, and unlike ObjectAttrs.Etag it is also on a reader's attrs.
+func cacheTag(a *storage.ObjectAttrs) string { return fmt.Sprintf("gen:%d", a.Generation) }
 
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if buf, ok := c.cache.Read(key); ok {
@@ -89,7 +94,12 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcs get %q read: %w", key, err)
 	}
-	c.cache.WriteAsync(key, buf)
+	// AC-40: the entry carries the generation of the object it was read from.
+	if r.Attrs.Generation != 0 && r.Attrs.Size == int64(len(buf)) {
+		tag := fmt.Sprintf("gen:%d", r.Attrs.Generation)
+		c.cache.Observe(key, tag, r.Attrs.Size)
+		c.cache.WriteAsync(key, buf, tag)
+	}
 	return buf, nil
 }
 
@@ -165,6 +175,7 @@ func (c *Client) List(ctx context.Context, prefix string) ([]objstore.ObjectMeta
 		if err != nil {
 			return nil, fmt.Errorf("gcs list %q: %w", prefix, err)
 		}
+		c.cache.Observe(attrs.Name, cacheTag(attrs), attrs.Size) // AC-40
 		out = append(out, attrsToMeta(attrs))
 	}
 	return out, nil

@@ -72,6 +72,7 @@ func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, err
 	if err != nil {
 		return objstore.ObjectMeta{}, fmt.Errorf("s3 stat %q: %w", key, err)
 	}
+	c.cache.Observe(key, info.ETag, info.Size) // AC-40
 	return toMeta(info), nil
 }
 
@@ -161,7 +162,12 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("s3 get %q read: %w", key, err)
 	}
-	c.cache.WriteAsync(key, buf)
+	// AC-40: the cache entry carries the ETag of the object it was read from.
+	// (obj.Stat's Size is 0 for a GetObject response; the body read is the size.)
+	if info, serr := obj.Stat(); serr == nil && info.ETag != "" {
+		c.cache.Observe(key, info.ETag, int64(len(buf)))
+		c.cache.WriteAsync(key, buf, info.ETag)
+	}
 	return buf, nil
 }
 
@@ -177,6 +183,7 @@ func (c *Client) List(ctx context.Context, prefix string) ([]objstore.ObjectMeta
 		if obj.Err != nil {
 			return nil, fmt.Errorf("s3 list %q: %w", prefix, obj.Err)
 		}
+		c.cache.Observe(obj.Key, obj.ETag, obj.Size) // AC-40
 		out = append(out, toMeta(obj))
 	}
 	return out, nil
@@ -275,13 +282,23 @@ func (c *Client) PutWithCopy(ctx context.Context, key, ifMatchETag string, parts
 						done[i] = minio.CompletePart{PartNumber: num, ETag: cp.ETag}
 					}
 				default:
-					if int64(len(p.Data)) != p.Len {
-						errs[i] = fmt.Errorf("s3 upload part %d of %q: have %d bytes, want %d", num, key, len(p.Data), p.Len)
-					} else if up, err := core.PutObjectPart(pctx, c.cfg.Bucket, key, uploadID, num,
-						bytes.NewReader(p.Data), p.Len, minio.PutObjectPartOptions{}); err != nil {
-						errs[i] = fmt.Errorf("s3 upload part %d of %q: %w", num, key, err)
-					} else {
-						done[i] = minio.CompletePart{PartNumber: num, ETag: up.ETag}
+					// Fill here, not up front: at most `workers` parts' bytes
+					// are in memory (AC-65).
+					data, ferr := p.Bytes()
+					switch {
+					case errors.Is(ferr, objstore.ErrSourceChanged):
+						errs[i] = objstore.ErrSourceChanged
+					case ferr != nil:
+						errs[i] = fmt.Errorf("s3 upload part %d of %q: fill: %w", num, key, ferr)
+					case int64(len(data)) != p.Len:
+						errs[i] = fmt.Errorf("s3 upload part %d of %q: have %d bytes, want %d", num, key, len(data), p.Len)
+					default:
+						if up, err := core.PutObjectPart(pctx, c.cfg.Bucket, key, uploadID, num,
+							bytes.NewReader(data), p.Len, minio.PutObjectPartOptions{}); err != nil {
+							errs[i] = fmt.Errorf("s3 upload part %d of %q: %w", num, key, err)
+						} else {
+							done[i] = minio.CompletePart{PartNumber: num, ETag: up.ETag}
+						}
 					}
 				}
 				if errs[i] != nil {
