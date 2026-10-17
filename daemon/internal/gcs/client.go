@@ -89,7 +89,7 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gcs get %q read: %w", key, err)
 	}
-	c.cache.Write(key, buf)
+	c.cache.WriteAsync(key, buf)
 	return buf, nil
 }
 
