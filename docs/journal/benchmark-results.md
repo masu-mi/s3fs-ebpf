@@ -1723,3 +1723,17 @@ arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準
 - enforce (capacity の pass) は無視できる。
 
 次の手順 (3): range GET を並列に出し、chunk ごとに POPULATE して chunk ごとに signal する (reader は最初の chunk だけで起きる)。全体 admit でも、先頭の chunk が揃った時点で reader を進められる。
+
+### 18.35 cold read: chunk ごとの populate (AC-52 手順 3、n=5、ローカル MinIO)
+
+大きいファイルの全体 admit を、4 並列の range GET と chunk ごとの POPULATE / signal に変えた (`admit_chunkload.go`)。reader は自分の chunk が揃えば進む。sha256 は全 backend で一致。`test-regression` の 15 件は全件 PASS。
+
+| サイズ | fuse-raw | ebpf (手順 1 後) | ebpf (手順 3 後) | ebpf / fuse-raw |
+|---:|---:|---:|---:|---:|
+| 10 MiB | 18.9 ms | 19.7 ms | 18.2 ms | 同等 |
+| 100 MiB | 99.9 ms | 149.1 ms | 124.7 ms | 0.80× |
+| 300 MiB | 324.1 ms | 764.6 ms | 399.9 ms | 0.81× |
+
+- 目標 (300 MiB で fuse-raw の 0.9× 以上) には届かない。残りは、populate の 4 MiB 単位の ioctl と、GET と populate が 1 本の goroutine で直列に並ぶ部分の影響と見ている (未切り分け)。
+- `s3c.Get` を通らなくなったので、この経路では `--cache-dir` に全体が書かれない。
+- 手順 1 と 3 の run は別日の fuse-raw が 312〜324 ms で、環境のずれは小さい。
