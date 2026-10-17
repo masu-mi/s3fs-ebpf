@@ -3362,10 +3362,13 @@ static int s3fs_mpin_acquire_locked(struct s3fs_file_data *fd,
 /* AC-50: true when, with fd->lock held, a modification may be applied: the
  * fd already owns the content, or every chunk of [0, min(need_end, i_size))
  * that the caller does not overwrite completely is allocated and populated.
- * s3fs_fd_load_for_modify unpins a chunk before the caller takes fd->lock
- * again; a shed / evict -> reset in that window frees it, and a write over
- * the hole would flush zeros.  Callers therefore re-check here under the
- * lock they apply the change with, and go back to loading when it fails. */
+ * s3fs_fd_load_for_modify returns with the chunks still pinned (struct
+ * s3fs_mpin), so a shed / evict -> reset cannot free them between the load
+ * and the change.  The pins are not enough on their own, though: a loader
+ * can return with a short set (a concurrent reset before it pinned, a
+ * partial load).  Callers therefore check here under fd->lock, keep that
+ * lock through s3fs_mpin_release_locked, the change and the dirty mark,
+ * and go back to loading when the check fails. */
 static bool s3fs_fd_modify_ready_locked(struct inode *inode,
 					struct s3fs_file_data *fd, u64 need_end,
 					u64 ow_lo, u64 ow_hi)
@@ -3521,9 +3524,10 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 
 	/* AC-50: the first modification of a clean file must start from its
 	 * current content, not from an empty buffer.  Chunks the write covers
-	 * completely are not fetched.  The chunks are unpinned while we wait
-	 * for fd->lock, so confirm under the lock that they are still there
-	 * and load again if a reset took them. */
+	 * completely are not fetched.  The loader leaves its chunks pinned
+	 * and we confirm under fd->lock that they are all present; the lock
+	 * is then held until the dirty mark, so nothing can free them.  If
+	 * the check fails, drop the lock and load again. */
 	for (tries = 0;; tries++) {
 		loff_t lstart = (file->f_flags & O_APPEND) ?
 				i_size_read(inode) : *pos;
