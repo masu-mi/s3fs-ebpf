@@ -8,10 +8,10 @@ Every scenario seeds its own object, edits it through the mount, closes, and
 compares the object in MinIO and a re-read through the mount (without
 drop_caches) with the locally computed bytes.
 """
-import hashlib, os, subprocess, sys, time
+import ctypes, fcntl, hashlib, os, struct, subprocess, sys, time
 
 mount, bucket, cont, mode, tmp = sys.argv[1:6]
-NAMES = ['mid.bin', 'edges.bin', 'size.bin', 'aligned.bin', 'race.bin', 'race2.bin']
+NAMES = ['mid.bin', 'edges.bin', 'size.bin', 'aligned.bin', 'race.bin', 'race2.bin', 'popu.bin']
 M = 1 << 20
 SIZE = 40 * M
 
@@ -133,6 +133,30 @@ new = bytearray(os.urandom(SIZE)); mc_put(name, bytes(new))
 want = bytearray(new); patch(want, 8 * M, d)
 os.close(fd)
 ok &= settle(name, bytes(want), "external overwrite before an aligned flush")
+
+# 7. A chunk whose buffer is only partly filled goes through a partial flush.
+#    POPULATE_PAGES for [12, 15) MiB of chunk 3 with only the first MiB filled
+#    (the rest of the buffer is zeros): the chunk is not populated.  A write
+#    elsewhere makes it remote (it keeps its buffer) and the flush copies the
+#    object's bytes; the whole file must read back right.
+#    NOTE (AC-63): this does NOT tell the fix from the bug.  signal_flush used
+#    to mark such a chunk populated, but the daemon drops the ino's admit and
+#    resets its unpinned chunks right after the flush, so the zeros are never
+#    served; with the old kmod this scenario passes too.  It is kept as
+#    coverage of the path (remote chunk with a buffer, flush, re-read).
+name = "popu.bin"; want = seed(name)
+ino = os.stat(f"{mount}/{name}").st_ino
+dev = os.open("/dev/s3fs_ebpf", os.O_RDWR)
+buf = ctypes.create_string_buffer(bytes(want[12 * M:13 * M]) + bytes(2 * M), 3 * M)
+try:
+    fcntl.ioctl(dev, 0x4020E30E, struct.pack("=QQQQ", ino, 12 * M, 3 * M, ctypes.addressof(buf)), False)
+except OSError as e:
+    ok = fail("half-filled chunk", f"POPULATE_PAGES: {e}")
+os.close(dev)
+fd = os.open(f"{mount}/{name}", os.O_RDWR)
+d = os.urandom(4096); os.pwrite(fd, d, 100); patch(want, 100, d)
+os.close(fd)
+ok &= settle(name, bytes(want), "half-filled remote chunk (partial flush path)")
 
 print("RESULT", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)

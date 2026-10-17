@@ -135,6 +135,23 @@ type partialIO struct {
 	getNow    func(ctx context.Context, off, n int64) ([]byte, error) // current object
 }
 
+// getNowClamped reads [off, off+n) of the object as it is now, cut at its end:
+// a range wholly past the end is empty (S3 would answer 416) and one that
+// crosses it is short.
+func getNowClamped(ctx context.Context, s3c objstore.Backend, key string, off, n int64) ([]byte, error) {
+	m, err := s3c.Stat(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if off >= m.Size {
+		return nil, nil
+	}
+	if off+n > m.Size {
+		n = m.Size - off
+	}
+	return s3c.GetRange(ctx, key, off, n)
+}
+
 // fillRange returns the bytes [off, off+n) of the new object: kmod's for the
 // data / hole chunks, the pinned object's for remote ones.
 func fillRange(ctx context.Context, io partialIO, kinds []objstore.ChunkKind, chunk, off, n int64, pinned bool) ([]byte, error) {
@@ -153,7 +170,17 @@ func fillRange(ctx context.Context, io partialIO, kinds []objstore.ChunkKind, ch
 				return nil, err
 			}
 			if int64(len(b)) != next-pos {
-				return nil, fmt.Errorf("remote range [%d,%d): got %d bytes", pos, next, len(b))
+				if pinned {
+					return nil, fmt.Errorf("remote range [%d,%d): got %d bytes", pos, next, len(b))
+				}
+				// The current object is shorter than this remote chunk
+				// (truncated by someone else since we pinned it).  The bytes
+				// are gone: what is missing reads as zeros, as if the file had
+				// been truncated and then extended.  The fallback is last
+				// writer wins anyway (the rest of the range already comes from
+				// the object as it is now).
+				fmt.Fprintf(os.Stderr, "[flush] remote range [%d,%d): the object now has only %d of its bytes; the rest is written as zeros\n",
+					pos, next, len(b))
 			}
 			copy(buf[pos-off:], b)
 		} else {
@@ -263,7 +290,7 @@ func tryFlushPartial(ctx context.Context, devFd int, s3c objstore.Backend, key s
 		getMatch: func(ctx context.Context, off, n int64) ([]byte, error) {
 			return mc.GetRangeMatch(ctx, key, off, n, etag)
 		},
-		getNow: func(ctx context.Context, off, n int64) ([]byte, error) { return s3c.GetRange(ctx, key, off, n) },
+		getNow: func(ctx context.Context, off, n int64) ([]byte, error) { return getNowClamped(ctx, s3c, key, off, n) },
 	}
 	sent, newETag, err := flushPartial(ctx, mc, func(ctx context.Context, d []byte) error { return s3c.Put(ctx, key, d) },
 		io, key, etag, kinds, chunk, size)

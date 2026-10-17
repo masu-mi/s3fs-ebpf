@@ -68,6 +68,7 @@
 - **flush 側の ioctl:** `S3FS_IOC_DIRTY_LAYOUT` が chunk ごとの状態 (data / hole / remote) と `fd->size` を返し、`flush_read_seq = flush_seq` を記録する (READ_DIRTY と同じく、ここまでの enqueue を覆う)。`S3FS_IOC_READ_DIRTY_RANGE` は `[offset, offset+size)` を読む。data / hole の chunk だけ読むこと (remote は 0 が返る)。
 
 - **ETag の pin (daemon、`objETags`):** 変更サイクルの最初の load (なければ flush) で Stat した ETag。kmod の miss event に `S3FS_MISS_FLAG_PINNED` が立つのは、fd が dirty / flushing か remote chunk を持つとき (中身が pin に依存する)。daemon の load (`getPinned`) は 412 (`ErrSourceChanged`) を受けたとき、(a) flush が終わって pin が新しい ETag になっていれば読み直して 1 回やり直す、(b) PINNED でなければ (放棄された cycle の古い pin) pin を捨てて Stat し直す、(c) PINNED なら本物の競合として EIO。flush の成功は `PutWithCopy` が返す新しい ETag を pin に保存する (remote chunk の中身は同じ)。plain put のときは pin を捨てる。daemon は起動のたびに kmod の `partial_modify` に 0 か 1 を明示的に書く (module は daemon より長生きする)。copier のない backend で remote chunk を持つ fd の flush は、全体 PUT を断る (remote を 0 で上書きするため)。
+- フォールバック (412 のあとの全体 PUT) で、現在の object が remote chunk の範囲より短いとき (外部の truncate) は、足りない bytes を 0 で埋めて警告を出す (`getNowClamped` + `fillRange` の非 pinned)。
 - **flush 成功で `populated` にしない chunk:** remote の chunk は buffer (`p`) を持っていても、flush が copy したのは object のバイトで buffer ではない。`signal_flush` は `p` を持つ chunk のうち remote でないものだけを populated にする (途中までしか埋まっていない chunk を clean として返さない)。
 
 ## flush pin (W1)
