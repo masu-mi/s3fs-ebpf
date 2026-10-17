@@ -3276,6 +3276,100 @@ static bool admit_snapshot(u64 ino, u64 pos,
  * S3FS_UPCALL_WAIT_JIFFIES for the daemon). */
 #define S3FS_LOAD_MAX_TRIES	6
 
+/* AC-50: pins held on the chunks a modification needs, from the start of
+ * the load until the caller has applied the change under fd->lock.  A pinned
+ * chunk is not freed by reset / shed (readers != 0), so what the load put in
+ * stays until the fd is dirty and owns the content.  Unpinning between the
+ * load and the write let a capacity pass free the chunk again, and a file
+ * larger than capacity_bytes could never hold all its chunks that way.
+ * Covers [0, end) except chunks [ow_lo, ow_hi) overwrites completely. */
+struct s3fs_mpin {
+	u64 end, ow_lo, ow_hi;
+	bool held;
+};
+
+/* fd->lock held. */
+static void s3fs_mpin_release_locked(struct s3fs_file_data *fd,
+				     struct s3fs_mpin *mp)
+{
+	u32 nci, ci;
+
+	if (!mp->held)
+		return;
+	nci = (u32)DIV_ROUND_UP(mp->end, S3FS_CHUNK_SIZE);
+	for (ci = 0; ci < nci; ci++) {
+		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, mp->end);
+
+		if (mp->ow_lo <= cs && mp->ow_hi >= ce)
+			continue;
+		s3fs_fd_chunk_unpin(fd, ci);
+	}
+	mp->held = false;
+}
+
+static void s3fs_mpin_release(struct s3fs_file_data *fd, struct s3fs_mpin *mp)
+{
+	mutex_lock(&fd->lock);
+	s3fs_mpin_release_locked(fd, mp);
+	mutex_unlock(&fd->lock);
+}
+
+/* fd->lock held.  Returns 0 with the pins held, or -errno with none. */
+static int s3fs_mpin_acquire_locked(struct s3fs_file_data *fd,
+				    struct s3fs_mpin *mp, u64 end,
+				    u64 ow_lo, u64 ow_hi)
+{
+	u32 nci = (u32)DIV_ROUND_UP(end, S3FS_CHUNK_SIZE), ci;
+
+	mp->end = end;
+	mp->ow_lo = ow_lo;
+	mp->ow_hi = ow_hi;
+	mp->held = true;
+	for (ci = 0; ci < nci; ci++) {
+		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, end);
+
+		if (ow_lo <= cs && ow_hi >= ce)
+			continue;
+		if (!s3fs_fd_chunk_pin(fd, ci)) {
+			mp->end = cs;	/* release what was pinned so far */
+			s3fs_mpin_release_locked(fd, mp);
+			return -ENOMEM;
+		}
+	}
+	return 0;
+}
+
+/* AC-50: true when, with fd->lock held, a modification may be applied: the
+ * fd already owns the content, or every chunk of [0, min(need_end, i_size))
+ * that the caller does not overwrite completely is allocated and populated.
+ * s3fs_fd_load_for_modify unpins a chunk before the caller takes fd->lock
+ * again; a shed / evict -> reset in that window frees it, and a write over
+ * the hole would flush zeros.  Callers therefore re-check here under the
+ * lock they apply the change with, and go back to loading when it fails. */
+static bool s3fs_fd_modify_ready_locked(struct inode *inode,
+					struct s3fs_file_data *fd, u64 need_end,
+					u64 ow_lo, u64 ow_hi)
+{
+	u64 end = min_t(u64, need_end, (u64)i_size_read(inode));
+	u32 nci = (u32)DIV_ROUND_UP(end, S3FS_CHUNK_SIZE), ci;
+
+	if (fd->dirty || fd->flushing)
+		return true;
+	for (ci = 0; ci < nci; ci++) {
+		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+		u64 ce = min_t(u64, cs + S3FS_CHUNK_SIZE, end);
+
+		if (ow_lo <= cs && ow_hi >= ce)
+			continue;
+		if (ci >= fd->nr_chunks || !fd->chunks[ci].p ||
+		    !fd->chunks[ci].populated)
+			return false;
+	}
+	return true;
+}
+
 /* AC-50: make the fd hold the parts of an existing object that a modification
  * leaves intact, before the modification is applied.
  *
@@ -3295,13 +3389,23 @@ static bool admit_snapshot(u64 ino, u64 pos,
  * flushed over the object.  Sleeps; call with no lock held. */
 static int s3fs_fd_load_for_modify(struct inode *inode,
 				   struct s3fs_file_data *fd, u64 need_end,
-				   u64 ow_lo, u64 ow_hi)
+				   u64 ow_lo, u64 ow_hi, struct s3fs_mpin *mp)
 {
 	u64 end = min_t(u64, need_end, (u64)i_size_read(inode));
 	u32 nci, ci;
+	int err;
 
-	if (!end)
+	mutex_lock(&fd->lock);
+	s3fs_mpin_release_locked(fd, mp);
+	if (!end || fd->dirty || fd->flushing) {
+		mutex_unlock(&fd->lock);
 		return 0;
+	}
+	err = s3fs_mpin_acquire_locked(fd, mp, end, ow_lo, ow_hi);
+	mutex_unlock(&fd->lock);
+	if (err)
+		return err;
+
 	nci = (u32)DIV_ROUND_UP(end, S3FS_CHUNK_SIZE);
 	for (ci = 0; ci < nci; ci++) {
 		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
@@ -3313,22 +3417,20 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 		for (;;) {
 			struct s3fs_pending *p;
 			struct mm_struct *mm;
-			bool pinned, owned, have;
+			bool owned, have;
 			long rem = 1;
-			int err;
 
 			mutex_lock(&fd->lock);
 			owned = fd->dirty || fd->flushing;
 			have = ci < fd->nr_chunks && fd->chunks[ci].p &&
 			       fd->chunks[ci].populated;
-			if (owned || have) {
-				mutex_unlock(&fd->lock);
-				if (owned)
-					return 0; /* the fd owns the content already */
-				break;
-			}
-			pinned = s3fs_fd_chunk_pin(fd, ci);
+			if (owned)
+				s3fs_mpin_release_locked(fd, mp);
 			mutex_unlock(&fd->lock);
+			if (owned)
+				return 0; /* the fd owns the content already */
+			if (have)
+				break;
 
 			read_lock(&s3fs_admits_lock);
 			mm = s3fs_admitted_mm;
@@ -3353,17 +3455,25 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 			}
 			if (p)
 				pending_put(p);
-			if (pinned) {
-				mutex_lock(&fd->lock);
-				s3fs_fd_chunk_unpin(fd, ci);
-				mutex_unlock(&fd->lock);
+			if (err || ++tries >= S3FS_LOAD_MAX_TRIES) {
+				bool done = false;
+
+				if (err && err != -ERESTARTSYS && err != -EINTR) {
+					/* A concurrent write made the fd dirty
+					 * first: the daemon refuses to populate
+					 * a dirty fd (-EBUSY), but there is
+					 * nothing left to load. */
+					mutex_lock(&fd->lock);
+					done = fd->dirty || fd->flushing;
+					mutex_unlock(&fd->lock);
+				}
+				s3fs_mpin_release(fd, mp);
+				if (done)
+					return 0;
+				if (err == -ERESTARTSYS || err == -EINTR)
+					return err;
+				return -EIO;
 			}
-			if (err == -ERESTARTSYS || err == -EINTR)
-				return err;
-			if (err)
-				return -EIO;
-			if (++tries >= S3FS_LOAD_MAX_TRIES)
-				return -EIO;
 		}
 	}
 	return 0;
@@ -3375,8 +3485,9 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 {
 	struct inode *inode = file_inode(file);
 	struct s3fs_file_data *fd = inode->i_private;
+	struct s3fs_mpin mp = {};
 	loff_t start;
-	int err;
+	int err, tries;
 
 	if (!fd)
 		return -EIO;
@@ -3385,22 +3496,36 @@ static ssize_t s3fs_ebpf_file_write(struct file *file,
 
 	/* AC-50: the first modification of a clean file must start from its
 	 * current content, not from an empty buffer.  Chunks the write covers
-	 * completely are not fetched. */
-	if (!READ_ONCE(fd->dirty) && !READ_ONCE(fd->flushing)) {
+	 * completely are not fetched.  The chunks are unpinned while we wait
+	 * for fd->lock, so confirm under the lock that they are still there
+	 * and load again if a reset took them. */
+	for (tries = 0;; tries++) {
 		loff_t lstart = (file->f_flags & O_APPEND) ?
 				i_size_read(inode) : *pos;
 
-		if (lstart >= 0) {
+		mutex_lock(&fd->lock);
+		if (lstart < 0 ||
+		    s3fs_fd_modify_ready_locked(inode, fd,
+						(u64)i_size_read(inode),
+						(u64)lstart,
+						(u64)lstart + count))
+			break;
+		mutex_unlock(&fd->lock);
+		if (tries >= S3FS_LOAD_MAX_TRIES)
+			err = -EIO;
+		else
 			err = s3fs_fd_load_for_modify(inode, fd,
-						      (u64)i_size_read(inode),
-						      (u64)lstart,
-						      (u64)lstart + count);
-			if (err)
-				return err;
+						(u64)i_size_read(inode),
+						(u64)lstart,
+						(u64)lstart + count, &mp);
+		if (err) {
+			s3fs_mpin_release(fd, &mp);
+			return err;
 		}
 	}
-
-	mutex_lock(&fd->lock);
+	/* fd->lock is held from the check to the dirty mark below, so the pins
+	 * are no longer needed. */
+	s3fs_mpin_release_locked(fd, &mp);
 	if (!fd->dirty && !fd->flushing)
 		fd->size = max_t(size_t, fd->size, (size_t)i_size_read(inode));
 	start = (file->f_flags & O_APPEND) ? (loff_t)fd->size : *pos;
@@ -3445,25 +3570,36 @@ static int s3fs_ebpf_file_setattr(struct mnt_idmap *idmap,
 	if ((attr->ia_valid & ATTR_SIZE) && fd) {
 		loff_t new_size = attr->ia_size;
 		bool owned;
+		struct s3fs_mpin mp = {};
 		u64 cur;
+		int tries;
 
 		/* AC-50: a clean file's size is the object's (i_size); fd->size
 		 * only covers what was fetched.  Changing it must start from the
 		 * content that survives, and even a truncate that fetches
 		 * nothing (`: > f`) has to mark the file dirty so it is PUT. */
-		mutex_lock(&fd->lock);
-		owned = fd->dirty || fd->flushing;
-		cur = owned ? (u64)fd->size : (u64)i_size_read(inode);
-		mutex_unlock(&fd->lock);
-		if (!owned && (u64)new_size != cur) {
-			err = s3fs_fd_load_for_modify(inode, fd,
-						      min_t(u64, new_size, cur),
-						      0, 0);
-			if (err)
+		for (tries = 0;; tries++) {
+			mutex_lock(&fd->lock);
+			owned = fd->dirty || fd->flushing;
+			cur = owned ? (u64)fd->size : (u64)i_size_read(inode);
+			if (owned || (u64)new_size == cur ||
+			    s3fs_fd_modify_ready_locked(inode, fd,
+						min_t(u64, new_size, cur), 0, 0))
+				break;
+			mutex_unlock(&fd->lock);
+			if (tries >= S3FS_LOAD_MAX_TRIES)
+				err = -EIO;
+			else
+				err = s3fs_fd_load_for_modify(inode, fd,
+						min_t(u64, new_size, cur),
+						0, 0, &mp);
+			if (err) {
+				s3fs_mpin_release(fd, &mp);
 				return err;
+			}
 		}
-
-		mutex_lock(&fd->lock);
+		/* fd->lock stays held until the size change is applied. */
+		s3fs_mpin_release_locked(fd, &mp);
 		if (!fd->dirty && !fd->flushing && (u64)new_size != cur)
 			fd->size = max_t(size_t, fd->size, (size_t)cur);
 		if (new_size < (loff_t)fd->size) {
