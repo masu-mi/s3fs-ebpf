@@ -1079,6 +1079,7 @@ static int s3fs_victim_cmp(const void *a, const void *b)
 
 static inline bool s3fs_fd_buf_owned(struct inode *inode); /* below */
 static bool s3fs_ino_shed_unpinned(u64 ino); /* below */
+static void s3fs_inode_grow_size_unowned(struct inode *inode, u64 end); /* below */
 
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			    const struct s3fs_admit_entry *entries,
@@ -1240,12 +1241,9 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			 * write/flush owns the size.  Remote shrinks arrive
 			 * via entries_replace (dcache shrink → re-lookup).
 			 * Overflow of offset + size was rejected above. */
-			if (changed[i] && !s3fs_fd_buf_owned(inode)) {
-				u64 end = entries[i].offset + entries[i].size;
-
-				if (end > (u64)i_size_read(inode))
-					i_size_write(inode, end);
-			}
+			if (changed[i])
+				s3fs_inode_grow_size_unowned(inode,
+					entries[i].offset + entries[i].size);
 			/* Drop any stale page cache filled from the kmalloc
 			 * fallback path (or from a prior admit with a
 			 * different size) — only for ranges that are new or
@@ -2494,6 +2492,22 @@ static inline bool s3fs_fd_buf_owned(struct inode *inode)
 	struct s3fs_file_data *fd = inode->i_private;
 
 	return fd && (READ_ONCE(fd->dirty) || READ_ONCE(fd->flushing));
+}
+
+/* AC-56: grow i_size to @end unless write/flush owns the size.  write and
+ * truncate change dirty and i_size under fd->lock, so the ownership check and
+ * the i_size_write happen under it too — otherwise a truncate between the two
+ * is undone.  fd->lock is the outer lock (the caller holds no admits_lock). */
+static void s3fs_inode_grow_size_unowned(struct inode *inode, u64 end)
+{
+	struct s3fs_file_data *fd = inode->i_private;
+
+	if (fd)
+		mutex_lock(&fd->lock);
+	if (!s3fs_fd_buf_owned(inode) && end > (u64)i_size_read(inode))
+		i_size_write(inode, end);
+	if (fd)
+		mutex_unlock(&fd->lock);
 }
 
 /* AC-41: bytes actually allocated for ino's fd->buf.  The capacity loop
@@ -4260,13 +4274,19 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 	 * reader pinned it).  Give it back an entry: otherwise the folio we fill
 	 * would sit in the page cache outside the capacity accounting, never
 	 * evicted.  Once the pin is gone the next pass evicts it normally. */
-	if (buf_valid && quiet) {
-		u64 cs = (u64)(pos >> S3FS_PCACHE_CHUNK_SHIFT)
-			 << S3FS_PCACHE_CHUNK_SHIFT;
+	/* AC-57: only for a clean fd and a populated chunk.  A dirty/flushing
+	 * fd is not capacity-managed, and its chunk may be a hole (buf_valid is
+	 * true for a hole there): an entry over it would inflate the capacity
+	 * accounting. */
+	if (buf_valid && quiet && !fd->dirty && !fd->flushing) {
+		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
+		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
 
-		(void)admit_insert_pcache(ino, cs,
-					  min_t(u64, S3FS_CHUNK_SIZE,
-						(u64)fd->size - cs));
+		if (ci < fd->nr_chunks && fd->chunks[ci].p &&
+		    fd->chunks[ci].populated)
+			(void)admit_insert_pcache(ino, cs,
+						  min_t(u64, S3FS_CHUNK_SIZE,
+							(u64)fd->size - cs));
 	}
 	if (buf_valid && gen != 0 &&
 	    atomic_read(&s3fs_admit_gen) != gen) {
