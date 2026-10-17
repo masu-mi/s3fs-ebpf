@@ -383,6 +383,31 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		return
 	}
 
+	// AC-51: unchanged chunks of a large file are copied server-side.
+	{
+		pctx, pcancel := context.WithTimeout(ctx, 120*time.Second)
+		handled, sent, size, perr := tryFlushPartial(pctx, devFd, s3c, s3key, ev.Ino)
+		pcancel()
+		if handled {
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "[flush] ino=%d s3://%s partial put: %v\n", ev.Ino, s3key, perr)
+				metrics.Global.FlushErrors.Add(1)
+				if mderr := markDirty(devFd, ev.Ino); mderr != nil {
+					fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n", ev.Ino, mderr)
+				}
+				putErr = -5 /* -EIO */
+				return
+			}
+			registerIno(s3key, ev.Ino)
+			metrics.Global.FlushBytes.Add(uint64(sent))
+			fmt.Printf("[flush] ino=%d s3://%s put %d bytes (%d sent, rest copied)\n", ev.Ino, s3key, size, sent)
+			// An arena admit of the old content would keep serving it.
+			dropAdmitIno(devPath, ev.Ino, progs)
+			fpebpf.SetSizeByIno(ev.Ino, uint64(size))
+			return
+		}
+	}
+
 	buf := make([]byte, ev.Size)
 	if ev.Size > 0 {
 		n, err := readDirty(devFd, ev.Ino, buf)
@@ -414,6 +439,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		return
 	}
 	registerIno(s3key, ev.Ino)
+	objETags.Delete(ev.Ino) // the modify cycle is over
 	metrics.Global.FlushBytes.Add(uint64(len(buf)))
 	fmt.Printf("[flush] ino=%d s3://%s put %d bytes\n",
 		ev.Ino, s3key, len(buf))

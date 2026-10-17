@@ -390,6 +390,8 @@ func runFastpath(args []string) int {
 			"When set, `file:` / bare-path policy loads and /policy/reload "+
 			"requests must hash to an allowlisted entry. builtin: bypasses. "+
 			"Empty disables verification (dev/demo default).")
+	partialModify := fs.Bool("partial-modify", false,
+		"AC-51: a write into a large existing object loads only the chunks it touches and flushes the rest with a server-side copy (S3 only; sets the kmod partial_modify parameter)")
 	noReadIterHook := fs.Bool("no-read-iter-hook", false,
 		"[R-01] disable fentry/generic_file_read_iter hook. "+
 			"Use for overhead measurement only; disables read pattern tracking and "+
@@ -806,6 +808,15 @@ func runFastpath(args []string) int {
 		}
 		fmt.Printf("[fastpath] object backend: bucket=%s%s (will warm arena on miss)\n",
 			s3c.Bucket(), prefixStr)
+		_, canCopy := s3c.(objstore.MultipartCopier)
+		switch {
+		case *partialModify && canCopy:
+			if err := setKmodParam("partial_modify", "1"); err != nil {
+				fmt.Fprintf(os.Stderr, "[kmod] %v\n", err)
+			}
+		case *partialModify:
+			fmt.Fprintln(os.Stderr, "[kmod] --partial-modify ignored: backend has no server-side copy")
+		}
 	} else {
 		fmt.Println("[fastpath] object backend disabled — misses are reported but not cached")
 	}

@@ -56,7 +56,9 @@
 - 同時に来た 2 つの write: 後の loader は daemon から -EBUSY (dirty な fd は populate しない) を受けるが、fd がすでに dirty なら 0 を返して続ける (-EIO にしない)。
 
 ## 途中の変更で運ばない部分 (AC-51、`partial_modify`、既定は off)
-設計は `docs/design/ac51-partial-modify.md`。kmod は `partial_modify=1` かつ `i_size >= partial_modify_min` (既定 16 MiB) のときだけ、次のように変わる。off のときは上の AC-50 のまま。**daemon の multipart flush (設計 §7) がつながるまで on にしない**: 今の `handleFlush` は fd 全体を `READ_DIRTY` で PUT するので、remote の chunk は 0 で上書きされる。
+設計は `docs/design/ac51-partial-modify.md`。kmod は `partial_modify=1` かつ `i_size >= partial_modify_min` (既定 16 MiB) のときだけ、次のように変わる。off のときは上の AC-50 のまま。**daemon の flush は `DIRTY_LAYOUT` で remote があれば multipart (`PutWithCopy`) にする** (`daemon/cmd/s3fs-ebpf/flush_partial.go`)。daemon は `--partial-modify` で、backend が `MultipartCopier` (S3) のときだけこのパラメータを 1 にする。kmod 単独で on にすると、古い daemon の `handleFlush` が fd 全体を `READ_DIRTY` で PUT して remote の chunk を 0 で上書きするので、on にしない。ETag は変更サイクルの最初の load (なければ flush) で `Stat` して pin し、flush 成功で捨てる。412 のときは現在のオブジェクトから remote の範囲を取り直して PUT する。
+
+`.write` / `setattr` (サイズ変更) は fd->lock を外したあとに page cache の該当範囲を invalidate / truncate する (読んだあとに書いた範囲が古く見える問題の修正)。fd->lock を持ったまま呼ぶと、folio lock を持つ `.read_folio` との間で逆順になる。
 - **dirty な fd の chunk は data / hole / remote のどれか。** remote (`chunks[ci].remote`、`fd->nr_remote` に数える) は、S3 のオブジェクトと同じバイトで fd が持たない chunk。remote があるのは dirty (または flushing) な fd だけ。
 - **何を読み込むか (`struct s3fs_mop`):** 変更が決めるバイト範囲 `[t_lo, t_hi)` に触れ、かつ全部は上書きされない chunk だけが「データが要る」(`s3fs_mop_needs_data`)。それ以外は fd に持たず、clean → dirty の瞬間に `s3fs_fd_mark_remote_locked` が remote にする (すでに populated な chunk は data のまま)。write は `t = [min(開始, i_size), 終端)`、縮小は `[新サイズ, 元のサイズ)`、拡張は `[元のサイズ, 新サイズ)`。chunk 全体の範囲で交差を見る (境界の chunk は、元のサイズより手前にあっても触れたと数える)。
 - **ready の判定は chunk ごと:** clean な fd は「populated」、dirty な fd は「remote でない」。dirty で `nr_remote == 0` なら何もしない (大きな dirty ファイルの write で全 chunk を走査しない)。pin は `s3fs_mop_needs_data` が選ぶ chunk だけ (acquire と release が同じ関数を使う)。

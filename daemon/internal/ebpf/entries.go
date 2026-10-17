@@ -82,3 +82,16 @@ func LookupByIno(ino uint64) *Entry {
 	}
 	return nil
 }
+
+// SetSizeByIno records the size of ino after the daemon itself wrote the
+// object (a flush may grow or shrink it between two syncs).
+func SetSizeByIno(ino, size uint64) {
+	entriesMu.Lock()
+	defer entriesMu.Unlock()
+	for i := range entries {
+		if entries[i].Ino == ino {
+			entries[i].Fallback = size
+			return
+		}
+	}
+}
