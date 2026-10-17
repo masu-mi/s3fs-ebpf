@@ -58,3 +58,4 @@
 - 残った pin (daemon 不在・PUT 失敗・キュー破棄) は `put_super` の `s3fs_flush_pins_release_all` が解放 (pr_warn)。unpin の所有権はリスト所属で決まるので二重 iput しない。
 - AC-48: `admit_replace` は i_size を、中身が変わった entry の range 終端 (`offset + size`) まで **伸ばすだけ** で縮めない。dirty/flushing の inode には触らない。entry は range なので `size` を i_size に書いてはいけない (縮むと W2 が誤ったサイズを entry に書き戻す)。S3 側の縮小は `entries_replace` の dcache shrink → 再 lookup で入る。
 - W2: `evict_inode` は通常ファイルの `i_size` を `s3fs_entry_record_size` で local/dyn エントリに書き戻す (`s3fs_entries_mtx`)。local entry は lookup でこの size を返す。daemon の periodic sync (`entries_replace`) が来れば S3 のサイズで上書き。`s3fs_entries_mtx` 保持中に iput するパスを作らないこと (evict から同 mutex を取るため自己デッドロックになる)。
+- F1: `flush_enqueue` は、WAIT (fsync) の event を積むとき、同じ ino の通常 queue の未処理 item を捨てる。WAIT queue は即座に処理され、通常 queue は daemon の ticker (100 ms) と debounce (200 ms) を通るため、`.create` が積む 0 byte の placeholder が fsync の PUT の後に PUT され、オブジェクトが 0 byte になっていた。PUT は実行時に buffer を読むので、WAIT の event が捨てた item の分も含む。
