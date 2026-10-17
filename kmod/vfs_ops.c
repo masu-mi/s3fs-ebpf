@@ -2731,6 +2731,24 @@ static void flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 	f->flags = flags;
 	memcpy(f->name, name, name_len);
 	if (flags & S3FS_FLUSH_FLAG_WAIT) {
+		struct s3fs_flush_item *q, *tmp;
+		LIST_HEAD(stale);
+
+		/* The wait queue is served at once, the normal queue by the
+		 * daemon's ticker, so a normal item for this ino that is still
+		 * queued (typically the empty placeholder .create enqueues) would
+		 * be handled after this fsync's PUT and overwrite it with older
+		 * state.  The PUT reads the buffer when it runs, so this event
+		 * covers those items: drop them. */
+		spin_lock(&s3fs_flush_lock);
+		list_for_each_entry_safe(q, tmp, &s3fs_flush_queue, link)
+			if (q->ino == ino)
+				list_move(&q->link, &stale);
+		spin_unlock(&s3fs_flush_lock);
+		list_for_each_entry_safe(q, tmp, &stale, link) {
+			list_del(&q->link);
+			kfree(q);
+		}
 		spin_lock(&s3fs_flush_wait_lock);
 		list_add_tail(&f->link, &s3fs_flush_wait_queue);
 		spin_unlock(&s3fs_flush_wait_lock);
