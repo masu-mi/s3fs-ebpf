@@ -1064,6 +1064,7 @@ struct s3fs_victim {
 	int score;     /* policy on_evict return value, clamped >= 0 */
 	u64 ino;       /* inode number (P3: replaces entries[] idx so pcache can be included) */
 	u32 tiebreak;  /* hash_32(ino,32): decorrelates from ino/Zipf distribution (Y-02) */
+	bool tried;    /* AC-58: pick_victim already returned this ino */
 };
 
 /* Highest score first; ties broken by tiebreak (ino hash) to avoid
@@ -1080,6 +1081,42 @@ static int s3fs_victim_cmp(const void *a, const void *b)
 static inline bool s3fs_fd_buf_owned(struct inode *inode); /* below */
 static bool s3fs_ino_shed_unpinned(u64 ino); /* below */
 static void s3fs_inode_grow_size_unowned(struct inode *inode, u64 end); /* below */
+
+/* Evict one capacity-pass candidate and charge what it released against
+ * *live_bytes.  A miss in flight means the ino is shed (idle chunks only)
+ * rather than evicted whole (AC-45 C3).  @pv: the policy keeps its own list,
+ * so tell it about a whole-ino eviction (AC-58). */
+static void s3fs_capacity_evict_one(u64 ino, u64 *live_bytes, u32 *evicted,
+				    bool pv)
+{
+	u64 freed = 0;
+	u64 buf_before = s3fs_ino_buf_bytes(ino);
+
+	if (pending_exists(ino)) {
+		/* AC-45 C3: a miss is in flight, so the ino is not evicted
+		 * whole (the chunk being populated and its entries must reach
+		 * the waiting reader), but its idle chunks are shed —
+		 * otherwise a file read front to back would keep everything it
+		 * has served. */
+		if (s3fs_ino_shed_unpinned(ino)) {
+			(*evicted)++;
+			buf_before -= min(s3fs_ino_buf_bytes(ino), buf_before);
+			*live_bytes -= min(buf_before, *live_bytes);
+		}
+		return;
+	}
+	if (!admit_evict_ino(ino, &freed))
+		return;
+	(*evicted)++;
+	if (pv)
+		s3fs_policy_ops_remove(ino);
+	/* AC-41: arena bytes from the dropped entries plus what reset actually
+	 * released (0 on skip_reset, so the loop keeps evicting while still
+	 * over capacity). */
+	buf_before -= min(s3fs_ino_buf_bytes(ino), buf_before);
+	freed += buf_before;
+	*live_bytes -= min(freed, *live_bytes);
+}
 
 int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			    const struct s3fs_admit_entry *entries,
@@ -1317,6 +1354,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		u64 *eval_inos = NULL;
 		int *eval_scores = NULL;
 		u32 eval_count = 0;
+		bool pv = s3fs_policy_has_pick_victim(); /* AC-58 */
 		int pi;
 
 		if (cap_bytes) {
@@ -1351,6 +1389,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			goto out_free_pcache;
 		}
 
+		/* AC-58: on_insert / pick_victim / on_remove mutate policy state
+		 * without a BPF-side lock, so one round holds the evict mutex. */
+		if (pv)
+			s3fs_policy_evict_lock();
+
 		/* Phase 1: collect unique inos and call on_evict once each.
 		 * First arena entries, then pcache entries (P3). */
 		for (i = 0; i < count; i++) {
@@ -1372,6 +1415,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
+				if (pv)
+					s3fs_policy_ops_insert(ino);
 
 				if (fr_vote != 0)
 					fmodret_votes++;
@@ -1399,6 +1444,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
+				if (pv)
+					s3fs_policy_ops_insert(ino);
 
 				if (fr_vote != 0)
 					fmodret_votes++;
@@ -1502,41 +1549,36 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			u32 k;
 
 			sort(cand, ncand, sizeof(*cand), s3fs_victim_cmp, NULL);
-			for (k = 0; k < ncand && live_bytes > cap_bytes; k++) {
-				u64 ino = cand[k].ino;
-				u64 freed = 0;
-				u64 buf_before;
+			/* AC-58: the policy's own order first.  Anything it
+			 * cannot name (0, unknown ino, one already tried) hands
+			 * the rest to the score order below. */
+			for (k = 0; pv && k < ncand && live_bytes > cap_bytes; k++) {
+				u64 v = s3fs_policy_ops_pick_victim();
+				u32 j;
 
-				buf_before = s3fs_ino_buf_bytes(ino);
-				if (pending_exists(ino)) {
-					/* AC-45 C3: a miss is in flight, so the ino is not
-					 * evicted whole (the chunk being populated and its
-					 * entries must reach the waiting reader), but its
-					 * idle chunks are shed — otherwise a file read front
-					 * to back would keep everything it has served. */
-					if (s3fs_ino_shed_unpinned(ino)) {
-						evicted++;
-						buf_before -= min(s3fs_ino_buf_bytes(ino),
-								  buf_before);
-						live_bytes -= min(buf_before, live_bytes);
-					}
+				if (!v)
+					break;
+				for (j = 0; j < ncand; j++)
+					if (cand[j].ino == v)
+						break;
+				if (j == ncand || cand[j].tried)
+					break;
+				cand[j].tried = true;
+				s3fs_capacity_evict_one(v, &live_bytes, &evicted, pv);
+			}
+			for (k = 0; k < ncand && live_bytes > cap_bytes; k++) {
+				if (cand[k].tried)
 					continue;
-				}
-				if (!admit_evict_ino(ino, &freed))
-					continue;
-				evicted++;
-				/* AC-41: arena bytes from the dropped entries plus what
-				 * reset actually released (0 on skip_reset, so the loop
-				 * keeps evicting while still over capacity). */
-				buf_before -= min(s3fs_ino_buf_bytes(ino), buf_before);
-				freed += buf_before;
-				live_bytes -= min(freed, live_bytes);
+				s3fs_capacity_evict_one(cand[k].ino, &live_bytes,
+							&evicted, pv);
 			}
 			kfree(cand);
 			if (live_bytes > cap_bytes)
 				pr_info_ratelimited("s3fs_ebpf: admit set %llu B still over capacity %llu B (in-flight misses)\n",
 						    live_bytes, cap_bytes);
 		}
+		if (pv)
+			s3fs_policy_evict_unlock();
 		if (fmodret_votes)
 			pr_info("s3fs_ebpf: fmod_ret voted evict on %u/%u entries\n",
 				fmodret_votes, total_count);

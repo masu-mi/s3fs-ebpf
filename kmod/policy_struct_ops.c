@@ -99,6 +99,60 @@ int s3fs_policy_ops_eval_hit(u64 ino)
 	return ret;
 }
 
+/* AC-58: on_insert / on_remove / pick_victim mutate BPF-side policy state
+ * that has no lock of its own, so one eviction round holds this mutex. */
+static DEFINE_MUTEX(s3fs_policy_evict_mutex);
+
+void s3fs_policy_evict_lock(void)   { mutex_lock(&s3fs_policy_evict_mutex); }
+void s3fs_policy_evict_unlock(void) { mutex_unlock(&s3fs_policy_evict_mutex); }
+
+bool s3fs_policy_has_pick_victim(void)
+{
+	struct s3fs_policy_ops *ops;
+	bool ret;
+
+	rcu_read_lock();
+	ops = rcu_dereference(s3fs_policy_active);
+	ret = ops && ops->pick_victim;
+	rcu_read_unlock();
+	return ret;
+}
+
+void s3fs_policy_ops_insert(u64 ino)
+{
+	struct s3fs_policy_ops *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(s3fs_policy_active);
+	if (ops && ops->on_insert)
+		ops->on_insert(ino);
+	rcu_read_unlock();
+}
+
+void s3fs_policy_ops_remove(u64 ino)
+{
+	struct s3fs_policy_ops *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(s3fs_policy_active);
+	if (ops && ops->on_remove)
+		ops->on_remove(ino);
+	rcu_read_unlock();
+}
+
+u64 s3fs_policy_ops_pick_victim(void)
+{
+	struct s3fs_policy_ops *ops;
+	u64 ret = 0;
+
+	rcu_read_lock();
+	ops = rcu_dereference(s3fs_policy_active);
+	if (ops && ops->pick_victim)
+		ret = ops->pick_victim();
+	rcu_read_unlock();
+	return ret;
+}
+
 /* --- struct_ops framework glue --- */
 
 /* CFI stubs. Modern kernels validate every indirect BPF call against
@@ -109,12 +163,18 @@ static int __s3fs_stub_admit(u64 c, u64 h)     { return 0; }
 static int __s3fs_stub_evict(u64 ino)          { return 0; }
 static int __s3fs_stub_pressure(u64 c, u64 t)  { return 0; }
 static int __s3fs_stub_hit(u64 ino)            { return 0; }
+static int __s3fs_stub_insert(u64 ino)         { return 0; }
+static int __s3fs_stub_remove(u64 ino)         { return 0; }
+static u64 __s3fs_stub_pick(void)              { return 0; }
 
 static struct s3fs_policy_ops s3fs_policy_cfi_stubs = {
 	.on_admit    = __s3fs_stub_admit,
 	.on_evict    = __s3fs_stub_evict,
 	.on_pressure = __s3fs_stub_pressure,
 	.on_hit      = __s3fs_stub_hit,
+	.on_insert   = __s3fs_stub_insert,
+	.on_remove   = __s3fs_stub_remove,
+	.pick_victim = __s3fs_stub_pick,
 };
 
 /* verifier_ops: minimal — allow the base helper set. */
