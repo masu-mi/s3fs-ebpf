@@ -1603,3 +1603,104 @@ evict-race のピークが capacity 4 MiB まで下がらないのは、reader 3
 | 修正後 | 3 | PASS |
 
 **make test-regression (13 本)**: 全 PASS、`fd_buf_audit` は全テストで drift 0。go test 全 ok。
+
+---
+
+## 18 (続き). pcache モードでの再計測と、計測項目の追加 (2026-10-17)
+
+§11 / §8 の arena モード時代の数字を、pcache モード (`--arena-metadata-only`) の現行コードで測り直し、既存オブジェクトの途中への write、cold read、小さいファイル大量の項目を足した。
+
+- **計測ビルド**: AC-50 の race 修正 (`84ebf2f`) と、fsync の修正 (`44f9270`) を含み、以降に入れた「append 済みファイルの再 load」「SYNC_ENTRIES の上限」の修正を加えた作業ツリー (§18.26 を参照)
+- **環境**: §1 と同じホスト (KVM ゲスト 6 vCPU)、MinIO はローカルの docker。ネットワーク遅延がないので、S3 往復の差は小さく見える
+- **スクリプト**: `scripts/bench-pcache-remeasure.sh` (`STEPS="A B C D E"`)。値は中央値 (A は microbench の p50)。ebpf は `--arena-metadata-only --cache-dir=... --sync-every=0`、fuse-raw は `s3fs` のキャッシュなし、fuse-cache は `use_cache + kernel_cache`、mount-s3 は `--cache` 付き
+- **回数が少ない**: B / C は 5 回、D は 3 回、E は 1 回。D の差が小さい箇所 (10 MiB) は誤差の範囲
+
+### 18.26 計測中に見つけた不具合 (計測の前に直した)
+
+1. **新規ファイルに write + fsync すると、あとで S3 のオブジェクトが 0 byte になる** (HIGH)。`.create` が空の flush を通常 queue に積み、fsync の event は WAIT queue に積まれて即座に処理される。daemon の ticker (100 ms) と debounce (200 ms) を通る placeholder が fsync の PUT の後に PUT され、上書きされた。`write → fsync → close` の python で再現 (3/3)。今回の変更の前のビルドでも起きる。`flush_enqueue` が WAIT の event を積むとき、同じ ino の通常 queue の未処理 item を捨てる。`test-fsync-new-file` を追加 (修正前の kmod で FAIL、後で PASS)。
+   - 計測スクリプトが daemon に `--bucket` を渡し忘れ、ebpf の書き込みが `s3fs-test` に入っていたことで見つかった。最初の B の ebpf の「durable write」の数字は 0 byte の PUT を含んでおり、無効 (下の表は修正後)。
+2. **append して flush 済みのファイルへの 2 回目の append が -EIO** (§1 の「i_size > Fallback」。再現した)。`--sync-every=0` だと daemon が持つオブジェクトのサイズは append 前のまま (`Fallback`)。`handleLoadForWrite` がそれで chunk の長さを切るので、末尾の chunk が populated にならず、6 回の再試行のあと EIO になった。kmod が miss event の `Count` に「i_size まで必要な長さ」を載せ、daemon はそれが長ければそれに合わせる。`test-write-existing` に `append2` を追加。
+3. **オブジェクトが 4096 個を超えると startup sync が失敗する**。`S3FS_IOC_SYNC_ENTRIES` が 4096 件を超えると `-E2BIG` を返し、マウントにはブートストラップの 6 件しか見えない (10,000 個のバケットで、`ls` が 6 件、全部 `cat` しても 0 byte)。上限を 65536 に上げた (lookup は配列の線形探索なので、無制限にはしていない)。10,000 個で `initial: 10000 entries`。
+
+### 18.27 open+read+close (hello.txt、18 B、microbench 5000 iters)
+
+| 条件 | fuse | ebpf | 差 |
+|---|---:|---:|---:|
+| キャッシュなし同士 (fuse-raw / ebpf-nocache) p50 | 1.707 ms | 523.7 µs | **3.3×** |
+| キャッシュあり同士 (fuse-cache / ebpf-pcache) p50 | 524.6 µs | 3.05 µs | **172×** |
+| 参考: mount-s3 (`--cache`) p50 | 103.8 µs | | ebpf の 34× 遅い |
+
+arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準。pcache モードで退行はない。ebpf-nocache の upcall は 5990 回 (warmup 込みの 6000 iters に相当) で、open ごとに 1 回 upcall している。
+
+### 18.28 durable write (新規ファイル、`dd conv=fsync`、中央値)
+
+| サイズ | fuse-raw | fuse-cache | ebpf | fuse-raw との差 |
+|---:|---:|---:|---:|---:|
+| 1 MiB | 20.6 ms | 21.5 ms | 15.0 ms | **1.37×** |
+| 10 MiB | 73.6 ms | 73.5 ms | 54.6 ms | **1.35×** |
+| 100 MiB | 359.8 ms | 384.1 ms | 262.4 ms | **1.37×** |
+
+3 つとも S3 のオブジェクトの sha256 が一致 (§18.26 の 1 の修正後)。§8.3 / §17 の 1.3〜1.7× (そちらは既存ファイルの上書き) より差が小さい。新規ファイルでは fuse-raw も create + 1 回の PUT で済むため。
+
+### 18.29 既存オブジェクトの途中への 4 KiB write (中央値、AC-50 の読み込みを含む)
+
+オブジェクトの真ん中に 4 KiB を書いて fsync。毎回別のオブジェクトを使う (読み込みは必ず cold)。サイズ・内容は全回、書き込み後も元のサイズのまま。
+
+| オブジェクト | fuse-raw | ebpf | fuse-raw との差 |
+|---:|---:|---:|---:|
+| 1 MiB | 20.6 ms | 17.6 ms | 1.17× 速い |
+| 10 MiB | 44.9 ms | 70.6 ms | **1.57× 遅い** |
+| 100 MiB | 158.5 ms | 389.3 ms | **2.46× 遅い** |
+
+**ebpf が負ける。** AC-50 の load は、残る部分をすべて GET して fd に入れ、flush はオブジェクト全体を PUT する (100 MiB 読み + 100 MiB 書き)。fuse-raw の方が 100 MiB でも速いのは、変更のない部分を取り込まずに済ませているためと推測する (s3fs-fuse の multipart upload は、変更のない part を server-side copy する。未確認)。発表の「速い場面」には入れず、「負ける場面」に置く。
+
+### 18.30 cold read (1 回目、中央値、n=3)
+
+毎回別のオブジェクト。各 backend の cache は空 (ebpf は daemon を再起動、cache-dir も空)。sha256 は全 backend で一致。
+
+| サイズ | fuse-raw | fuse-cache | mount-s3 | ebpf | ebpf / fuse-raw |
+|---:|---:|---:|---:|---:|---:|
+| 10 MiB | 19.6 ms | 22.4 ms | 25.6 ms | 25.8 ms | 1.3× 遅い |
+| 100 MiB | 109.5 ms | 92.7 ms | 106.9 ms | 198.1 ms | **1.8× 遅い** |
+| 300 MiB | 298.4 ms | 399.7 ms | 362.4 ms | 870.2 ms | **2.9× 遅い** |
+
+**ebpf は大きいファイルの cold read で負ける。** 切り分け (n=2、別 run): daemon の `--cache-dir` なしだと 100 MiB が 135〜208 ms、300 MiB が 330〜459 ms で、cache-dir を付けた 300 MiB (527〜551 ms、この run) より速い。cache-dir への書き込みが cold read の時間の一部になっている。それでも fuse-raw には届かない (残りの原因は未調査)。cold read の数字は MinIO がローカルで 1 GB/s 近く出るので、実際の S3 では転送が支配して差は縮むはず。
+
+### 18.31 小さいファイル 10,000 個 (4 KiB、flat、wall time)
+
+`ls -l <dir>` (ls) と `find | sort | xargs cat` (cat)。cold = 各 backend のマウント直後 (drop_caches 後)、warm = 同じことをもう一度。
+
+| 操作 | fuse-raw | fuse-cache | mount-s3 | ebpf | fuse-raw との差 |
+|---|---:|---:|---:|---:|---:|
+| ls -l (cold) | 3,108 ms | 3,357 ms | 1,901 ms | 275 ms | **11.3×** |
+| ls -l (warm) | 1,407 ms | 1,418 ms | 303 ms | 64 ms | **22×** |
+| cat 全部 (cold) | 18,354 ms | 20,266 ms | 7,705 ms | 6,884 ms | **2.7×** |
+| cat 全部 (warm) | 18,280 ms | 6,373 ms | 1,433 ms | 197 ms | **93×** (fuse-cache 比 32×、mount-s3 比 7.3×) |
+
+- cat (cold) の 1 ファイルあたり: ebpf 0.69 ms、fuse-raw 1.84 ms、mount-s3 0.77 ms。mount-s3 とはほぼ同じ。cold は S3 の GET が支配する。
+- warm の差が大きいのは、open が upcall を要さないため (§18.27 の 172× が 10,000 回分積み上がる)。ebpf の warm は 1 ファイルあたり 20 µs。
+- ebpf の `ls -l` (cold) は `SYNC_ENTRIES` の結果 (kmod の表) を読むだけで、S3 を叩かない。fuse-raw は HEAD が 10,000 回要る。ただし、ebpf の表は startup の sync 時点のもの。
+
+### 18.32 発表の perf スライド用の表 (場面、FUSE、ebpf、差)
+
+| 場面 | FUSE | ebpf | 差 | 比べた相手 |
+|---|---:|---:|---:|---|
+| open+read+close (キャッシュなし) | 1.71 ms | 0.52 ms | 3.3× | fuse-raw |
+| open+read+close (キャッシュあり) | 524.6 µs | 3.05 µs | 172× | fuse-cache |
+| 小さいファイル 10,000 個を cat (warm) | 18.3 s | 0.20 s | 93× (fuse-cache 比 32×) | fuse-raw |
+| 小さいファイル 10,000 個を `ls -l` (warm) | 1.41 s | 0.064 s | 22× | fuse-raw |
+| 小さいファイル 10,000 個を `ls -l` (cold) | 3.11 s | 0.27 s | 11× | fuse-raw |
+| 小さいファイル 10,000 個を cat (cold) | 18.4 s | 6.9 s | 2.7× (mount-s3 とは同等) | fuse-raw |
+| durable write 1 / 10 / 100 MiB (新規) | 20.6 / 73.6 / 360 ms | 15.0 / 54.6 / 262 ms | 1.37× / 1.35× / 1.37× | fuse-raw |
+| 既存の 1 MiB の途中に 4 KiB + fsync | 20.6 ms | 17.6 ms | 1.17× | fuse-raw |
+| 既存の 10 / 100 MiB の途中に 4 KiB + fsync | 44.9 / 158.5 ms | 70.6 / 389.3 ms | **0.64× / 0.41× (負け)** | fuse-raw |
+| cold read 10 / 100 / 300 MiB | 19.6 / 109.5 / 298.4 ms | 25.8 / 198.1 / 870.2 ms | **0.76× / 0.55× / 0.34× (負け)** | fuse-raw |
+
+勝つのは「open と fsync を何度も繰り返す使い方」(小さいファイル、warm)。大きいファイルの cold read と、大きい既存ファイルの途中の書き換えは負ける。
+
+### 18.33 AC-50 の race 修正 (部分的に未対応の項目を含む)
+
+- **修正した**: `s3fs_fd_load_for_modify` の pin を、書き込みが dirty にするまで持つ (`struct s3fs_mpin`)。write / setattr は `fd->lock` 下で必要な chunk が populated かを確かめ、足りなければ読み込みからやり直す。pin を unpin してから lock を取る方式 (最初の修正案) は、capacity (12 MiB) より大きい 24 MiB のファイルを 8 並列で変更すると、必要な chunk を全部同時に持てず -EIO になったので採らなかった。変更中のファイルは capacity を一時的に超える。回帰テストは `test-write-existing-capacity` (capacity 12 MiB、24 MiB のオブジェクト 8 個の途中への write と truncate を並列に、40 MiB の読みを背景で回し続け、3 ラウンドで sha256 を比較)。**修正前のコードで FAIL することは確認していない** (途中の「unpin する版」では全件 EIO で落ちた)。
+- **修正した**: 2 つの write が同時に clean なファイルに来たときの EIO。後の loader が daemon の -EBUSY を受けたとき、fd がすでに dirty なら 0 を返す。`test-write-existing-capacity` に 1 object 2 writer のケースを入れた。
+- **修正した**: i_size > Fallback の EIO (§18.26 の 2)。
+- **未対応 (LOW)**: AC-48 の `i_size_write` が同時の truncate を巻き戻す窓、dirty の fd に PCACHE エントリが穴の上に入り容量を水増しする件。

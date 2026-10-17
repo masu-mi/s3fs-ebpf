@@ -50,6 +50,7 @@
 - clean な fd の論理サイズは `i_size` (S3 のサイズ)。`fd->size` は取得済みの範囲しか表さない。最初の変更で `fd->size = max(fd->size, i_size)` にしてから適用する。setattr は、サイズが変わるとき (`new_size != 現在のサイズ`) は必ず dirty にする (0 への truncate も PUT される)。
 - すでに dirty / flushing の fd は内容を持っているので、読み込まない。
 - **pin は書き込みが dirty にするまで持ち続ける**: `s3fs_fd_load_for_modify` は必要な chunk を最初にまとめて pin し (`struct s3fs_mpin`)、読み込みが終わっても unpin せずに返す。write / setattr は `fd->lock` 下で `s3fs_fd_modify_ready_locked` を確かめ、通ったらその lock を離さずに `s3fs_mpin_release_locked` → 適用 → dirty。足りなければ lock を離して読み込みからやり直す (最大 `S3FS_LOAD_MAX_TRIES`)。pin が無いと shed / reset が chunk を free し、穴が 0 のまま flush される。capacity より大きいファイルの変更では、必要な chunk を全部持つので一時的に capacity を超える (書き込み用 buffer なので許容)。
+- 読み込みの miss event の `Count` は「chunk が i_size まで持つべき長さ」(`min(4 MiB, i_size - chunk 先頭)`)。daemon が持つオブジェクトのサイズ (`Fallback`) は append + flush のあと sync まで古いので、daemon は `Count` が長ければそれに合わせる。短いと chunk が populated にならず、-EIO になる。
 - 同時に来た 2 つの write: 後の loader は daemon から -EBUSY (dirty な fd は populate しない) を受けるが、fd がすでに dirty なら 0 を返して続ける (-EIO にしない)。
 
 ## flush pin (W1)

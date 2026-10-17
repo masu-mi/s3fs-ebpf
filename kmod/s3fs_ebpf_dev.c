@@ -221,7 +221,10 @@ static long s3fs_dev_sync_entries(void __user *uarg)
 	if (hdr.count == 0)
 		return s3fs_ebpf_entries_replace(NULL, 0);
 
-	if (hdr.count > 4096)
+	/* Lookups scan this array linearly, so the cap stays modest; 4096 was
+	 * too small for a bucket with 10,000 small objects (the startup sync
+	 * failed and the mount showed only the bootstrap entries). */
+	if (hdr.count > 65536)
 		return -E2BIG;
 
 	ubuf = kvcalloc(hdr.count, sizeof(*ubuf), GFP_KERNEL);

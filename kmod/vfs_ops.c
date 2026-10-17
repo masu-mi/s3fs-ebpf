@@ -3458,8 +3458,15 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 				p = NULL;
 			} else {
 				p = pending_get_or_create(inode->i_ino, cs);
-				err = p ? miss_enqueue(inode->i_ino, cs,
-						       S3FS_CHUNK_SIZE,
+				/* Count = what the chunk must hold up to i_size.
+				 * The daemon's size for the object can be older
+				 * (appended + flushed, entry not re-synced); with
+				 * a shorter chunk it never becomes populated. */
+				u64 isz = i_size_read(inode);
+				u64 want = min_t(u64, S3FS_CHUNK_SIZE,
+						 isz > cs ? isz - cs : 1);
+
+				err = p ? miss_enqueue(inode->i_ino, cs, want,
 						       S3FS_MISS_FLAG_FOR_WRITE)
 					: -ENOMEM;
 			}
