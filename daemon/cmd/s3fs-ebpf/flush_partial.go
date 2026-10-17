@@ -214,27 +214,25 @@ func flushPartial(ctx context.Context, mc objstore.MultipartCopier, put func(ctx
 	if err != nil {
 		return 0, "", err
 	}
+	// The bytes of an upload part are produced by the executor right before it
+	// uploads the part (Part.Fill), so memory holds a few parts, not all.
 	parts := make([]objstore.Part, len(specs))
 	var sent int64
 	t0 := time.Now()
 	for i, sp := range specs {
+		sp := sp
 		parts[i] = objstore.Part{PartSpec: sp}
 		if sp.Kind == objstore.PartUpload {
-			parts[i].Data, err = fillRange(ctx, io, kinds, chunk, sp.Off, sp.Len, true)
-			if err != nil {
-				break
+			parts[i].Fill = func() ([]byte, error) {
+				return fillRange(ctx, io, kinds, chunk, sp.Off, sp.Len, true)
 			}
 			sent += sp.Len
 		}
 	}
-	t1 := time.Now()
-	var newETag string
+	newETag, err := mc.PutWithCopy(ctx, key, etag, parts)
 	if err == nil {
-		newETag, err = mc.PutWithCopy(ctx, key, etag, parts)
-	}
-	if err == nil {
-		fmt.Printf("[flush] s3://%s %d parts: fill %.1f ms, multipart %.1f ms\n", key, len(parts),
-			float64(t1.Sub(t0).Microseconds())/1000, float64(time.Since(t1).Microseconds())/1000)
+		fmt.Printf("[flush] s3://%s %d parts (%d B uploaded): %.1f ms\n", key, len(parts), sent,
+			float64(time.Since(t0).Microseconds())/1000)
 		return sent, newETag, nil
 	}
 	if !errors.Is(err, objstore.ErrSourceChanged) {

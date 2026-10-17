@@ -13,6 +13,7 @@ type fakeCopier struct {
 	obj     []byte // the object in "S3"
 	changed bool   // pinned operations fail with ErrSourceChanged
 	got     []objstore.Part
+	eager   int // upload parts that arrived with their bytes already in memory
 	result  []byte
 }
 
@@ -28,12 +29,21 @@ func (f *fakeCopier) PutWithCopy(_ context.Context, _, _ string, parts []objstor
 		return "", objstore.ErrSourceChanged
 	}
 	f.got = parts
+	for _, p := range parts {
+		if p.Data != nil {
+			f.eager++ // AC-65: the bytes must come from Fill, at upload time
+		}
+	}
 	var out []byte
 	for _, p := range parts {
 		if p.Kind == objstore.PartCopy {
 			out = append(out, f.obj[p.Off:p.Off+p.Len]...)
 		} else {
-			out = append(out, p.Data...)
+			d, err := p.Bytes()
+			if err != nil {
+				return "", err
+			}
+			out = append(out, d...)
 		}
 	}
 	f.result = out
@@ -73,6 +83,9 @@ func TestFlushPartial(t *testing.T) {
 		}
 		if sent >= size/2 {
 			t.Fatalf("sent %d of %d: remote chunks were not copied", sent, size)
+		}
+		if f.eager != 0 {
+			t.Fatalf("%d upload parts were filled before the executor asked (AC-65: fill lazily)", f.eager)
 		}
 		if etag != "new" {
 			t.Fatalf("new ETag %q, want the one PutWithCopy returned", etag)
@@ -136,7 +149,7 @@ func TestFlushPartial_NoCopyRunFallsBackToPut(t *testing.T) {
 type etagBackend struct {
 	objstore.Backend
 	etag    string
-	body    []byte // for Stat's size and GetRange
+	body    []byte            // for Stat's size and GetRange
 	onMatch func(etag string) // runs before each pinned read
 	reads   int
 }
@@ -163,7 +176,19 @@ func (b *etagBackend) GetRange(_ context.Context, _ string, off, n int64) ([]byt
 	return b.body[off : off+n], nil
 }
 
-func (b *etagBackend) PutWithCopy(context.Context, string, string, []objstore.Part) (string, error) {
+// PutWithCopy plays the executor: the copy source must still be the pinned
+// object, and the upload parts' bytes are produced here (Part.Fill).
+func (b *etagBackend) PutWithCopy(_ context.Context, _, ifMatch string, parts []objstore.Part) (string, error) {
+	if ifMatch != b.etag {
+		return "", objstore.ErrSourceChanged
+	}
+	for _, p := range parts {
+		if p.Kind == objstore.PartUpload {
+			if _, err := p.Bytes(); err != nil {
+				return "", err
+			}
+		}
+	}
 	return "", nil
 }
 

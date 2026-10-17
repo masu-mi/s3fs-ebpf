@@ -172,10 +172,23 @@ func splitLarge(segs []PartSpec) ([]PartSpec, error) {
 var ErrSourceChanged = errors.New("objstore: source object changed (ETag mismatch)")
 
 // Part is one part of a PutWithCopy: a PartCopy needs no data, a PartUpload
-// carries the bytes of [Off, Off+Len).
+// carries the bytes of [Off, Off+Len) in Data, or produces them with Fill when
+// Data is nil.  Fill is called by the executor right before it uploads the
+// part (and from one of its workers), so only the parts being uploaded are in
+// memory, not all of them (AC-65).  An error from Fill that wraps
+// ErrSourceChanged counts as the copy source having changed.
 type Part struct {
 	PartSpec
 	Data []byte
+	Fill func() ([]byte, error)
+}
+
+// Bytes returns the data of an upload part, calling Fill if the part has none.
+func (p Part) Bytes() ([]byte, error) {
+	if p.Data != nil || p.Fill == nil {
+		return p.Data, nil
+	}
+	return p.Fill()
 }
 
 // MultipartCopier is implemented by backends with a multipart upload that
