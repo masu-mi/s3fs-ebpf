@@ -143,6 +143,11 @@ struct s3fs_read_miss_event {
  * waiter; it does not admit anything into the arena.
  */
 #define S3FS_MISS_FLAG_FOR_WRITE	0x1u
+/* AC-51: the fd's content depends on the object's pinned ETag (it is dirty or
+ * flushing, or holds remote chunks that a flush copies from the object).  A
+ * changed object is then a conflict.  Without this flag the fd depends on
+ * nothing, so the daemon may drop a stale pin and re-Stat. */
+#define S3FS_MISS_FLAG_PINNED		0x2u
 /* AC-51: also sent for a read of a remote chunk of a dirty file: load the
  * whole chunk at `offset` into the fd (kmod accepts it because the chunk is
  * remote; the daemon needs nothing else). */

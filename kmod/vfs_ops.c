@@ -1561,7 +1561,14 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				for (j = 0; j < ncand; j++)
 					if (cand[j].ino == v)
 						break;
-				if (j == ncand || cand[j].tried)
+				if (j == ncand) {
+					/* Not a candidate any more (evicted by
+					 * another route): let the policy forget
+					 * it and ask again. */
+					s3fs_policy_ops_remove(v);
+					continue;
+				}
+				if (cand[j].tried)
 					break;
 				cand[j].tried = true;
 				s3fs_capacity_evict_one(v, &live_bytes, &evicted, pv);
@@ -2928,10 +2935,16 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 
 						/* Only allocated chunks hold the data
 						 * that was just PUT; a hole is
-						 * re-fetched on its next read. */
+						 * re-fetched on its next read.  A remote
+						 * chunk may have a buffer (mark_remote
+						 * leaves a half-filled one in place) but
+						 * the flush copied the object's bytes, not
+						 * the buffer's: it stays unpopulated
+						 * (AC-51). */
 						for (ci = 0; ci <= last_ci &&
 						     ci < fd->nr_chunks; ci++)
-							if (fd->chunks[ci].p)
+							if (fd->chunks[ci].p &&
+							    !fd->chunks[ci].remote)
 								fd->chunks[ci].populated = true;
 						/* AC-51: the object now equals
 						 * the fd, so a remote chunk is
@@ -3910,12 +3923,14 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 		for (;;) {
 			struct s3fs_pending *p;
 			struct mm_struct *mm;
-			bool have;
+			bool have, bound;
 			long rem = 1;
 
 			err = 0;
 			mutex_lock(&fd->lock);
 			have = s3fs_mop_chunk_ready(fd, ci);
+			/* AC-51: a dirty / remote-holding fd depends on the pin. */
+			bound = fd->dirty || fd->flushing || fd->nr_remote;
 			mutex_unlock(&fd->lock);
 			if (have)
 				break;
@@ -3937,7 +3952,8 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 						 isz > cs ? isz - cs : 1);
 
 				err = p ? miss_enqueue(inode->i_ino, cs, want,
-						       S3FS_MISS_FLAG_FOR_WRITE)
+						       S3FS_MISS_FLAG_FOR_WRITE |
+						       (bound ? S3FS_MISS_FLAG_PINNED : 0))
 					: -ENOMEM;
 			}
 			if (!err) {
@@ -4556,7 +4572,8 @@ retry:
 				    fd->chunks[mci].remote) {
 					u64 isz = i_size_read(inode);
 
-					mflags = S3FS_MISS_FLAG_FOR_WRITE;
+					mflags = S3FS_MISS_FLAG_FOR_WRITE |
+						 S3FS_MISS_FLAG_PINNED;
 					mpos = chunk_offset;
 					mcount = min_t(u64, S3FS_CHUNK_SIZE,
 						       isz > chunk_offset ?

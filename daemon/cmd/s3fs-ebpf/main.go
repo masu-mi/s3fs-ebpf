@@ -808,16 +808,24 @@ func runFastpath(args []string) int {
 		}
 		fmt.Printf("[fastpath] object backend: bucket=%s%s (will warm arena on miss)\n",
 			s3c.Bucket(), prefixStr)
+		// The module outlives the daemon, so a value left by an earlier run
+		// (--partial-modify on S3) would stay on for a backend that cannot
+		// copy: always write the value, "0" included.
 		_, canCopy := s3c.(objstore.MultipartCopier)
+		pm := "0"
 		switch {
 		case *partialModify && canCopy:
-			if err := setKmodParam("partial_modify", "1"); err != nil {
-				fmt.Fprintf(os.Stderr, "[kmod] %v\n", err)
-			}
+			pm = "1"
 		case *partialModify:
 			fmt.Fprintln(os.Stderr, "[kmod] --partial-modify ignored: backend has no server-side copy")
 		}
+		if err := setKmodParam("partial_modify", pm); err != nil {
+			fmt.Fprintf(os.Stderr, "[kmod] %v\n", err)
+		}
 	} else {
+		if err := setKmodParam("partial_modify", "0"); err != nil {
+			fmt.Fprintf(os.Stderr, "[kmod] %v\n", err)
+		}
 		fmt.Println("[fastpath] object backend disabled — misses are reported but not cached")
 	}
 

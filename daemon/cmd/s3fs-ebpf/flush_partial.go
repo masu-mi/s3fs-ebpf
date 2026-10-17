@@ -96,6 +96,38 @@ func pinETag(ctx context.Context, s3c objstore.Backend, ino uint64, key string) 
 	return v.(string), nil
 }
 
+// getPinned reads [off, off+n) of ino's object for a load-for-write, pinned
+// to the cycle's ETag.  An ETag mismatch has two causes:
+//   - a flush finished meanwhile and pinned the new object (its remote
+//     chunks have the same bytes): read the pin again and retry;
+//   - the pin is stale.  If the fd depends on it (bound: dirty, flushing, or
+//     remote chunks) that is a real conflict and the error is returned.
+//     Otherwise nothing depends on it (an abandoned cycle): drop it, Stat
+//     again and retry.
+func getPinned(ctx context.Context, s3c objstore.Backend, mc objstore.MultipartCopier,
+	ino uint64, key string, off, n int64, bound bool) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		etag, err := pinETag(ctx, s3c, ino, key)
+		if err != nil {
+			return nil, err
+		}
+		body, err := mc.GetRangeMatch(ctx, key, off, n, etag)
+		if !errors.Is(err, objstore.ErrSourceChanged) {
+			return body, err
+		}
+		lastErr = err
+		if cur, ok := objETags.Load(ino); ok && cur.(string) != etag {
+			continue // a flush re-pinned
+		}
+		if bound {
+			return nil, err
+		}
+		objETags.CompareAndDelete(ino, etag)
+	}
+	return nil, lastErr
+}
+
 // partialIO is what the part executor needs; tests replace it.
 type partialIO struct {
 	readDirty func(off int64, buf []byte) error
@@ -140,13 +172,20 @@ func fillRange(ctx context.Context, io partialIO, kinds []objstore.ChunkKind, ch
 
 // flushPartial writes the new object with PutWithCopy; on ErrSourceChanged
 // it rebuilds the whole content from the current object plus kmod's chunks
-// and does a plain Put (last writer wins, as before AC-51).  Returns the
-// number of bytes sent.
+// and does a plain Put (last writer wins, as before AC-51).  When no run of
+// unchanged chunks is long enough to be a copy part (every part but the last
+// must be >= 5 MiB), PlanParts says ErrNoCopy and the whole content is put
+// the plain way, the remote chunks' bytes coming from the pinned object.
+// Returns the number of bytes sent and the ETag of the new object ("" when
+// the plain put was used: its ETag is not known here).
 func flushPartial(ctx context.Context, mc objstore.MultipartCopier, put func(ctx context.Context, data []byte) error,
-	io partialIO, key, etag string, kinds []objstore.ChunkKind, chunk, size int64) (int64, error) {
+	io partialIO, key, etag string, kinds []objstore.ChunkKind, chunk, size int64) (int64, string, error) {
 	specs, err := objstore.PlanParts(kinds, chunk, size)
+	if errors.Is(err, objstore.ErrNoCopy) {
+		return fullPut(ctx, io, put, kinds, chunk, size, true)
+	}
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	parts := make([]objstore.Part, len(specs))
 	var sent int64
@@ -162,32 +201,42 @@ func flushPartial(ctx context.Context, mc objstore.MultipartCopier, put func(ctx
 		}
 	}
 	t1 := time.Now()
+	var newETag string
 	if err == nil {
-		_, err = mc.PutWithCopy(ctx, key, etag, parts)
+		newETag, err = mc.PutWithCopy(ctx, key, etag, parts)
 	}
 	if err == nil {
 		fmt.Printf("[flush] s3://%s %d parts: fill %.1f ms, multipart %.1f ms\n", key, len(parts),
 			float64(t1.Sub(t0).Microseconds())/1000, float64(time.Since(t1).Microseconds())/1000)
-		return sent, nil
+		return sent, newETag, nil
 	}
 	if !errors.Is(err, objstore.ErrSourceChanged) {
-		return 0, err
+		return 0, "", err
 	}
 	fmt.Fprintf(os.Stderr, "[flush] s3://%s changed under the copy source; falling back to a full put\n", key)
-	full, err := fillRange(ctx, io, kinds, chunk, 0, size, false)
-	if err != nil {
-		return 0, err
+	return fullPut(ctx, io, put, kinds, chunk, size, false)
+}
+
+// fullPut puts the whole new content with a plain Put.  With pinned, the
+// remote chunks' bytes come from the pinned object (they are the bytes the
+// fd was built on); if that object changed, or when not pinned, from the
+// current object (last writer wins).
+func fullPut(ctx context.Context, io partialIO, put func(ctx context.Context, data []byte) error,
+	kinds []objstore.ChunkKind, chunk, size int64, pinned bool) (int64, string, error) {
+	full, err := fillRange(ctx, io, kinds, chunk, 0, size, pinned)
+	if pinned && errors.Is(err, objstore.ErrSourceChanged) {
+		full, err = fillRange(ctx, io, kinds, chunk, 0, size, false)
 	}
-	return size, put(ctx, full)
+	if err != nil {
+		return 0, "", err
+	}
+	return size, "", put(ctx, full)
 }
 
 // tryFlushPartial handles the flush of ev when the file has remote chunks.
 // handled=false means "use the full put" (nothing remote, or no support).
 func tryFlushPartial(ctx context.Context, devFd int, s3c objstore.Backend, key string, ino uint64) (handled bool, sent int64, size int64, err error) {
-	mc, ok := s3c.(objstore.MultipartCopier)
-	if !ok {
-		return false, 0, 0, nil
-	}
+	mc, canCopy := s3c.(objstore.MultipartCopier)
 	kinds, size, chunk, lerr := dirtyLayout(devFd, ino)
 	if lerr != nil {
 		return false, 0, 0, nil // old kmod: no layout, full put
@@ -198,6 +247,12 @@ func tryFlushPartial(ctx context.Context, devFd int, s3c objstore.Backend, key s
 	}
 	if !remote || size <= 0 {
 		return false, 0, 0, nil
+	}
+	if !canCopy {
+		// kmod left partial_modify on for a backend that cannot copy: a plain
+		// put of the buffer would write zeros over the remote chunks.  Refuse;
+		// the caller marks the file dirty again.
+		return true, 0, size, errors.New("file has remote chunks but the backend cannot copy server-side; refusing a put that would zero them")
 	}
 	etag, err := pinETag(ctx, s3c, ino, key)
 	if err != nil {
@@ -210,10 +265,18 @@ func tryFlushPartial(ctx context.Context, devFd int, s3c objstore.Backend, key s
 		},
 		getNow: func(ctx context.Context, off, n int64) ([]byte, error) { return s3c.GetRange(ctx, key, off, n) },
 	}
-	sent, err = flushPartial(ctx, mc, func(ctx context.Context, d []byte) error { return s3c.Put(ctx, key, d) },
+	sent, newETag, err := flushPartial(ctx, mc, func(ctx context.Context, d []byte) error { return s3c.Put(ctx, key, d) },
 		io, key, etag, kinds, chunk, size)
 	if err == nil {
-		objETags.Delete(ino)
+		// The new object has the same bytes the pinned one had in every
+		// remote chunk, so a load that runs during or after this flush (the
+		// fd may be dirty again) can pin the new ETag.  Unknown ETag (plain
+		// put): drop the pin; the next load pins the current object.
+		if newETag != "" {
+			objETags.Store(ino, newETag)
+		} else {
+			objETags.Delete(ino)
+		}
 	}
 	return true, sent, size, err
 }

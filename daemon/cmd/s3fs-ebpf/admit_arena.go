@@ -592,6 +592,10 @@ type readMissEvent struct {
 // to modify the file and needs the chunk at Offset loaded into its fd.
 const missFlagForWrite = 0x1
 
+// missFlagPinned mirrors S3FS_MISS_FLAG_PINNED (AC-51): the fd depends on the
+// pinned ETag, so a changed object is a conflict, not a stale pin.
+const missFlagPinned = 0x2
+
 // signalAdmitArg mirrors `struct s3fs_signal_admit` (U13: added ChunkOffset).
 type signalAdmitArg struct {
 	Ino         uint64
@@ -668,12 +672,8 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 	if mc, ok := s3c.(objstore.MultipartCopier); ok {
 		// AC-51: the chunks loaded in one modify cycle must come from the
 		// same object the flush copies the rest from.
-		etag, perr := pinETag(ctx, s3c, ev.Ino, entry.S3Key)
-		if perr != nil {
-			fail(-5, "s3://%s stat: %v", entry.S3Key, perr)
-			return
-		}
-		body, err = mc.GetRangeMatch(ctx, entry.S3Key, missChunkOffset, size, etag)
+		body, err = getPinned(ctx, s3c, mc, ev.Ino, entry.S3Key, missChunkOffset, size,
+			ev.Flags&missFlagPinned != 0)
 	} else {
 		body, err = s3c.GetRange(ctx, entry.S3Key, missChunkOffset, size)
 	}

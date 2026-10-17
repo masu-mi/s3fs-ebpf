@@ -67,6 +67,9 @@
 - **dirty な fd の読み出しは upcall しない (remote を除く):** `s3fs_ebpf_read_folio` は、dirty / flushing な fd で remote でない chunk (持っている chunk と穴) の miss では daemon を呼ばず、fd から直接読む (`gen=0` の fill)。daemon は dirty な fd に populate できず (-EBUSY)、folio ごとに timeout を待っていた (AC-51 の煙テストで、旧終端より先を `drop_caches` 後に読むと数十秒かかった)。
 - **flush 側の ioctl:** `S3FS_IOC_DIRTY_LAYOUT` が chunk ごとの状態 (data / hole / remote) と `fd->size` を返し、`flush_read_seq = flush_seq` を記録する (READ_DIRTY と同じく、ここまでの enqueue を覆う)。`S3FS_IOC_READ_DIRTY_RANGE` は `[offset, offset+size)` を読む。data / hole の chunk だけ読むこと (remote は 0 が返る)。
 
+- **ETag の pin (daemon、`objETags`):** 変更サイクルの最初の load (なければ flush) で Stat した ETag。kmod の miss event に `S3FS_MISS_FLAG_PINNED` が立つのは、fd が dirty / flushing か remote chunk を持つとき (中身が pin に依存する)。daemon の load (`getPinned`) は 412 (`ErrSourceChanged`) を受けたとき、(a) flush が終わって pin が新しい ETag になっていれば読み直して 1 回やり直す、(b) PINNED でなければ (放棄された cycle の古い pin) pin を捨てて Stat し直す、(c) PINNED なら本物の競合として EIO。flush の成功は `PutWithCopy` が返す新しい ETag を pin に保存する (remote chunk の中身は同じ)。plain put のときは pin を捨てる。daemon は起動のたびに kmod の `partial_modify` に 0 か 1 を明示的に書く (module は daemon より長生きする)。copier のない backend で remote chunk を持つ fd の flush は、全体 PUT を断る (remote を 0 で上書きするため)。
+- **flush 成功で `populated` にしない chunk:** remote の chunk は buffer (`p`) を持っていても、flush が copy したのは object のバイトで buffer ではない。`signal_flush` は `p` を持つ chunk のうち remote でないものだけを populated にする (途中までしか埋まっていない chunk を clean として返さない)。
+
 ## flush pin (W1)
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。
 - `read_dirty` が `flush_read_seq = flush_seq` を記録。`signal_flush` は `err≠0 || flush_read_seq==flush_seq` のとき `flushing=false`、さらに `err==0 && !dirty` なら unpin (`iput` は fd->lock 解放後)。seq 不一致 = 後続 enqueue が未 PUT なので flushing/pin を維持。err≠0 は flushing を下ろすが pin は保持。
