@@ -84,8 +84,14 @@ func TestChunkLoad_PopulatesAllStartingAtMiss(t *testing.T) {
 	if !bytes.Equal(got, src) {
 		t.Fatal("populated bytes differ from source")
 	}
-	if k.signals[0] != fmt.Sprintf("3:0:%d", s3fsSignalVerifyPopulated) {
-		t.Fatalf("first signal = %s, want the miss chunk 3", k.signals[0])
+	// The workers start with the miss chunk; it is among the first signals.
+	want := fmt.Sprintf("3:0:%d", s3fsSignalVerifyPopulated)
+	found := false
+	for _, s := range k.signals[:chunkLoadWorkers] {
+		found = found || s == want
+	}
+	if !found {
+		t.Fatalf("signals = %v, want the miss chunk 3 among the first %d", k.signals, chunkLoadWorkers)
 	}
 }
 
@@ -105,13 +111,13 @@ func TestChunkLoad_RepopulatesAfterEAGAIN(t *testing.T) {
 
 // A failing range GET fails the load and releases followers with -EIO.
 func TestChunkLoad_FailureReleasesFollowers(t *testing.T) {
-	size := 4 * partialAdmitChunk
+	size := 6 * chunkLoadGroup * chunkLoadWorkers / 4 * partialAdmitChunk
 	k := newFake()
-	ops := k.ops(testBody(size), 5*time.Millisecond, 2*partialAdmitChunk)
+	ops := k.ops(testBody(size), 5*time.Millisecond, 0)
 	l := newChunkLoad(int64(size))
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); l.follow(context.Background(), ops, 3) }()
+	go func() { defer wg.Done(); l.follow(context.Background(), ops, l.n-1) }()
 	if err := l.run(context.Background(), ops, 0); err == nil {
 		t.Fatal("run succeeded despite a failing GET")
 	}
@@ -120,12 +126,12 @@ func TestChunkLoad_FailureReleasesFollowers(t *testing.T) {
 	defer k.mu.Unlock()
 	found := false
 	for _, s := range k.signals {
-		if s == "3:-5:0" {
+		if s == fmt.Sprintf("%d:-5:0", l.n-1) {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("follower of chunk 3 not answered with -EIO; signals=%v", k.signals)
+		t.Fatalf("last-chunk follower not answered with -EIO; signals=%v", k.signals)
 	}
 }
 
@@ -154,7 +160,7 @@ func TestChunkLoad_FollowerWaitsForItsChunk(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("follower not released")
 	}
-	if gets != l.n {
-		t.Fatalf("GETs = %d, want %d (one per chunk)", gets, l.n)
+	if want := (l.n + chunkLoadGroup - 1) / chunkLoadGroup; gets != want {
+		t.Fatalf("GETs = %d, want %d (one per group of %d chunks)", gets, want, chunkLoadGroup)
 	}
 }
