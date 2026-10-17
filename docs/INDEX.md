@@ -47,6 +47,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
+| [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計案 (未承認) |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
 | [`design/admit-and-softcap.md`](design/admit-and-softcap.md) | admit / softcap の実際の挙動、キャッシュアルゴリズムとしての問題点 (容量上限なし等)、page cache との役割分担と改善項目 |
