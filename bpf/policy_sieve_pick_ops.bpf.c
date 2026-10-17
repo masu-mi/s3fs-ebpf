@@ -238,7 +238,7 @@ static long pick_step(__u64 i, void *data)
 }
 
 SEC("struct_ops/pick_victim")
-int BPF_PROG(sp_pick)
+__u64 BPF_PROG(sp_pick)
 {
 	struct sv_state *s = get_state();
 	struct sv_pick_ctx c = { .s = s, .victim = 0 };

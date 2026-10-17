@@ -1886,3 +1886,47 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 - 各 run は 1 回。seed 間のばらつきは 2 ポイント程度で、policy 間の差 (4〜5 ポイント) より小さいが、n は小さい。
 - **測っていない**: `pick_victim` 1 回の時間、mutex の保持時間、`on_hit` の read 経路へのコスト (hash lookup が 1 回増える)。hit-rate bench は 1 ino = 44 B の小さい file で、read 経路の負担は見えない。次の計測で `bench-ab-pcache` / 64 jobs の退行を確かめる。
 - `make test-regression` 17 件 PASS (既定 policy は `pick_victim` を持たないので、元の score 順の経路)。
+
+### 18.42 AC-58: policy のコスト計測と、LRU / S3-FIFO の `pick_victim` 移行
+
+**read 経路のコスト** (`scripts/bench-policy-cost.sh`、fio psync `bs=1` で小さい 1 file を読む。どの read も `on_hit` を通る最悪ケース。3 arm を 3 round 交互、各 5 s、IOPS の平均):
+
+| arm | 1 job | 16 jobs | 64 jobs |
+|---|---|---|---|
+| policy なし | 1328k | 4124k | 4130k |
+| sieve_ops (旧: `on_hit` で map update) | 1156k (−12.9%) | 3504k (−15.0%) | 3519k (−14.8%) |
+| sieve_pick_ops (`on_hit` は lookup + store) | 1247k (−6.1%) | 3982k (−3.4%) | 3940k (−4.6%) |
+
+- round 間のばらつきは 1〜2% で、arm 間の差より小さい。
+- `pick_victim` 版は旧 SIEVE より read 経路が軽い (`bpf_map_update_elem` を `lookup` + 1 ビットの store に置き換えたため)。ただし policy なしと比べると、64 jobs で 4.6% 落ちる。この値は 1 file の `bs=1` read という極端な負荷での上限。
+
+**BPF プログラム 1 回の時間** (`kernel.bpf_stats_enabled=1`、`bench-hitrate` の 3 seed 通し。stats 自体のオーバーヘッド込みで、絶対値は目安):
+
+| program | LRU | S3-FIFO | SIEVE |
+|---|---|---|---|
+| on_hit | 336 ns | 416 ns | 310 ns |
+| on_insert | 380 ns | 359 ns | 379 ns |
+| on_remove | 70 ns | 147 ns | 66 ns |
+| pick_victim | 902 ns | 505 ns | 622 ns |
+
+- 候補集合は 8 件 (capacity 8 slot) で小さい。LRU の `pick_victim` は全 slot を走査するので候補数に比例する (4096 slot まで)。候補が数千になるときの時間は測っていない。
+- mutex の保持時間は個別には測っていない。1 round は `on_insert` を候補数ぶんと `pick_victim` を数回呼ぶだけで、この表の時間の合計 (8 候補なら数 µs) は `admit_evict_ino` (fd->lock、page cache の drop) より桁で小さい。
+
+**hit rate** (`bench-hitrate`、capacity mode、各 seed 1 回。旧 `lru_ops` / `s3fifo_ops` は seed 42 / 7 / 123 の順):
+
+| policy | seed 42 | seed 7 | seed 123 |
+|---|---|---|---|
+| lru_ops (旧、epoch 近似) | 32.55% | 33.80% | 31.70% |
+| lru_pick_ops (厳密な LRU) | 34.90% | 37.45% | 34.95% |
+| s3fifo_ops (旧、score) | 31.80% | 33.40% | 33.55% |
+| s3fifo_pick_ops (S / M / G の 3 queue) | 37.20% | 40.00% | 36.70% |
+| sieve_pick_ops | 34.95% | 37.10% | 35.50% |
+| 参考: trace-replay の lru / sieve / opt | 39.2 / 43.8 / 64.2% | 41.7 / 48.0 / 65.8% | 39.2 / 46.8 / 65.3% |
+
+- `pick_victim` 版は 3 seed とも旧版より高い (LRU +2.4〜3.7、S3-FIFO +3.2〜6.6 ポイント)。順位は S3-FIFO > LRU ≈ SIEVE。
+- 本物のキャッシュサイズ (30 file) でトレースを再生した結果 (trace-replay) には届かない (LRU でも約 4 ポイント差)。ライブは eval を 25 access ごとにしか回さない。
+- 候補 30 件のワークロードなので、この差が大きなキャッシュでも同じかは分からない。
+
+**移行しなかった policy**: `freq2bit_ops` / `time_decay_ops` / `size_aware_ops` / `pressure_ops` は、ino ごとの score で順位が決まる (kmod が score 順に整列する) ので、`pick_victim` に移しても結果は変わらない。W-TinyLFU (`wtinylfu_ops` / `wtinylfu_full_ops`) は admission window と SLRU と sketch を持ち、移行には別の設計が要るので今回は見送った。
+
+`make test-regression`: 17 件 PASS。
