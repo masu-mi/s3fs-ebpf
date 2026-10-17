@@ -29,7 +29,11 @@ func NewPrefixed(b Backend, prefix string) Backend {
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	return &Prefixed{inner: b, prefix: prefix}
+	p := &Prefixed{inner: b, prefix: prefix}
+	if mc, ok := b.(MultipartCopier); ok {
+		return prefixedCopier{Prefixed: p, mc: mc}
+	}
+	return p
 }
 
 // Prefix returns the normalized prefix ("" if the wrapper is a
@@ -92,3 +96,19 @@ func (p *Prefixed) List(ctx context.Context, subprefix string) ([]ObjectMeta, er
 }
 
 var _ Backend = (*Prefixed)(nil)
+
+// MultipartCopier is forwarded when the wrapped backend has it; callers
+// type-assert on the returned Backend, so the wrapper must answer the same
+// way the inner one would.  prefixedCopier is what NewPrefixed returns then.
+type prefixedCopier struct {
+	*Prefixed
+	mc MultipartCopier
+}
+
+func (p prefixedCopier) GetRangeMatch(ctx context.Context, key string, offset, size int64, etag string) ([]byte, error) {
+	return p.mc.GetRangeMatch(ctx, p.prefix+key, offset, size, etag)
+}
+
+func (p prefixedCopier) PutWithCopy(ctx context.Context, key, ifMatchETag string, parts []Part) (string, error) {
+	return p.mc.PutWithCopy(ctx, p.prefix+key, ifMatchETag, parts)
+}
