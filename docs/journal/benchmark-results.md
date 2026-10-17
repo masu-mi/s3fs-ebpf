@@ -1737,3 +1737,17 @@ arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準
 - 目標 (300 MiB で fuse-raw の 0.9× 以上) には届かない。残りは、populate の 4 MiB 単位の ioctl と、GET と populate が 1 本の goroutine で直列に並ぶ部分の影響と見ている (未切り分け)。
 - `s3c.Get` を通らなくなったので、この経路では `--cache-dir` に全体が書かれない。
 - 手順 1 と 3 の run は別日の fuse-raw が 312〜324 ms で、環境のずれは小さい。
+
+**退行確認 (warm read と 64 jobs、`bench-ab-pcache.sh`、100 MiB、fio 64 jobs × 5 s、手順 3 の前後の daemon を 2 回ずつ交互に)**:
+
+| 指標 | 前 (`096682a`) 1 回目 / 2 回目 | 後 (`c0f641d`) 1 回目 / 2 回目 |
+|---|---:|---:|
+| 64 jobs read IOPS (pcache、hook あり) | 5,799k / 5,812k | 5,802k / 5,925k |
+| 64 jobs read IOPS (pcache、hook なし) | 6,084k / 6,211k | 6,160k / 6,173k |
+| fuse-raw IOPS (同じ run) | 6,085k / 6,105k | 6,116k / 6,076k |
+| 100 MiB cat (warm、pcache) | 13.46 / 13.39 ms | 13.73 / 13.71 ms |
+| microbench ops/s (pcache) | 304k / 315k | 308k / 300k |
+
+退行なし。gate (a) (b) (c) は 4 回とも PASS。warm の経路は kmod だけで完結し、daemon は通らない (手順 3 は miss の経路だけを変える)。100 MiB cat の +2% は run 間のばらつきの範囲。ここの 13.4〜13.7 ms は `bench-ab-pcache.sh` の `timed_reads` の値で、§18.2 の 9.5 ms (`hyperfine -N cat`) とは測り方が違い、直接比べない。
+
+計測の注意: この環境の bucket `s3fs-test` には過去の bench の 100 MiB のオブジェクトが残っており、arena (128 MiB) の prewarm が埋まって `ab07_large.bin` が admit できず、arena フェーズの warm-up が EIO で失敗する (変更前の daemon でも同じ)。一時 bucket に必要な 3 object だけをコピーし、`S3FS_BUCKET` と `S3_BUCKET` の両方を渡して測った (bucket は測定後に削除)。
