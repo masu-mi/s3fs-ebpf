@@ -1930,3 +1930,35 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 **移行しなかった policy**: `freq2bit_ops` / `time_decay_ops` / `size_aware_ops` / `pressure_ops` は、ino ごとの score で順位が決まる (kmod が score 順に整列する) ので、`pick_victim` に移しても結果は変わらない。W-TinyLFU (`wtinylfu_ops` / `wtinylfu_full_ops`) は admission window と SLRU と sketch を持ち、移行には別の設計が要るので今回は見送った。
 
 `make test-regression`: 17 件 PASS。
+
+### 18.43 AC-13: 現在のビルドでの再計測 (2026-10-17、`fd8f772`)
+
+§18 (`d3d550c`) の再計測を、AC-47 / AC-50〜58 / AC-40 / AC-65 を含む現在のビルドでやり直した。
+
+**AB-07 (`bench-ab-pcache.sh`、100 MiB、バケットは hello / big / 10m だけ、cache-dir は消してから)**
+
+| 指標 | §18.2 (`d3d550c`) | 今回 |
+|---|---|---|
+| gate (a) 64 jobs psync read | FAIL (0.66×) | **PASS** (pcache 5759k vs fuse-raw 5857k、hook なし 6172k、`hook_ratio` 0.983 [OK]) |
+| gate (b) 100 MiB cat | FAIL (1.20×) | **PASS** (pcache 14.7 ms vs fuse-cache 17.1 ms) |
+| gate (c) microbench ops/s | FAIL (0.977×) | **PASS** (pcache 305894 vs arena 287077) |
+
+**bench-hitrate (seed 42、30 files、2000 accesses、softcap 8、capacity_bytes 352、各 1 回)**
+
+| policy | arena hit_rate | arena adm_max | pcache hit_rate |
+|---|---|---|---|
+| observe | 31.30% | 8 | 31.05% |
+| lru_ops | 31.30% | 8 | 30.05% |
+| sieve_ops | 30.90% | 8 | 29.10% |
+| s3fifo_ops | 31.10% | 8 | 30.30% |
+| lru_pick_ops | 34.90% | 8 | 34.55% |
+| s3fifo_pick_ops | 37.40% | 8 | 35.35% |
+| sieve_pick_ops | 35.00% | 8 | 34.60% |
+
+- Belady の上限 opt (64.15%) を超えた行はない。arena の旧 policy は §12.3 (30.6%) の +0.3〜+0.7 ポイントで、整合する。
+- §18.1 の pcache は 52〜54% だった。今回の 29〜35% は、AC-44 で `--arena-metadata-only` の prewarm がメタデータだけになり、pcache の hit が「最初の read で取った分」に限られるようになったため (§18 続き)。arena と pcache の差は 1〜2 ポイントになった。
+- pcache の `adm_max` は 0 と出る。この指標は arena の admit だけを数え、pcache の容量は `fd_buf_audit` と回帰テスト (`capacity-tail` / `capacity-noeval` / `capacity-seq`) で見ている。
+
+**正しさのテスト**: `make test-regression` 18 件 PASS (multiread、evict-race-short の sha256 を含む)。dmesg に oops / BUG / hung task なし。
+
+**lockdep は未検証**。計測カーネル (6.12.0-061200) は `CONFIG_PROVE_LOCKING` が無効で、インストール済みのどのカーネルも同じ (AC-42)。
