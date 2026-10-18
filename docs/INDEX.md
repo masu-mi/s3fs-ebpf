@@ -69,6 +69,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 | doc | 内容 |
 |---|---|
+| [`journal/history.md`](journal/history.md) | 開発史: 年表、backlog の系列ごとの課題、トラブル (データ破損 / race / oops / 計測の無効化 / 外れた仮説) と教訓 |
 | [`journal/week1-build-runtime-notes.md`](journal/week1-build-runtime-notes.md) | Week 1: kernel 6.12 + clang-20 + kmod build 疎通 |
 | [`journal/week2-implementation-notes.md`](journal/week2-implementation-notes.md) | Week 2: MinIO + s3-list/stat 実装、verifier 地雷 |
 | [`journal/week3-implementation-notes.md`](journal/week3-implementation-notes.md) | Week 3: arena/GUP プロトタイプ、VFS materialise |
