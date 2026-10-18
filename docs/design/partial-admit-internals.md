@@ -14,7 +14,7 @@
    - S4 multi-range per ino (同 ino に複数 chunk が同居する状態遷移)
 4. Invariant 表 (常に守られる制約)
 
-> 2026-10-18 注: この資料は arena モードの仕組み。pcache モード (`--arena-metadata-only`) では chunk は arena ではなく kmod の `fd->chunks[]` (4 MiB) に置かれ、admit entry は `S3FS_ADMIT_FLAG_PCACHE` になる。その不変条件 (R1 / pin / shed) は `docs/kmod-pcache-invariants.md`。
+> 2026-10-18 注: この資料は arena モードの仕組み。pcache モード (`--arena-metadata-only`) では chunk は arena ではなく kmod の `fd->chunks[]` (4 MiB) に置かれ、admit entry は `S3FS_ADMIT_FLAG_PCACHE` になる。全体像は `docs/design/pcache-mode.md`、不変条件 (R1 / pin / shed) は `docs/kmod-pcache-invariants.md`。
 
 ## 1. データ構造
 

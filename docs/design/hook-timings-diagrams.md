@@ -4,7 +4,7 @@ s3fs-ebpf の read/write/eviction/durability path を「どの層に
 どの操作が来て、何が連鎖するか」でオブジェクト図化したもの。
 コード追跡や Meetup で「ここで policy が呼ばれる」を指す用途。
 
-> 2026-10-18 注: 図は arena モード (Path B / C) のもの。pcache モードでは admit が `POPULATE_PAGES` (kmod の chunk + PCACHE entry) になり、`.read_folio` は arena の GUP ではなく kmod の chunk から folio を埋める。policy のフック (末尾の一覧) は両モード共通。違いは `docs/design/read-path-design.md` §0。
+> 2026-10-18 注: 図は arena モード (Path B / C) のもの。pcache モードでは admit が `POPULATE_PAGES` (kmod の chunk + PCACHE entry) になり、`.read_folio` は arena の GUP ではなく kmod の chunk から folio を埋める。policy のフック (末尾の一覧) は両モード共通。pcache モードの流れは `docs/design/pcache-mode.md` §4〜§6。
 
 ## 全体コンポーネントの見取り図
 
