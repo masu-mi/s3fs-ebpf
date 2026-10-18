@@ -48,6 +48,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
+| [`design/pcache-mode.md`](design/pcache-mode.md) | pcache モード (`--arena-metadata-only`) の全体像: arena モードとの違い、chunk の表、read / eviction / write の流れ、性能と残課題 |
 | [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計 (実装済み、`--partial-modify`、既定 off) |
 | [`design/ac58-pick-victim.md`](design/ac58-pick-victim.md) | AC-58: policy の vtable に `on_insert` / `on_remove` / `pick_victim` を足し、victim の選択を BPF に渡す設計 (実装済み、SIEVE / LRU / S3-FIFO の `*_pick_ops`) |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
