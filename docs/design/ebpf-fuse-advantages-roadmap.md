@@ -236,14 +236,14 @@ int arena_gc_iter(struct bpf_iter__bpf_map_elem *ctx) {
 
 ## 5. 各 Step と backlog ID の対応
 
-未実装の 4 項目は `docs/journal/backlog.md` の既存 ID 体系に従い以下 ID で追記する。
+未実装の 4 項目は `docs/journal/backlog.md` の AD 系に登録した (2026-10-18)。初版では Q-01〜Q-04 と書いていたが、その ID は backlog のセキュリティ修正 (`backlog-archive.md`、完了済み) と重なっていたので振り直した。
 
 | backlog ID | 対応 Step | タイトル |
 |---|---|---|
-| Q-01 | §3-2 | bpf_timer 自律 eviction |
-| Q-02 | §3-4 | BPF Iterator arena GC |
-| Q-03 | §3-3 | KFunc + radix tree readdir |
-| Q-04 | §3-1 | fmod_ret + cgroup_id() per-cgroup ポリシー |
+| AD-01 (旧 Q-01) | §3-2 | bpf_timer 自律 eviction |
+| AD-02 (旧 Q-02) | §3-4 | BPF Iterator arena GC |
+| AD-03 (旧 Q-03) | §3-3 | KFunc + radix tree readdir |
+| AD-04 (旧 Q-04) | §3-1 | fmod_ret + cgroup_id() per-cgroup ポリシー |
 
 ---
 

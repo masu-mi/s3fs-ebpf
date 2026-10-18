@@ -57,6 +57,25 @@
 - [ ] **K-02** arena kern_vm range 用の generic-context fault handler 追加提案 — 詳細 [`../dev-notes/ebpf-ecosystem-gaps.md §1.2`](../dev-notes/ebpf-ecosystem-gaps.md#12-改善案)
   当てれば A′ (kern_vm 直 deref) 経路が復活、B の GUP overhead が消える (数百ns オーダー改善見込み)。
 
+### AD. FUSE に対する優位性の未実装項目 (`docs/design/ebpf-fuse-advantages-roadmap.md §3`)
+
+2026-10-18 登録。roadmap の初版は Q-01〜Q-04 と書いていたが、Q 系 (セキュリティ修正、archive) と重なるので AD に振り直した。順序と見積もりは roadmap §4。
+
+- [ ] **AD-01** `bpf_timer` による自律 eviction (roadmap §3-2、旧 Q-01)。daemon の push を待たずに容量を守る基盤。目安 3〜4 日
+- [ ] **AD-02** BPF Iterator による arena GC (roadmap §3-4、旧 Q-02)。R-05 と合流。pcache モードでは arena がメタデータだけになったので、着手前に必要性を見直す。目安 4〜5 日
+- [ ] **AD-03** KFunc + in-kernel radix tree による `readdir` 高速化 (roadmap §3-3、旧 Q-03)。AC-55 で SYNC_ENTRIES に索引が入ったので、残る差を測ってから判断する。目安 4〜5 日
+- [ ] **AD-04** `fmod_ret` + `cgroup_id()` の per-cgroup policy (roadmap §3-1、旧 Q-04)。R-04 と合流。目安 4〜5 日
+
+### R. 不足フック (`docs/design/ebpf-hook-gaps.md §2.3 / §4`)
+
+2026-10-18 登録。R-01 (`fentry/generic_file_read_iter`) は完了 (archive)。
+
+- [ ] **R-02** `struct_ops` に `on_read_miss(ino, size, rand_ratio)` を追加し、miss の upcall 前に refuse できるようにする。R-01 のデータが溜まってから
+- [ ] **R-03** `fentry/d_lookup` で lookup を観測し、ネガティブキャッシュの頻度を取る
+- [ ] **R-04** `lsm/inode_permission` の per-cgroup policy (AD-04 と合流)
+- [ ] **R-05** `iter/bpf_map_elem` の arena GC (AD-02 と合流)
+- [ ] **R-06** `fentry/filemap_fault` で mmap のアクセスを観測する。read 経路のフックと同じく、hit 経路の負担は `docs/design/read-iter-hook-overhead.md` §5 の基準で見る
+
 ## 6. スコープ外 (明示的 non-goal)
 
 **Week 5+ か別 project でしか扱わない**もの。ここに書いておくことで「なぜやらないか」の説明を省ける:
