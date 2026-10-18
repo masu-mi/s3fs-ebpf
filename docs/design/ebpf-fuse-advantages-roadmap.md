@@ -25,6 +25,10 @@ struct s3fs_policy_ops {
     int (*on_evict)(u64 ino);
     int (*on_pressure)(u64 count, u64 threshold);
     int (*on_hit)(u64 ino);
+    /* AC-58 (2026-10-17) で末尾に追加 */
+    int (*on_insert)(u64 ino);
+    int (*on_remove)(u64 ino);
+    u64 (*pick_victim)(void);
 };
 ```
 
@@ -251,4 +255,4 @@ int arena_gc_iter(struct bpf_iter__bpf_map_elem *ctx) {
 - `docs/design/read-path-design.md` — Path A/B/C の設計比較
 - `kmod/policy_struct_ops.h` — vtable 定義
 - `kmod/tree_traversal.c` — KFunc expose の現行実装 (§3-3 の参考)
-- `docs/journal/backlog.md` §3 §4 — 未完了 follow-up の一元リスト
+- `docs/journal/backlog.md` — 未完了 follow-up の一元リスト (完了した古い項目は `docs/journal/backlog-archive.md`)

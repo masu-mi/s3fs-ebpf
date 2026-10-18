@@ -46,9 +46,10 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 |---|---|
 | [`design/design.md`](design/design.md) | 統合設計書 (initial pitch, §0 で現状との相違メモ付き) |
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
-| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
+| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
-| [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計案 (未承認) |
+| [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計 (実装済み、`--partial-modify`、既定 off) |
+| [`design/ac58-pick-victim.md`](design/ac58-pick-victim.md) | AC-58: policy の vtable に `on_insert` / `on_remove` / `pick_victim` を足し、victim の選択を BPF に渡す設計 (実装済み、SIEVE / LRU / S3-FIFO の `*_pick_ops`) |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
 | [`design/admit-and-softcap.md`](design/admit-and-softcap.md) | admit / softcap の実際の挙動、キャッシュアルゴリズムとしての問題点 (容量上限なし等)、page cache との役割分担と改善項目 |
@@ -83,7 +84,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | doc | 内容 |
 |---|---|
 | [`journal/benchmark-results.md`](journal/benchmark-results.md) | Meetup 用の headline 数値 + 3-way fair bench (ebpf vs fuse-raw vs fuse-cache) |
-| [`journal/hit-rate-bench.md`](journal/hit-rate-bench.md) | Zipf workload の policy hit-rate 実測 (W-TinyLFU 88.5 / SIEVE 66 / LRU 7.5 / freq2bit 6.5%) |
+| [`journal/hit-rate-bench.md`](journal/hit-rate-bench.md) | Zipf workload の policy hit-rate 実測 (2026-09-28 の数値は容量が効いておらず無効。2026-10-05 以降の capacity mode が正。`pick_victim` 版の比較は `journal/benchmark-results.md` §18.41〜18.43) |
 | [`journal/bench-env-notes.md`](journal/bench-env-notes.md) | bench 環境 caveats、Grafana metric surface、`make bench*` の修正記録 |
 
 ### 運用

@@ -14,6 +14,8 @@
    - S4 multi-range per ino (同 ino に複数 chunk が同居する状態遷移)
 4. Invariant 表 (常に守られる制約)
 
+> 2026-10-18 注: この資料は arena モードの仕組み。pcache モード (`--arena-metadata-only`) では chunk は arena ではなく kmod の `fd->chunks[]` (4 MiB) に置かれ、admit entry は `S3FS_ADMIT_FLAG_PCACHE` になる。その不変条件 (R1 / pin / shed) は `docs/kmod-pcache-invariants.md`。
+
 ## 1. データ構造
 
 ### 1.1 kmod 側
@@ -577,7 +579,7 @@ prewarm 対象外にして、複数 offset を dd で読むと dmesg + /metrics
 
 ## 参照
 
-- `docs/journal/backlog.md` D-01 / D-02 の commit ref (`b0a62c7` / `c419541`)
+- `docs/journal/backlog-archive.md` D-01 / D-02 の commit ref (`b0a62c7` / `c419541`)
 - `docs/design/hook-timings-diagrams.md` タイミング 3 (read miss + partial admit)、6 (eviction + arena free)
 - `docs/user/posix-and-practical-notes.md` §D-01 / §D-02 の POSIX 準拠論点
 - `kmod/vfs_ops.c`: `s3fs_admit` / `admit_lookup_at_locked` / `admit_snapshot`

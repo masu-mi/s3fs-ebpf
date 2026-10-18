@@ -12,8 +12,9 @@ s3fs-ebpf における「kmod の `.read` が daemon が用意した実データ
 | **B** | kmod が daemon user_vm を GUP + kmap 経由 read | **✅ 実装済** | ○ (物理 page 共有) | 強 | 小 |
 | **C** | kmod read miss → daemon upcall → daemon が S3 fetch → admit → kmod 待機解除 | **✅ 実装済** | ○ (admit 後は B 経路で読む) | 強 (Slow Path 完成) | 中 |
 | D | upstream に patch を投げて A′ を復活 | 📝 提案 | ◎ (JIT 直参照相当) | 最強 + 上流貢献 | 大 (kernel rebuild + upstream review) |
+| **pcache** | C の upcall で取った中身を `POPULATE_PAGES` で kmod の 4 MiB chunk に置き、`.read_folio` が page cache に埋める。arena はメタデータだけ (`--arena-metadata-only`) | **✅ 実装済 (AB-04〜、2026-10-13〜)** | × (chunk へ 1 回コピー、hit は page cache) | 強 (FUSE 比の倍率は維持) | 大 (不変条件が多い) |
 
-**現状の構成**: B が prewarm 済 ino の Fast Path、C が未 admit ino への on-demand fetch (Slow Path)、fallback が daemon 不在時の kmod compile-time initial_content。D は Meetup 後の upstream 貢献候補。
+**現状の構成**: arena モード (既定) では B が prewarm 済 ino の Fast Path、C が未 admit ino への on-demand fetch (Slow Path)、fallback が daemon 不在時の kmod compile-time initial_content。pcache モードでは B を使わず、C の upcall の結果を kmod 側の chunk と page cache に置く。64 並列 read で GUP が伸びなかったこと (AA-03) が移行の理由で、2026-10-13 以降の計測と修正は pcache モードで行っている。両モードの比較は `docs/user/meetup-qa.md` Q12、pcache のロック順と不変条件は `docs/kmod-pcache-invariants.md`、経緯は `docs/journal/history.md` §2.5〜。D は Meetup 後の upstream 貢献候補。
 
 ---
 

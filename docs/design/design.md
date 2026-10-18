@@ -1,5 +1,15 @@
 # eBPF × KFunc 活用型 次世代 S3FS 統合設計書
 
+## 0. 現状との相違 (2026-10-18 時点)
+
+この文書は初期の構想 (pitch) で、§1 以降は書いた当時のまま残している。実装は次の点で違う。経緯は `docs/journal/history.md`。
+
+- **データの置き場所**: 「eBPF + KFunc が `bpf_arena` を直参照する Fast Path」(§2 の 4) は、kmod から arena の kern_vm を直接読む方式 (Path A′) が 6.12 で動かず断念した。arena モードでは kmod が daemon の arena を GUP で読む (Path B)。その後、arena をメタデータだけに縮退し、ファイルの中身を kmod の 4 MiB chunk と Linux の page cache に置く pcache モード (`--arena-metadata-only`、AB 系) に移り、計測と修正はこちらで進めている (既定は今も arena モード)。比較は `docs/user/meetup-qa.md` Q12、read path は `docs/design/read-path-design.md`、pcache の不変条件は `docs/kmod-pcache-invariants.md`。
+- **Slow Path**: miss の通知は `bpf_ringbuf` ではなく、`/dev/s3fs_ebpf` の blocking `read(2)` と ioctl (Path C)。ringbuf (`s3fs_events`) は fentry 側の観測用に残っている。通信路の一覧は `docs/design/component-communication.md`。
+- **巨大データ (§3)**: `bpf_rbtree` のレンジインデックスと NVMe の階層管理は作っていない。大きいファイルは 4 MiB chunk の部分 admit (D-01、`docs/design/partial-admit-internals.md`) と、daemon の disk cache (`--cache-dir` / `--disk-cache-capacity`) で扱う。既存の大きいオブジェクトの途中の書き換えは multipart + server-side copy (AC-51、`docs/design/ac51-partial-modify.md`)。
+- **policy**: GopherLua / Wasmtime ではなく、CEL (Layer 1) + built-in / user の eBPF (struct_ops / fmod_ret) + KFunc の構成 (`docs/design/policy-engine-design.md` §4.5)。struct_ops (§1 の「候補 B」) は採用済みで、AC-58 で victim の選択も BPF に渡せるようになった (`docs/design/ac58-pick-victim.md`)。
+- **§4 / §5 のスクリプトとディレクトリ**: 実際の daemon は `daemon/cmd/s3fs-ebpf` の `fastpath` サブコマンド (`mount` / `unmount` は骨組みのまま) で、daemon のパッケージは `daemon/internal/` 以下、policy は `policies/*.cel`。起動は `make run` (`fastpath --s3`) で、手順は `README.md` を見る。mount の `map_id=` 渡し (§2 の 3) は今もこの形。
+
 ## 1. コンセプトと位置付け
 
 本プロジェクトは、Linux カーネルの `bpf_arena`、`bpf_obj_new`、およびカスタム **KFunc (カーネルモジュール)** を組み合わせ、FUSE のコンテキストスイッチオーバーヘッドを排除した超低レイテンシ S3 ファイルシステムです。
