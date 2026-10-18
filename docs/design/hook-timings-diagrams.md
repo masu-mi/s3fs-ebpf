@@ -4,6 +4,8 @@ s3fs-ebpf の read/write/eviction/durability path を「どの層に
 どの操作が来て、何が連鎖するか」でオブジェクト図化したもの。
 コード追跡や Meetup で「ここで policy が呼ばれる」を指す用途。
 
+> 2026-10-18 注: 図は arena モード (Path B / C) のもの。pcache モードでは admit が `POPULATE_PAGES` (kmod の chunk + PCACHE entry) になり、`.read_folio` は arena の GUP ではなく kmod の chunk から folio を埋める。policy のフック (末尾の一覧) は両モード共通。違いは `docs/design/read-path-design.md` §0。
+
 ## 全体コンポーネントの見取り図
 
 ```
@@ -590,16 +592,24 @@ App          VFS         kmod                       daemon          S3
 | `admit_replace` (count > softcap) | `on_pressure(count, threshold)` | 圧力越え 1 回 | 事前通知 (advisory) |
 | `admit_replace` per entry | `on_evict(ino)` | admit 数 (最大 hash size) | 1 = vote evict, 0 = keep |
 | `.read_folio` (admit hit) | `on_hit(ino)` | per folio | freq/visited-bit 更新 |
+| `fentry/generic_file_read_iter` (page cache hit) | `on_hit(ino)` (KFunc `s3fs_kfunc_policy_hit` 経由、S-03) | per read (CPU と ino ごとに jiffy 1 回に間引き、AC-47) | page cache で返る read も policy に見せる |
+| `admit_replace` の容量パス (Phase 1) | `on_insert(ino)` (struct_ops のみ、AC-58) | 候補 ino ごと (冪等) | policy の FIFO / queue に候補を入れる |
+| `admit_replace` (容量超過) | `pick_victim()` (struct_ops のみ、AC-58) | evict する件数ぶん | 次に捨てる ino を返す。0 なら score 順に戻る |
+| `admit_replace` (evict 後) | `on_remove(ino)` (struct_ops のみ、AC-58) | evict した ino ごと | policy の構造から外す |
+
+AC-58 の 3 つは vtable が `pick_victim` を持つときだけ、`s3fs_policy_evict_lock` の下で呼ばれる (`docs/design/ac58-pick-victim.md`)。
 
 ## 参考: KFunc (Layer 0) 一覧
 
 | KFunc | 型 | 意味 |
 |---|---|---|
 | `s3fs_kfunc_admit_count()` | u32 | 現 admit hash size |
-| `s3fs_kfunc_softcap()` | u32 | S3FS_EVICT_SOFTCAP (=8) |
+| `s3fs_kfunc_softcap()` | u32 | module param `softcap` (既定 8) |
+| `s3fs_kfunc_capacity_bytes()` | u64 | module param `capacity_bytes` (0 = 容量上限なし) |
 | `s3fs_kfunc_evictions_total()` | u32 | atomic_long_read (2^32 wrap) |
 | `s3fs_kfunc_time_ns()` | u64 | ktime_get_boottime_ns |
 | `s3fs_kfunc_ino_size(ino)` | u64 | admit lookup の size (D-01 後は range 1 個の size) |
+| `s3fs_kfunc_policy_hit(ino)` | int | fentry (tracing) から policy の `on_hit` を呼ぶ (S-03) |
 
 ## 参考: ioctl 一覧 (daemon → kmod, kmod → daemon)
 
@@ -617,3 +627,7 @@ App          VFS         kmod                       daemon          S3
 | `S3FS_IOC_SIGNAL_FLUSH` (0x0A) | daemon | fsync waiter を wake (E-01) |
 | `S3FS_IOC_POP_DELETE` (0x0B) | daemon | delete event drain (E-02) |
 | `S3FS_IOC_POP_RENAME` (0x0C) | daemon | rename event drain (E-02) |
+| `S3FS_IOC_POP_FLUSH_WAIT` (0x0D) | daemon | fsync の flush event を blocking で pop (S-08) |
+| `S3FS_IOC_POPULATE_PAGES` (0x0E) | daemon | pcache モードの admit (fd の chunk にコピー + PCACHE entry、AB-04) |
+| `S3FS_IOC_DIRTY_LAYOUT` (0x0F) | daemon | dirty file の chunk 状態 (data / hole / remote) を読む (AC-51) |
+| `S3FS_IOC_READ_DIRTY_RANGE` (0x10) | daemon | offset 指定の READ_DIRTY (AC-51) |

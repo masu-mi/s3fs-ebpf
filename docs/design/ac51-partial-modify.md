@@ -1,6 +1,6 @@
 # AC-51: 既存の大きいオブジェクトの途中の書き換え — 変更のない部分を運ばない
 
-状態: **承認済み (2026-10-17)**。§9 の 4 点は推奨どおり (412 は取り直して PUT、閾値 16 MiB、ETag は最初の変更で記録、GCS は対象外)。実装の順序 (§10) の 1 から進める。実装するときは同じ変更で `docs/kmod-pcache-invariants.md` の「既存ファイルへの最初の変更 (AC-50)」を更新する。
+状態: **実装済み (2026-10-17)**。§9 の 4 点は推奨どおり (412 は取り直して PUT、閾値 16 MiB、ETag は最初の変更で記録、GCS は対象外)。daemon の `--partial-modify` (既定 off、S3 のみ) で有効になり、daemon が kmod の module param `partial_modify` に書く (閾値は module param `partial_modify_min`、既定 16 MiB)。結果は `docs/journal/benchmark-results.md` §18.36 (100 MiB の途中書き換えが fuse-raw の 1.02×)。レビューで出た AC-59〜65 (5 MiB 未満の remote 区間の fallback、ETag pin の後始末、`partial_modify` を起動ごとに明示的に書く、remote chunk を populated にしない、part の遅延生成) も修正済み (`docs/journal/backlog.md`)。不変条件は `docs/kmod-pcache-invariants.md` に反映済み。以下は承認時の設計で、残る課題は §18.36 の「残る課題」を見る。
 
 ## 1. 問題
 
