@@ -90,7 +90,8 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 | doc | 内容 |
 |---|---|
-| [`journal/backlog.md`](journal/backlog.md) | 全 follow-up の一元リスト (P0/P1/P2 × カテゴリ A-L、✅ 完了も記録保持) |
+| [`journal/backlog.md`](journal/backlog.md) | 開いている follow-up と最近の項目 (AC-50 以降) |
+| [`journal/backlog-archive.md`](journal/backlog-archive.md) | 完了した古い backlog 項目 (A〜AB 系、AC-01〜AC-49)。必要なときだけ読む |
 
 ---
 
