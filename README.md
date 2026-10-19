@@ -4,12 +4,18 @@
 FUSE を経由せずに Linux VFS へ直接ぶら下がる、次世代 S3 ファイルシステムの PoC。
 Linux 6.12 LTS の **`bpf_arena`**（生ポインタ・ゼロコピー共有メモリ、6.9 導入・6.12 で安定）、カーネルモジュール上の **KFunc**（Verifier 制限突破 + Layer 0 primitives）、**eBPF struct_ops による policy engine**（Layer 2/3、hot swap 可能）、**Go 製コントロールプレーン** の 4 段構成でメタデータ操作を IPC 0 回で完結させます。
 
-> **Status (2026-09-28)**: Week 0-4 完了。read + write path、動的な
-> policy engine (CEL + built-in eBPF + user eBPF + KFunc の 4 層)、
-> hit-rate bench で **W-TinyLFU 88.5% / SIEVE 66% / LRU 7.5% /
-> freq2bit 6.5%** を実測 (※容量で正規化した比較ではない —
-> [Validity review](docs/journal/hit-rate-bench.md))、Grafana に 21 panel。次段階は Meetup
-> 登壇、および Week 5+ の分散 / multi-tenant / 大ファイル対応。
+> **Status (2026-10-18)**: read + write path、動的な policy engine
+> (CEL + built-in eBPF + user eBPF + KFunc の 4 層)、Grafana に 21 panel。
+> 中身を kmod の chunk と page cache に置く pcache モード
+> (`--arena-metadata-only`、[`docs/design/pcache-mode.md`](docs/design/pcache-mode.md))
+> で、open+read+close が fuse-cache の 172 倍。既存オブジェクトの途中書き換え
+> (`--partial-modify`) と、victim の選択を BPF に渡す `pick_victim` まで実装済み。
+> hit-rate bench (capacity mode、30 files / 8 slot) は S3-FIFO 36.7〜40.0% /
+> LRU 34.9〜37.5% / SIEVE 35.0〜37.1% (`pick_victim` 版、
+> [`benchmark-results.md` §18.42](docs/journal/benchmark-results.md))。
+> 2026-09-28 に出した W-TinyLFU 88.5% などは容量が効いていない計測で無効
+> ([Validity review](docs/journal/hit-rate-bench.md))。経緯は
+> [`docs/journal/history.md`](docs/journal/history.md)。
 >
 > **すぐに使ってみたい場合**:
 > - 概要と数値 → [`docs/user/motivation.md §0`](docs/user/motivation.md)
@@ -147,23 +153,26 @@ make daemon-gen # cilium/ebpf を fetch して bpf2go 実行 → build（Week 1+
 # 1. 観測スタック（MinIO + Prometheus + Grafana + node_exporter）
 make compose-up
 
-# 2. カーネルモジュールをロードして S3 バケットをマウント
-./s3fs-ebpf.sh mount
-#   ↑ 内部で insmod → daemon 起動 → syscall.Mount("...s3fs_ebpf...") を実行
+# 2. カーネルモジュールをロードしてマウント (insmod + mount -t s3fs_ebpf、既定は /mnt/s3demo)
+make mount
 
-# 3. 触ってみる（Week 0 は空 FS）
-ls /mnt/s3data
+# 3. デーモンをフォアグラウンドで起動 (s3fs-ebpf fastpath --s3、Ctrl+C で停止)
+make daemon-run
+
+# 4. 別の端末で触ってみる
+ls /mnt/s3demo
+
+# 後片付け (デーモン停止 + umount + rmmod)
+make unmount
 ```
 
-`ENDPOINT` / `BUCKET_NAME` / `MOUNT_POINT` / `POLICY_FILE` を環境変数で上書き可能。
+`MOUNT_POINT` / `METRICS_ADDR` は make の変数で、バケットや endpoint は `S3FS_BUCKET` / `S3FS_ENDPOINT` /
+`S3FS_ACCESS_KEY` / `S3FS_SECRET_KEY` などの環境変数で上書きできる (`sudo -E` で渡る)。デーモンのオプション
+(`--arena-metadata-only` / `--cache-capacity` / `--policy-bpf` など) は
+`sudo -E ./bin/s3fs-ebpf fastpath --help` を見る。
 
-デーモンをフォアグラウンドで直叩きしたい場合:
-
-```bash
-sudo ./bin/s3fs-ebpf mount --bucket s3fs-test \
-    --endpoint http://localhost:9000 \
-    --mount-point /mnt/s3data
-```
+> `./s3fs-ebpf.sh mount` と `s3fs-ebpf mount` / `unmount` サブコマンドは初期の骨組みのままで、
+> マウントもデーモンの起動もしない。
 
 ---
 

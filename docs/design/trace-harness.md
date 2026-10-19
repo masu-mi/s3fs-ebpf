@@ -102,6 +102,14 @@ The candidate policies diverge from their BPF counterparts:
 | `lru` | `policy_lru_ops.bpf.c` — approximate age-based FIFO with epoch bumps per admit_replace | strict doubly-linked-list LRU | BPF has no linked-list primitive; age proxy loses ordering info on multi-round eviction cascades |
 | `sieve` | `policy_sieve_ops.bpf.c` — per-ino visited bit, cleared during on_evict round | paper hand-pointer clock over linked list | BPF version can only clear per admit_replace round, not per operation |
 
+Update (2026-10-17, AC-58): `policy_lru_pick_ops.bpf.c` (exact LRU) and
+`policy_sieve_pick_ops.bpf.c` (FIFO + hand) now keep the order on the
+BPF side and choose victims via `pick_victim`, so the algorithm gap in
+this table applies to the older `*_ops` only. The live numbers still
+trail the simulator (SIEVE about 35–37 % vs 44–48 %) because the live
+bench evaluates every 25 accesses; see
+`docs/journal/benchmark-results.md` §18.41 / §18.42.
+
 Result on the bench's own trace (`$OUT/trace.jsonl`, Zipf(0.7)/30/200,
 seed 42):
 

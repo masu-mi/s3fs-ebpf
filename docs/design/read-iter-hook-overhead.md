@@ -1,6 +1,6 @@
 # read の fentry フックの負担: 調査記録と、フックを使うときの注意点 (2026-10-16)
 
-AB-07 の性能 gate (a)「64 jobs の psync read で、ebpf-pcache の IOPS が fuse-raw 以上」が落ち続けていた原因を調べた記録。被疑箇所に気づいた経緯、行った試験と結果、そこから分かったフックポイントを使うときの注意点と、フックを採用するかどうかの判断基準をまとめる。数値の詳細は `docs/journal/benchmark-results.md` §18.16、残りの課題は `docs/journal/backlog.md` の AC-47。
+AB-07 の性能 gate (a)「64 jobs の psync read で、ebpf-pcache の IOPS が fuse-raw 以上」が落ち続けていた原因を調べた記録。被疑箇所に気づいた経緯、行った試験と結果、そこから分かったフックポイントを使うときの注意点と、フックを採用するかどうかの判断基準をまとめる。数値の詳細は `docs/journal/benchmark-results.md` §18.16、残りの課題は `docs/journal/backlog-archive.md` の AC-47 (完了)。
 
 ## 1. 結論
 
@@ -132,7 +132,7 @@ page cache で hit する read の経路に入るフックや変更は、次の�
 
 到達点: gate (a) は fuse-raw 比 0.94〜0.96 (フックなしの最低コストは 0.974)。残りは固定の負担と、slot の更新・counter の bump など read のたびにする最小限の仕事。これ以上を狙うなら、フックの目的 (miss のときの判断) を miss の経路で実現し、hit の経路から外す設計変更になる (§4.6)。
 
-**gate (a) の判定方法 (決定済み、2026-10-16)**: 文面どおりの「ebpf-pcache ≥ fuse-raw」は、フックが残る限り満たせない (フックを外した構成は 1.00〜1.03)。そこで `scripts/bench-ab-pcache.sh` の gate (a) を、**フックなしの pcache (`--no-read-iter-hook --pattern-aware-admit=false`) が fuse-raw の 0.98 倍以上** (`NOHOOK_TOLERANCE`、bench の run どうしのばらつきは約 2%) に変えた。フックの負担は gate には入れず、**`hook_ratio`** (フックありの pcache / fuse-raw) として毎回出し、0.90 (`HOOK_RATIO_MIN`) を下回ったら WARN を出す。今の値は 0.96 前後。フックを足したり重くしたりする変更は、`hook_ratio` を §5 の基準で見る。
+**gate (a) の判定方法 (決定済み、2026-10-16)**: 文面どおりの「ebpf-pcache ≥ fuse-raw」は、フックが残る限り満たせない (フックを外した構成は 1.00〜1.03)。そこで `scripts/bench-ab-pcache.sh` の gate (a) を、**フックなしの pcache (`--no-read-iter-hook --pattern-aware-admit=false`) が fuse-raw の 0.98 倍以上** (`NOHOOK_TOLERANCE`、bench の run どうしのばらつきは約 2%) に変えた。フックの負担は gate には入れず、**`hook_ratio`** (フックありの pcache / fuse-raw) として毎回出し、0.90 (`HOOK_RATIO_MIN`) を下回ったら WARN を出す。2026-10-17 の現在のビルド (`fd8f772`) では gate (a) PASS、`hook_ratio` 0.983 (`docs/journal/benchmark-results.md` §18.43)。フックを足したり重くしたりする変更は、`hook_ratio` を §5 の基準で見る。
 
 ## 関連
 

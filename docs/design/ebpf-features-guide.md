@@ -161,14 +161,14 @@ LRU 退場は per-bucket approximate LRU（bucket 内最古を近似的に選ぶ
 
 **用途・有用性**
 
-`struct s3fs_policy_ops { on_admit / on_evict / on_pressure / on_hit }` を BPF プログラムとして実装し、kmod が RCU 経由でディスパッチする。`BPF_LINK_UPDATE` 1 回で vtable を **原子的に** 差し替えられる（`rcu_assign_pointer + synchronize_rcu()`）。
+`struct s3fs_policy_ops { on_admit / on_evict / on_pressure / on_hit / on_insert / on_remove / pick_victim }` を BPF プログラムとして実装し、kmod が RCU 経由でディスパッチする。`BPF_LINK_UPDATE` 1 回で vtable を **原子的に** 差し替えられる（`rcu_assign_pointer + synchronize_rcu()`）。
 
 実装済みポリシー:
 
 | ファイル | アルゴリズム | 特徴 |
 |---|---|---|
 | `policy_lru_ops.bpf.c` | Approximate LRU (epoch-based) | on_hit で seed リフレッシュ |
-| `policy_sieve_ops.bpf.c` | SIEVE (visited-bit + second chance) | ヒット率ベンチ最高（hit-rate-bench.md 参照） |
+| `policy_sieve_ops.bpf.c` | SIEVE の近似 (visited-bit のみ、FIFO と hand なし) | 旧版。本来の SIEVE は `policy_sieve_pick_ops` |
 | `policy_s3fifo_ops.bpf.c` | S3-FIFO (3-tier FIFO) | small/main/ghost の 3 キュー |
 | `policy_freq2bit_ops.bpf.c` | 2-bit 頻度カウンタ | fmod_ret 版と共通 algorithm |
 | `policy_wtinylfu_ops.bpf.c` | W-TinyLFU (CMS + aging) | 4×256 CMS sketch、bpf_loop で aging |
@@ -176,6 +176,11 @@ LRU 退場は per-bucket approximate LRU（bucket 内最古を近似的に選ぶ
 | `policy_size_aware_ops.bpf.c` | size-aware eviction | KFunc で ino_size を読む |
 | `policy_time_decay_ops.bpf.c` | 時刻ベース decay LRU | KFunc `s3fs_kfunc_time_ns` で最終ヒット時刻管理。KFunc 呼び出しデモが主目的 |
 | `policy_wtinylfu_full_ops.bpf.c` | W-TinyLFU 完全版（Window LRU + Doorkeeper + CMS） | 論文忠実実装。ヒット率はスコープ版（`policy_wtinylfu_ops`）より劣る（`hit-rate-bench.md` 参照） |
+| `policy_sieve_pick_ops.bpf.c` | SIEVE (FIFO + hand) | AC-58 の `pick_victim` で victim を BPF が選ぶ |
+| `policy_lru_pick_ops.bpf.c` | 厳密な LRU (stamp の最小) | 同上。旧 `policy_lru_ops` は epoch 近似 |
+| `policy_s3fifo_pick_ops.bpf.c` | S3-FIFO (S / M / G の 3 queue) | 同上。capacity mode の hit rate で最も高い (`benchmark-results.md` §18.42) |
+
+`on_insert` / `on_remove` / `pick_victim` は AC-58 で vtable の末尾に足した (`docs/design/ac58-pick-victim.md`)。持たない policy は従来どおり `on_evict` の score 順で evict される。
 
 **FS・キャッシュでの価値**
 
