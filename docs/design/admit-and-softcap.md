@@ -212,11 +212,13 @@ page cache hit を policy に見せる方法は既にある材料で作れる。
 | S-02 (P1〜P3) | 実装済 | module param `capacity_bytes` (>0 で capacity mode) と `softcap` (実行時に可変)。daemon `--cache-capacity` / `--softcap` で設定する。capacity mode では `on_evict` の戻り値をスコアとして扱う (高い順 → 0 は古い順) |
 | S-04 (P6) | 実装済 | daemon は push の直前に evict log を drain する (`reconcileEvictionsLocked`)。kmod が evict するのは daemon の push 中だけなので、復活の窓が無くなる |
 | 追加 | 実装済 | miss upcall で reader が待っている ino はどちらのモードでも evict しない (`pending_exists`)。以前は、自分の push で入れた ino をその場で追い出し、reader が placeholder buffer に落ちる可能性があった |
-| S-03 (P5) | 未着手 | page cache hit を policy に供給する |
+| S-03 (P5) | 実装済 | KFunc `s3fs_kfunc_policy_hit` を `fentry/generic_file_read_iter` の hit パスから呼び、page cache で返る read でも `on_hit` が dispatch される |
+| AC-58 (P3、P4 の一部) | 実装済 (2026-10-17) | vtable に `on_insert` / `on_remove` / `pick_victim` を追加。これを持つ policy (SIEVE / LRU / S3-FIFO の `*_pick_ops`) は容量超過のとき「次に捨てる ino」を自分で選び、kmod は必要な分だけ evict する。持たない policy は従来の score 順 (`docs/design/ac58-pick-victim.md`) |
 
 capacity mode でも残る点:
 
 - **件数ではなくバイト**: bench はファイルが等サイズなので `SOFTCAP × 44 B` で slot 数を再現している
-- **判定は全置換ラウンド単位 (P4)**: admit が増えるのは必ず daemon の push (= `admit_replace`) 経由なので、上限は push のたびに守られる。ただし policy は push ごとに全件を再評価するので、LRU / SIEVE などの「アクセス単位」のアルゴリズムは引き続き近似になる
+- **判定は全置換ラウンド単位 (P4)**: admit が増えるのは必ず daemon の push (= `admit_replace`) 経由なので、上限は push のたびに守られる。ただし policy は push ごとに全件を再評価するので、LRU / SIEVE などの「アクセス単位」のアルゴリズムは引き続き近似になる。AC-58 の `pick_victim` 版は順序を BPF 側で正しく持つが、evict するタイミングは push ごとのまま
 - **in-flight の ino は上限計算から外せない**: 待ち reader がいる ino は evict しないので、その分は一時的に上限を超えることがある (`pr_info_ratelimited` で記録)
-- **実機未検証** (S-06)
+- ~~**実機未検証** (S-06)~~ 実機検証済み (2026-10-07、S-06)
+- **pcache モード (`--arena-metadata-only`)**: 容量は fd の chunk の確保量 (`fd->cap`) で数える (AC-41、ino ごとに 1 回)。miss が in-flight の ino は丸ごとは evict せず、reader が pin していない chunk だけを free する (shed、AC-45 C3)。ロック順と不変条件は `docs/kmod-pcache-invariants.md`

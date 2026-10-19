@@ -17,11 +17,11 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 |---|---|---|---|---|---|---|
 | **T1** | app → VFS | syscall (`open` / `read` / `write` / `stat` / `unlink` / `rename` / `fsync`) | ユーザ操作の入口 | 常時 | μs | Linux VFS |
 | **T2** | VFS → kmod | file/inode/address_space/super_operations fop dispatch | mount 経由の全操作 | 常時 | μs | `kmod/vfs_ops.c` |
-| **T3** | kmod → BPF (policy) | fmod_ret 経由の関数置換 or struct_ops vtable dispatch | admit / evict / pressure / hit hook | 各 admit_replace | μs | `kmod/tree_traversal.c` (fmod_ret set), `kmod/policy_struct_ops.c` (vtable) |
-| **T4** | BPF → kmod | KFunc call | `admit_count` / `softcap` / `evictions_total` / `time_ns` / `ino_size` | policy 判定内 | ns | `kmod/tree_traversal.c` KFunc set |
+| **T3** | kmod → BPF (policy) | fmod_ret 経由の関数置換 or struct_ops vtable dispatch | admit / evict / pressure / hit hook。struct_ops はさらに insert / remove / pick_victim (AC-58) | 各 admit_replace | μs | `kmod/tree_traversal.c` (fmod_ret set), `kmod/policy_struct_ops.c` (vtable) |
+| **T4** | BPF → kmod | KFunc call | `admit_count` / `softcap` / `capacity_bytes` / `evictions_total` / `time_ns` / `ino_size`。fentry からは `policy_hit` (page cache hit を `on_hit` に渡す) | policy 判定内 | ns | `kmod/tree_traversal.c` KFunc set |
 | **T5** | kmod ↔ BPF map | `bpf_map_lookup/update_elem` (helper), 一部は kmod 側からも書く | inode_index / counters / arena / policy 個別 map | fentry 発火ごと | ns | `bpf/s3fs_fastpath.bpf.c` maps |
 | **T6** | daemon → BPF map | mmap (arena bytes 書込) / `bpf(BPF_MAP_UPDATE_ELEM)` (inode_index 書込) | arena 書込は syscall なし。inode_index は cilium/ebpf 経由 | admit ごと | μs | `daemon/internal/ebpf/loader.go` `AdmitContent` / `WarmCache` |
-| **T7** | daemon → kmod | **ioctl on `/dev/s3fs_ebpf`** (12 種類、下表) | table push、waiter wake、queue pop、stats read | miss/flush ごと | μs | `daemon/cmd/s3fs-ebpf/{admit_arena,flush_loop,delete_loop,sync_entries}.go` |
+| **T7** | daemon → kmod | **ioctl on `/dev/s3fs_ebpf`** (16 種類、下表) | table push、waiter wake、queue pop、stats read | miss/flush ごと | μs | `daemon/cmd/s3fs-ebpf/{admit_arena,flush_loop,delete_loop,sync_entries}.go` |
 | **T8** | kmod → daemon (event) | miscdev **`read(2)` blocking** on `/dev/s3fs_ebpf` | read-miss event stream (`s3fs_read_miss_event`) | miss ごと | μs (blocking) | `runReadMissLoop` in admit_arena.go |
 | **T9** | BPF → daemon (event) | **`BPF_MAP_TYPE_RINGBUF`** (`s3fs_events`) | fentry-side slow-path miss event | fentry miss ごと | μs | `bpf/s3fs_fastpath.bpf.c` `s3fs_events` map、daemon 側 `ringbuf.Reader` |
 | **T10** | daemon ↔ backend | HTTP (minio-go / cloud.google.com/go/storage) | S3/GCS GET/PUT/DELETE/COPY/HEAD/LIST | miss + flush ごと | ms | `daemon/internal/{s3,gcs}/client.go` |
@@ -29,7 +29,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 
 ### 1.1 T7 (ioctl) の内訳
 
-`/dev/s3fs_ebpf` 上の 12 個の ioctl (magic `0xE3`)。詳細は `include/s3fs_ebpf_uapi.h`。
+`/dev/s3fs_ebpf` 上の 16 個の ioctl (magic `0xE3`)。詳細は `include/s3fs_ebpf_uapi.h`。
 
 | nr | 名前 | 方向 | 目的 | 発火頻度 |
 |---:|---|---|---|---|
@@ -45,6 +45,12 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 | 0x0A | `SIGNAL_FLUSH` | user→kmod | `.fsync` の pending waiter を wake | 各 flush の後 |
 | 0x0B | `POP_DELETE` | user←kmod | `.unlink` から来た delete event を pop | 100ms ticker |
 | 0x0C | `POP_RENAME` | user←kmod | `.rename` から来た rename event を pop | 100ms ticker |
+| 0x0D | `POP_FLUSH_WAIT` | user←kmod | `POP_FLUSH` の blocking 版。fsync (FLUSH_FLAG_WAIT) の event だけを待って pop (S-08) | fsync ごと |
+| 0x0E | `POPULATE_PAGES` | user→kmod | pcache モード: 取得した範囲を fd の chunk にコピーし、PCACHE の admit entry を入れる (AB-04) | 各 miss の後 |
+| 0x0F | `DIRTY_LAYOUT` | user↔kmod | dirty な file の chunk ごとの状態 (data / hole / remote) を読む (AC-51 の partial flush) | 各 flush (`--partial-modify`) |
+| 0x10 | `READ_DIRTY_RANGE` | user↔kmod | `READ_DIRTY` の offset 指定版。data / hole の chunk だけを読む (AC-51) | 各 flush (`--partial-modify`) |
+
+ioctl のほかに、daemon は起動時に kmod の module param (`/sys/module/s3fs_kfunc/parameters/`) へ `softcap` / `capacity_bytes` / `partial_modify` を書く (`daemon/cmd/s3fs-ebpf/kmod_params.go`)。起動時だけの設定なので通信路には数えていない。
 
 ### 1.2 BPF map 一覧 (T5 / T6 に登場)
 
@@ -246,7 +252,7 @@ sequenceDiagram
     end
 ```
 
-WAIT flag と coalescer の分岐は E-03 実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/journal/backlog.md J-05` 参照)。
+WAIT flag と coalescer の分岐は E-03 実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/journal/backlog-archive.md J-05` 参照)。
 
 **§4 の `s3fs_flush_event` が §3 の ringbuf と別 transport になっている理由**: kmod C context (`.release` / `.fsync` → `s3fs_ebpf_flush_pop` = `kmod/vfs_ops.c:1338`) の producer なので、BPF prog 専用の `bpf_ringbuf_reserve/submit` は使えない (`bpf_ringbuf_output` は kmod 側から呼べるが、以下 2 要件が満たせない):
 
@@ -270,7 +276,7 @@ WAIT flag と coalescer の分岐は E-03 実装 (`docs/journal/week4c-implement
 
 ## 5. Policy engine dispatch (Layer 1〜4)
 
-BPF 側 hook が 4 種類 (`on_admit` / `on_evict` / `on_pressure` / `on_hit`) あり、fmod_ret と struct_ops の 2 attach 方式が共存する。KFunc は BPF → kmod の逆方向 helper。
+BPF 側 hook が 4 種類 (`on_admit` / `on_evict` / `on_pressure` / `on_hit`) あり、fmod_ret と struct_ops の 2 attach 方式が共存する。struct_ops の vtable には AC-58 で `on_insert` / `on_remove` / `pick_victim` が足され、これを持つ policy は容量超過のときに victim を自分で選ぶ (`docs/design/ac58-pick-victim.md`。fmod_ret 側にはない)。KFunc は BPF → kmod の逆方向 helper。
 
 ```mermaid
 flowchart TB
@@ -295,7 +301,7 @@ flowchart TB
     end
 
     subgraph L4["Layer 4: KFunc (BPF → kmod helper)"]
-      KF["s3fs_kfunc_admit_count<br/>_softcap / _evictions_total<br/>_time_ns / _ino_size"]
+      KF["s3fs_kfunc_admit_count<br/>_softcap / _capacity_bytes<br/>_evictions_total / _time_ns<br/>_ino_size / _policy_hit"]
     end
 
     Daemon["daemon"] -->|"--policy-bpf select"| CEL
@@ -323,7 +329,7 @@ fmod_ret と struct_ops の trade-off は `docs/design/policy-attach-comparison.
 
 ## 6. Sync + eviction feedback (30s 巡回)
 
-periodic 系は独立 ticker で回るが、**メインの feedback は (b) の admit → policy vote → evict_log → drain** — daemon が再送する admit と kmod policy の evict の oscillation を止めるための因果ループがここに閉じている (`docs/journal/backlog.md P-13` の解決点)。
+periodic 系は独立 ticker で回るが、**メインの feedback は (b) の admit → policy vote → evict_log → drain** — daemon が再送する admit と kmod policy の evict の oscillation を止めるための因果ループがここに閉じている (`docs/journal/backlog-archive.md P-13` の解決点)。
 
 ```mermaid
 sequenceDiagram
@@ -368,7 +374,7 @@ evict feedback を持たないと oscillation が起きる根拠と実装は `km
 
 ## 7. 補足: 「USER_RINGBUF で ioctl 置換」の検討
 
-上図の T7 (ioctl) は 12 種類あるが、それらを `BPF_MAP_TYPE_USER_RINGBUF` に置換して syscall overhead を削れるか、という議論は現時点で **効果なし** と判定している。理由:
+上図の T7 (ioctl) は 16 種類あるが、それらを `BPF_MAP_TYPE_USER_RINGBUF` に置換して syscall overhead を削れるか、という議論は現時点で **効果なし** と判定している。理由:
 
 - **SIGNAL_ADMIT / SIGNAL_FLUSH** は blocking waiter を起こす semantics で、"drain trigger" を BPF 側で持てない
 - 現行 ioctl の overhead (~500ns-1μs) は Path C 全体 (S3 Get ~5-30ms 支配) の 0.02% 以下

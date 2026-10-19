@@ -151,6 +151,7 @@ struct s3fs_policy_ops s3fifo_ops = { .on_evict = ..., ... };
 **s3fs-ebpf 期間中は struct_ops を primary に格上げ、fmod_ret は互換用に維持**:
 
 1. `--policy-bpf=builtin:policy_sieve_ops` を Meetup demo 用 default に (hit-rate bench で最高)
+   - 2026-10-18 追記: 「最高」は容量が効いていなかった 2026-09-28 の bench (`docs/journal/hit-rate-bench.md` の冒頭で無効と判定) による。今の capacity mode では AC-58 の `policy_s3fifo_pick_ops` / `policy_lru_pick_ops` / `policy_sieve_pick_ops` が旧 `policy_sieve_ops` より 4〜8 ポイント高い (`docs/journal/benchmark-results.md` §18.41〜18.43)
 2. `--policy-bpf=builtin:policy_freq2bit` (fmod_ret 版) は「fine-grained per-hook attach」の option として残す
 3. 新 algorithm (LRU / SIEVE / W-TinyLFU) は struct_ops 版 (`policy_lru_ops.bpf.c` 等) を先に書く
 4. kmod 側 call site から fmod_ret hook の呼出は残す (無害、性能影響も無視できる)。fmod_ret が attach されていなければ return 0、struct_ops が attach されていれば struct_ops vote を採用

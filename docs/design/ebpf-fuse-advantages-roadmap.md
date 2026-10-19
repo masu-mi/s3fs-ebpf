@@ -25,6 +25,10 @@ struct s3fs_policy_ops {
     int (*on_evict)(u64 ino);
     int (*on_pressure)(u64 count, u64 threshold);
     int (*on_hit)(u64 ino);
+    /* AC-58 (2026-10-17) で末尾に追加 */
+    int (*on_insert)(u64 ino);
+    int (*on_remove)(u64 ino);
+    u64 (*pick_victim)(void);
 };
 ```
 
@@ -232,14 +236,14 @@ int arena_gc_iter(struct bpf_iter__bpf_map_elem *ctx) {
 
 ## 5. 各 Step と backlog ID の対応
 
-未実装の 4 項目は `docs/journal/backlog.md` の既存 ID 体系に従い以下 ID で追記する。
+未実装の 4 項目は `docs/journal/backlog.md` の AD 系に登録した (2026-10-18)。初版では Q-01〜Q-04 と書いていたが、その ID は backlog のセキュリティ修正 (`backlog-archive.md`、完了済み) と重なっていたので振り直した。
 
 | backlog ID | 対応 Step | タイトル |
 |---|---|---|
-| Q-01 | §3-2 | bpf_timer 自律 eviction |
-| Q-02 | §3-4 | BPF Iterator arena GC |
-| Q-03 | §3-3 | KFunc + radix tree readdir |
-| Q-04 | §3-1 | fmod_ret + cgroup_id() per-cgroup ポリシー |
+| AD-01 (旧 Q-01) | §3-2 | bpf_timer 自律 eviction |
+| AD-02 (旧 Q-02) | §3-4 | BPF Iterator arena GC |
+| AD-03 (旧 Q-03) | §3-3 | KFunc + radix tree readdir |
+| AD-04 (旧 Q-04) | §3-1 | fmod_ret + cgroup_id() per-cgroup ポリシー |
 
 ---
 
@@ -251,4 +255,4 @@ int arena_gc_iter(struct bpf_iter__bpf_map_elem *ctx) {
 - `docs/design/read-path-design.md` — Path A/B/C の設計比較
 - `kmod/policy_struct_ops.h` — vtable 定義
 - `kmod/tree_traversal.c` — KFunc expose の現行実装 (§3-3 の参考)
-- `docs/journal/backlog.md` §3 §4 — 未完了 follow-up の一元リスト
+- `docs/journal/backlog.md` — 未完了 follow-up の一元リスト (完了した古い項目は `docs/journal/backlog-archive.md`)

@@ -223,13 +223,15 @@ R-01 フックのデータを即座にキャッシュ判断に活用する最適
 
 ## 4. 残課題 (backlog)
 
+R-02〜R-06 は `docs/journal/backlog.md` の R 系に登録済み (2026-10-18)。
+
 | ID | 内容 | 依存 |
 |---|---|---|
 | R-01 | `fentry/generic_file_read_iter` 追加 + `--pattern-aware-admit` sequential 大ファイル最適化 | **実装済 + bench スクリプト追加** |
 | R-02 | `struct_ops` に `on_read_miss(ino, size, rand_ratio)` hook 追加 | R-01 データ蓄積後 |
 | R-03 | `fentry/d_lookup` で lookup 観測 + ネガティブキャッシュ frequency | — |
-| R-04 | `lsm/inode_permission` per-cgroup policy (→ Q-04 との合流) | — |
-| R-05 | `iter/bpf_map_elem` arena GC (→ Q-02 との合流) | — |
+| R-04 | `lsm/inode_permission` per-cgroup policy (→ AD-04 との合流) | — |
+| R-05 | `iter/bpf_map_elem` arena GC (→ AD-02 との合流) | — |
 | R-06 | `fentry/filemap_fault` mmap アクセス観測 | — |
 
 ---
