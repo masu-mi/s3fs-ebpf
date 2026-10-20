@@ -1,0 +1,10 @@
+CONFIG_KUNIT=y
+CONFIG_BPF=y
+CONFIG_BPF_SYSCALL=y
+# catch what the suites cannot assert on: lock order, sleeping in atomic
+# context, list corruption, use-after-free / out-of-bounds
+CONFIG_DEBUG_KERNEL=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_ATOMIC_SLEEP=y
+CONFIG_DEBUG_LIST=y
+CONFIG_KASAN=y
