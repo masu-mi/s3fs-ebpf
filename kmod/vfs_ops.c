@@ -5487,3 +5487,7 @@ int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc)
 	flush_wait_reopen();
 	return 0;
 }
+
+#ifdef S3FS_KUNIT
+#include "vfs_ops_kunit.c"
+#endif
