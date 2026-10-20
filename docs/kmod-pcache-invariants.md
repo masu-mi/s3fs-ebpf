@@ -12,7 +12,9 @@
 - 例外: `setattr` の縮小 (truncate) は切った先の chunk を free するので、dirty の間は entry の下に chunk がないことがある。chunk へのアクセスはすべて `p != NULL` を確認するので、読むと upcall に戻るだけで壊れない。
 - 保守する側: `s3fs_ebpf_populate_pages` は copy と chunk の `populated` フラグのセットに続けて、`fd->lock` を保持したまま `admit_insert_pcache` を呼ぶ。`s3fs_file_data_reset` は `fd->lock` 下で残っている PCACHE entry を再 evict してから chunk を free する (drop と reset の間に populate が挟まるケースへの対策)。
 - S1: R1 が成り立つのは `fd->lock` 下だけ。`fc_pcache_check` (lockless) から `s3fs_folio_fill_from_kmalloc` が lock を取るまでに `s3fs_admit_gen` が進んでいたら、entry を read_lock で再検証する。`gen == 0` は検証なしの fallback を意味する。
-- T2: `gen != 0` のときも `gen == 0` のときも、確保済みの chunk に `populated` フラグが立っていることを要求する (未取得の chunk の 0 を返さないため)。フラグは chunk ごとにあるので、256 MiB を超えるファイルも同じ判定になる (旧: `ci >= 64` は R1 だけに頼っていた)。dirty/flushing のときは見ない (T1): 確保されていない chunk は hole で、0 として読める。
+- T5: populate が chunk に `populated` を立てるのは、範囲が chunk の先頭から始まり、chunk の終端か eof まで届くときだけ (`s3fs_populate_fills_chunk`)。chunk の途中から始まる範囲は、eof まで届いても立てない (以前は最後の chunk だけこの確認がなく、取得していない前半を 0 として返していた)。daemon の populate は chunk 境界から始まるので、通常の経路では変わらない。
+- T2: `gen != 0` のときも `gen == 0` のときも、確保済みの chunk に `populated` フラグが立っていることを要求する (未取得の chunk の 0 を返さないため)。フラグは chunk ごとにあるので、256 MiB を超えるファイルも同じ判定になる (旧: `ci >= 64` は R1 だけに頼っていた)。dirty/flushing のときは見ない (T1): 確保されていない chunk は hole で、0 として読める。`fd->size` より後ろも 0 (truncate が read と競合したとき)。
+- EOF: `.read_folio` は i_size より後ろの folio を、upcall も fallback もせずに 0 で埋めて成功させる (filemap_read が i_size で切る)。
 
 ## pending のキー
 - `s3fs_pending` は `(ino, chunk_offset)` 単位で、chunk は 4 MiB (`S3FS_PCACHE_CHUNK_SHIFT=22`)。hash key は `ino` のみ (P1: 同じ ino の全チャンクが同じ bucket に入る)。照合は `p->ino` と `p->chunk_offset` の両方で行うので、チャンクごとの完了待ちは独立 (U13)。
@@ -74,6 +76,8 @@
 ## flush pin (W1)
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。
 - `read_dirty` が `flush_read_seq = flush_seq` を記録。`signal_flush` は `err≠0 || flush_read_seq==flush_seq` のとき `flushing=false`、さらに `err==0 && !dirty` なら unpin (`iput` は fd->lock 解放後)。seq 不一致 = 後続 enqueue が未 PUT なので flushing/pin を維持。err≠0 は flushing を下ろすが pin は保持。
+- W3: fsync の waiter (`s3fs_flush_pending`) を起こすのも、同じ seq の条件を満たす signal だけ (`err≠0 || flush_read_seq==flush_seq`)。seq 不一致の成功 signal は、fsync が書く前に読んだ PUT なので、waiter には触らず 0 を返す (fsync 自身の WAIT event の signal が起こす)。以前は close(2) の PUT の完了で、fsync がデータを読まれる前に 0 を返していた。残る窓: fsync の WAIT event の read_dirty の後に古い PUT の signal が来ると、seq が一致するので起こしてしまう (signal が seq を運ばないため)。
+- `put_super` の `flush_queue_drain` は fsync queue を shutdown にする (`POP_FLUSH_WAIT` が -ENODEV)。`fill_super` が `flush_wait_reopen` で戻す。戻さないと rmmod しない再 mount で daemon の fsync loop が即終了していた。
 - 残った pin (daemon 不在・PUT 失敗・キュー破棄) は `put_super` の `s3fs_flush_pins_release_all` が解放 (pr_warn)。unpin の所有権はリスト所属で決まるので二重 iput しない。
 - AC-48: `admit_replace` は i_size を、中身が変わった entry の range 終端 (`offset + size`) まで **伸ばすだけ** で縮めない。dirty/flushing の inode には触らない。entry は range なので `size` を i_size に書いてはいけない (縮むと W2 が誤ったサイズを entry に書き戻す)。S3 側の縮小は `entries_replace` の dcache shrink → 再 lookup で入る。
 - AC-56: `admit_replace` が i_size を伸ばすときの「dirty/flushing でない」確認と `i_size_write` は `fd->lock` 下 (`s3fs_inode_grow_size_unowned`)。write / truncate が dirty と i_size を `fd->lock` 下で変えるので、確認と書き込みの間に挟まった truncate を巻き戻さない。呼び出し時に admits_lock は解放済み (fd->lock が外側)。
