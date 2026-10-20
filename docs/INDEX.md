@@ -18,7 +18,8 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 | doc | 対象読者 | いつ読むか |
 |---|---|---|
-| [`../README.md`](../README.md) | 新入 dev | Quick start / demo path / 環境構築 |
+| [`../README.md`](../README.md) | 新入 dev | PoC の概要 / アーキテクチャ / Quick start / 性能の要約 |
+| [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
@@ -30,6 +31,8 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | doc | 内容 |
 |---|---|
 | [`user/motivation.md`](user/motivation.md) | 背景 / Meetup narrative / スプリント計画 (§1) |
+| [`user/getting-started.md`](user/getting-started.md) | 前提環境 / 環境準備 / ビルド / 起動 / 単体テスト / ベンチ / 可視化 / ディレクトリ構成 |
+| [`user/cli-reference.md`](user/cli-reference.md) | `s3fs-ebpf --help` と `make help` の出力 (`make cli-reference` で `cli-reference.md.tmpl` から生成) |
 | [`user/demo-scenario.md`](user/demo-scenario.md) | Meetup 35 分発表 script (Demo 0-8 の run / expected / say) |
 | [`user/writing-policies.md`](user/writing-policies.md) | 自作 policy の書き方 (Layer 1 CEL / Layer 2 eBPF rebuilt / Layer 3 user eBPF plug) |
 | [`user/posix-and-practical-notes.md`](user/posix-and-practical-notes.md) | FS 拡張の POSIX 準拠スコアカード (E-01/02/03, D-01/02) |
@@ -73,6 +76,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | doc | 内容 |
 |---|---|
 | [`journal/history.md`](journal/history.md) | 開発史: 年表、backlog の系列ごとの課題、トラブル (データ破損 / race / oops / 計測の無効化 / 外れた仮説) と教訓 |
+| [`journal/early-walkthroughs.md`](journal/early-walkthroughs.md) | 以前 README にあった Week 1〜3 の動作確認手順 (test-arena / fastpath / verifier-demo / s3-list) とスプリントのロードマップ |
 | [`journal/week1-build-runtime-notes.md`](journal/week1-build-runtime-notes.md) | Week 1: kernel 6.12 + clang-20 + kmod build 疎通 |
 | [`journal/week2-implementation-notes.md`](journal/week2-implementation-notes.md) | Week 2: MinIO + s3-list/stat 実装、verifier 地雷 |
 | [`journal/week3-implementation-notes.md`](journal/week3-implementation-notes.md) | Week 3: arena/GUP プロトタイプ、VFS materialise |
@@ -107,7 +111,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`dev-notes/kunit.md`](dev-notes/kunit.md) | kmod の KUnit テスト (`make test-kunit`): 実行方法、suite の対象、テストで見つけて直したバグ |
 | [`dev-notes/ebpf-ecosystem-gaps.md`](dev-notes/ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠) |
 
-> 新規環境構築手順は `README.md` と `Makefile` (`doctor` / `setup-kernel` / `setup-toolchain` / `setup-kbuild`) に正本があり、依存箇所ごとの症状と解消は `dev-notes/build-env-dependencies.md`、週 1 の `journal/week1-build-runtime-notes.md` に初回踏破時のメモが残っている。
+> 新規環境構築手順は `user/getting-started.md` と `Makefile` (`doctor` / `setup-kernel` / `setup-toolchain` / `setup-kbuild`) に正本があり、依存箇所ごとの症状と解消は `dev-notes/build-env-dependencies.md`、週 1 の `journal/week1-build-runtime-notes.md` に初回踏破時のメモが残っている。
 
 ---
 
@@ -122,6 +126,6 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 ## 更新運用
 
 - doc を**追加**したら本索引にも 1 行反映。無ければ検索経由でしか辿れない。
-- doc を**リネーム / 移動**したら `git grep -n '<old-path>' docs/ README.md.tmpl` で参照サイトを全部書き換え、`make readme` で README.md を再生成する。
+- doc を**リネーム / 移動**したら `git grep -n '<old-path>' docs/ README.md` で参照サイトを全部書き換える。
 - 相互リンクは `docs/<subdir>/<file>.md §N` の形で書き、他 doc から辿れるようにする (anchor は heading 変更で壊れるので使わない)。
 - カテゴリに迷ったら: README から直リンクされるものは `user/`、設計を純粋に説明するなら `design/`、時系列で起きたことなら `journal/`、横断 tips なら `dev-notes/`。
