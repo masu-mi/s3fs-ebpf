@@ -54,6 +54,15 @@ if ((${#missing[@]})); then
 	echo "kunit.sh: missing ${missing[*]} (Ubuntu: sudo apt install build-essential flex bison bc)" >&2
 	exit 1
 fi
+# Kconfig runs `pahole --version`; a pahole that is installed but broken
+# (e.g. a source build whose libdwarves is not in the ld cache) prints
+# nothing and kconfig fails with "init/Kconfig: syntax error".  The suites
+# do not need BTF, so build as if pahole were absent.
+MAKE_OPTS=()
+if command -v pahole >/dev/null && ! pahole --version >/dev/null 2>&1; then
+	echo "kunit.sh: pahole is installed but does not run ($(pahole --version 2>&1 | head -n1)); building without it" >&2
+	MAKE_OPTS+=(--make_options=PAHOLE=/nonexistent/pahole)
+fi
 
 [[ -x "$KSRC/tools/testing/kunit/kunit.py" ]] ||
 	{ echo "kunit.sh: $KSRC/tools/testing/kunit/kunit.py not found" >&2; exit 1; }
@@ -79,5 +88,6 @@ cd "$KSRC"
 exec python3 tools/testing/kunit/kunit.py run \
 	--build_dir="$BUILD_DIR" \
 	"${CONFIGS[@]}" \
+	${MAKE_OPTS[@]+"${MAKE_OPTS[@]}"} \
 	--jobs="$JOBS" \
 	"$@"
