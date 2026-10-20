@@ -1,6 +1,6 @@
 # AC-66: W-TinyLFU を `pick_victim` で動かす — 変更の検討と計画
 
-状態: **実装済み (2026-10-20)、ライブの計測は未実施**。計画は 2026-10-19、実装でどう決めたかと結果は §9。前提は pcache モード (`--arena-metadata-only`、`docs/design/pcache-mode.md`) と AC-58 の `pick_victim` (`docs/design/ac58-pick-victim.md`)。ロック順と不変条件は `docs/kmod-pcache-invariants.md` が正本。
+状態: **実装済み (2026-10-20)**。ライブの計測は 1 回だけ (§9.4)。計画は 2026-10-19、実装でどう決めたかと結果は §9。前提は pcache モード (`--arena-metadata-only`、`docs/design/pcache-mode.md`) と AC-58 の `pick_victim` (`docs/design/ac58-pick-victim.md`)。ロック順と不変条件は `docs/kmod-pcache-invariants.md` が正本。
 
 ## 1. 結論
 
@@ -126,7 +126,19 @@ kmod は 1 round で最大 `ncand` 回 `pick_victim` を呼び、試し済みの
 - §7 の段 0 の条件 (W-TinyLFU ≥ S3-FIFO) は、bench と同じ形 (30 files / 容量 8) と scan 混在の小さい容量では満たすが、大きい容量では S3-FIFO と SIEVE に 1〜4 ポイント負ける。静的な Zipf では SIEVE / S3-FIFO も頻度の高いものを残せるので、W-TinyLFU の利点は小さい (S3-FIFO の論文の結果と同じ傾向)。window の割合を固定 1 % にしていることと、sketch の reset が 10 × 容量のアクセスごとと短いことが効いている。Caffeine は window の大きさを hill climbing で動かす。
 - BPF 版 (CLOCK、件数でなくバイトの予算) は参照実装と ±1.6 ポイントで、近似による損は見えない。
 
-### 9.4 残り
+### 9.4 実機 (2026-10-20、ma さんの環境)
 
-- ライブの `bench-hitrate` (3 seed、`POLICIES="s3fifo_pick_ops wtinylfu_pick_ops"`)、`bench-hitrate-mixed`、`bench-policy-cost`、`test-pick-victim-stale` を新 policy で回す。ライブでは eval が 25 access ごとなので、trace-replay の値には届かない (AC-58 §6)。
+- `make kmod` は成功 (gcc のバージョン差の既知の警告だけ)。`make test-regression` は全部 PASS (`test-pick-victim-stale` / `test-pattern-aware-admit` を含む)。`on_size` に起因する問題は見つかっていない。
+- `bench-hitrate` (30 files、Zipf α=0.7、2,000 access、softcap=8、1 回):
+
+| policy | hit_rate | miss | err | ms/access |
+|---|---|---|---|---|
+| `s3fifo_pick_ops` | 37.80% | 1244 | 0 | 6.56 |
+| `wtinylfu_pick_ops` | 38.55% | 1229 | 0 | 6.70 |
+
+- W-TinyLFU が 0.75 ポイント (15 miss) 上で、trace-replay と同じ向き。1 回なので有意とは言えない。ライブが trace-replay より低いのは AC-58 §6 と同じ (eval が 25 access ごと、prewarm 済み)。
+
+### 9.5 残り
+
+- `bench-hitrate` を 3 seed、`bench-hitrate-mixed` (大きいファイルの扱い、G5)、`bench-policy-cost` (on_hit の read 経路のコスト) を回す。
 - 必要なら window の割合と sample の倍数を config map にする。
