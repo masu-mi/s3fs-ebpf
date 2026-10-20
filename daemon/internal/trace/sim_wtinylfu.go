@@ -180,28 +180,39 @@ func (p *wtinylfuSim) Size() int { return len(p.items) }
 // --- W-TinyLFU as the BPF policy does it -----------------------------
 
 type clockEntry struct {
-	ino  uint64
-	seg  int
-	hit  bool
-	cand bool
+	ino uint64
+	seg int
+	hit bool
 }
 
 type wtinylfuClockSim struct {
 	cap   int
 	items map[uint64]*list.Element
 	seg   [3]*list.List // front = newest, back = oldest
+	cand  *list.Element // latest window overflow, while it stays in probation
 	sk    *sketch
+	// The BPF side resets the sketch lazily (on_hit only counts), at the
+	// start of on_insert / pick_victim.
+	sample int
+	// Every item weighs this much (the kmod's on_size); budgets are in
+	// weight units as in the BPF version.
+	weight uint64
 }
 
 // NewWTinyLFUClock follows bpf/policy_wtinylfu_pick_ops.bpf.c: segments
 // are FIFOs with a hit bit (CLOCK), a hit only sets the bit, and all
 // movement happens on insert (window balance) or eviction (pick).  Budgets
 // come from the resident count, as the BPF side does not know the
-// capacity.  The kmod's rounds, pending shed and limbo are not modelled.
-func NewWTinyLFUClock(cap int) Policy {
+// capacity.  Items weigh 4 KiB each, as the kmod reports bytes through
+// on_size (so a 1 % window of a small cache holds no item: Caffeine's
+// weighted behaviour).  The kmod's rounds, the pending shed and the BPF
+// side's limbo and rejected queues are not modelled.
+func NewWTinyLFUClock(cap int) Policy { return newWTinyLFUClock(cap, 4096) }
+
+func newWTinyLFUClock(cap int, weight uint64) *wtinylfuClockSim {
 	p := &wtinylfuClockSim{
 		cap: cap, items: make(map[uint64]*list.Element),
-		sk: newSketch(1024, 0),
+		sk: newSketch(1024, 0), weight: weight,
 	}
 	for i := range p.seg {
 		p.seg[i] = list.New()
@@ -212,9 +223,7 @@ func NewWTinyLFUClock(cap int) Policy {
 func (p *wtinylfuClockSim) Name() string { return "wtinylfu-clock" }
 
 func (p *wtinylfuClockSim) Access(ino uint64) bool {
-	// BPF: on_hit increments the sketch; the reset threshold is 10 ×
-	// the resident count, refreshed by on_insert.
-	p.sk.increment(ino)
+	p.sk.increment(ino) // on_hit: any read of a known ino
 	if el, ok := p.items[ino]; ok {
 		el.Value.(*clockEntry).hit = true
 		return true
@@ -226,120 +235,123 @@ func (p *wtinylfuClockSim) Access(ino uint64) bool {
 	return false
 }
 
+// budgets returns how many items the window and protected segments may
+// hold, from the BPF side's byte budgets.
 func (p *wtinylfuClockSim) budgets() (window, protected int) {
-	total := len(p.items)
-	window = total / 100
-	if window < 1 {
-		window = 1
+	total := uint64(len(p.items)) * p.weight
+	wb := total / 100
+	if wb == 0 {
+		wb = 1
 	}
-	protected = (total - window) * 80 / 100
-	return
+	var pb uint64
+	if total > wb {
+		pb = (total - wb) * 80 / 100
+	}
+	return int(wb / p.weight), int(pb / p.weight)
 }
 
-func (p *wtinylfuClockSim) push(e *clockEntry, seg int) {
+// move takes el out of its segment and appends it to seg as the newest.
+func (p *wtinylfuClockSim) move(el *list.Element, seg int) *list.Element {
+	e := el.Value.(*clockEntry)
+	p.seg[e.seg].Remove(el)
+	if p.cand == el {
+		p.cand = nil
+	}
 	e.seg = seg
-	p.items[e.ino] = p.seg[seg].PushFront(e)
-}
-
-// popOldest takes the oldest entry of seg out of its list (still in items).
-func (p *wtinylfuClockSim) popOldest(seg int) *clockEntry {
-	b := p.seg[seg].Back()
-	if b == nil {
-		return nil
-	}
-	return p.seg[seg].Remove(b).(*clockEntry)
-}
-
-func (p *wtinylfuClockSim) insert(ino uint64) {
-	p.sk.sample = 10 * (len(p.items) + 1)
-	p.push(&clockEntry{ino: ino}, segWindow)
-	window, _ := p.budgets()
-	for p.seg[segWindow].Len() > window {
-		e := p.popOldest(segWindow)
-		if e.hit {
-			e.hit = false
-			p.push(e, segWindow)
-			continue
-		}
-		e.cand = true
-		p.push(e, segProbation)
-		break
-	}
-}
-
-// oldestProbation runs the probation CLOCK until its oldest entry has no
-// hit bit (hit entries move to protected, which demotes its own oldest
-// unhit entry back to probation when over budget).
-func (p *wtinylfuClockSim) oldestProbation() *list.Element {
-	for i := 0; i < 4*len(p.items)+4; i++ {
-		b := p.seg[segProbation].Back()
-		if b == nil {
-			return nil
-		}
-		e := b.Value.(*clockEntry)
-		if !e.hit {
-			return b
-		}
-		p.seg[segProbation].Remove(b)
-		e.hit, e.cand = false, false
-		p.push(e, segProtected)
-		_, protected := p.budgets()
-		for p.seg[segProtected].Len() > protected {
-			d := p.popOldest(segProtected)
-			if d.hit {
-				d.hit = false
-				p.push(d, segProtected)
-				continue
-			}
-			p.push(d, segProbation)
-			break
-		}
-	}
-	return p.seg[segProbation].Back()
+	nel := p.seg[seg].PushFront(e)
+	p.items[e.ino] = nel
+	return nel
 }
 
 func (p *wtinylfuClockSim) evict(el *list.Element) {
 	e := el.Value.(*clockEntry)
 	p.seg[e.seg].Remove(el)
+	if p.cand == el {
+		p.cand = nil
+	}
 	delete(p.items, e.ino)
 }
 
-func (p *wtinylfuClockSim) pick() {
-	if v := p.oldestProbation(); v != nil {
-		ve := v.Value.(*clockEntry)
-		// Duel: the newest candidate against probation's oldest.
-		if c := p.seg[segProbation].Front(); c != v && c.Value.(*clockEntry).cand {
-			ce := c.Value.(*clockEntry)
-			if p.sk.estimate(ce.ino) > p.sk.estimate(ve.ino) {
-				ce.cand = false
-				p.evict(v)
-			} else {
-				p.evict(c)
-			}
+func (p *wtinylfuClockSim) insert(ino uint64) {
+	p.maybeReset()
+	p.items[ino] = p.seg[segWindow].PushFront(&clockEntry{ino: ino, seg: segWindow})
+	defer func() {
+		p.sample = 10 * len(p.items)
+		if p.sample < 16 {
+			p.sample = 16
+		}
+	}()
+	for i := 0; i < 2*len(p.items)+2; i++ {
+		window, _ := p.budgets()
+		b := p.seg[segWindow].Back()
+		if p.seg[segWindow].Len() <= window || b == nil {
 			return
 		}
-		p.evict(v)
+		e := b.Value.(*clockEntry)
+		if e.hit {
+			e.hit = false
+			p.move(b, segWindow)
+			continue
+		}
+		p.cand = p.move(b, segProbation)
 		return
 	}
-	for _, seg := range []int{segProtected, segWindow} {
-		for i := 0; i < 2*len(p.items)+2; i++ {
-			b := p.seg[seg].Back()
-			if b == nil {
-				break
-			}
+}
+
+func (p *wtinylfuClockSim) maybeReset() {
+	if p.sample > 0 && p.sk.adds >= p.sample {
+		p.sk.reset()
+	}
+}
+
+func (p *wtinylfuClockSim) pick() {
+	p.maybeReset()
+	for i := 0; i < 4*len(p.items)+8; i++ {
+		if _, protected := p.budgets(); p.seg[segProtected].Len() > protected {
+			b := p.seg[segProtected].Back()
 			e := b.Value.(*clockEntry)
 			if e.hit {
 				e.hit = false
-				p.seg[seg].MoveToFront(b)
+				p.move(b, segProtected)
+			} else {
+				p.move(b, segProbation)
+			}
+			continue
+		}
+		if v := p.seg[segProbation].Back(); v != nil {
+			ve := v.Value.(*clockEntry)
+			if ve.hit {
+				ve.hit = false
+				p.move(v, segProtected)
 				continue
 			}
-			p.evict(b)
+			if c := p.cand; c != nil && c != v {
+				p.cand = nil
+				if p.sk.estimate(c.Value.(*clockEntry).ino) > p.sk.estimate(ve.ino) {
+					p.evict(v)
+				} else {
+					p.evict(c)
+				}
+				return
+			}
+			p.evict(v)
 			return
 		}
-		if b := p.seg[seg].Back(); b != nil {
-			p.evict(b)
+		seg := segProtected
+		if p.seg[seg].Len() == 0 {
+			seg = segWindow
+		}
+		b := p.seg[seg].Back()
+		if b == nil {
 			return
 		}
+		if e := b.Value.(*clockEntry); e.hit {
+			e.hit = false
+			p.move(b, seg)
+			continue
+		}
+		p.evict(b)
+		return
 	}
 }
 

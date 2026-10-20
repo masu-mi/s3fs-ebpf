@@ -21,6 +21,8 @@ int (*on_remove)(u64 ino);       /* kmod が ino を evict した */
 u64 (*pick_victim)(void);        /* 次に捨てる ino。0 = 決められない */
 ```
 
+2026-10-20 (AC-66): さらに末尾に `int (*on_size)(u64 ino, u64 bytes);` を足した。Phase 1 で `on_insert` の直後に、kmod がその ino に課金するバイト数 (arena は entry の合計、pcache は `fd->cap`) を渡す。`capacity_bytes > 0` のときだけ呼ぶ。W-TinyLFU が window / main の予算をバイトで持つため (`docs/design/wtinylfu-pick-plan.md`)。
+
 - `on_hit(ino)` は既存。これが access の通知。
 - 非 sleepable。`on_insert` / `on_remove` / `pick_victim` は **kmod 側の mutex (`s3fs_policy_evict_mutex`) で直列化**して呼ぶ。BPF 側は状態の更新に lock を要らない (bpf_spin_lock の中では map helper を呼べず、リスト操作が書けないため)。`on_hit` だけは並行に来るので、visited の 1 ビットを立てるだけにする (落ちた更新は害がない)。
 
@@ -64,7 +66,7 @@ score と同点処理 (`on_evict`、tiebreak) は、`pick_victim` を持たな�
 - read 経路 (`bench-policy-cost.sh`、1 file の `bs=1` read、どの read も `on_hit` を通る最悪ケース): 64 jobs で policy なしより −4.6% (旧 `sieve_ops` は −14.8%)。`on_hit` を map update から lookup + 1 ビットの store にしたため。
 - BPF プログラム 1 回 (`bpf_stats_enabled`、8 候補): `pick_victim` 0.5〜0.9 µs、`on_insert` 約 0.4 µs、`on_hit` 0.3〜0.4 µs。1 round の合計は数 µs で、`admit_evict_ino` より桁で小さい。
 - 回帰テストに `test-pick-victim-stale` を追加 (AC-64: 削除した ino が policy に残らない)。
-- 残り: 候補が数千のときの `pick_victim` の時間 (LRU は候補を全部見る)、W-TinyLFU の移行、§7 のアプリのヒント。
+- 残り: 候補が数千のときの `pick_victim` の時間 (LRU は候補を全部見る)、§7 のアプリのヒント。W-TinyLFU は AC-66 で `policy_wtinylfu_pick_ops` にした (`docs/design/wtinylfu-pick-plan.md`)。
 
 ## 7. アプリのヒント (未着手)
 

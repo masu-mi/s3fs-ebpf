@@ -153,6 +153,17 @@ u64 s3fs_policy_ops_pick_victim(void)
 	return ret;
 }
 
+void s3fs_policy_ops_size(u64 ino, u64 bytes)
+{
+	struct s3fs_policy_ops *ops;
+
+	rcu_read_lock();
+	ops = rcu_dereference(s3fs_policy_active);
+	if (ops && ops->on_size)
+		ops->on_size(ino, bytes);
+	rcu_read_unlock();
+}
+
 /* --- struct_ops framework glue --- */
 
 /* CFI stubs. Modern kernels validate every indirect BPF call against
@@ -166,6 +177,7 @@ static int __s3fs_stub_hit(u64 ino)            { return 0; }
 static int __s3fs_stub_insert(u64 ino)         { return 0; }
 static int __s3fs_stub_remove(u64 ino)         { return 0; }
 static u64 __s3fs_stub_pick(void)              { return 0; }
+static int __s3fs_stub_size(u64 ino, u64 b)   { return 0; }
 
 static struct s3fs_policy_ops s3fs_policy_cfi_stubs = {
 	.on_admit    = __s3fs_stub_admit,
@@ -175,6 +187,7 @@ static struct s3fs_policy_ops s3fs_policy_cfi_stubs = {
 	.on_insert   = __s3fs_stub_insert,
 	.on_remove   = __s3fs_stub_remove,
 	.pick_victim = __s3fs_stub_pick,
+	.on_size     = __s3fs_stub_size,
 };
 
 /* verifier_ops: minimal — allow the base helper set. */
