@@ -1415,8 +1415,20 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				if (pv)
+				if (pv) {
 					s3fs_policy_ops_insert(ino);
+					/* AC-66: the bytes this ino adds to
+					 * live_bytes (all of its ranges). */
+					if (cap_bytes) {
+						u64 b = 0;
+						u32 k;
+
+						for (k = i; k < count; k++)
+							if (entries[k].ino == ino)
+								b += entries[k].size;
+						s3fs_policy_ops_size(ino, b);
+					}
+				}
 
 				if (fr_vote != 0)
 					fmodret_votes++;
@@ -1444,8 +1456,13 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				if (pv)
+				if (pv) {
 					s3fs_policy_ops_insert(ino);
+					/* AC-66: charged by fd->cap, as live_bytes. */
+					if (cap_bytes)
+						s3fs_policy_ops_size(ino,
+							s3fs_ino_buf_bytes(ino));
+				}
 
 				if (fr_vote != 0)
 					fmodret_votes++;

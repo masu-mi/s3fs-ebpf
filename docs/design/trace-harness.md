@@ -110,6 +110,11 @@ trail the simulator (SIEVE about 35–37 % vs 44–48 %) because the live
 bench evaluates every 25 accesses; see
 `docs/journal/benchmark-results.md` §18.41 / §18.42.
 
+Update (2026-10-20, AC-66): `s3fifo`, `wtinylfu` (reference, exact
+LRU segments) and `wtinylfu-clock` (`policy_wtinylfu_pick_ops.bpf.c`
+step for step) are available too (`daemon/internal/trace/sim_wtinylfu.go`);
+results in `docs/design/wtinylfu-pick-plan.md` §9.
+
 Result on the bench's own trace (`$OUT/trace.jsonl`, Zipf(0.7)/30/200,
 seed 42):
 
