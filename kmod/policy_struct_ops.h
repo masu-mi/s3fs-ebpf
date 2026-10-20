@@ -38,6 +38,10 @@ struct s3fs_policy_ops {
 	int (*on_insert)(u64 ino);   /* ino entered the candidate set (idempotent) */
 	int (*on_remove)(u64 ino);   /* the kmod evicted ino */
 	u64 (*pick_victim)(void);    /* next ino to evict; 0 = no opinion */
+	/* AC-66 (docs/design/wtinylfu-pick-plan.md).  Bytes the capacity
+	 * pass charges ino this round, called right after on_insert under
+	 * the same lock, so a policy can keep byte budgets. */
+	int (*on_size)(u64 ino, u64 bytes);
 };
 
 /* Kmod entry points: call these from hot paths in vfs_ops.c. Each
@@ -55,6 +59,7 @@ bool s3fs_policy_has_pick_victim(void);
 void s3fs_policy_ops_insert(u64 ino);
 void s3fs_policy_ops_remove(u64 ino);
 u64  s3fs_policy_ops_pick_victim(void);
+void s3fs_policy_ops_size(u64 ino, u64 bytes);
 
 int  s3fs_policy_struct_ops_register(void);
 void s3fs_policy_struct_ops_unregister(void);

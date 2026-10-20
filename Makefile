@@ -385,6 +385,10 @@ test-pick-victim-stale: kmod daemon ## AC-64: an ino that left the admit set doe
 	@echo "==> test-pick-victim-stale (AC-64)"
 	@sudo $(SCRIPTS_DIR)/test-pick-victim-stale.sh
 
+test-wtinylfu-harness: ## AC-66: policy_wtinylfu_pick_ops through the verifier, checked against the Go model (no kmod / mount)
+	@echo "==> test-wtinylfu-harness (AC-66)"
+	@sudo $(SCRIPTS_DIR)/test-wtinylfu-harness.sh
+
 ## Cleanup:
 clean: kmod-clean bpf-clean daemon-clean vmlinux-clean ## Clean all build artefacts
 	rm -rf $(BIN_DIR)
