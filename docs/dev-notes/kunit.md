@@ -11,6 +11,7 @@ apt-get source --download-only linux-hwe-6.14 && tar xzf linux-hwe-6.14_6.14.0.o
 
 # カーネルの build に flex / bison / bc が要る
 sudo apt install build-essential flex bison bc
+# pahole は無くてよい (壊れた pahole は kunit.sh が無視する)
 
 make test-kunit KSRC=$PWD/linux-6.14                  # UML (既定)
 make test-kunit KSRC=... KUNIT_ARGS="'s3fs_ebpf_vfs*'"  # suite を絞る
