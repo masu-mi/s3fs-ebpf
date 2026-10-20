@@ -9,6 +9,9 @@ daemon も root も使わずに kmod (`kmod/*.c`) を検査する単体テスト
 # Ubuntu 24.04 なら deb-src を有効にして:
 apt-get source --download-only linux-hwe-6.14 && tar xzf linux-hwe-6.14_6.14.0.orig.tar.gz
 
+# カーネルの build に flex / bison / bc が要る
+sudo apt install build-essential flex bison bc
+
 make test-kunit KSRC=$PWD/linux-6.14                  # UML (既定)
 make test-kunit KSRC=... KUNIT_ARGS="'s3fs_ebpf_vfs*'"  # suite を絞る
 make test-kunit KSRC=... KUNIT_ARGS="--arch=x86_64 --qemu_args='-smp 4'"  # qemu (SMP)

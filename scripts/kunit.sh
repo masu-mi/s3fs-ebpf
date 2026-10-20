@@ -45,6 +45,16 @@ else
 fi
 JOBS="${JOBS:-$(nproc)}"
 
+# What the kernel build itself needs (kconfig is generated with flex/bison).
+missing=()
+for c in gcc make flex bison bc python3; do
+	command -v "$c" >/dev/null || missing+=("$c")
+done
+if ((${#missing[@]})); then
+	echo "kunit.sh: missing ${missing[*]} (Ubuntu: sudo apt install build-essential flex bison bc)" >&2
+	exit 1
+fi
+
 [[ -x "$KSRC/tools/testing/kunit/kunit.py" ]] ||
 	{ echo "kunit.sh: $KSRC/tools/testing/kunit/kunit.py not found" >&2; exit 1; }
 
