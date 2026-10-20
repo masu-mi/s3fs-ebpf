@@ -48,6 +48,7 @@
 #include <linux/statfs.h>
 #include <linux/string.h>
 #include <linux/uaccess.h>
+#include <linux/uio.h>
 #include <linux/version.h>
 #include <linux/wait.h>
 
@@ -2890,12 +2891,19 @@ static void flush_pending_unhash(struct s3fs_flush_pending *p)
  * caller blocked on this ino. -ENOENT (no waiter) is a normal outcome
  * for the .release path — daemon signals unconditionally and doesn't
  * care whether anyone was listening.
+ *
+ * W3: a successful PUT whose read_dirty predates the latest enqueue (the
+ * W1 seq check) does not hold what an fsync enqueued after it wrote, so
+ * it leaves the waiter alone: the fsync's own WAIT event signals it.
+ * Before, the PUT of an earlier close(2) finishing while an fsync waited
+ * returned that fsync 0 before its data had been read.
  */
 int s3fs_ebpf_signal_flush(u64 ino, int err)
 {
 	struct s3fs_flush_pending *p, *target = NULL;
 	struct inode *inode;
 	struct s3fs_file_data *fd;
+	bool covered = true;
 
 	spin_lock(&s3fs_flush_pending_lock);
 	hash_for_each_possible(s3fs_flush_pending, p, node, ino) {
@@ -2926,7 +2934,9 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 				 * On error keep the pin: the daemon has restored
 				 * dirty and the data must survive until a later
 				 * flush succeeds (or umount releases it). */
-				if (err != 0 || fd->flush_read_seq == fd->flush_seq) {
+				covered = err != 0 ||
+					  fd->flush_read_seq == fd->flush_seq;
+				if (covered) {
 					fd->flushing = false;
 					if (err == 0 && !fd->dirty && fd->size > 0) {
 						u32 last_ci = (u32)((fd->size - 1) >>
@@ -2969,6 +2979,10 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 
 	if (!target)
 		return -ENOENT;
+	if (!covered) {
+		flush_pending_put(target);	/* W3: not this waiter's PUT */
+		return 0;
+	}
 
 	target->err = err;
 	complete_all(&target->done);
@@ -3065,6 +3079,11 @@ static void flush_queue_drain(void)
 	}
 	spin_unlock(&s3fs_flush_wait_lock);
 	wake_up_all(&s3fs_flush_wait_wq);
+}
+
+static void flush_wait_reopen(void)
+{
+	WRITE_ONCE(s3fs_flush_wait_shutdown, false);
 }
 
 int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
@@ -3518,6 +3537,21 @@ static bool s3fs_fd_remote_covered(struct inode *inode, struct s3fs_file_data *f
 	return true;
 }
 
+/* T5: does a populate of [offset, end) leave chunk ci holding valid data
+ * everywhere below eof?  Yes when it covers the whole chunk, or the chunk
+ * from its start up to eof (the file's last chunk).  A range that starts
+ * inside the chunk never does: the bytes in front of offset were not part
+ * of this call (the tail case used to ignore that and mark them valid). */
+static bool s3fs_populate_fills_chunk(u64 offset, u64 end, u64 eof, u32 ci)
+{
+	u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+	u64 ce = cs + S3FS_CHUNK_SIZE;
+
+	if (offset > cs)
+		return false;
+	return end >= ce || end >= eof;
+}
+
 int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 			     const void __user *data_ptr)
 {
@@ -3574,7 +3608,6 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 	 * exists for every chunk now, so the pcache path no longer skips the
 	 * check for chunks >= 64 (files > 256 MiB). */
 	{
-		u64 chunk_size = (u64)1 << S3FS_PCACHE_CHUNK_SHIFT;
 		u32 ci;
 		u32 first_ci = (u32)(offset >> S3FS_PCACHE_CHUNK_SHIFT);
 		u32 last_ci  = (u32)((end - 1) >> S3FS_PCACHE_CHUNK_SHIFT);
@@ -3586,13 +3619,9 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 		 * across evictions (Q1/S8 invariant). */
 		u64 eof = max_t(u64, end, (u64)i_size_read(inode));
 
-		for (ci = first_ci; ci <= last_ci; ci++) {
-			u64 chunk_start = (u64)ci * chunk_size;
-			u64 chunk_end   = chunk_start + chunk_size;
-			if ((offset <= chunk_start && chunk_end <= end) ||
-			    (ci == last_ci && end >= eof))
+		for (ci = first_ci; ci <= last_ci; ci++)
+			if (s3fs_populate_fills_chunk(offset, end, eof, ci))
 				fd->chunks[ci].populated = true;
-		}
 	}
 	if (!owned && end > (u64)fd->size)
 		fd->size = (size_t)end;
@@ -4299,9 +4328,10 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 		if (fd->dirty || fd->flushing) {
 			/* T1: dirty or in-flight flush — the chunks are owned by
 			 * the write/flush path; bypass the populated flags.  A
-			 * missing chunk is a hole and reads as zeros. */
-			buf_valid = (size_t)pos < fd->size &&
-				    !(c && c->remote);
+			 * missing chunk is a hole and reads as zeros, and so does
+			 * a folio past fd->size (a truncate that ran after
+			 * read_folio checked i_size: zeros, not -EIO). */
+			buf_valid = !(c && c->remote);
 		} else if (gen != 0) {
 			/* T2: after reset()/partial re-populate a chunk may be
 			 * allocated but not yet fetched (its tail is zero); the
@@ -4355,7 +4385,7 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 			buf_valid = false;
 		read_unlock(&s3fs_admits_lock);
 	}
-	if (buf_valid) {
+	if (buf_valid && (size_t)pos < fd->size) {
 		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
 		size_t chunk_end = min_t(size_t,
 					 (size_t)(ci + 1) << S3FS_PCACHE_CHUNK_SHIFT,
@@ -4450,6 +4480,16 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	bool filled = false;
 	bool pinned = false;	/* U8: chunk pin held (per chunk) */
 	u32 pin_ci = 0;
+
+	/* A folio wholly past EOF holds zeros (filemap_read clips the copy at
+	 * i_size).  A truncate racing the read gets here; an upcall or the
+	 * fallback would turn it into -EIO. */
+	if (pos >= i_size_read(inode)) {
+		folio_zero_range(folio, 0, fs_size);
+		folio_mark_uptodate(folio);
+		folio_unlock(folio);
+		return 0;
+	}
 
 retry:
 	/* AB-04 / AB-10 fast path: page-cache mode admit — data is in fd->buf.
@@ -5409,6 +5449,11 @@ int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_magic		= S3FS_EBPF_MAGIC;
 	sb->s_blocksize		= PAGE_SIZE;
 	sb->s_blocksize_bits	= PAGE_SHIFT;
+	/* alloc_super leaves MAX_NON_LFS (2 GiB - 1): generic_file_read_iter
+	 * then returned EOF at 2 GiB for larger objects.  The chunk table
+	 * stops at S3FS_MAX_CHUNKS (1 TiB) and fails beyond it (-EFBIG on
+	 * store, -EIO on read), which is better than a silent short file. */
+	sb->s_maxbytes		= MAX_LFS_FILESIZE;
 	sb->s_op		= &s3fs_ebpf_super_ops;
 	sb->s_time_gran		= 1;
 
@@ -5436,5 +5481,9 @@ int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc)
 	/* Single-mount PoC: remember the sb so admit_replace can walk
 	 * cached inodes and refresh their i_size. Cleared in put_super. */
 	s3fs_active_sb = sb;
+	/* put_super of an earlier mount left the fsync queue shut down; a
+	 * remount without rmmod must reopen it, or POP_FLUSH_WAIT returns
+	 * -ENODEV at once and the daemon's fsync loop exits. */
+	flush_wait_reopen();
 	return 0;
 }

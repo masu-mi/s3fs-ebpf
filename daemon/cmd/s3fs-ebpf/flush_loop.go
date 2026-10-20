@@ -410,23 +410,24 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		}
 	}
 
+	// READ_DIRTY runs for an empty file too: it is what tells kmod this PUT
+	// covers the flush (W1/W3).  Skipping it for size 0 left the fd
+	// flushing and pinned, and an fsync waiting for its own PUT timed out.
 	buf := make([]byte, ev.Size)
-	if ev.Size > 0 {
-		n, err := readDirty(devFd, ev.Ino, buf)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[flush] ino=%d read dirty: %v\n",
-				ev.Ino, err)
-			metrics.Global.FlushErrors.Add(1)
-			// Restore dirty flag so the next close/fsync will re-try.
-			if mderr := markDirty(devFd, ev.Ino); mderr != nil {
-				fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
-					ev.Ino, mderr)
-			}
-			putErr = -5 /* -EIO — kmod-side buffer copy failed */
-			return
+	n, err := readDirty(devFd, ev.Ino, buf)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[flush] ino=%d read dirty: %v\n",
+			ev.Ino, err)
+		metrics.Global.FlushErrors.Add(1)
+		// Restore dirty flag so the next close/fsync will re-try.
+		if mderr := markDirty(devFd, ev.Ino); mderr != nil {
+			fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
+				ev.Ino, mderr)
 		}
-		buf = buf[:n]
+		putErr = -5 /* -EIO — kmod-side buffer copy failed */
+		return
 	}
+	buf = buf[:n]
 	putCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := s3c.Put(putCtx, s3key, buf); err != nil {
