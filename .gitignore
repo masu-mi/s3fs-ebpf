@@ -33,3 +33,6 @@ bench/results/
 .vscode/
 .claude
 daemon/s3fs-ebpf
+
+# Coverage (make test-kunit-cov / test-daemon-cov)
+coverage/

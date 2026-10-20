@@ -19,9 +19,21 @@ make test-kunit KSRC=... KUNIT_ARGS="--arch=x86_64 --qemu_args='-smp 4'"  # qemu
 ```
 
 - `scripts/kunit.sh` が `kmod/*.[ch]` を `$KSRC/fs/s3fs_ebpf_kunit/` に symlink し、`-DS3FS_KUNIT` 付きで kernel に組み込んで (`obj-y`) `tools/testing/kunit/kunit.py run` を呼ぶ。UML には root fs がなく insmod できないので組み込みにしている。`$KSRC/fs/Makefile` に 1 行足す以外は tree を変えない。出力は `$KSRC/.kunit-s3fs-<arch>/`。
-- `kmod/.kunitconfig` で lockdep (`PROVE_LOCKING`)、`DEBUG_ATOMIC_SLEEP`、`DEBUG_LIST`、KASAN を有効にしている。assert していない lock 順の逆転や use-after-free もテストの失敗として出る。UML 用の追加は `kmod/kunit-uml.config`。
+- `kmod/.kunitconfig` で lockdep (`PROVE_LOCKING`)、`DEBUG_ATOMIC_SLEEP`、`DEBUG_LIST` を、`kmod/kunit-kasan.config` で KASAN を有効にしている。assert していない lock 順の逆転や use-after-free もテストの失敗として出る。UML 用の追加は `kmod/kunit-uml.config`。
 - UML は 1 CPU なので、並行テストはプリエンプションでの交互実行にとどまる。本当の並列は `--arch=x86_64 --qemu_args='-smp 4'` (qemu-system-x86 が要る。KVM がないと遅い)。
 - 実カーネルで回すなら `make -C kmod KDIR=... KUNIT=1` で suite 入りの module を作り、`CONFIG_KUNIT` のある kernel に insmod する (結果は dmesg)。suite は global な表 (admit / pending / queue) を触るので、mount 中の環境では使わない。
+
+## カバレッジ (Codecov)
+
+```bash
+sudo apt install clang lld llvm libclang-rt-18-dev
+make test-kunit-cov KSRC=...   # -> coverage/kmod.lcov (kmod/*.c、テストファイルは除く)
+make test-daemon-cov           # -> coverage/daemon.out
+```
+
+- kmod は clang の source-based coverage (`-fprofile-instr-generate`) で取る。gcc の gcov は UML に link できない (gcc 13 以降の libgcov が `mangle_path` を定義していて `fs/seq_file.c` と衝突する)。
+- profile の計装は dynamic link の UML が要り、UML の KASAN は `STATIC_LINK` が要るので、カバレッジ用の build (`COVERAGE=1 scripts/kunit.sh`、出力は `$KSRC/.kunit-s3fs-um-cov/`) は KASAN なし。KASAN 付きの検査は通常の `make test-kunit` で行う。
+- `.github/workflows/test.yml` が push / PR ごとに両方を走らせ、リポジトリが public のときだけ Codecov に送る (`CODECOV_TOKEN` secret を設定する)。設定は `codecov.yml` (flag `daemon` / `kmod`、PR を落とさない informational)。
 
 ## 構成
 

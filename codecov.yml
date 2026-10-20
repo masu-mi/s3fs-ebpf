@@ -1,0 +1,35 @@
+# Uploaded by .github/workflows/test.yml: coverage/daemon.out (go test) and
+# coverage/kmod.lcov (KUnit in UML, scripts/kunit-cov.sh).
+codecov:
+  require_ci_to_pass: false
+
+coverage:
+  status:
+    # Report only; do not fail PRs on coverage.
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+flags:
+  daemon:
+    paths: [daemon/]
+    carryforward: true
+  kmod:
+    paths: [kmod/]
+    carryforward: true
+
+# go test reports files by import path; map the module to its directory.
+fixes:
+  - "github.com/bbsakura/s3fs-ebpf/daemon/::daemon/"
+
+ignore:
+  - "daemon/internal/ebpf/*_bpfel.go"
+  - "daemon/internal/ebpf/*_bpfeb.go"
+  - "kmod/*_kunit.c"
+
+comment:
+  layout: "diff, flags, files"
+  require_changes: true

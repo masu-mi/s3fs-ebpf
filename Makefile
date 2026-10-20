@@ -71,7 +71,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
-        lint-scripts readme test-arena test-kunit test-daemon \
+        lint-scripts readme test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
         test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
         test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
@@ -317,8 +317,16 @@ test-kunit: ## KUnit suites for kmod in UML (KSRC=<linux source tree>)
 	@test -n "$(KSRC)" || { echo "set KSRC=<linux source tree>, see docs/dev-notes/kunit.md"; exit 2; }
 	KSRC=$(KSRC) $(SCRIPTS_DIR)/kunit.sh $(KUNIT_ARGS)
 
+test-kunit-cov: ## KUnit in UML with clang coverage -> coverage/kmod.lcov (KSRC=...)
+	@test -n "$(KSRC)" || { echo "set KSRC=<linux source tree>, see docs/dev-notes/kunit.md"; exit 2; }
+	KSRC=$(KSRC) $(SCRIPTS_DIR)/kunit-cov.sh $(CURDIR)/coverage/kmod.lcov $(KUNIT_ARGS)
+
 test-daemon: ## go test for the daemon
 	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) test ./...
+
+test-daemon-cov: ## go test with coverage -> coverage/daemon.out
+	mkdir -p coverage
+	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) test -covermode=atomic -coverprofile=$(CURDIR)/coverage/daemon.out ./...
 
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
 test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale ## Run all regression tests
