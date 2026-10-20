@@ -21,9 +21,12 @@ TEST_NAME=${TEST_NAME:-test-write-partial}
 S3_BUCKET=${WRITE_PARTIAL_BUCKET:-s3fs-write-partial}
 
 log() { printf '[write-partial] %s\n' "$*" >&2; }
+# Reset partial_modify while the module is still loaded (ebpf_stop rmmods
+# it, which resets it anyway).  The 2>/dev/null goes first so a missing
+# parameter file (module already gone) prints nothing.
 cleanup() {
+    { echo 0 > /sys/module/s3fs_kfunc/parameters/partial_modify; } 2>/dev/null || true
     ebpf_stop "$MOUNT" 2>/dev/null || true
-    echo 0 > /sys/module/s3fs_kfunc/parameters/partial_modify 2>/dev/null || true
 }
 trap cleanup EXIT
 mkdir -p "$OUT"
