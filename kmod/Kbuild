@@ -3,3 +3,13 @@ obj-m := s3fs_kfunc.o
 s3fs_kfunc-objs := s3fs_kfunc_main.o vfs_ops.o tree_traversal.o s3fs_ebpf_dev.o policy_struct_ops.o
 
 ccflags-y += -I$(src) -I$(src)/../include
+
+# KUNIT=1: build the KUnit suites (kmod/*_kunit.c) into the module.  They
+# run when the module is loaded into a kernel with CONFIG_KUNIT; see
+# scripts/kunit.sh for the UML runner.
+ifeq ($(KUNIT),1)
+ifeq ($(CONFIG_KUNIT),)
+$(error KUNIT=1 needs a kernel built with CONFIG_KUNIT (or use scripts/kunit.sh))
+endif
+ccflags-y += -DS3FS_KUNIT
+endif

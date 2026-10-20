@@ -1,0 +1,63 @@
+# Unit tests with coverage: go test for the daemon, KUnit (UML) for kmod.
+# Coverage goes to Codecov only while the repository is public (the upload
+# steps are skipped for a private repo); set the CODECOV_TOKEN secret then.
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  daemon:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: daemon/go.mod
+          cache-dependency-path: daemon/go.sum
+      - run: make test-daemon-cov
+      - uses: codecov/codecov-action@v5
+        if: ${{ !github.event.repository.private }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/daemon.out
+          flags: daemon
+          disable_search: true
+
+  kunit:
+    runs-on: ubuntu-24.04
+    env:
+      # The kmod's minimum; any tree >= 6.12 works.
+      LINUX_TAG: v6.12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install kernel build tools and clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc python3 \
+            clang lld llvm libclang-rt-18-dev
+      - name: Fetch Linux ${{ env.LINUX_TAG }}
+        run: |
+          git clone --depth 1 --branch "$LINUX_TAG" \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+            "$RUNNER_TEMP/linux"
+      # Coverage build: clang, without KASAN (see scripts/kunit.sh).
+      - run: make test-kunit-cov KSRC="$RUNNER_TEMP/linux"
+      - uses: codecov/codecov-action@v5
+        if: ${{ !github.event.repository.private }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/kmod.lcov
+          flags: kmod
+          disable_search: true

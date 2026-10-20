@@ -296,3 +296,7 @@ void s3fs_policy_struct_ops_unregister(void)
 	/* struct_ops types are torn down automatically when THIS_MODULE
 	 * unloads; no explicit deregister API is exposed. */
 }
+
+#ifdef S3FS_KUNIT
+#include "policy_struct_ops_kunit.c"
+#endif
