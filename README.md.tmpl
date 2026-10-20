@@ -209,6 +209,7 @@ daemon と root なしで回せるテスト。kmod は KUnit (UML、lockdep と 
 ```bash
 make test-daemon
 make test-kunit KSRC=/path/to/linux-6.12+   # カーネルのソースツリーが要る
+make test-daemon-cov test-kunit-cov KSRC=...  # カバレッジ (coverage/)。CI は public のとき Codecov に送る
 ```
 
 KUnit の準備、suite の中身、見つかったバグは [`docs/dev-notes/kunit.md`](docs/dev-notes/kunit.md)。

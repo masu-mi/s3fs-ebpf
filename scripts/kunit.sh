@@ -34,20 +34,39 @@ ARCH=um
 for a in "$@"; do
 	case "$a" in --arch=*) ARCH="${a#--arch=}" ;; esac
 done
-BUILD_DIR="${BUILD_DIR:-$KSRC/.kunit-s3fs-$ARCH}"
+COVERAGE="${COVERAGE:-0}"
+[[ "$COVERAGE" == 1 ]] && SUFFIX=$ARCH-cov || SUFFIX=$ARCH
+BUILD_DIR="${BUILD_DIR:-$KSRC/.kunit-s3fs-$SUFFIX}"
 CONFIGS=(--kunitconfig="$ROOT/kmod/.kunitconfig")
 # UML has one CPU; elsewhere build SMP so the concurrency cases run in
 # parallel (pass --qemu_args='-smp N').
-if [[ "$ARCH" == um ]]; then
-	CONFIGS+=(--kunitconfig="$ROOT/kmod/kunit-uml.config")
+if [[ "$COVERAGE" == 1 ]]; then
+	# Source-based coverage with clang (UML only).  gcc's gcov does not
+	# link: libgcov >= 13 defines mangle_path, which fs/seq_file.c also
+	# does.  The profile instrumentation needs a dynamically linked UML,
+	# and KASAN on UML needs STATIC_LINK, so this run goes without KASAN.
+	# UML writes $LLVM_PROFILE_FILE when it exits; scripts/kunit-cov.sh
+	# turns it into lcov.
+	[[ "$ARCH" == um ]] || { echo "kunit.sh: COVERAGE=1 needs --arch=um" >&2; exit 1; }
+	CONFIGS+=(--kunitconfig="$ROOT/kmod/kunit-coverage.config" --make_options=LLVM=1)
+	mkdir -p "$BUILD_DIR"
+	export LLVM_PROFILE_FILE="$BUILD_DIR/kunit.profraw"
+	rm -f "$LLVM_PROFILE_FILE"
 else
-	CONFIGS+=(--kconfig_add=CONFIG_SMP=y)
+	CONFIGS+=(--kunitconfig="$ROOT/kmod/kunit-kasan.config")
+	if [[ "$ARCH" == um ]]; then
+		CONFIGS+=(--kunitconfig="$ROOT/kmod/kunit-uml.config")
+	else
+		CONFIGS+=(--kconfig_add=CONFIG_SMP=y)
+	fi
 fi
 JOBS="${JOBS:-$(nproc)}"
 
 # What the kernel build itself needs (kconfig is generated with flex/bison).
 missing=()
-for c in gcc make flex bison bc python3; do
+tools=(gcc make flex bison bc python3)
+[[ "$COVERAGE" == 1 ]] && tools+=(clang ld.lld llvm-ar)
+for c in "${tools[@]}"; do
 	command -v "$c" >/dev/null || missing+=("$c")
 done
 if ((${#missing[@]})); then
