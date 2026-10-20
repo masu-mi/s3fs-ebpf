@@ -97,3 +97,42 @@ func TestOPTIgnoresWrites(t *testing.T) {
 		t.Fatalf("opt: hits=%d misses=%d, want 1/2", r.Hits, r.Misses)
 	}
 }
+
+// zipfWithScans interleaves a scan of `scan` never-repeated inos every
+// `every` Zipf reads (AC-66: the case admission by frequency is for).
+func zipfWithScans(files, n int, alpha float64, every, scan int) []Event {
+	var ev []Event
+	next := uint64(1 << 20)
+	for i, e := range GenerateZipf(files, n, alpha, 7) {
+		ev = append(ev, e)
+		if i%every == every-1 {
+			for j := 0; j < scan; j++ {
+				ev = append(ev, Event{Ino: next, Op: OpRead})
+				next++
+			}
+		}
+	}
+	return ev
+}
+
+// AC-66: the frequency-based policies stay within capacity and under OPT,
+// and admission keeps scans from flushing the cache the way LRU lets them.
+func TestFrequencyPoliciesBoundedAndScanResistant(t *testing.T) {
+	for _, cap := range []int{1, 2, 8, 32} {
+		ev := zipfWithScans(200, 20000, 0.9, 2000, 4*cap)
+		opt := Replay(NewOPT(cap, ev), ev).Hits
+		lru := Replay(NewLRU(cap), ev).Hits
+		for _, p := range []Policy{NewS3FIFO(cap), NewWTinyLFU(cap), NewWTinyLFUClock(cap)} {
+			h := Replay(p, ev).Hits
+			if h > opt {
+				t.Fatalf("%s cap=%d: hits=%d above opt=%d", p.Name(), cap, h, opt)
+			}
+			if p.Size() > cap {
+				t.Fatalf("%s cap=%d: grew to %d", p.Name(), cap, p.Size())
+			}
+			if cap >= 8 && h <= lru {
+				t.Fatalf("%s cap=%d: hits=%d not above lru=%d", p.Name(), cap, h, lru)
+			}
+		}
+	}
+}
