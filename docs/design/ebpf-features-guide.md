@@ -179,6 +179,7 @@ LRU 退場は per-bucket approximate LRU（bucket 内最古を近似的に選ぶ
 | `policy_sieve_pick_ops.bpf.c` | SIEVE (FIFO + hand) | AC-58 の `pick_victim` で victim を BPF が選ぶ |
 | `policy_lru_pick_ops.bpf.c` | 厳密な LRU (stamp の最小) | 同上。旧 `policy_lru_ops` は epoch 近似 |
 | `policy_s3fifo_pick_ops.bpf.c` | S3-FIFO (S / M / G の 3 queue) | 同上。capacity mode の hit rate で最も高い (`benchmark-results.md` §18.42) |
+| `policy_wtinylfu_pick_ops.bpf.c` | W-TinyLFU (window + SLRU + Count-Min sketch + admission) | 同上。AC-66 で足した `on_size` で予算をバイトで持つ (`docs/design/wtinylfu-pick-plan.md`) |
 
 `on_insert` / `on_remove` / `pick_victim` は AC-58 で vtable の末尾に足した (`docs/design/ac58-pick-victim.md`)。持たない policy は従来どおり `on_evict` の score 順で evict される。
 

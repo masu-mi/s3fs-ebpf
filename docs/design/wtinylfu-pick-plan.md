@@ -1,6 +1,6 @@
 # AC-66: W-TinyLFU を `pick_victim` で動かす — 変更の検討と計画
 
-状態: **計画 (2026-10-19)**。実装はまだしていない。前提は pcache モード (`--arena-metadata-only`、`docs/design/pcache-mode.md`) と AC-58 の `pick_victim` (`docs/design/ac58-pick-victim.md`)。ロック順と不変条件は `docs/kmod-pcache-invariants.md` が正本。
+状態: **実装済み (2026-10-20)**。ライブの計測は 1 回だけ (§9.4)。計画は 2026-10-19、実装でどう決めたかと結果は §9。前提は pcache モード (`--arena-metadata-only`、`docs/design/pcache-mode.md`) と AC-58 の `pick_victim` (`docs/design/ac58-pick-victim.md`)。ロック順と不変条件は `docs/kmod-pcache-invariants.md` が正本。
 
 ## 1. 結論
 
@@ -89,3 +89,56 @@ kmod は 1 round で最大 `ncand` 回 `pick_victim` を呼び、試し済みの
 - **小さい容量**: bench の 8 slot では window の 1% は 1 件未満なので最低 1 件にする。ここでの数字は大きい容量の挙動を代表しない (trace-replay で容量を変えて確かめる)。
 - **live の eval 間隔**: AC-58 §6 のとおり、ライブは 25 access ごとにしか eval を回さず、trace-replay の値には届かない。W-TinyLFU も同じ。
 - **区画の LRU が近似**であること (G4) と、limbo の ino が多いとき `node[]` を圧迫すること。limbo は `on_remove` か次の `on_insert` で必ず抜けるが、あふれたら最古の limbo を捨てる。
+
+## 9. 実装 (2026-10-20)
+
+段 1 と段 2 を一度に入れた (kmod に `on_size` を足したので、件数ベースの段を別に出す意味がなくなった)。ライブの `bench-hitrate` と `bench-policy-cost` はまだ回していない (この変更はカーネルのない環境で作った)。
+
+### 9.1 入ったもの
+
+- `bpf/policy_wtinylfu_pick_ops.bpf.c`: §4 の設計どおり。W / P / T / X (rejected) / L (limbo) の 5 つの ring、sketch (1024 × 4、u8 の 4-bit counter)、候補は `st.cand` (slot と seq) で持つ。各 member の中身は `do_*` の inline 関数で、struct_ops の program はそれを呼ぶだけ (harness から同じ関数を呼ぶため)。
+- kmod: `struct s3fs_policy_ops` の末尾に `on_size(ino, bytes)`。`s3fs_ebpf_admit_replace` の Phase 1 で、`pick_victim` を持つ policy かつ `capacity_bytes > 0` のとき、`on_insert` の直後に呼ぶ。arena はその ino の entry の合計、pcache は `s3fs_ino_buf_bytes` (live_bytes と同じ数え方)。`s3fs_ino_buf_bytes` は `ilookup` と `READ_ONCE(fd->cap)` だけで fd->lock を取らないので、policy の mutex の中で呼んでもロック順は変わらない。
+- `dev trace-replay` に `s3fifo` / `wtinylfu` (厳密な LRU の参照実装) / `wtinylfu-clock` (BPF 版を手順どおりに写したもの) を追加 (`daemon/internal/trace/sim_wtinylfu.go`)。
+- `make test-wtinylfu-harness` (`scripts/test-wtinylfu-harness.sh`): policy の操作を `SEC("syscall")` の program として load し (kmod も mount も要らない、root だけ要る)、Go から trace を流す。verifier を通ること、BPF 版の hit 数が `wtinylfu-clock` と一致すること (件数 / 4 KiB の重み、容量 2 / 8 / 32)、shed で残った ino が limbo から戻っても常に resident な ino を返すことを確かめる。
+
+### 9.2 計画から変えたこと
+
+- **config map は作らなかった**。window 1 %、protected 80 %、sample = 10 × resident (最低 16)、sketch の幅 1024 は定数。調整が要ると分かってから足す。
+- **doorkeeper は入れなかった**。Caffeine の既定にもなく、小さい容量では 1 回目の hit を捨てる害の方が大きい。
+- **window の予算はバイトで、最低 1 件の床がない**。容量 8 件 (4 KiB ずつ) なら 1 % は 327 B で、新しい ino はすぐ probation の候補になる (Caffeine の weigher と同じ)。件数モードでは 1 件の床がある。
+- **G9 (容量を超える ino の特別扱い) は入れなかった**。daemon が capacity を超えるファイルを全体 admit にしないので (`fullAdmitExceedsCapacity`)、policy から見える重みは容量を超えない。
+- **G5 (頻度の粒度) は触っていない**。`bench-hitrate-mixed` を回してから決める。
+- duel に勝った候補は probation に残り、hit すれば protected に上がる。probation の最古が候補自身のときは duel をせず、そのまま victim にする。
+
+### 9.3 trace-replay の結果
+
+`dev trace-replay`、容量は件数 (`--softcap`)。scan 混在は Zipf(0.9, 200 files) の 2,000 read ごとに一度きりの ino を 4 × 容量個読む trace (`zipfWithScans`、テストにある)。
+
+| trace | 容量 | LRU | SIEVE | S3-FIFO | W-TinyLFU (参照) | W-TinyLFU (BPF 版) | OPT |
+|---|---|---|---|---|---|---|---|
+| Zipf(0.7) 30 files / 2,000 | 8 | 40.9 | 48.0 | 49.0 | 49.9 | 50.0 | 64.7 |
+| Zipf(0.9) 2,000 files / 50,000 | 16 | 15.3 | 27.8 | 30.0 | 28.5 | 29.3 | 37.0 |
+| 同上 | 256 | 54.6 | 62.0 | 62.2 | 60.5 | 60.5 | 74.2 |
+| scan 混在 / 40,000 | 8 | 20.0 | 31.6 | 34.5 | 33.3 | 34.2 | 43.4 |
+| 同上 | 32 | 45.0 | 54.2 | 53.7 | 53.7 | 55.3 | 66.3 |
+| 同上 | 128 | 65.8 | 70.1 | 69.9 | 66.5 | 66.3 | 75.4 |
+
+- §7 の段 0 の条件 (W-TinyLFU ≥ S3-FIFO) は、bench と同じ形 (30 files / 容量 8) と scan 混在の小さい容量では満たすが、大きい容量では S3-FIFO と SIEVE に 1〜4 ポイント負ける。静的な Zipf では SIEVE / S3-FIFO も頻度の高いものを残せるので、W-TinyLFU の利点は小さい (S3-FIFO の論文の結果と同じ傾向)。window の割合を固定 1 % にしていることと、sketch の reset が 10 × 容量のアクセスごとと短いことが効いている。Caffeine は window の大きさを hill climbing で動かす。
+- BPF 版 (CLOCK、件数でなくバイトの予算) は参照実装と ±1.6 ポイントで、近似による損は見えない。
+
+### 9.4 実機 (2026-10-20、ma さんの環境)
+
+- `make kmod` は成功 (gcc のバージョン差の既知の警告だけ)。`make test-regression` は全部 PASS (`test-pick-victim-stale` / `test-pattern-aware-admit` を含む)。`on_size` に起因する問題は見つかっていない。
+- `bench-hitrate` (30 files、Zipf α=0.7、2,000 access、softcap=8、1 回):
+
+| policy | hit_rate | miss | err | ms/access |
+|---|---|---|---|---|
+| `s3fifo_pick_ops` | 37.80% | 1244 | 0 | 6.56 |
+| `wtinylfu_pick_ops` | 38.55% | 1229 | 0 | 6.70 |
+
+- W-TinyLFU が 0.75 ポイント (15 miss) 上で、trace-replay と同じ向き。1 回なので有意とは言えない。ライブが trace-replay より低いのは AC-58 §6 と同じ (eval が 25 access ごと、prewarm 済み)。
+
+### 9.5 残り
+
+- `bench-hitrate` を 3 seed、`bench-hitrate-mixed` (大きいファイルの扱い、G5)、`bench-policy-cost` (on_hit の read 経路のコスト) を回す。
+- 必要なら window の割合と sample の倍数を config map にする。

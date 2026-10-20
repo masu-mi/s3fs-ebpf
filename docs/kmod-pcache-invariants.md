@@ -84,3 +84,4 @@
 ## policy の pick_victim (AC-58)
 - 設計は `docs/design/ac58-pick-victim.md`。vtable の `on_insert` / `on_remove` / `pick_victim` は、**vtable が `pick_victim` を持つときだけ**、`s3fs_ebpf_admit_replace` の eviction block が `s3fs_policy_evict_lock` (mutex) を取って呼ぶ。この mutex は `fd->lock` / `s3fs_admits_lock` より外側 (admit_replace は他のロックを持たずに入る)。mutex の中で `admit_evict_ino` (fd->lock → admits write_lock) を呼ぶ。
 - 容量超過のとき、まず `pick_victim` が返した ino を (`cand[]` にあり、未試行なら) `s3fs_capacity_evict_one` で処理する。`cand[]` にない ino が返ったら (別の経路で evict 済み)、`on_remove` を呼んで聞き直す (AC-64)。0 / 試行済みが返ったら、残りは score 順 (`on_evict` + tiebreak) に戻る。pending 中の ino は丸ごとは evict せず shed になる (AC-45 C3 のまま)。`on_remove` を呼ぶのは、丸ごと evict したときと、上の聞き直しのときだけ。
+- AC-66: `on_size(ino, bytes)` は Phase 1 で `on_insert` の直後に、同じ mutex の中で呼ぶ (`capacity_bytes > 0` のときだけ)。bytes は live_bytes と同じ数え方 (arena は entry の合計、pcache は `s3fs_ino_buf_bytes`)。`s3fs_ino_buf_bytes` は `ilookup` + `READ_ONCE(fd->cap)` で fd->lock を取らない。
