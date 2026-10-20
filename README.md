@@ -285,6 +285,18 @@ Targets:
 
 ---
 
+## 単体テスト (`test-kunit` / `test-daemon`)
+
+daemon と root なしで回せるテスト。kmod は KUnit (UML、lockdep と KASAN 付き)、daemon は `go test`。
+
+```bash
+make test-daemon
+make test-kunit KSRC=/path/to/linux-6.12+   # カーネルのソースツリーが要る
+make test-daemon-cov test-kunit-cov KSRC=...  # カバレッジ (coverage/)。CI は public のとき Codecov に送る
+```
+
+KUnit の準備、suite の中身、見つかったバグは [`docs/dev-notes/kunit.md`](docs/dev-notes/kunit.md)。
+
 ## 動作確認 (`test-arena`)
 
 Linux 6.12+ ホスト上で以下を叩くと 3 つのサブテストが順に走ります:
