@@ -61,8 +61,8 @@ RESET  := \033[0m
 
 .DEFAULT_GOAL := help
 
-README_TMPL := $(TOPDIR)/README.md.tmpl
-README      := $(TOPDIR)/README.md
+CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
+CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
 .PHONY: help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
@@ -71,7 +71,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
-        lint-scripts readme test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
+        lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
         test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
         test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
@@ -289,16 +289,16 @@ lint-scripts: ## shellcheck scripts/ and s3fs-ebpf.sh
 	shellcheck $(SCRIPTS_DIR)/*.sh $(SCRIPTS_DIR)/lib/*.sh $(TOPDIR)/s3fs-ebpf.sh
 
 ## Documentation:
-readme: $(README) ## Regenerate README.md from README.md.tmpl
+cli-reference: $(CLI_REF) ## Regenerate docs/user/cli-reference.md (CLI / make help)
 
-$(README): $(README_TMPL) $(DAEMON_BIN) Makefile
+$(CLI_REF): $(CLI_REF_TMPL) $(DAEMON_BIN) Makefile
 	@command -v envsubst >/dev/null || { echo "envsubst not found (apt install gettext-base)"; exit 1; }
-	@echo "==> regenerating $(notdir $(README))"
+	@echo "==> regenerating $(notdir $(CLI_REF))"
 	@CLI_HELP="$$($(DAEMON_BIN) --help 2>&1)" \
 	 CLI_MOUNT_HELP="$$($(DAEMON_BIN) mount --help 2>&1)" \
 	 MAKE_HELP="$$($(MAKE) --no-print-directory help | sed 's/\x1b\[[0-9;]*m//g')" \
 	 envsubst '$$CLI_HELP $$CLI_MOUNT_HELP $$MAKE_HELP' \
-	   < $(README_TMPL) > $(README)
+	   < $(CLI_REF_TMPL) > $(CLI_REF)
 
 ## Week 1 verification:
 test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
