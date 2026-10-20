@@ -1,0 +1,28 @@
+<!-- Generated from docs/user/cli-reference.md.tmpl by `make cli-reference`. Do not edit cli-reference.md directly. -->
+# CLI / Make リファレンス
+
+`s3fs-ebpf --help` と `make help` の出力。`make cli-reference` で daemon をビルドしてから再生成する。CLI や Make ターゲットを変えたら、再生成してから一緒にコミットする (差分をレビューで見るため)。使い方の流れは [`getting-started.md`](getting-started.md) を見る。
+
+## CLI リファレンス
+
+`s3fs-ebpf --help` の出力:
+
+```text
+${CLI_HELP}
+```
+
+サブコマンドの詳細フラグは `s3fs-ebpf <command> --help` で確認できます。例:
+
+```text
+${CLI_MOUNT_HELP}
+```
+
+---
+
+## Make ターゲット一覧
+
+`make help` の出力:
+
+```text
+${MAKE_HELP}
+```
