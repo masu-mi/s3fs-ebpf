@@ -106,7 +106,7 @@ func loadEvents(tracePath, zipfSpec string, seed int64) ([]trace.Event, error) {
 }
 
 func availablePolicies() []string {
-	return []string{"lru", "sieve", "opt", "noevict"}
+	return []string{"lru", "sieve", "s3fifo", "wtinylfu", "wtinylfu-clock", "opt", "noevict"}
 }
 
 // makePolicy builds a simulator. "opt" (Belady) needs the whole trace
@@ -119,6 +119,12 @@ func makePolicy(name string, cap int, events []trace.Event) (trace.Policy, error
 		return trace.NewLRU(cap), nil
 	case "sieve":
 		return trace.NewSIEVE(cap), nil
+	case "s3fifo":
+		return trace.NewS3FIFO(cap), nil
+	case "wtinylfu":
+		return trace.NewWTinyLFU(cap), nil
+	case "wtinylfu-clock":
+		return trace.NewWTinyLFUClock(cap), nil
 	case "opt":
 		return trace.NewOPT(cap, events), nil
 	case "noevict":
