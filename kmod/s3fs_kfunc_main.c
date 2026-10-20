@@ -11,6 +11,7 @@
 #include <linux/fs_context.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/version.h>
 
 #include "policy_struct_ops.h"
 #include "s3fs_ebpf_dev.h"
@@ -89,6 +90,14 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("bbsakura");
 MODULE_DESCRIPTION("s3fs-ebpf: VFS + KFunc skeleton for eBPF-driven S3 filesystem");
 MODULE_VERSION("0.0.1");
-/* bpf_map_get() lives in the BPF_INTERNAL namespace on 6.12; opt in. */
+/*
+ * bpf_map_get() lives in the BPF_INTERNAL namespace on 6.12; opt in.
+ * 6.13 turned the namespace argument into a string literal (commit
+ * cdd30ebb1b9f), so the bare identifier no longer compiles there.
+ */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
+MODULE_IMPORT_NS("BPF_INTERNAL");
+#else
 MODULE_IMPORT_NS(BPF_INTERNAL);
+#endif
 MODULE_ALIAS_FS("s3fs_ebpf");
