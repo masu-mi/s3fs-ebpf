@@ -17,6 +17,12 @@ set -euo pipefail
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=lib/bench.sh
 source "$TOPDIR/scripts/lib/bench.sh"
+# shellcheck source=lib/toolchain.sh
+source "$TOPDIR/scripts/lib/toolchain.sh"
+# Ubuntu + mainline kernel: /usr/sbin/bpftool is a wrapper that exits 2
+# because no /usr/lib/linux-tools/<krel>/ matches `uname -r`.  Resolve it
+# the same way the build does (BPFTOOL= override, then detect_bpftool).
+BPFTOOL=$(detect_bpftool) || { echo "no working bpftool; set BPFTOOL=/path/to/bpftool" >&2; exit 2; }
 
 MOUNT=${MOUNT:-/mnt/s3demo}
 OUT=${OUT:-/tmp/test-pick-victim-stale}
@@ -31,7 +37,7 @@ cleanup() { ebpf_stop "$MOUNT" 2>/dev/null || true; mc rb --force "local/$S3_BUC
 mc() { docker exec "$MINIO_CONTAINER" mc "$@"; }
 trap cleanup EXIT
 mkdir -p "$OUT"
-need_cmds docker curl python3 bpftool
+need_cmds docker curl python3
 need_built
 mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null 2>&1
 mc rb --force "local/$S3_BUCKET" >/dev/null 2>&1 || true
@@ -43,7 +49,7 @@ done
 
 # idx_inos: the inos in the policy's `idx` map, one per line.
 idx_inos() {
-    sudo bpftool map dump name idx -j 2>/dev/null | python3 -I -c '
+    sudo "$BPFTOOL" map dump name idx -j 2>/dev/null | python3 -I -c '
 import json, sys
 def num(v):
     if isinstance(v, int): return v
