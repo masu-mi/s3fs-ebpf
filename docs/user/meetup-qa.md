@@ -264,7 +264,7 @@ CEL でできることの範囲 (誤解しやすいので):
 
 - **変な victim:** kmod は `pick_victim` が返した ino が候補 (`cand[]`) にあり、まだ試していないときだけ evict する。候補にない ino なら `on_remove` で BPF に忘れさせて聞き直し、0 や試し済みなら score 順に戻る (`docs/design/ac58-pick-victim.md` §2)。容量の上限を守るのは kmod で、BPF は順番を決めるだけ。
 - **止まらない:** verifier がループの上限を検査するので、無限ループは load できない。`pick_victim` は kmod の mutex の中で呼ぶので、遅いと eviction 全体が待つ。8 候補で 0.5〜0.9 µs (§18.42)。候補が数千のときは未計測。
-- **daemon が落ちた:** struct_ops の link は daemon の fd が閉じると外れ、kmod の `unreg` が vtable を NULL に戻す (`kmod/policy_struct_ops.c` の `s3fs_policy_unreg`)。以後は kmod の既定の動き (score なし、古い順) になる。
+- **daemon が落ちた:** daemon は struct_ops の link を pin していないので、プロセスが終わると link が外れ、kmod の `unreg` が vtable を NULL に戻す (`kmod/policy_struct_ops.c` の `s3fs_policy_unreg`)。以後は policy なしの既定の動き (score がすべて 0 で、同点処理の順、Q5) になる。
 - **hot swap:** `BPF_LINK_UPDATE` で vtable のポインタを RCU で入れ替える。走っている呼び出しは古い vtable で完走する。ポリシーの状態 (map) は引き継がないので、新しいポリシーは空の状態から始まる。
 
 ### Q18. 誰でも BPF のポリシーを差し込めるのか。権限とセキュリティは
@@ -357,7 +357,7 @@ CEL でできることの範囲 (誤解しやすいので):
 
 - s3fs-fuse (キャッシュなし) は 1 回で /dev/fuse を約 4 往復する (read_iter 2、flush 1、release 1、§11.2)。1 往復あたり約 423 µs。s3fs-ebpf は hit なら 0 往復。
 - キャッシュありの s3fs-fuse (`use_cache` + `kernel_cache`) でも 524.6 µs かかるので、read 以外の往復 (flush / release) が残っていると考えている。内訳は測っていない。
-- FUSE には往復を減らす手段がある。open に ENOSYS を返すと以後の open / release を送らない `FUSE_NO_OPEN_SUPPORT`、flush に ENOSYS を返すと flush を送らない、`entry_timeout` / `attr_timeout` を長くするなど。これらを使う FUSE の実装なら差はかなり縮むはずだが、試していない。
+- FUSE には往復を減らす手段がある。open に ENOSYS を返すと以後の open を送らない `FUSE_NO_OPEN_SUPPORT`、flush に ENOSYS を返すと以後の flush を送らない、`entry_timeout` / `attr_timeout` を長くするなど。これらを使う FUSE の実装なら差はかなり縮むはずだが、試していない。
 - 実際に、mount-s3 (`--cache`) は同じ計測で 103.8 µs で、fuse-cache の約 5 倍速い (§18.27)。s3fs-ebpf はその 34 倍速い。
 - 言えること: 「FUSE ではなく、s3fs-fuse より」の倍率であること。構造の差として確かに残るのは、hit のときにユーザー空間のプロセスを一度も起こさないこと。
 
