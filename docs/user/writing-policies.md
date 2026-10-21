@@ -303,7 +303,7 @@ policy: "builtin:policy_s3fifo_pick_ops"
 注意:
 - サイズの定数に `u` を付けると `entry.size` (uint) と型がそろう。付けなくても比較はできる。
 - prewarm は daemon 起動時に 1 回だけ評価する。実行中に増えたファイルには効かない。
-- **pcache モード (`--arena-metadata-only`) では中身の prewarm をしない (AC-44)。** prewarm の CEL が効くのは arena モードだけ。pcache モードで効くのは `policy:` の選択だけ。
+- pcache モード (`--arena-metadata-only`) は既定では中身の prewarm をしない (AC-44)。`--pcache-prewarm` を付けると、`prewarm` が true のファイルを daemon が起動後にマウント経由で 1 回読む (AC-67、`docs/design/pcache-mode.md` §4.1)。容量の既定は無制限なので `--cache-capacity` も付ける。
 
 ## Layer 2 — built-in eBPF policy を tuning する
 
