@@ -44,6 +44,8 @@
 
 **背景**: `docs/design/bpf-arena-use-cases.md` のレビュー結果、arena 128MB をバルクページキャッシュとして使う現設計は arena の設計意図 (small, hot metadata) と不整合。改善案A (arena を admit メタデータだけに縮退、ページ実体は Linux page cache に委譲) が最有力。GUP オーバーヘッド (AA-01 残課題) と arena サイズ上限 (大ファイル劣後) の両方を同時解消する見込み。**実装前に 3 段階の検証** (Phase 1 分離測定 → Phase 2 PoC → Phase 3 本格計測) で判断する。
 
+> **2026-10-21 訂正**: 実装 (pcache モード、`--arena-metadata-only`) では arena にメタデータも置かなかった。中身は page cache と kmod の chunk 表、admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない (`docs/user/meetup-qa.md` Q53)。
+
 **Phase 1 — 現状の bottleneck 分離測定** (判断材料集め、2〜3 日):
 
 - [ ] **AB-03** mount-s3 を同一ワークロードで動かし外部基準の 4-way 比較 — AA-06 の bench 延長で、特に 10MB / 100MB の cold-read を 3 回ずつ (fuse-raw / fuse-cache / ebpf / mount-s3)。eBPF の positive/negative 差分の内訳を明確化。目安 0.5 日 (**AB-01/AB-02 で Gate PASS 済みのため省略可、必要に応じて実施**)
@@ -62,7 +64,7 @@
 2026-10-18 登録。roadmap の初版は Q-01〜Q-04 と書いていたが、Q 系 (セキュリティ修正、archive) と重なるので AD に振り直した。順序と見積もりは roadmap §4。
 
 - [ ] **AD-01** `bpf_timer` による自律 eviction (roadmap §3-2、旧 Q-01)。daemon の push を待たずに容量を守る基盤。目安 3〜4 日
-- [ ] **AD-02** BPF Iterator による arena GC (roadmap §3-4、旧 Q-02)。R-05 と合流。pcache モードでは arena がメタデータだけになったので、着手前に必要性を見直す。目安 4〜5 日
+- [ ] **AD-02** BPF Iterator による arena GC (roadmap §3-4、旧 Q-02)。R-05 と合流。目安 4〜5 日。2026-10-21 訂正: 「pcache モードでは arena がメタデータだけ」は誤りで、pcache モードは arena に何も置かない。GC が要るのは arena モード (中身を arena に置く、今の既定) だけなので、arena モードを残すかを決めてから着手するか閉じる
 - [ ] **AD-03** KFunc + in-kernel radix tree による `readdir` 高速化 (roadmap §3-3、旧 Q-03)。AC-55 で SYNC_ENTRIES に索引が入ったので、残る差を測ってから判断する。目安 4〜5 日
 - [ ] **AD-04** `fmod_ret` + `cgroup_id()` の per-cgroup policy (roadmap §3-1、旧 Q-04)。R-04 と合流。目安 4〜5 日
 
@@ -73,7 +75,7 @@
 - [ ] **R-02** `struct_ops` に `on_read_miss(ino, size, rand_ratio)` を追加し、miss の upcall 前に refuse できるようにする。R-01 のデータが溜まってから
 - [ ] **R-03** `fentry/d_lookup` で lookup を観測し、ネガティブキャッシュの頻度を取る
 - [ ] **R-04** `lsm/inode_permission` の per-cgroup policy (AD-04 と合流)
-- [ ] **R-05** `iter/bpf_map_elem` の arena GC (AD-02 と合流)
+- [ ] **R-05** `iter/bpf_map_elem` の arena GC (AD-02 と合流。arena モードだけの話、AD-02 の訂正を参照)
 - [ ] **R-06** `fentry/filemap_fault` で mmap のアクセスを観測する。read 経路のフックと同じく、hit 経路の負担は `docs/design/read-iter-hook-overhead.md` §5 の基準で見る
 
 ## 6. スコープ外 (明示的 non-goal)

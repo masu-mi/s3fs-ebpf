@@ -200,7 +200,7 @@ __bpf_kfunc int s3fs_kfunc_policy_hit(u64 ino)
 __bpf_kfunc_end_defs();
 
 /*
- * 6.11+ requires BTF_KFUNCS_START (sets BTF_SET8_KFUNCS in .flags) —
+ * 6.9+ requires BTF_KFUNCS_START (sets BTF_SET8_KFUNCS in .flags) —
  * register_btf_kfunc_id_set rejects sets without it. Fall back to
  * BTF_SET8_START on older kernels that predate BTF_KFUNCS_START.
  */
