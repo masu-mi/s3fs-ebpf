@@ -15,7 +15,7 @@
 
 ## 2026-10-16 更新: 現行スライドの構成と、後から加わった知見
 
-スライドの正本は claude.ai の Slides アーティファクト (本編 26 枚 + 付録 2 枚、2026-10-18 更新)。この節は、下のアウトライン (2026-10-02 時点) から変わった点だけをまとめる。
+スライドの正本は claude.ai の Slides アーティファクト (本編 26 枚 + 付録 2 枚、2026-10-21 更新)。この節は、下のアウトライン (2026-10-02 時点) から変わった点だけをまとめる。
 
 ### 構成 (本編 26 枚 + 付録 2 枚)
 
@@ -24,10 +24,10 @@
 | 導入 | cover / intro | arena の使いどころを間違えた話をする、と最初に言う |
 | bpf_arena | arena-what / arena-who / arena-design | 変更なし (arena-map は付録へ) |
 | KFunc | kfunc | 変更なし (arena-loop は付録へ) |
-| struct_ops | so-concept / so-sieve / so-swap / so-pitfall / so-fix / **so-real** | so-real (新規): 案B (`pick_victim`) を実装。LRU / SIEVE / S3-FIFO を移し、3 seed で旧版より +2〜7 pt (S3-FIFO 36.7〜40.0% が最良)。read 経路のコストは 64 jobs で policy なし比 −4.6% (旧 SIEVE は −14.8%)、`pick_victim` 1 回 0.5〜0.9 µs (候補 8 件) |
+| struct_ops | so-concept / so-sieve / so-swap / so-pitfall / so-fix / **so-real** | so-real (新規): 案B (`pick_victim`) を実装。LRU / SIEVE / S3-FIFO を移し、3 seed で旧版より +2〜7 pt (S3-FIFO 36.7〜40.0% が最良)。read 経路のコストは 64 jobs で policy なし比 −4.6% (旧 SIEVE は −14.8%)、`pick_victim` 1 回 0.5〜0.9 µs (候補 8 件)。コード枠に AC-66 の `on_size` を追加し、W-TinyLFU も移した (実機 1 回で 38.55%、S3-FIFO 37.80%) |
 | 勝てるところ | **perf** / **perf-lose** / **fs-usecases** | perf: pcache モードで測り直した数字 (open+read+close 3.3× / 172×、4 KiB × 10,000 個の cat 2 回目 93×、`ls -l` 初回 11×、新規の durable write 1.37×)。perf-lose (新規): 負けていた大きいファイルの 2 場面を直した前後 (既存 100 MiB の途中の書き換えは互角、cold read 300 MiB は毎回キャッシュを空にすると 1.26×、続けて読むと 0.80×)。fs-usecases: 小さいファイルを大量に開く、短命なプロセスが多い、fsync で確実に書く、キャッシュの判断を変えたい。向かないのはメモリの少ないホストで大きいファイルを次々に読む使い方 |
 | 失敗談 | fail-title / fail-plan / fail-result / fail-why / **fail-found** / **hook-tips** | fail-found (新規): 64 jobs の律速は daemon の `fentry/generic_file_read_iter` だった。hook-tips (新規): hot path にフックを置くときの注意 6 項目 |
-| まとめ | lessons / next / **usecases** / takeaway / end | usecases (新規): 判断は struct_ops、共有する状態は arena。takeaway に fentry の行を追加。next の 3 を「案B を実装」に |
+| まとめ | lessons / next / **usecases** / takeaway / end | usecases (新規): 判断は struct_ops、共有する状態は arena。takeaway に fentry の行を追加。next の 3 を「案B を実装」に (W-TinyLFU も追加)。end のノートは 172× (pcache モード) |
 | 付録 (Q&A 用) | **arena-map** / **arena-loop** | arena-map: 同じ物理ページを daemon の user_vm と kernel の kern_vm に二重にマップしている。BPF は JIT が `r12 = kern_vm_start` を使うので、フック時のマップ切り替えはない。arena-loop: コストを決めるのはループの書き方ではなく「arena を読むのが BPF か普通のカーネル C か」 |
 
 ### 後から加わった知見 (根拠)
