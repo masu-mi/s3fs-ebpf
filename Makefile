@@ -329,7 +329,7 @@ test-daemon-cov: ## go test with coverage -> coverage/daemon.out
 	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) test -covermode=atomic -coverprofile=$(CURDIR)/coverage/daemon.out ./...
 
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
-test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale ## Run all regression tests
+test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -366,6 +366,14 @@ test-pcache-capacity-tail: kmod daemon ## AC-41: capacity_bytes bounds fd->buf m
 test-pcache-prewarm-none: kmod daemon ## AC-43: reads work in pcache mode when prewarm admits nothing
 	@echo "==> test-pcache-prewarm-none (AC-43)"
 	@sudo $(SCRIPTS_DIR)/test-pcache-prewarm-none.sh
+
+test-pcache-prewarm: kmod daemon ## AC-67: --pcache-prewarm makes the first read of a selected file a page-cache hit
+	@echo "==> test-pcache-prewarm (AC-67)"
+	@sudo $(SCRIPTS_DIR)/test-pcache-prewarm.sh
+
+test-prefetch-next: kmod daemon ## AC-68: prefetch_next reads the next sibling files ahead after a miss
+	@echo "==> test-prefetch-next (AC-68)"
+	@sudo $(SCRIPTS_DIR)/test-prefetch-next.sh
 
 test-arena-partial-readback: kmod daemon ## AC-48: arena chunk admits keep i_size (random-first + parallel reads, sha256)
 	@echo "==> test-arena-partial-readback (AC-48)"

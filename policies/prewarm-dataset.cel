@@ -1,0 +1,52 @@
+# prewarm-dataset.cel — 学習ジョブ向けの、少し複雑な prewarm ポリシー
+#
+# ユースケース: 1 つのバケットに学習データ、モデル、ログ、作業中のファイルが
+# 混在している。ジョブが起動直後に必ず読むものだけを prewarm し、
+# 残りは最初の read で取る (Path C)。
+#
+# 判定の順番 (上から評価、&& / || は短絡評価):
+#   0. metric() で入力のサイズを Prometheus に出す (常に true)。
+#   1. 除外: 隠しファイル、.log / .tmp / .part、_tmp/ _staging/ archive/ 配下。
+#   2. 次のどれかに当たれば prewarm する。
+#      a. データセットの目印になる小さいファイル (_SUCCESS, manifest.json など)。
+#      b. datasets/<名前>/train|val/ 配下の shard で、8 MiB 以下かつ
+#         .parquet / .arrow / .tfrecord。
+#      c. models/<名前>/latest/ 配下の 2 GiB 以下のファイル。
+#      d. 4 KiB 以下のファイル全部 (設定や index。prewarm のコストが小さい)。
+#
+# 使っている CEL の機能: 文字列メソッド (startsWith / endsWith / contains /
+# matches の RE2 正規表現)、リスト定数と `in`、マクロ `exists`、三項演算子、
+# 複数行の式 (空白で始まる行は前の行の続き)。
+#
+# 注意:
+#   - prewarm は daemon 起動時に 1 回だけ評価する。実行中に増えたファイルには
+#     効かない。書き換えたら daemon の再起動が要る。
+#   - pcache モード (--arena-metadata-only) では中身の prewarm をしない
+#     (AC-44)。このポリシーが効くのは arena モードだけ。
+#   - 式の途中に `#` のコメントは書けない。コメントは行頭に置く。
+#
+# 使い方:
+#   sudo bin/s3fs-ebpf fastpath --s3 \
+#       --policy=policies/prewarm-dataset.cel \
+#       --metrics-addr=:9600
+
+prewarm: metric("prewarm_input_bytes", entry.size)
+    && !entry.name.startsWith(".")
+    && ![".log", ".tmp", ".part"].exists(ext, entry.name.endsWith(ext))
+    && !entry.s3_key.matches("(^|/)(_tmp|_staging|archive)/")
+    && (entry.name in ["_SUCCESS", "manifest.json", "schema.json", "index.json"]
+        || (entry.s3_key.matches("^datasets/[^/]+/(train|val)/")
+            && entry.size <= 8388608u
+            && [".parquet", ".arrow", ".tfrecord"].exists(ext, entry.name.endsWith(ext)))
+        || (entry.s3_key.matches("^models/[^/]+/latest/")
+            && entry.size <= 2147483648u)
+        || entry.size <= 4096u)
+
+# 読まれた shard の次の 2 個を先読みする (AC-68、pcache モードだけ)。
+# train / val の shard は名前順に読まれることが多い。
+prefetch_next: entry.s3_key.matches("^datasets/[^/]+/(train|val)/") ? 2 : 0
+
+# 小さい shard を繰り返し読む学習ジョブは、1 回しか読まれない shard が多い。
+# S3-FIFO は小さい FIFO で一度きりのアクセスを早く追い出すので向いている
+# (pick_victim 版、docs/design/ac58-pick-victim.md)。
+policy: "builtin:policy_s3fifo_pick_ops"

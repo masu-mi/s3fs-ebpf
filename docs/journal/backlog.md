@@ -44,7 +44,7 @@
 
 **背景**: `docs/design/bpf-arena-use-cases.md` のレビュー結果、arena 128MB をバルクページキャッシュとして使う現設計は arena の設計意図 (small, hot metadata) と不整合。改善案A (arena を admit メタデータだけに縮退、ページ実体は Linux page cache に委譲) が最有力。GUP オーバーヘッド (AA-01 残課題) と arena サイズ上限 (大ファイル劣後) の両方を同時解消する見込み。**実装前に 3 段階の検証** (Phase 1 分離測定 → Phase 2 PoC → Phase 3 本格計測) で判断する。
 
-> **2026-10-21 訂正**: 実装 (pcache モード、`--arena-metadata-only`) では arena にメタデータも置かなかった。中身は page cache と kmod の chunk 表、admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない (`docs/user/meetup-qa.md` Q13)。
+> **2026-10-21 訂正**: 実装 (pcache モード、`--arena-metadata-only`) では arena にメタデータも置かなかった。中身は page cache と kmod の chunk 表、admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない (`docs/user/meetup-qa.md` Q52)。
 
 **Phase 1 — 現状の bottleneck 分離測定** (判断材料集め、2〜3 日):
 
@@ -114,6 +114,8 @@
 | AC-64 | (レビュー LOW 6, 7) AC-58: `on_remove` が capacity のパスからしか呼ばれず、BPF 側に古い ino が残る。`pick_victim` が候補にない ino を返すと `break` して残りが score 順になる。また u64 を返す member を `int BPF_PROG` で定義していた | P3 | ✅ 修正: 候補にない ino は `on_remove` して聞き直す。戻り値は `__u64 BPF_PROG`。`test-pick-victim-stale` (回帰テストに追加): 旧コードでは削除した ino が policy の `idx` に残って FAIL、修正後は PASS |
 | AC-65 | (レビュー LOW 9) `flushPartial` は multipart を始める前に upload の part をすべてメモリに持つ。fill と upload は 120 s の ctx を共有する (以前の全体 PUT より悪くはない) | P3 | ✅ 修正: `objstore.Part` に `Fill` (遅延生成) を足し、`PutWithCopy` の worker が upload の直前に生成する。メモリに載る upload part は同時に最大 4 つ (以前は全部)。flush の timeout は 120 s に object 8 MiB あたり 1 s を足す。`Fill` が `ErrSourceChanged` を返せば source 変更として扱う。`TestFlushPartial` に「part が eager に埋められていない」確認を追加 |
 | AC-66 | W-TinyLFU を AC-58 の `pick_victim` で動かす (window + SLRU + sketch + admission。populate 後の admission は「候補を victim にする」で表し、pending で shed になった ino は limbo で区画を覚える)。1 段目は件数ベースで kmod 変更なし、2 段目で vtable 末尾に `on_size(ino, bytes)` を足して予算をバイトにする | P2 | 実装 (2026-10-20、ライブ計測は未): `policy_wtinylfu_pick_ops`、kmod の `on_size`、trace-replay の `wtinylfu` / `wtinylfu-clock` / `s3fifo`、`make test-wtinylfu-harness` (verifier と Go の模型の一致)。trace-replay では 30 files / 容量 8 で S3-FIFO より上、大きい容量では 1〜4 ポイント下 (`docs/design/wtinylfu-pick-plan.md` §9)。実機 (1 回): `make test-regression` 全 PASS、`bench-hitrate` で S3-FIFO 37.80% に対し 38.55% (§9.4)。残: bench-hitrate の 3 seed、mixed、policy-cost |
+| AC-67 | pcache モードで中身の prewarm ができない (AC-44 でメタデータだけにした。inode がないので POPULATE_PAGES が -ENOENT) | P2 | 実装 (`--pcache-prewarm`、既定 off、`docs/design/pcache-mode.md` §4.1): daemon が policy で選んだファイルを起動後にマウント経由で読む。kmod は変えない。Go の単体テストのみ実行。`make test-pcache-prewarm` と、prewarm 後の 10 MiB の途中書き換え (§18.36) の計測は実機で未実施 |
+| AC-68 | 起動時以外の prewarm: 読まれたファイルの次の兄弟を先読みしたい (学習データの shard、連番のログ) | P2 | 実装 (CEL `prefetch_next: <int>`、`docs/design/pcache-mode.md` §4.1): 最初の chunk の miss のあと、同じディレクトリの名前順で次の N 個を AC-67 の worker で読む。worker 自身の miss からは連鎖しない。Go の単体テストのみ実行。`make test-prefetch-next` と効果の計測は実機で未実施。残: fadvise(WILLNEED) の fentry、ジョブ開始 (exec / cgroup) の契機、HTTP API |
 
 ### AC-06 調査計画 (未着手)
 - `perf c2c record -a -- fio ...` (64 jobs, shared small file) でキャッシュライン競合の特定

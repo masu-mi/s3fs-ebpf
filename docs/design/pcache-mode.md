@@ -15,7 +15,7 @@ arena モードでは、ファイルの中身を `bpf_arena` (daemon と BPF の
 | 中身の置き場所 | `bpf_arena` | inode ごとの 4 MiB chunk の表 (`fd->chunks[]`) と page cache |
 | admit の ioctl | `ADMIT_ARENA` (uaddr / size / offset の表) | `POPULATE_PAGES` (中身を kmod にコピー) + `S3FS_ADMIT_FLAG_PCACHE` の entry |
 | hit の経路 | `.read_iter` が arena から GUP でコピー | `.read_iter` → `generic_file_read_iter`。page cache が空なら `.read_folio` が chunk から folio を埋める |
-| prewarm | 中身まで | メタデータだけ。中身は最初の read で取る (AC-44) |
+| prewarm | 中身まで | メタデータだけ。中身は最初の read で取る (AC-44)。`--pcache-prewarm` で、policy が選んだファイルを起動後にマウント経由で 1 回読む (AC-67) |
 | 容量 | arena の大きさ (128 MiB) | `capacity_bytes` (既定 0 = 無制限) で chunk の確保量を数える |
 | 弱み | 毎回の GUP | 不変条件が多い。読んだ page を残すので、大きいファイルを続けて読むとホストのメモリ回収を待つ (`br §18.39`) |
 
@@ -35,6 +35,23 @@ arena モードでは、ファイルの中身を `bpf_arena` (daemon と BPF の
 5. daemon は `SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を付けて reader を起こす。chunk がもう evict されていれば kmod は `-EAGAIN` を返し、daemon は populate をやり直す (最大 3 回)。
 
 page cache で返る read も policy に見えるように、`fentry/generic_file_read_iter` が KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ (S-03。CPU と ino ごとに jiffy 1 回に間引き、AC-47)。
+
+## 4.1 prewarm (`--pcache-prewarm`、AC-67、既定 off)
+
+prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる。inode を作って入れても、dentry がないと最後の iput で消える (`generic_delete_inode`)。そこで daemon は、CEL の `prewarm` が true のファイルを記録しておき、`runReadMissLoop` を始めたあとで、マウント経由で 1 回ずつ読む (`daemon/cmd/s3fs-ebpf/prewarm_pcache.go`、4 並列)。
+
+- 読みは普通の lookup と miss の経路 (上の 4) を通るので、kmod も不変条件も変えない。dentry が inode と chunk を保つ。
+- マウントは `--pcache-prewarm-mount`、空なら `/proc/self/mounts` の最初の `s3fs_ebpf` (30 秒まで待つ)。
+- `capacity_bytes` が設定されていれば、合計がそれを超える手前で止める (超えた分は読んでもすぐ evict されるだけ)。既定の容量は無制限なので、使うときは `--cache-capacity` を付ける。
+- `--prewarm-on-sync` のとき、sync で増えたファイルも同じように読む。
+- prewarm の読みも `fentry/generic_file_read_iter` を通るので、pattern-aware の判定と policy の `on_hit` に 1 回分入る (普通の最初の read と同じ扱い)。
+- 回帰テスト: `make test-pcache-prewarm` (選ばれたファイルの最初の read で upcall が出ないこと、選ばれていないファイルは upcall すること、sha256)。
+
+**兄弟の先読み (`prefetch_next`、AC-68)**: CEL に `prefetch_next: <int>` があると、ファイルの最初の chunk の miss を処理したあとで、そのファイルについて式を評価し、同じディレクトリで名前順に後ろの N 個 (上限 64) を同じ worker のキューに積む (`prefetch_next.go`)。
+- worker 自身の読みで起きた miss (キューにある、または読み中の ino) からは先読みしない。しないと先読みが連鎖してディレクトリ全体を読む。
+- 容量: 先読みは読み進めるにつれて古いものを置き換えるので、起動時の prewarm の合計には数えない。1 ファイルが `capacity_bytes` の 1/4 を超えるときは読まない。
+- `--pcache-prewarm` なしでも、`prefetch_next` があれば worker を起動する。arena モードでは無視する (警告を出す)。
+- 回帰テスト: `make test-prefetch-next`。
 
 ## 5. 容量と eviction
 
