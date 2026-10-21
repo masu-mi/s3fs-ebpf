@@ -188,4 +188,4 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - daemon と BPF の間で状態を共有する候補は、アプリのヒント (AC-58 の残り)、W-TinyLFU の設定値 (AC-66 §9.5)、取得の前に断る admission (AC-66 §8、範囲外)。前の 2 つは小さい表なので map の update で足りる。3 つ目は miss のたびに daemon が BPF の sketch を読むので arena に一番近いが、計画には入っていない。
 - AD-02 (arena GC) は「pcache モードでは arena がメタデータだけ」という誤った前提で書かれていたので、backlog で訂正した。GC が要るのは arena モードだけ。
 
-スライド: adopt-arena、付録の usecases。
+スライド: adopt-arena、付録の usecases。kmod と daemon の間なら、arena ではなく kmod が持つ共有メモリ (miscdev の `.mmap`) を使える (`docs/design/kmod-daemon-shared-memory.md`)。
