@@ -42,6 +42,10 @@ prewarm: metric("prewarm_input_bytes", entry.size)
             && entry.size <= 2147483648u)
         || entry.size <= 4096u)
 
+# 読まれた shard の次の 2 個を先読みする (AC-68、pcache モードだけ)。
+# train / val の shard は名前順に読まれることが多い。
+prefetch_next: entry.s3_key.matches("^datasets/[^/]+/(train|val)/") ? 2 : 0
+
 # 小さい shard を繰り返し読む学習ジョブは、1 回しか読まれない shard が多い。
 # S3-FIFO は小さい FIFO で一度きりのアクセスを早く追い出すので向いている
 # (pick_victim 版、docs/design/ac58-pick-victim.md)。

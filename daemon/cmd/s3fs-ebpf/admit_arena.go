@@ -853,6 +853,12 @@ func handleReadMiss(ctx context.Context, devPath string,
 		_ = signalAdmit(devPath, ev.Ino, missChunkOffset, -61 /* -ENODATA */)
 		return
 	}
+	// AC-68: after this miss is served, read ahead the next siblings the
+	// prefetch_next policy asks for. Only the first chunk's miss counts,
+	// so a large file triggers it once per load, not once per chunk.
+	if missChunkOffset == 0 && arenaMetadataOnlyEnabled {
+		defer maybePrefetchSiblings(ev.Ino)
+	}
 
 	// D-01 partial admit path. Small files (< threshold): fetch
 	// whole object, admit at offset=0. Large files: fetch just the

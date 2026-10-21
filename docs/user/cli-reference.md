@@ -116,6 +116,7 @@ Targets:
     test-pcache-capacity-tailAC-41: capacity_bytes bounds fd->buf memory (tail-chunk reads)
     test-pcache-prewarm-noneAC-43: reads work in pcache mode when prewarm admits nothing
     test-pcache-prewarmAC-67: --pcache-prewarm makes the first read of a selected file a page-cache hit
+    test-prefetch-nextAC-68: prefetch_next reads the next sibling files ahead after a miss
     test-arena-partial-readbackAC-48: arena chunk admits keep i_size (random-first + parallel reads, sha256)
     test-pcache-capacity-noevalAC-45: capacity_bytes bounds fd->buf without any policy eval (full reads, 4 x 9 MiB)
     test-pcache-capacity-seqAC-45: a file larger than capacity_bytes read front to back stays within capacity (40 MiB vs 12 MiB)
