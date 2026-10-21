@@ -39,7 +39,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/gcs-backend.md`](user/gcs-backend.md) | GCS backend 対応の使い方と `--backend s3\|gcs` 切替 |
 | [`user/related-works.md`](user/related-works.md) | ExtFUSE / RFUSE / Mountpoint との位置付け |
 | [`user/meetup-ebpf-outline.md`](user/meetup-ebpf-outline.md) | eBPFミートアップ発表アウトライン 20min (KFunc / struct_ops / Layer 0 KFuncs 中心) |
-| [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 55 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表 |
+| [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 56 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表 |
 
 ---
 
@@ -58,6 +58,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/wtinylfu-pick-plan.md`](design/wtinylfu-pick-plan.md) | AC-66: W-TinyLFU を `pick_victim` で動かす計画 (現行とのずれ、BPF 側の設計、kmod に足す `on_size`、手順。未実装) |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
+| [`design/kmod-daemon-shared-memory.md`](design/kmod-daemon-shared-memory.md) | kmod と daemon の共有メモリ (miscdev の `.mmap`): 仕組み、arena との違い、この実装で使う場合の候補と注意。未実装・未計測 |
 | [`design/admit-and-softcap.md`](design/admit-and-softcap.md) | admit / softcap の実際の挙動、キャッシュアルゴリズムとしての問題点 (容量上限なし等)、page cache との役割分担と改善項目 |
 | [`design/policy-engine-design.md`](design/policy-engine-design.md) | 4 layer (CEL + built-in eBPF + user eBPF + KFunc) architecture の設計 |
 | [`design/policy-attach-comparison.md`](design/policy-attach-comparison.md) | fmod_ret vs struct_ops の attach 方式比較 |
