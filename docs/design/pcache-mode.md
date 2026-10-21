@@ -6,7 +6,7 @@
 
 arena モードでは、ファイルの中身を `bpf_arena` (daemon と BPF の共有メモリ) に置き、kmod は daemon の arena を GUP で読む (`docs/design/read-path-design.md` Path B)。kmod から見ると arena は「別プロセスのユーザー空間」なので、hot path の read のたびに GUP が要り (1 回約 1.7 µs)、64 並列の read が伸びなかった (AA-03、`br §14`)。arena は BPF とユーザー空間で状態を共有するのには向くが、kmod の hot path から毎回読む場所には向かない (`docs/design/bpf-arena-use-cases.md`)。
 
-そこで中身を kernel 側に置き、2 回目以降の read を普通の page cache で返すことにした (AB-04〜、`1db272e`)。arena には中身を置かない。
+そこで中身を kernel 側に置き、2 回目以降の read を普通の page cache で返すことにした (AB-04〜、`1db272e`)。arena には中身もメタデータも置かない (フラグ名の `--arena-metadata-only` とは違う。admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない)。
 
 ## 2. 2 つのモードの違い
 

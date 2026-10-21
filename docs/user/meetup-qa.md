@@ -54,7 +54,7 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 **判断は struct_ops に、共有する状態は arena に。**
 
 - **struct_ops:** カーネルが判断を問い合わせる点と、アルゴリズムの判断単位が一致するときに向く。例は sched_ext (次に走らせるタスクを選ぶ)、TCP 輻輳制御 (`tcp_congestion_ops`)、HID-BPF。s3fs なら「どれを追い出すか」を聞く vtable (後の `pick_victim`)。
-- **bpf_arena:** BPF とユーザー空間が、ポインタを含むデータ構造を syscall なしで共有したいときに向く。例は sched_ext のタスクごとの状態、BPF 側のリスト・木・ハッシュ。s3fs なら admit のメタデータとポリシーの状態だけを arena に置き、ページの実体は page cache に任せる。
+- **bpf_arena:** BPF とユーザー空間が、ポインタを含むデータ構造を syscall なしで共有したいときに向く。例は sched_ext のタスクごとの状態、BPF 側のリスト・木・ハッシュ。s3fs の今の read 経路 (pcache モード) は arena を使っていない。中身は page cache と kmod の chunk 表、admit のメタデータは kmod の admit hash、policy の状態は普通の BPF map に置いている。arena が活きるのは、BPF の状態をユーザー空間が syscall なしで頻繁に読み書きする場面で、今の backlog にそういう項目はない (Q13)。
 
 スライド: usecases。
 
@@ -169,9 +169,23 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 | | arena モード (元の方式) | pcache モード (`--arena-metadata-only`) |
 |---|---|---|
 | 中身の置き場所 | bpf_arena (daemon と BPF の共有メモリ、128 MiB) | fd ごとの 4 MiB chunk の表と page cache |
-| arena に置くもの | 中身とメタデータ | admit したファイル・範囲と policy の状態だけ |
+| arena に置くもの | ファイルの中身 | 何も置かない (daemon は起動時に arena の map を作って mmap するが、書かない) |
+| admit のメタデータ | kmod の admit hash (uaddr と範囲) | kmod の admit hash (`S3FS_ADMIT_FLAG_PCACHE`、uaddr=0) |
 | read の経路 | kmod が arena からコピー。kmod から見た arena は daemon のメモリなので毎回 GUP (1 回約 1.7 µs) | 普通の `read_iter` / page cache。2 回目以降は kmod の中で完結 |
 | 容量 | arena の大きさ | `capacity_bytes` (既定は無制限) で chunk を数える |
 | 弱み | 毎回の GUP。並列 read が伸びなかった (AA-03) | 読んだ page を残すので、大きいファイルを続けて読むとメモリ回収を待つ (§18.39)。pin などの不変条件が増えて複雑 (`docs/kmod-pcache-invariants.md`) |
 
-切り替えた理由は、失敗談の「誰から見ると何に見えるか」の 3 行目。arena は BPF とユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない。スライド: next の 1 (page cache に戻す)。
+切り替えた理由は、失敗談の「誰から見ると何に見えるか」の 3 行目。arena は BPF とユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない。スライド: 付録の next の 1 (page cache に戻す)。
+
+フラグ名の `--arena-metadata-only` は実態と合っていない。AB の検討では「arena を admit メタデータだけに縮退する」案だったが、実装ではメタデータも arena に置かなかった。
+
+### Q13. pcache モードで arena はどこに使われているか。daemon と BPF で状態を共有する future work はあるか
+
+**read 経路では使っていない。arena が要る future work も今はない。**
+
+- fentry (`fentry/generic_file_read_iter`) が触るのは `s3fs_ino_slots` (per-CPU)、`s3fs_counters` (PERCPU_ARRAY)、`s3fs_inode_index` (HASH、daemon が書く)、`s3fs_events` (ringbuf) で、どれも普通の BPF map。struct_ops の policy の状態も BPF map。
+- `__arena` を使うのは `bpf/s3fs_fastpath.bpf.c` の `SEC("syscall")` のプログラム (verifier-demo の list walk、prealloc など) だけ。arena の map は daemon が起動時にモードに関係なく作って mmap する (`daemon/internal/ebpf/loader.go`)。
+- daemon と BPF の間で状態を共有する候補は、アプリのヒント (AC-58 の残り)、W-TinyLFU の設定値 (AC-66 §9.5)、取得の前に断る admission (AC-66 §8、範囲外)。前の 2 つは小さい表なので map の update で足りる。3 つ目は miss のたびに daemon が BPF の sketch を読むので arena に一番近いが、計画には入っていない。
+- AD-02 (arena GC) は「pcache モードでは arena がメタデータだけ」という誤った前提で書かれていたので、backlog で訂正した。GC が要るのは arena モードだけ。
+
+スライド: adopt-arena、付録の usecases。
