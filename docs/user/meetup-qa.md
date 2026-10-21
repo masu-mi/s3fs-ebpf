@@ -69,45 +69,46 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 | Q30 | ロックを RCU にしていれば | 勝てなかった。ロックなしの判定でも変わらなかった |
 | Q31 | large folio を有効にすれば | 試していない。64 jobs の説明としては外れた |
 | Q32 | 大きいファイルの cold read で負ける理由 | 最後はホストのメモリ回収待ち |
-| Q33 | durable write が 1.37 倍速い理由 | 分解していない。write で daemon を通らない構造と推測 |
-| Q34 | S3 へのリクエストは減るか | 一覧と stat は減る。GET は同じ。LIST が定期的に出る |
-| Q35 | mount-s3 と比べると | open を繰り返すと速い。cold は同じくらい。機能の範囲が違う |
+| Q33 | pcache の prewarm と 10 MiB 前後の遅さ | prewarm は使える (AC-67)。10 MiB 前後は arena でも chunk でも縮まない |
+| Q34 | durable write が 1.37 倍速い理由 | 分解していない。write で daemon を通らない構造と推測 |
+| Q35 | S3 へのリクエストは減るか | 一覧と stat は減る。GET は同じ。LIST が定期的に出る |
+| Q36 | mount-s3 と比べると | open を繰り返すと速い。cold は同じくらい。機能の範囲が違う |
 
 **7. 計測の妥当性**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q36 | 172 倍は公平か | s3fs-fuse との比で、FUSE の上限ではない |
-| Q37 | 64 jobs × 1 byte の fio の意味 | 現実ではなく、固定費と取り合いを最大に見せる試験 |
-| Q38 | 計測環境と信頼性 | KVM 1 台、ローカルの MinIO、回数は少ない。比で見る |
+| Q37 | 172 倍は公平か | s3fs-fuse との比で、FUSE の上限ではない |
+| Q38 | 64 jobs × 1 byte の fio の意味 | 現実ではなく、固定費と取り合いを最大に見せる試験 |
+| Q39 | 計測環境と信頼性 | KVM 1 台、ローカルの MinIO、回数は少ない。比で見る |
 
 **8. FS としての振る舞い**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q39 | daemon が落ちたら | ハングはしない。miss の read と fsync は失敗、queue は失われる |
-| Q40 | 他のクライアントの上書きは見えるか | 削除は見えるが、上書きはすぐには見えない |
-| Q41 | mmap、O_DIRECT、ディレクトリ操作 | 読む mmap は可。共有書き込み mmap と O_DIRECT は不可 |
-| Q42 | 1 ディレクトリに大量のファイル | 10 万個まで件数に比例。上限は 26 万件 |
-| Q43 | メモリの制限と memcg | 既定は無制限。chunk は memcg に課金されない |
+| Q40 | daemon が落ちたら | ハングはしない。miss の read と fsync は失敗、queue は失われる |
+| Q41 | 他のクライアントの上書きは見えるか | 削除は見えるが、上書きはすぐには見えない |
+| Q42 | mmap、O_DIRECT、ディレクトリ操作 | 読む mmap は可。共有書き込み mmap と O_DIRECT は不可 |
+| Q43 | 1 ディレクトリに大量のファイル | 10 万個まで件数に比例。上限は 26 万件 |
+| Q44 | メモリの制限と memcg | 既定は無制限。chunk は memcg に課金されない |
 
 **9. 開発と検証**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q44 | race のバグをどう潰したか | 不変条件の文書化、修正前に落ちるテスト、KUnit と lockdep |
-| Q45 | cilium/ebpf でつまずいたこと | struct_ops の link の Update と arena 命令の marshal |
-| Q46 | verifier とツールチェーンの地雷 | arena のエラーは原因と表示が離れていた |
-| Q47 | どのカーネルで動くか | 開発と計測は 6.12 LTS。arena のレイアウト複製が弱点 |
+| Q45 | race のバグをどう潰したか | 不変条件の文書化、修正前に落ちるテスト、KUnit と lockdep |
+| Q46 | cilium/ebpf でつまずいたこと | struct_ops の link の Update と arena 命令の marshal |
+| Q47 | verifier とツールチェーンの地雷 | arena のエラーは原因と表示が離れていた |
+| Q48 | どのカーネルで動くか | 開発と計測は 6.12 LTS。arena のレイアウト複製が弱点 |
 
 **10. 振り返りと今後**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q48 | bpf_arena を使う意義はあったか | 性能ではなかった。境界を知る材料としてはあった |
-| Q49 | struct_ops と arena の用例 | 判断は struct_ops、共有する状態は arena |
-| Q50 | 本番で使えるか | 使えない。PoC。足りないものの一覧 |
-| Q51 | この先やりたいこと | フックの移動、実 S3 での計測、arena を共有状態に使う |
+| Q49 | bpf_arena を使う意義はあったか | 性能ではなかった。境界を知る材料としてはあった |
+| Q50 | struct_ops と arena の用例 | 判断は struct_ops、共有する状態は arena |
+| Q51 | 本番で使えるか | 使えない。PoC。足りないものの一覧 |
+| Q52 | この先やりたいこと | フックの移動、実 S3 での計測、arena を共有状態に使う |
 
 ---
 
@@ -130,7 +131,7 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 - **FUSE passthrough** は、daemon が開いたローカルの backing file に read / write を直接流す仕組み。S3 の場合はローカルにファイルを置いてからになるので、ローカルディスクのキャッシュがある構成 (fuse-cache 相当) を速くする手段。open / release の往復は残る。
 - **FUSE over io_uring** は /dev/fuse の往復を安くする (RFUSE と同じ方向、`docs/user/related-works.md`)。往復の回数は減らない。
 - **fuse-bpf** (Android 由来のパッチ) は upstream に入っていない。
-- この PoC の速さの源は「hit のときに daemon へ一度も行かない」こと (Q28、Q48)。FUSE 側にも往復を減らす手段はある (Q36) ので、「FUSE では原理的に無理」とは言わない。
+- この PoC の速さの源は「hit のときに daemon へ一度も行かない」こと (Q28、Q49)。FUSE 側にも往復を減らす手段はある (Q37) ので、「FUSE では原理的に無理」とは言わない。
 
 ### Q3. pcache モードと arena モードの違いは
 
@@ -404,7 +405,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 CEL でできることの範囲 (誤解しやすいので):
 - hook は 2 つだけ。`prewarm` (daemon 起動時に 1 回、ファイルごとに bool) と `policy` (起動時に 1 回、Layer 2 の BPF プログラム名)。**どれを追い出すか (キャッシュの eviction) は CEL では書けず、BPF の struct_ops (Layer 2 / 3) の役目。** CEL は「どの BPF ポリシーを使うか」を選ぶだけ。
 - 入力は `entry` の 5 項目 (ino / name / s3_key / size / mode) だけで、アクセス頻度や時刻、cgroup は見えない。
-- **pcache モードでは中身の prewarm をしない (AC-44) ので、`prewarm` の CEL は arena モードでしか効かない。** 計測の主軸を pcache モードに移してからは、CEL の prewarm は実質的に使われていない。
+- **pcache モードは中身の prewarm をしない (AC-44) ので、`prewarm` の CEL は arena モードでしか効かなかった。** 計測の主軸を pcache モードに移してからは、CEL の prewarm は実質的に使われていない。その後: `--pcache-prewarm` で pcache モードでも使えるようにした (AC-67、Q33)。
 - ポリシーを書き換えたら daemon の再起動が要る (BPF の `policy` は `POST /policy/reload` で差し替えられる)。
 
 例と判定表: `docs/user/writing-policies.md` のレシピ 5。
@@ -441,7 +442,7 @@ hot path に置いた fentry の負担と、その測り方。
 - microbench の stat は s3fs-ebpf 1.38 µs、s3fs-fuse 1.39 µs (§0、2026-09-22)。fio の並列 stat も 3 つのマウントでほぼ同じで、4 jobs あたりで約 23M IOPS の共通の上限に当たる (§10.3)。
 - s3fs-ebpf の getattr は `simple_getattr`。daemon が付けた `fentry/vfs_getattr_nosec` (`bpf/s3fs_fastpath.bpf.c` の `s3fs_fp_getattr`) は、hit / miss を数え、miss なら ringbuf で daemon に知らせるだけ。
 - このフックはまだ `BPF_CORE_READ` (probe_read) で引数をたどっている。read のフックで直した (Q25) のと同じ書き換えが効くはず。stat の並列 bench で差が出ていないので後回しにしている。
-- 差が出るのは stat ではなく open のある操作 (Q36)。`ls -l` の cold が 11 倍速いのは、HEAD を投げずに kmod の一覧から返すため (Q34)。
+- 差が出るのは stat ではなく open のある操作 (Q37)。`ls -l` の cold が 11 倍速いのは、HEAD を投げずに kmod の一覧から返すため (Q35)。
 
 ---
 
@@ -513,26 +514,45 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 設計の問題として残っているのは、容量の既定が無制限でホストのメモリを見ないこと、4 並列の populate が短時間に大きく確保すること (§18.39.1)。
 - まだ確かめていないこと: ext4 で同じ読み方をしたときに同じ遅くなり方をするか。回収されたページのうち pcache と MinIO の内訳。
 
-### Q33. durable write (新規ファイル + fsync) で FUSE より 1.37 倍速いのはなぜか
+### Q33. pcache モードでも prewarm を使えるか。10 MiB 以下が遅いのは、arena に載せるか chunk サイズの工夫で速くできるか (2026-10-21 時点)
+
+**prewarm は使えるようにした (`--pcache-prewarm`、AC-67)。10 MiB 前後の遅さは、arena でも chunk サイズでもほぼ縮まない。効くのは prewarm の方。**
+
+prewarm:
+- AC-44 で外した理由は 2 つ。prewarm の時点では inode がなく `POPULATE_PAGES` が `-ENOENT` になる。inode を作って入れても、dentry がないと最後の iput で中身ごと消える (`generic_delete_inode`)。
+- そこで daemon が、CEL の `prewarm` が true のファイルを、起動後にマウント経由で 1 回読む。普通の miss の経路を通るので、kmod も不変条件も変えていない (`docs/design/pcache-mode.md` §4.1)。容量 (`capacity_bytes`) を超える手前で止める。
+
+10 MiB 前後で遅い場面 (§18.36、§18.37、ローカル MinIO):
+
+| 場面 | fuse-raw | ebpf | 律速 |
+|---|---:|---:|---|
+| cold read 10 MiB | 19.2 ms | 20.5 ms (0.94×) | S3 の GET |
+| 既存 10 MiB の途中に 4 KiB + fsync | 51.5 ms | 70.6〜84.2 ms | 変更前の全体 GET (AC-50) + 全体 PUT |
+
+- **arena に載せても速くならない。** どちらも S3 との転送が律速で、arena が効くのはデータがメモリに載った後。そこは pcache で 172× (§18.27)。arena から kmod が読むと GUP が増えるだけ (Q49)。
+- **chunk サイズの工夫も効果は小さい見込み。** `--partial-modify` は 16 MiB 未満では全体を読み書きする。しきい値を下げても、S3 の multipart は最後以外の part が 5 MiB 以上という制約があり、10 MiB (4 + 4 + 2 MiB の chunk) ではほぼ全体を運ぶうえ、往復が 3〜4 回増える。8 MiB にした計測はしていない。chunk の大きさ (4 MiB) は `S3FS_PCACHE_CHUNK_SHIFT` で、pin や pending の単位でもあるので、変えるなら回帰テスト一式をやり直す必要がある。
+- **prewarm で効く見込み。** 中身が先に chunk にあれば、cold read は warm (page cache) になり、途中の書き換えも AC-50 の読み込みが要らず PUT だけになる (推定 50 ms 前後)。どちらも実測していない。prewarm の読みは起動時に払うので、起動から最初の read までに時間があるワークロード向け。
+
+### Q34. durable write (新規ファイル + fsync) で FUSE より 1.37 倍速いのはなぜか
 
 **内訳は分解していない。** 以下は構造からの推測。
 
 - 数字: 1 / 10 / 100 MiB で fuse-raw の 1.37 / 1.35 / 1.37 倍 (§18.28)。S3 のオブジェクトの sha256 は一致。
-- s3fs-ebpf の write は kmod の chunk に書くだけで、daemon は通らない。fsync で daemon が `READ_DIRTY` で中身を読み、PUT して完了を知らせる (Q41、`posix-and-practical-notes.md` E-01)。
+- s3fs-ebpf の write は kmod の chunk に書くだけで、daemon は通らない。fsync で daemon が `READ_DIRTY` で中身を読み、PUT して完了を知らせる (Q42、`posix-and-practical-notes.md` E-01)。
 - s3fs-fuse は write のたびに /dev/fuse を往復し、daemon 側のバッファに溜めてから PUT する (と理解している)。100 MiB だと write の往復の回数が効く可能性がある。
 - 既存ファイルの上書きでは差がもっと大きかった (1.3〜1.7 倍、§8.3)。新規ファイルでは s3fs-fuse も create + 1 回の PUT で済むので差が小さい (§18.28 の注)。
-- close では PUT を待たないので、fsync なしの「書いて閉じる」はさらに速い (§8.3 の non-durable 列)。ただしそれは比べ方として公平ではない (Q36)。
+- close では PUT を待たないので、fsync なしの「書いて閉じる」はさらに速い (§8.3 の non-durable 列)。ただしそれは比べ方として公平ではない (Q37)。
 
-### Q34. S3 へのリクエストは減るのか (費用の面)
+### Q35. S3 へのリクエストは減るのか (費用の面)
 
 **一覧と stat は減る。中身の GET は同じ。一覧の LIST は定期的に出る。**
 
 - `ls -l` (10,000 個、cold): s3fs-fuse は HEAD を 10,000 回投げる。s3fs-ebpf は起動時と `--sync-every` ごとの LIST の結果 (kmod の表) から返すので、S3 に行かない (§18.31)。
 - 中身の初回の読み込み (cold cat) は、どちらも 1 ファイルに 1 回 GET する。cold cat 10,000 個は 2.7 倍速いが、GET の回数は同じ。
-- 代わりに、既定で 30 秒ごとに LIST する。10 万個のバケットなら LIST の 1 ページが 1000 件として約 100 リクエストを 30 秒ごとに出す。`--sync-every=0` で止められるが、他のクライアントの追加と削除が見えなくなる (Q40)。
+- 代わりに、既定で 30 秒ごとに LIST する。10 万個のバケットなら LIST の 1 ページが 1000 件として約 100 リクエストを 30 秒ごとに出す。`--sync-every=0` で止められるが、他のクライアントの追加と削除が見えなくなる (Q41)。
 - 大きいオブジェクトの途中の書き換えは、`--partial-modify` で変更のない部分を `UploadPartCopy` (server-side copy) で運ぶので、転送量が減る (Q28)。
 
-### Q35. Mountpoint for Amazon S3 (mount-s3) と比べるとどうか
+### Q36. Mountpoint for Amazon S3 (mount-s3) と比べるとどうか
 
 **open を繰り返す読み方では速い。cold の小さいファイルは同じくらい。機能の範囲は違う。** 同じホスト・同じ MinIO で測った (`--cache` 付き)。
 
@@ -545,7 +565,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 (§18.27、§18.31。cold read の大きいファイルは AC-52 の前の数字しかないので並べない)
 
-- mount-s3 は FUSE なので、hit でも open / read の往復が残る。それでも s3fs-fuse の約 5 倍速い (Q36)。
+- mount-s3 は FUSE なので、hit でも open / read の往復が残る。それでも s3fs-fuse の約 5 倍速い (Q37)。
 - 機能: mount-s3 は既存オブジェクトの途中の書き換えをしない (読み込みと新規の順次書き込みが中心。公式の制限で、この PoC では確かめていない)。s3fs-ebpf は途中の書き換えと fsync で待つ書き込みができる。一方、mount-s3 は本番で使われている実装で、PoC と同じ土俵ではない。
 
 ---
@@ -554,7 +574,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 倍率の比べ方、試験の意味、環境の限界。
 
-### Q36. open+read+close の 172 倍は公平か。FUSE でも往復を減らせるのではないか
+### Q37. open+read+close の 172 倍は公平か。FUSE でも往復を減らせるのではないか
 
 **比べた相手は s3fs-fuse の実装で、FUSE の上限ではない。** 倍率は「1 回の open+read+close で daemon に行く回数の差」から来ている。
 
@@ -564,7 +584,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 実際に、mount-s3 (`--cache`) は同じ計測で 103.8 µs で、fuse-cache の約 5 倍速い (§18.27)。s3fs-ebpf はその 34 倍速い。
 - 言えること: 「FUSE ではなく、s3fs-fuse より」の倍率であること。構造の差として確かに残るのは、hit のときにユーザー空間のプロセスを一度も起こさないこと。
 
-### Q37. 64 jobs で 1 byte ずつ 18 B のファイルを読む fio は、現実のワークロードを表しているか
+### Q38. 64 jobs で 1 byte ずつ 18 B のファイルを読む fio は、現実のワークロードを表しているか
 
 **表していない。read 経路の「固定費」と「共有データの取り合い」を最大に見せるための試験。**
 
@@ -572,7 +592,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 大きい read では、コピーの時間に固定費が埋もれる。100 MiB の warm read では s3fs-ebpf の方が速い (§18.16 T6)。
 - 現実に近い場面の数字は Q28 の表 (小さいファイル 10,000 個、durable write、cold read)。
 
-### Q38. 計測環境は何か。数字はどこまで信用できるか
+### Q39. 計測環境は何か。数字はどこまで信用できるか
 
 **KVM ゲスト 1 台、ローカルの MinIO、回数は少ない。比で見てほしい。**
 
@@ -589,7 +609,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 障害時、一貫性、サポートする操作、規模、メモリ。
 
-### Q39. daemon が落ちたら、読み書きはどうなるか
+### Q40. daemon が落ちたら、読み書きはどうなるか
 
 **ハングはしないが、miss の read と fsync は失敗する。** カーネルの queue はメモリだけなので、落ちた時点で未処理のものは失われる。
 
@@ -604,7 +624,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 正常終了なら daemon が kmod のファイル一覧を起動時のもの (bootstrap) に戻す (`daemon/cmd/s3fs-ebpf/main.go` の sync clear)。
 - ino と S3 キーの対応は `--ino-state` を付けたときだけファイルに残る。付けないと、daemon の再起動で ino が振り直される。
 
-### Q40. 他のクライアントが S3 のオブジェクトを書き換えたら、見えるか (一貫性)
+### Q41. 他のクライアントが S3 のオブジェクトを書き換えたら、見えるか (一貫性)
 
 **消えたキーは次の sync で消えるが、中身の書き換えはすぐには見えない。** この PoC は「1 つのマウントがそのバケットを主に使う」前提。
 
@@ -614,7 +634,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 書き込みの競合は「最後に PUT した者が勝つ」。途中の書き換え (`--partial-modify`) は ETag で copy 元を固定し、変わっていたら全体を PUT し直す (`docs/design/ac51-partial-modify.md`)。
 - close-to-open の一貫性 (NFS のような) も保証しない。
 
-### Q41. mmap、O_DIRECT、ディレクトリ操作、ハードリンクは使えるか
+### Q42. mmap、O_DIRECT、ディレクトリ操作、ハードリンクは使えるか
 
 **読む方の mmap は使える。それ以外は限定的か、ない。** コードから読んだ範囲で、テストしていないものを含む。
 
@@ -624,7 +644,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - **rename:** S3 に rename がないので CopyObject + Delete。原子性はない。`RENAME_NOREPLACE` 以外のフラグは EINVAL (`posix-and-practical-notes.md` E-02)。
 - **write:** write-back のみ。close では PUT を待たず、fsync で PUT の完了を待つ。
 
-### Q42. 1 つのディレクトリに大量のファイルがあるとどうなるか
+### Q43. 1 つのディレクトリに大量のファイルがあるとどうなるか
 
 **10 万個までは件数にほぼ比例する。上限は 26 万件 (262144)。** (AC-55、§18.40、1 回の計測)
 
@@ -639,7 +659,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 10 万個のとき、daemon の起動から全件が見えるまで 13 秒かかる。daemon の LIST が支配的で、kmod ではない。
 - 上限 262144 は kmod のメモリの保護として残している。
 
-### Q43. chunk と page cache のメモリはどう制限されるのか。cgroup のメモリ制限は効くか
+### Q44. chunk と page cache のメモリはどう制限されるのか。cgroup のメモリ制限は効くか
 
 **既定では制限がない。chunk は memcg に課金されない。**
 
@@ -655,7 +675,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 バグの潰し方、ツールチェーン、カーネルの版。
 
-### Q44. カーネルのロックや race のバグはどうやって見つけ、潰したのか
+### Q45. カーネルのロックや race のバグはどうやって見つけ、潰したのか
 
 **静かなデータ破損 (read が 0 を返す) が何度も出た。不変条件を文書にし、修正前に落ちるテストを書いて止めた。**
 
@@ -667,7 +687,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
   - 修正前のコードで FAIL することを確かめる (AC-48、AC-50、AC-53、AC-64)。
 - 未完: 実機での lockdep 付きの検証 (AC-42)。
 
-### Q45. Go (cilium/ebpf) で書いていて、つまずいたことは
+### Q46. Go (cilium/ebpf) で書いていて、つまずいたことは
 
 **struct_ops まわりの API の不足と、arena 用の命令の marshal のバグ。**
 
@@ -678,18 +698,18 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 kmod 側では、struct_ops の glue (`verifier_ops` / `cfi_stubs` / `reg` / `unreg` / `update` / `init_member`) が多く、fmod_ret 版の 2.3 倍の行数になった (`ebpf-ecosystem-gaps.md` §2)。
 
-### Q46. verifier や BPF のツールチェーンで、ほかに苦しんだことは
+### Q47. verifier や BPF のツールチェーンで、ほかに苦しんだことは
 
 **arena まわりのエラーは原因と表示が離れていて、読み解くのに時間がかかった。** (`docs/journal/week2-implementation-notes.md` §0 に早見表)
 
-- `BPF_MOV uses reserved fields` が 2 つの原因で出た。1 つは cilium/ebpf の marshal のバグ (Q45)。もう 1 つは、プログラムが arena の map を一度も参照していないと verifier が arena を関連付けず、`addr_space_cast` を拒否すること。`asm volatile("" :: "r"(&s3fs_arena));` で参照を作って通した。
+- `BPF_MOV uses reserved fields` が 2 つの原因で出た。1 つは cilium/ebpf の marshal のバグ (Q46)。もう 1 つは、プログラムが arena の map を一度も参照していないと verifier が arena を関連付けず、`addr_space_cast` を拒否すること。`asm volatile("" :: "r"(&s3fs_arena));` で参照を作って通した。
 - arena は daemon が mmap してから BPF プログラムを load しないと `arena's user address must be set via map_extra or mmap()` になる。load の順番を 2 段に分けた。
 - `fentry/vfs_getattr` を付けても発火しなかった。今のカーネルの stat は `vfs_getattr_nosec` を直接呼ぶので、そちらに付け直した。
 - pahole が作る `vmlinux.h` に `BPF_MAP_TYPE_ARENA` がなかった (enum が途中で切れていた)。自分で define した。
 - clang 18 は `addr_space_cast` を出せないので clang 19 以上 (手元は 20) にした。
 - `while (n)` の pointer chase は `BPF program is too large. Processed 1000001 insn` で拒否される。これは発表のデモに使っている (`can_loop` を足せば通る話は Q5)。
 
-### Q47. どのカーネルで動くか。カーネルを上げると壊れないか
+### Q48. どのカーネルで動くか。カーネルを上げると壊れないか
 
 **開発と計測は 6.12 LTS。他の版は一部だけ確かめた。**
 
@@ -705,7 +725,7 @@ kmod 側では、struct_ops の glue (`verifier_ops` / `cfi_stubs` / `reg` / `un
 
 arena を使った意義、適用範囲、本番との距離、これから。
 
-### Q48. bpf_arena を使う意義はあったか (2026-10-21 時点)
+### Q49. bpf_arena を使う意義はあったか (2026-10-21 時点)
 
 **性能の面ではなかった。学びと発表の材料としてはあった。** この PoC で arena が担った「ファイルの中身の置き場所」は arena に向かない役割で、速さの源は arena ではなく「hit のときに upcall しない」構造の方だった。arena に向く役割 (BPF と daemon が共有するポリシーの状態) には、結局まだ使っていない。
 
@@ -726,7 +746,7 @@ arena を使った意義、適用範囲、本番との距離、これから。
 
 **意義があったところ**
 
-1. **適用範囲の境界が実測で分かった。** 「判断は struct_ops、共有する状態は arena」(Q49) と、「arena は BPF ↔ ユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない」(Q3) は、arena を誤った場所で使って計測したから言える。発表の中心 (失敗談 AA-03) になっている。
+1. **適用範囲の境界が実測で分かった。** 「判断は struct_ops、共有する状態は arena」(Q50) と、「arena は BPF ↔ ユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない」(Q3) は、arena を誤った場所で使って計測したから言える。発表の中心 (失敗談 AA-03) になっている。
 2. **arena の仕組みを v6.12 のソースで確かめた。** 同じ物理ページを user_vm と kern_vm に二重にマップし、JIT が r12 = kern_vm_start で変換する、未割り当てのページは例外テーブルで 0 になる、という説明 (Q7) は arena を使ったから得られた。
 3. **verifier と KFunc のデモの土台になった。** arena 上の linked list を `while (n)` でたどると verifier が拒否し、KFunc に渡すと通る、というデモ (`daemon/cmd/s3fs-ebpf/verifier_demo_kfunc.go`) は arena がないと成り立たない。
 4. **upstream への具体的な要望が出た。** `bpf_arena_get_kern_vm_start` の export (K-01)、kern_vm の generic context 用 fault handler (K-02)、cilium/ebpf の `addr_space_cast` の Marshal 修正 (`docs/misc/`)。K-02 が入れば kmod から GUP なしで読めるので、arena に中身を置く設計の評価は変わりうる。
@@ -739,7 +759,7 @@ arena を使った意義、適用範囲、本番との距離、これから。
 
 スライド: arena-who、失敗談 (AA-03)、usecases。
 
-### Q49. struct_ops と arena の適切な用例は
+### Q50. struct_ops と arena の適切な用例は
 
 **判断は struct_ops に、共有する状態は arena に。**
 
@@ -748,28 +768,28 @@ arena を使った意義、適用範囲、本番との距離、これから。
 
 スライド: usecases。
 
-### Q50. 本番で使えるか。使うなら何が足りないか
+### Q51. 本番で使えるか。使うなら何が足りないか
 
 **使えない。Linux 6.12 で、この 3 つの機能で FS を組めるかを試す PoC。** 足りないものは分かっている範囲で次のとおり。
 
-- **daemon が落ちたときの耐性:** close 後の PUT、unlink、rename の queue がメモリだけ (Q39、backlog H-01)。
-- **一貫性:** 他のクライアントによる上書きを検知しない (Q40)。
-- **メモリ:** pcache の容量は既定で無制限で、chunk は memcg に課金されない (Q43)。
-- **書き込み:** 書き込み可能な共有 mmap が S3 に届かない、O_DIRECT がない (Q41)。
-- **検証:** 実際の S3 での計測がない (Q38)。実機での lockdep 付きの検証がない (AC-42)。
-- **カーネル依存:** 6.12 でだけ確かめた箇所がある (Q47)。
+- **daemon が落ちたときの耐性:** close 後の PUT、unlink、rename の queue がメモリだけ (Q40、backlog H-01)。
+- **一貫性:** 他のクライアントによる上書きを検知しない (Q41)。
+- **メモリ:** pcache の容量は既定で無制限で、chunk は memcg に課金されない (Q44)。
+- **書き込み:** 書き込み可能な共有 mmap が S3 に届かない、O_DIRECT がない (Q42)。
+- **検証:** 実際の S3 での計測がない (Q39)。実機での lockdep 付きの検証がない (AC-42)。
+- **カーネル依存:** 6.12 でだけ確かめた箇所がある (Q48)。
 - **既定のモード:** 既定は今も arena モードで、計測と修正は pcache モードで行っている (`docs/design/pcache-mode.md` §9)。
 
-### Q51. この先やりたいこと、できそうなことは
+### Q52. この先やりたいこと、できそうなことは
 
 **優先順位の高いものと、構想だけのものがある。**
 
 実装に近いもの:
 - read のフックを hit の経路から外し、miss の経路で集める (Q25)。
 - W-TinyLFU の計測を 3 seed に増やす (Q16)。候補が数千のときの `pick_victim` の時間を測る。
-- 実際の S3 で計測する (Q38)。
+- 実際の S3 で計測する (Q39)。
 - KVM ではない環境で `perf c2c` を取り、A/B で推定した cacheline の取り合い (Q26) を直接確かめる (AC-06)。
-- arena を「ポリシーと daemon が共有する状態」に使う (Q48 の「やり直すなら」)。
+- arena を「ポリシーと daemon が共有する状態」に使う (Q49 の「やり直すなら」)。
 
 構想 (`docs/design/ebpf-fuse-advantages-roadmap.md`、未実装):
 - cgroup ごとにポリシーを変える (`bpf_get_current_cgroup_id()`、Q14)。
@@ -777,4 +797,4 @@ arena を使った意義、適用範囲、本番との距離、これから。
 - BPF iterator で arena の GC をする。
 - アプリのヒントを map で渡す (Q14)。
 
-upstream への提案: K-01 (`bpf_arena_get_kern_vm_start` の export)、K-02 (kern_vm の generic context 用の fault handler)、cilium/ebpf の marshal 修正 (Q45)。
+upstream への提案: K-01 (`bpf_arena_get_kern_vm_start` の export)、K-02 (kern_vm の generic context 用の fault handler)、cilium/ebpf の marshal 修正 (Q46)。
