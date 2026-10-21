@@ -47,6 +47,12 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 - prewarm の読みも `fentry/generic_file_read_iter` を通るので、pattern-aware の判定と policy の `on_hit` に 1 回分入る (普通の最初の read と同じ扱い)。
 - 回帰テスト: `make test-pcache-prewarm` (選ばれたファイルの最初の read で upcall が出ないこと、選ばれていないファイルは upcall すること、sha256)。
 
+**兄弟の先読み (`prefetch_next`、AC-68)**: CEL に `prefetch_next: <int>` があると、ファイルの最初の chunk の miss を処理したあとで、そのファイルについて式を評価し、同じディレクトリで名前順に後ろの N 個 (上限 64) を同じ worker のキューに積む (`prefetch_next.go`)。
+- worker 自身の読みで起きた miss (キューにある、または読み中の ino) からは先読みしない。しないと先読みが連鎖してディレクトリ全体を読む。
+- 容量: 先読みは読み進めるにつれて古いものを置き換えるので、起動時の prewarm の合計には数えない。1 ファイルが `capacity_bytes` の 1/4 を超えるときは読まない。
+- `--pcache-prewarm` なしでも、`prefetch_next` があれば worker を起動する。arena モードでは無視する (警告を出す)。
+- 回帰テスト: `make test-prefetch-next`。
+
 ## 5. 容量と eviction
 
 - 容量は arena の entry のサイズと、pcache の ino ごとの `fd->cap` (確保済み chunk の合計) で数える (AC-41)。

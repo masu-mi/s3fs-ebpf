@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
@@ -28,6 +29,11 @@ import (
 // pcachePrewarmEnabled is set once by main from --pcache-prewarm.
 var pcachePrewarmEnabled bool
 
+// pcacheWorkerUp is true while runPcachePrewarm is serving the queue.
+// Prefetch (AC-68) queues nothing otherwise, so the queue cannot grow
+// without a reader.
+var pcacheWorkerUp atomic.Bool
+
 // pcachePrewarmMount is set once by main from --pcache-prewarm-mount.
 // Empty means find the s3fs_ebpf mount in /proc/self/mounts.
 var pcachePrewarmMount string
@@ -45,30 +51,69 @@ const (
 )
 
 type pcachePrewarmItem struct {
-	ino  uint64
-	size uint64
+	ino      uint64
+	size     uint64
+	prefetch bool // AC-68: queued by a read miss, not by the prewarm policy
 }
 
 var pcachePrewarmQ struct {
 	mu    sync.Mutex
 	items []pcachePrewarmItem
-	kick  chan struct{}
+	// warming holds the inos queued or being read by the worker. A miss
+	// on one of them is the worker's own read, so it must not trigger
+	// prefetch_next (that would chain through the whole directory).
+	warming map[uint64]struct{}
+	kick    chan struct{}
 }
 
 func init() {
 	pcachePrewarmQ.kick = make(chan struct{}, 1)
+	pcachePrewarmQ.warming = make(map[uint64]struct{})
 }
 
 // queuePcachePrewarm records a file whose content prewarm the policy asked
 // for but pcache mode skipped at prewarm time. Safe from any goroutine.
 func queuePcachePrewarm(ino, size uint64) {
+	queuePcacheItems([]pcachePrewarmItem{{ino: ino, size: size}})
+}
+
+// queuePcacheItems queues items whose ino is not already queued or being
+// read, and returns how many it queued.
+func queuePcacheItems(items []pcachePrewarmItem) int {
+	n := 0
 	pcachePrewarmQ.mu.Lock()
-	pcachePrewarmQ.items = append(pcachePrewarmQ.items, pcachePrewarmItem{ino, size})
-	pcachePrewarmQ.mu.Unlock()
-	select {
-	case pcachePrewarmQ.kick <- struct{}{}:
-	default:
+	for _, it := range items {
+		if _, busy := pcachePrewarmQ.warming[it.ino]; busy {
+			continue
+		}
+		pcachePrewarmQ.warming[it.ino] = struct{}{}
+		pcachePrewarmQ.items = append(pcachePrewarmQ.items, it)
+		n++
 	}
+	pcachePrewarmQ.mu.Unlock()
+	if n > 0 {
+		select {
+		case pcachePrewarmQ.kick <- struct{}{}:
+		default:
+		}
+	}
+	return n
+}
+
+// isWarming reports whether ino is queued or being read by the worker.
+func isWarming(ino uint64) bool {
+	pcachePrewarmQ.mu.Lock()
+	defer pcachePrewarmQ.mu.Unlock()
+	_, ok := pcachePrewarmQ.warming[ino]
+	return ok
+}
+
+func doneWarming(items []pcachePrewarmItem) {
+	pcachePrewarmQ.mu.Lock()
+	for _, it := range items {
+		delete(pcachePrewarmQ.warming, it.ino)
+	}
+	pcachePrewarmQ.mu.Unlock()
 }
 
 func takePcachePrewarm() []pcachePrewarmItem {
@@ -88,7 +133,9 @@ func runPcachePrewarm(ctx context.Context) {
 		return
 	}
 	fmt.Printf("[pcache-prewarm] reading through %s\n", mnt)
-	var used uint64 // bytes this worker has prewarmed so far
+	pcacheWorkerUp.Store(true)
+	defer pcacheWorkerUp.Store(false)
+	var used uint64 // startup prewarm bytes so far (prefetch is not summed)
 	for {
 		items := takePcachePrewarm()
 		if len(items) > 0 {
@@ -98,7 +145,13 @@ func runPcachePrewarm(ctx context.Context) {
 				fmt.Printf("[pcache-prewarm] %d files skipped: capacity_bytes=%d would be exceeded\n",
 					skipped, capBytes)
 			}
-			used += prewarmThroughMount(ctx, mnt, sel)
+			prewarmThroughMount(ctx, mnt, sel)
+			for _, it := range sel {
+				if !it.prefetch {
+					used += it.size
+				}
+			}
+			doneWarming(items)
 		}
 		select {
 		case <-ctx.Done():
@@ -108,19 +161,28 @@ func runPcachePrewarm(ctx context.Context) {
 	}
 }
 
-// selectWithinCapacity keeps items, in order, while the running total
-// (starting at used) stays within capBytes. capBytes <= 0 means no limit.
-// Prewarming past the capacity would only evict what was just prewarmed.
+// selectWithinCapacity keeps startup prewarm items, in order, while the
+// running total (starting at used) stays within capBytes: prewarming past
+// the capacity would only evict what was just prewarmed. Prefetch items
+// (AC-68) replace older content as the reader moves on, so they are not
+// summed; each is kept unless it alone exceeds a quarter of the capacity.
+// capBytes <= 0 means no limit.
 func selectWithinCapacity(items []pcachePrewarmItem, used uint64, capBytes int64) ([]pcachePrewarmItem, int) {
 	if capBytes <= 0 {
 		return items, 0
 	}
 	var out []pcachePrewarmItem
 	for _, it := range items {
-		if used+it.size > uint64(capBytes) {
-			continue
+		if it.prefetch {
+			if it.size > uint64(capBytes)/4 {
+				continue
+			}
+		} else {
+			if used+it.size > uint64(capBytes) {
+				continue
+			}
+			used += it.size
 		}
-		used += it.size
 		out = append(out, it)
 	}
 	return out, len(items) - len(out)
