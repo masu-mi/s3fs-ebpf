@@ -50,9 +50,11 @@ type Engine struct {
 //
 //	prewarm: <cel expression returning bool>
 //
-// Comments start with `#`. Blank lines allowed. Unknown hook names
-// are ignored with a log line (forward-compat when older engines
-// meet newer policies).
+// Comments start with `#`. Blank lines allowed. A line that starts
+// with a space or tab continues the previous hook's expression, so a
+// long rule can be split across lines. Unknown hook names are ignored
+// with a log line (forward-compat when older engines meet newer
+// policies).
 //
 // Returns a working Engine with prewarm=nil when the file exists
 // but declares nothing — the daemon's default (prewarm=true) then
@@ -70,19 +72,19 @@ func Load(path string) (*Engine, error) {
 		return nil, fmt.Errorf("policy: build env: %w", err)
 	}
 	eng := &Engine{source: filepath.Base(path)}
-	// tiny hand-rolled parser — full YAML/HCL is overkill for one hook.
-	for lineno, line := range splitLines(raw) {
-		trim := trimSpace(line)
-		if trim == "" || trim[0] == '#' {
-			continue
-		}
-		name, expr, ok := cutColon(trim)
+	// tiny hand-rolled parser — full YAML/HCL is overkill for two hooks.
+	stmts, err := splitStatements(raw)
+	if err != nil {
+		return nil, fmt.Errorf("policy: %s:%w", path, err)
+	}
+	for _, st := range stmts {
+		name, expr, ok := cutColon(st.text)
 		if !ok {
-			return nil, fmt.Errorf("policy: %s:%d syntax: expected 'hook: expr'", path, lineno+1)
+			return nil, fmt.Errorf("policy: %s:%d syntax: expected 'hook: expr'", path, st.lineno)
 		}
 		prog, err := compileHook(env, expr)
 		if err != nil {
-			return nil, fmt.Errorf("policy: %s:%d compile %s: %w", path, lineno+1, name, err)
+			return nil, fmt.Errorf("policy: %s:%d compile %s: %w", path, st.lineno, name, err)
 		}
 		switch name {
 		case "prewarm":
@@ -91,7 +93,7 @@ func Load(path string) (*Engine, error) {
 			eng.policyName = prog
 		default:
 			fmt.Fprintf(os.Stderr, "[policy] %s:%d ignoring unknown hook %q\n",
-				path, lineno+1, name)
+				path, st.lineno, name)
 		}
 	}
 	return eng, nil
@@ -214,6 +216,34 @@ func compileHook(env *cel.Env, expr string) (cel.Program, error) {
 		return nil, issues.Err()
 	}
 	return env.Program(ast)
+}
+
+// statement is one `hook: expr` declaration, possibly joined from
+// several lines. lineno is the 1-based line it starts on.
+type statement struct {
+	text   string
+	lineno int
+}
+
+// splitStatements drops blank and comment lines and joins each line
+// that starts with a space or tab onto the statement before it.
+func splitStatements(b []byte) ([]statement, error) {
+	var out []statement
+	for i, line := range splitLines(b) {
+		trim := trimSpace(line)
+		if trim == "" || trim[0] == '#' {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			if len(out) == 0 {
+				return nil, fmt.Errorf("%d syntax: continuation line before any 'hook: expr'", i+1)
+			}
+			out[len(out)-1].text += " " + trim
+			continue
+		}
+		out = append(out, statement{text: trim, lineno: i + 1})
+	}
+	return out, nil
 }
 
 func splitLines(b []byte) []string {
