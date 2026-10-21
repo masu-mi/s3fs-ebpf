@@ -17,7 +17,7 @@
 **Memory estimate:** 10,000 entries × 100 bytes = 1MB  
 **Access pattern:** lookup-heavy, infrequent mutations  
 **Benefit:** Zero-copy lookup eliminates syscall/IPC latency; fits entirely in arena  
-**Example:** `s3fs-ebpf` admit-metadata table (inode→location) without page data
+**Example:** `s3fs-ebpf` admit-metadata table (inode→location) without page data — proposed only. The implemented pcache mode keeps that table in the kmod admit hash and does not use the arena (2026-10-21)
 
 ### 2. Statistics & Histogram Aggregation (10MB–50MB)
 
