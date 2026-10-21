@@ -105,4 +105,58 @@ func TestPrewarmDatasetPolicy(t *testing.T) {
 	if got := eng.EvalPolicyName(); got != "builtin:policy_s3fifo_pick_ops" {
 		t.Errorf("policy name: got %q", got)
 	}
+	for key, want := range map[string]int{
+		"datasets/imagenet/train/shard-0001.parquet": 2,
+		"datasets/imagenet/test/shard-0001.parquet":  0,
+		"models/resnet/latest/weights.pt":            0,
+	} {
+		if got := eng.EvalPrefetchNext(EntryInput{S3Key: key}); got != want {
+			t.Errorf("prefetch_next %s: got %d, want %d", key, got, want)
+		}
+	}
+}
+
+func TestPrefetchNext(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "pf.cel")
+	src := "prefetch_next: entry.s3_key.startsWith(\"datasets/\") ? 3 : 0\n"
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !eng.HasPrefetchNext() {
+		t.Fatal("HasPrefetchNext = false")
+	}
+	if got := eng.EvalPrefetchNext(EntryInput{S3Key: "datasets/a/x"}); got != 3 {
+		t.Errorf("datasets: got %d, want 3", got)
+	}
+	if got := eng.EvalPrefetchNext(EntryInput{S3Key: "logs/x"}); got != 0 {
+		t.Errorf("logs: got %d, want 0", got)
+	}
+
+	for expr, want := range map[string]int{
+		"-5":        0,
+		"1000":      MaxPrefetchNext,
+		"7u":        7,
+		"100000u":   MaxPrefetchNext,
+		"\"three\"": 0, // non-int
+	} {
+		if err := os.WriteFile(p, []byte("prefetch_next: "+expr+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		eng, err := Load(p)
+		if err != nil {
+			t.Fatalf("%s: %v", expr, err)
+		}
+		if got := eng.EvalPrefetchNext(EntryInput{}); got != want {
+			t.Errorf("%s: got %d, want %d", expr, got, want)
+		}
+	}
+
+	empty, _ := Load("")
+	if empty.HasPrefetchNext() || empty.EvalPrefetchNext(EntryInput{}) != 0 {
+		t.Error("no policy: want no prefetch")
+	}
 }

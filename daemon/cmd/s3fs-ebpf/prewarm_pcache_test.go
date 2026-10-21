@@ -91,12 +91,12 @@ func TestEntryPaths(t *testing.T) {
 }
 
 func TestSelectWithinCapacity(t *testing.T) {
-	items := []pcachePrewarmItem{{1, 40}, {2, 50}, {3, 10}, {4, 5}}
+	items := []pcachePrewarmItem{{ino: 1, size: 40}, {ino: 2, size: 50}, {ino: 3, size: 10}, {ino: 4, size: 5}}
 	if got, skipped := selectWithinCapacity(items, 0, 0); len(got) != 4 || skipped != 0 {
 		t.Fatalf("unlimited: got %v skipped %d", got, skipped)
 	}
 	got, skipped := selectWithinCapacity(items, 30, 100)
-	want := []pcachePrewarmItem{{1, 40}, {3, 10}, {4, 5}}
+	want := []pcachePrewarmItem{{ino: 1, size: 40}, {ino: 3, size: 10}, {ino: 4, size: 5}}
 	if !reflect.DeepEqual(got, want) || skipped != 1 {
 		t.Fatalf("capped: got %v skipped %d, want %v skipped 1", got, skipped, want)
 	}
@@ -121,18 +121,23 @@ func TestPrewarmThroughMount(t *testing.T) {
 		{Ino: 503, ParentIno: 502, Name: "b.txt", Mode: 0o100644},
 		{Ino: 504, Name: "missing.bin", Mode: 0o100644}, // read error is skipped
 	})
-	items := []pcachePrewarmItem{{501, 3 << 20}, {503, 5}, {504, 1}, {505, 1}}
+	items := []pcachePrewarmItem{{ino: 501, size: 3 << 20}, {ino: 503, size: 5}, {ino: 504, size: 1}, {ino: 505, size: 1}}
 	if got := prewarmThroughMount(context.Background(), mnt, items); got != 3<<20+5 {
 		t.Fatalf("bytes read: got %d, want %d", got, 3<<20+5)
 	}
 }
 
 func TestPcachePrewarmQueue(t *testing.T) {
-	_ = takePcachePrewarm()
+	doneWarming(takePcachePrewarm())
 	queuePcachePrewarm(7, 70)
 	queuePcachePrewarm(8, 80)
+	queuePcachePrewarm(7, 70) // already queued: dropped
+	if !isWarming(7) || isWarming(9) {
+		t.Fatal("warming set wrong")
+	}
 	got := takePcachePrewarm()
-	want := []pcachePrewarmItem{{7, 70}, {8, 80}}
+	defer doneWarming(got)
+	want := []pcachePrewarmItem{{ino: 7, size: 70}, {ino: 8, size: 80}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -144,4 +149,32 @@ func TestPcachePrewarmQueue(t *testing.T) {
 	default:
 		t.Fatal("queue did not kick the worker")
 	}
+}
+
+func TestSelectWithinCapacityPrefetch(t *testing.T) {
+	items := []pcachePrewarmItem{
+		{ino: 1, size: 90},                 // startup: fills the budget
+		{ino: 2, size: 20, prefetch: true}, // prefetch: not summed, ≤ cap/4
+		{ino: 3, size: 30, prefetch: true}, // prefetch: > cap/4, skipped
+		{ino: 4, size: 20},                 // startup: over budget, skipped
+	}
+	got, skipped := selectWithinCapacity(items, 0, 100)
+	want := []pcachePrewarmItem{items[0], items[1]}
+	if !reflect.DeepEqual(got, want) || skipped != 2 {
+		t.Fatalf("got %v skipped %d, want %v skipped 2", got, skipped, want)
+	}
+}
+
+func TestPrewarmDoneClearsWarming(t *testing.T) {
+	doneWarming(takePcachePrewarm())
+	queuePcacheItems([]pcachePrewarmItem{{ino: 11, size: 1}, {ino: 12, size: 1}})
+	items := takePcachePrewarm()
+	if !isWarming(11) {
+		t.Fatal("taken but unread item must stay warming")
+	}
+	doneWarming(items)
+	if isWarming(11) || isWarming(12) {
+		t.Fatal("doneWarming left items")
+	}
+	<-pcachePrewarmQ.kick
 }

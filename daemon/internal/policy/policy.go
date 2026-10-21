@@ -36,13 +36,15 @@ type EntryInput struct {
 }
 
 // Engine holds compiled programs for each declared hook. Currently
-// `prewarm` (per-entry bool) and `policy` (global string returning a
-// Layer 2 program name / builtin:/file: URI) are wired.
+// `prewarm` (per-entry bool), `policy` (global string returning a
+// Layer 2 program name / builtin:/file: URI) and `prefetch_next`
+// (per-entry int, evaluated on a read miss) are wired.
 type Engine struct {
 	mu           sync.RWMutex
 	source       string      // originating file path, for logs
 	prewarm      cel.Program // may be nil (policy did not declare it)
 	policyName   cel.Program // returns string; global scope, no entry
+	prefetchNext cel.Program // returns int; may be nil (AC-68)
 }
 
 // Load reads a CEL policy from `path`. Format: newline-separated
@@ -91,6 +93,8 @@ func Load(path string) (*Engine, error) {
 			eng.prewarm = prog
 		case "policy":
 			eng.policyName = prog
+		case "prefetch_next":
+			eng.prefetchNext = prog
 		default:
 			fmt.Fprintf(os.Stderr, "[policy] %s:%d ignoring unknown hook %q\n",
 				path, st.lineno, name)
@@ -110,15 +114,7 @@ func (e *Engine) EvalPrewarm(in EntryInput) bool {
 	if prog == nil {
 		return true
 	}
-	out, _, err := prog.Eval(map[string]any{
-		"entry": map[string]any{
-			"ino":    in.Ino,
-			"name":   in.Name,
-			"s3_key": in.S3Key,
-			"size":   in.Size,
-			"mode":   uint64(in.Mode),
-		},
-	})
+	out, _, err := prog.Eval(map[string]any{"entry": in.celMap()})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[policy] %s prewarm eval ino=%d: %v (defaulting true)\n",
 			e.source, in.Ino, err)
@@ -131,6 +127,67 @@ func (e *Engine) EvalPrewarm(in EntryInput) bool {
 		return true
 	}
 	return bool(b)
+}
+
+// MaxPrefetchNext caps what a prefetch_next expression may ask for, so a
+// typo like `100000` cannot make one miss read a whole directory.
+const MaxPrefetchNext = 64
+
+// HasPrefetchNext reports whether the policy declares prefetch_next.
+func (e *Engine) HasPrefetchNext() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.prefetchNext != nil
+}
+
+// EvalPrefetchNext returns how many of the entry's following siblings
+// (same directory, by name) to read ahead after a read miss on it
+// (AC-68). Default (not declared, eval error, non-int result) is 0;
+// results are clamped to [0, MaxPrefetchNext].
+func (e *Engine) EvalPrefetchNext(in EntryInput) int {
+	e.mu.RLock()
+	prog := e.prefetchNext
+	e.mu.RUnlock()
+	if prog == nil {
+		return 0
+	}
+	out, _, err := prog.Eval(map[string]any{"entry": in.celMap()})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[policy] %s prefetch_next eval ino=%d: %v (defaulting 0)\n",
+			e.source, in.Ino, err)
+		return 0
+	}
+	var n int64
+	switch v := out.(type) {
+	case types.Int:
+		n = int64(v)
+	case types.Uint:
+		if uint64(v) > MaxPrefetchNext {
+			return MaxPrefetchNext
+		}
+		n = int64(v)
+	default:
+		fmt.Fprintf(os.Stderr, "[policy] %s prefetch_next ino=%d: non-int result %v (defaulting 0)\n",
+			e.source, in.Ino, out.Value())
+		return 0
+	}
+	if n < 0 {
+		return 0
+	}
+	if n > MaxPrefetchNext {
+		return MaxPrefetchNext
+	}
+	return int(n)
+}
+
+func (in EntryInput) celMap() map[string]any {
+	return map[string]any{
+		"ino":    in.Ino,
+		"name":   in.Name,
+		"s3_key": in.S3Key,
+		"size":   in.Size,
+		"mode":   uint64(in.Mode),
+	}
 }
 
 // Source returns the loaded policy's file basename, for log context.
