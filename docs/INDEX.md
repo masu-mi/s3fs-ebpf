@@ -39,7 +39,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/gcs-backend.md`](user/gcs-backend.md) | GCS backend 対応の使い方と `--backend s3\|gcs` 切替 |
 | [`user/related-works.md`](user/related-works.md) | ExtFUSE / RFUSE / Mountpoint との位置付け |
 | [`user/meetup-ebpf-outline.md`](user/meetup-ebpf-outline.md) | eBPFミートアップ発表アウトライン 20min (KFunc / struct_ops / Layer 0 KFuncs 中心) |
-| [`user/meetup-qa.md`](user/meetup-qa.md) | 発表準備で出た質問と回答 (arena / KFunc / struct_ops / FUSE との比較 / pcache と arena モード / bpf_arena を使った意義 / CEL ポリシーの試験状況 / pcache の prewarm と 10 MiB 前後の遅さ) |
+| [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 52 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表 |
 
 ---
 
