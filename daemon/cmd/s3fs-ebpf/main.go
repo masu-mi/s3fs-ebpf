@@ -532,6 +532,15 @@ func runFastpath(args []string) int {
 	if *policyPath != "" {
 		fmt.Printf("[policy] loaded %s\n", *policyPath)
 	}
+	// AC-68: prefetch_next reads siblings through the mount into the
+	// pcache; arena mode has no such path.
+	if pol.HasPrefetchNext() {
+		if arenaMetadataOnlyEnabled {
+			prefetchPolicy = pol
+		} else {
+			fmt.Fprintln(os.Stderr, "[policy] prefetch_next ignored: needs --arena-metadata-only")
+		}
+	}
 
 	// Layer 2 / Layer 3 BPF policy program (Week 4 (d)). --policy-bpf
 	// takes 'builtin:<name>' (engine-shipped) or 'file:<path>' (user
@@ -890,7 +899,7 @@ func runFastpath(args []string) int {
 		go runSeqPrefetchLoop(ctx, *dev, progs, s3c)
 		// AC-67: the prewarm reads block on upcalls, so start after
 		// runReadMissLoop.
-		if pcachePrewarmEnabled {
+		if pcachePrewarmEnabled || prefetchPolicy != nil {
 			go runPcachePrewarm(ctx)
 		}
 	}

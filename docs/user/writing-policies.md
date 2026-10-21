@@ -55,7 +55,13 @@ prewarm: entry.size <= 33554432 && !entry.name.endsWith(".log")
 # policy: string — 起動時に load する Layer 2 program
 # --policy-bpf flag より優先
 policy: "builtin:policy_wtinylfu_ops"
+
+# prefetch_next: int — read miss のあと、同じディレクトリの名前順で
+# 次の何個を先読みするか (AC-68、pcache モードだけ。デフォルト 0、上限 64)
+prefetch_next: entry.s3_key.startsWith("datasets/") ? 2 : 0
 ```
+
+`prefetch_next` は、ファイルの最初の chunk の miss を処理したあとに、そのファイルを `entry` として評価する。daemon はマウント経由で兄弟を読み、page cache に載せる (`docs/design/pcache-mode.md` §4.1)。学習データの shard や連番のログのように、名前順に読まれるファイルに向く。名前順に読まれないディレクトリでは外れた先読みが容量を使うので 0 にする。
 
 ### 使える変数と関数
 
