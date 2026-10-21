@@ -110,6 +110,26 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 - read 経路のコストは、1 file を 1 byte ずつ読む最悪ケースの 64 jobs で、policy なし比 −4.6% (旧 SIEVE は on_hit の map update で −14.8%)。`pick_victim` 1 回は候補 8 件で 0.5〜0.9 µs。
 - アプリのヒントは未着手。
 
+### Q14. policy をホットスワップで切り替えたいケースはあるか。ハンドラが切り替わっても、eBPF maps と kmod の状態は不整合にならないか
+
+**ケースはある。cache を捨てずに policy を変えたいとき。状態は壊れないが、新しい policy は履歴のない状態から始まる。** (2026-10-21、`kmod/policy_struct_ops.c`、`kmod/vfs_ops.c` の capacity モード)
+
+使いどころ:
+- daemon を再起動すると admit 表も chunk も空になる。`POST /policy/reload` は vtable だけを替えるので、cache は温かいまま残る。
+- workload の変化 (scan が増えたら S3-FIFO にする)、policy の修正や調整、デモや bench での A/B 比較。本番で必須というより、実験とデモで効く。
+
+不整合にならない理由:
+1. **正本は kmod。** admit 表、chunk、`live_bytes` は kmod が持つ。BPF map は policy ごとの派生状態で、kmod は信用しない。`pick_victim` が返した ino は候補にあるか確かめ、なければ `on_remove` で忘れさせて聞き直す。0 なら score 順に戻る。
+2. **次の round で揃う。** kmod は eviction round のたびに、生きている全 ino について `on_insert` (冪等) と `on_size` を呼ぶ。新しい policy の map はそこで埋まる。
+3. **旧 vtable の呼び出しは終わってから戻る。** `.update` は `rcu_assign_pointer` のあと `synchronize_rcu()` を待つ。旧 vtable の `on_hit` が走っていても、解放済みの map には書かない。
+
+引き継がないもの、注意:
+- 旧 policy の map は link と一緒に解放される。visited や頻度の履歴は消え、FIFO の順も round 内の `on_insert` の順になる (本当の古さではない)。
+- `.update` は evict mutex を取らない。round の途中で差し替わると、`on_insert` は旧 map に、`pick_victim` は新 map に届きうる。その round は新 policy がほぼ空なので score 順のフォールバックになる。安全だが、1 round だけ policy の判断が効かない。
+- fmod_ret (tracing link) は `BPF_LINK_UPDATE` に対応しないので、新旧が同時に走る間がある (`docs/design/policy-attach-comparison.md` §1.3)。
+
+スライド: so-swap。
+
 ---
 
 ## 3. 性能と FUSE との比較
