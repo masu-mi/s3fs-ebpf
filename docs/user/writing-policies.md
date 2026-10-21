@@ -43,7 +43,7 @@ path には出ない。
 
 ### ファイル形式
 
-`policies/*.cel` — 1 hook 1 行、`#` コメント可。
+`policies/*.cel` — `hook: <式>` の並び。行頭の `#` はコメント。空白 (space / tab) で始まる行は前の行の式の続きとして連結するので、長い式は複数行に分けて書ける。式の途中 (行末) に `#` のコメントは書けない (CEL の構文エラーになる)。`policies/*.cel` はすべて `go test ./internal/policy/` で読み込めることを確かめている。
 
 ```cel
 # policies/mypolicy.cel
@@ -71,9 +71,9 @@ policy: "builtin:policy_wtinylfu_ops"
 `metric()` は必ず true を返すので `&&` chain に組み込める:
 
 ```cel
-# entry の size と、その log2 を metric に出す + prewarm 判定
+# entry の size を metric に出す + prewarm 判定
 prewarm: metric("size_bytes", entry.size)
-      && metric("size_log2", int(entry.size).size().doubleFloor())
+      && metric("size_mib", double(entry.size) / 1048576.0)
       && entry.size <= 33554432
 ```
 
@@ -147,7 +147,7 @@ prewarm: metric("last_model_size_bytes", entry.size)
           || entry.name.endsWith(".bin")
           || entry.name.endsWith(".pkl")
           || entry.name.endsWith(".onnx"))
-      && entry.size <= 2147483648   # 2 GiB 上限
+      && entry.size <= 2147483648
 
 policy: "builtin:policy_wtinylfu_ops"
 ```
@@ -187,8 +187,10 @@ warm、大ファイル・ログは on-demand にするバランス型。
 
 ```cel
 # policies/prewarm-tiered.cel
-prewarm: (entry.size <= 65536)          # Tier 1: 64 KiB 以下は全部
-      || (entry.size <= 134217728       # Tier 2: ~128 MiB かつ分析フォーマット
+# Tier 1: 64 KiB 以下は全部
+# Tier 2: ~128 MiB かつ分析フォーマット
+prewarm: (entry.size <= 65536)
+      || (entry.size <= 134217728
           && (entry.name.endsWith(".parquet")
               || entry.name.endsWith(".arrow")
               || entry.name.endsWith(".csv")
@@ -260,6 +262,48 @@ curl -s http://localhost:9600/metrics | grep fast_path_hits_total
 > は必ず走り、BPF `inode_index` に登録される。stat は Path A のまま高速。
 > content は first read-miss → `handleReadMiss` → `SeqRatio() ≥ 0.70` で
 > full-file GET という流れ。詳細は `docs/design/ebpf-hook-gaps.md §3.4`。
+
+---
+
+#### レシピ 5: 除外 + 複数の条件を組み合わせる (学習ジョブ向け)
+
+学習データ、モデル、ログ、作業中のファイルが混在するバケットで、ジョブが起動直後に必ず読むものだけを prewarm する。正規表現 (`matches`、RE2)、リスト定数と `in`、マクロ `exists`、複数行の式を使う、少し複雑な例。
+
+```cel
+# policies/prewarm-dataset.cel (抜粋)
+prewarm: metric("prewarm_input_bytes", entry.size)
+    && !entry.name.startsWith(".")
+    && ![".log", ".tmp", ".part"].exists(ext, entry.name.endsWith(ext))
+    && !entry.s3_key.matches("(^|/)(_tmp|_staging|archive)/")
+    && (entry.name in ["_SUCCESS", "manifest.json", "schema.json", "index.json"]
+        || (entry.s3_key.matches("^datasets/[^/]+/(train|val)/")
+            && entry.size <= 8388608u
+            && [".parquet", ".arrow", ".tfrecord"].exists(ext, entry.name.endsWith(ext)))
+        || (entry.s3_key.matches("^models/[^/]+/latest/")
+            && entry.size <= 2147483648u)
+        || entry.size <= 4096u)
+
+policy: "builtin:policy_s3fifo_pick_ops"
+```
+
+| S3 key | size | 判定 | 理由 |
+|---|---|---|---|
+| `datasets/imagenet/train/shard-0001.parquet` | 6 MiB | warm | train 配下の shard、8 MiB 以下 |
+| `datasets/imagenet/train/shard-0002.parquet` | 64 MiB | skip | 8 MiB 超 |
+| `datasets/imagenet/test/shard-0001.parquet` | 1 MiB | skip | train / val 以外 |
+| `datasets/imagenet/manifest.json` | 200 KiB | warm | 目印のファイル |
+| `models/resnet/latest/weights.pt` | 1.5 GiB | warm | latest 配下、2 GiB 以下 |
+| `models/resnet/v1/weights.pt` | 1.5 GiB | skip | latest 以外 |
+| `configs/train.yaml` | 900 B | warm | 4 KiB 以下 |
+| `logs/run1/stdout.log` | 100 B | skip | `.log` は除外が先に効く |
+| `datasets/_staging/train/shard-0001.parquet` | 1 MiB | skip | `_staging/` 配下 |
+
+この表は `daemon/internal/policy/policy_test.go` の `TestPrewarmDatasetPolicy` で確かめている (評価だけで、マウントしての計測はしていない)。
+
+注意:
+- サイズの定数に `u` を付けると `entry.size` (uint) と型がそろう。付けなくても比較はできる。
+- prewarm は daemon 起動時に 1 回だけ評価する。実行中に増えたファイルには効かない。
+- **pcache モード (`--arena-metadata-only`) では中身の prewarm をしない (AC-44)。** prewarm の CEL が効くのは arena モードだけ。pcache モードで効くのは `policy:` の選択だけ。
 
 ## Layer 2 — built-in eBPF policy を tuning する
 

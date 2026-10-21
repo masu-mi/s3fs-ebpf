@@ -214,3 +214,25 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 スライド: arena-who、失敗談 (AA-03)、usecases。
 
+### Q14. CEL で複雑なキャッシュ / prewarm のポリシーを試したことはあるか (2026-10-21 時点)
+
+**ない。** 実際にマウントして使った CEL ポリシーは 1 行の単純なものだけで、複数行の「複雑な」サンプル 2 本はそもそも読み込めない状態だった。
+
+これまでに使ったもの:
+- `prewarm: false` (`scripts/test-pcache-prewarm-none.sh`、`test-arena-partial-readback.sh`、`policies/prewarm-meta-only.cel`)。
+- `prewarm: entry.size <= 4194304` (`policies/bench-no-large-prewarm.cel`、§18.17 の pattern-aware の計測)。
+- `policies/default.cel` (`metric()` + サイズ + 拡張子の 1 行と、`policy:` で SIEVE を選ぶ)。P-01 / P-03 の spike で動作を確認。
+
+見つかった問題 (この PR で修正):
+- ローダーは 1 行 1 hook で、続きの行を前の式に連結しなかった。`policies/prewarm-models.cel` と `prewarm-tiered.cel` は 2 行目で `syntax: expected 'hook: expr'` になり、daemon が起動できなかった。`docs/user/writing-policies.md` のレシピ 2 / 3 も同じで、行末の `#` コメントも CEL では構文エラーになる。
+- CEL の hook には `daemon/internal/policy` のテストがなかった。
+
+修正: 空白で始まる行を前の式の続きとして連結するようにし、`policies/*.cel` を全部読み込むテストと、少し複雑な例 `policies/prewarm-dataset.cel` (除外の正規表現、リストと `exists`、複数行) の判定表のテストを足した。マウントしての計測はまだしていない。
+
+CEL でできることの範囲 (誤解しやすいので):
+- hook は 2 つだけ。`prewarm` (daemon 起動時に 1 回、ファイルごとに bool) と `policy` (起動時に 1 回、Layer 2 の BPF プログラム名)。**どれを追い出すか (キャッシュの eviction) は CEL では書けず、BPF の struct_ops (Layer 2 / 3) の役目。** CEL は「どの BPF ポリシーを使うか」を選ぶだけ。
+- 入力は `entry` の 5 項目 (ino / name / s3_key / size / mode) だけで、アクセス頻度や時刻、cgroup は見えない。
+- **pcache モードでは中身の prewarm をしない (AC-44) ので、`prewarm` の CEL は arena モードでしか効かない。** 計測の主軸を pcache モードに移してからは、CEL の prewarm は実質的に使われていない。
+- ポリシーを書き換えたら daemon の再起動が要る (BPF の `policy` は `POST /policy/reload` で差し替えられる)。
+
+例と判定表: `docs/user/writing-policies.md` のレシピ 5。
