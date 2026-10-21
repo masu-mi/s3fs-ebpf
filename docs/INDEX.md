@@ -39,7 +39,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/gcs-backend.md`](user/gcs-backend.md) | GCS backend 対応の使い方と `--backend s3\|gcs` 切替 |
 | [`user/related-works.md`](user/related-works.md) | ExtFUSE / RFUSE / Mountpoint との位置付け |
 | [`user/meetup-ebpf-outline.md`](user/meetup-ebpf-outline.md) | eBPFミートアップ発表アウトライン 20min (KFunc / struct_ops / Layer 0 KFuncs 中心) |
-| [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 54 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表 |
+| [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 55 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表 |
 
 ---
 
@@ -52,6 +52,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
 | [`design/pcache-mode.md`](design/pcache-mode.md) | pcache モード (`--arena-metadata-only`) の全体像: arena モードとの違い、chunk の表、read / eviction / write の流れ、性能と残課題 |
+| [`design/backing-file-tier.md`](design/backing-file-tier.md) | 案 (未実装・未計測): pcache の下にローカル FS の backing file へ素通しする段 (warm) を足し、メモリの上限を緩める設計。fuse-bpf / FUSE passthrough と同じ形。将来の検証項目 8 つ |
 | [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計 (実装済み、`--partial-modify`、既定 off) |
 | [`design/ac58-pick-victim.md`](design/ac58-pick-victim.md) | AC-58: policy の vtable に `on_insert` / `on_remove` / `pick_victim` を足し、victim の選択を BPF に渡す設計 (実装済み、SIEVE / LRU / S3-FIFO の `*_pick_ops`) |
 | [`design/wtinylfu-pick-plan.md`](design/wtinylfu-pick-plan.md) | AC-66: W-TinyLFU を `pick_victim` で動かす計画 (現行とのずれ、BPF 側の設計、kmod に足す `on_size`、手順。未実装) |
