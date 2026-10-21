@@ -5,7 +5,7 @@
 ## 1. 結論
 
 - **持てる。** kmod がカーネル側でメモリを確保し、miscdev (`/dev/s3fs_ebpf`) に `.mmap` を実装して daemon に mmap させる。io_uring の SQ / CQ リング、perf のリングバッファ、BPF の ringbuf map と同じ形。
-- **arena と違って、kmod は GUP なしで読み書きできる。** メモリの持ち主が kmod なので、kmod は自分のカーネル番地でそのまま触れる。arena は BPF とユーザー空間のメモリで、kmod から見ると「よそのプロセスのユーザーメモリ」になる (`docs/user/meetup-qa.md` Q9)。
+- **arena と違って、kmod は GUP なしで読み書きできる。** メモリの持ち主が kmod なので、kmod は自分のカーネル番地でそのまま触れる。arena は BPF とユーザー空間のメモリで、kmod から見ると「よそのプロセスのユーザーメモリ」になる (`docs/user/meetup-qa.md` Q10)。
 - **この実装で効きそうなのは、中身のコピーを 1 回減らすこと。** ただし chunk の確保の仕方 (ちょうどの大きさで確保し、伸びると確保し直す) を変える必要がある (§5)。効果は見積もりだけで、測っていない。
 
 ## 2. 今の受け渡し
@@ -40,7 +40,7 @@ pcache モードの read では、中身は「daemon のバッファ → chunk (
 | 大きさ | 確保した分で固定 (作り直しが要る) | 最大 4 GiB の疎な領域、ページ単位で割り当て |
 | 向く使い方 | kmod と daemon の間の大量の受け渡し、イベントのリング | BPF とユーザー空間の間で、ポインタを含む構造を共有する |
 
-「kmod と daemon」の間なら kmod の共有メモリ、「BPF とユーザー空間」の間なら arena、と分けて考える。3 者 (kmod、BPF、daemon) で同じメモリを共有する正規の手段は今はない (kmod から arena を使えない理由は `docs/user/meetup-qa.md` Q9 と backlog K-01 / K-02)。
+「kmod と daemon」の間なら kmod の共有メモリ、「BPF とユーザー空間」の間なら arena、と分けて考える。3 者 (kmod、BPF、daemon) で同じメモリを共有する正規の手段は今はない (kmod から arena を使えない理由は `docs/user/meetup-qa.md` Q10 と backlog K-01 / K-02)。
 
 ## 5. 設計の注意
 
@@ -70,5 +70,5 @@ A の代わりに失うもの:
 
 - `docs/design/pcache-mode.md` — chunk の表と populate の流れ
 - `docs/design/component-communication.md` — T7 (ioctl)、T8 (miscdev の read)
-- `docs/user/meetup-qa.md` Q9 (kmod が kern_vm を使えない理由)、Q52 (arena は今どこで使われているか)
+- `docs/user/meetup-qa.md` Q10 (kmod が kern_vm を使えない理由)、Q53 (arena は今どこで使われているか)
 - `docs/design/bpf-arena-use-cases.md` — arena が向く使い方
