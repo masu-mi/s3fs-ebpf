@@ -232,26 +232,150 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 CEL でできることの範囲 (誤解しやすいので):
 - hook は 2 つだけ。`prewarm` (daemon 起動時に 1 回、ファイルごとに bool) と `policy` (起動時に 1 回、Layer 2 の BPF プログラム名)。**どれを追い出すか (キャッシュの eviction) は CEL では書けず、BPF の struct_ops (Layer 2 / 3) の役目。** CEL は「どの BPF ポリシーを使うか」を選ぶだけ。
 - 入力は `entry` の 5 項目 (ino / name / s3_key / size / mode) だけで、アクセス頻度や時刻、cgroup は見えない。
-- **pcache モードは中身の prewarm をしない (AC-44) ので、`prewarm` の CEL は arena モードでしか効かなかった。** 計測の主軸を pcache モードに移してからは、CEL の prewarm は実質的に使われていない。その後: `--pcache-prewarm` で pcache モードでも使えるようにした (AC-67、Q15)。
+- **pcache モードでは中身の prewarm をしない (AC-44) ので、`prewarm` の CEL は arena モードでしか効かない。** 計測の主軸を pcache モードに移してからは、CEL の prewarm は実質的に使われていない。
 - ポリシーを書き換えたら daemon の再起動が要る (BPF の `policy` は `POST /policy/reload` で差し替えられる)。
 
 例と判定表: `docs/user/writing-policies.md` のレシピ 5。
 
-### Q15. pcache モードでも prewarm を使えるか。10 MiB 以下が遅いのは、arena に載せるか chunk サイズの工夫で速くできるか (2026-10-21 時点)
+---
 
-**prewarm は使えるようにした (`--pcache-prewarm`、AC-67)。10 MiB 前後の遅さは、arena でも chunk サイズでもほぼ縮まない。効くのは prewarm の方。**
+## 5. 設計の選択 (eBPF まわり)
 
-prewarm:
-- AC-44 で外した理由は 2 つ。prewarm の時点では inode がなく `POPULATE_PAGES` が `-ENOENT` になる。inode を作って入れても、dentry がないと最後の iput で中身ごと消える (`generic_delete_inode`)。
-- そこで daemon が、CEL の `prewarm` が true のファイルを、起動後にマウント経由で 1 回読む。普通の miss の経路を通るので、kmod も不変条件も変えていない (`docs/design/pcache-mode.md` §4.1)。容量 (`capacity_bytes`) を超える手前で止める。
+### Q15. なぜ FS 本体を BPF で書かず、カーネルモジュールが要るのか
 
-10 MiB 前後で遅い場面 (§18.36、§18.37、ローカル MinIO):
+**BPF からは FS を登録できないから。** `register_filesystem` や `file_operations` / `address_space_operations` を BPF で実装する手段は upstream にない。struct_ops で差し替えられるのは、カーネル (またはモジュール) が vtable として公開したものだけで、VFS の ops はその対象ではない。
 
-| 場面 | fuse-raw | ebpf | 律速 |
-|---|---:|---:|---|
-| cold read 10 MiB | 19.2 ms | 20.5 ms (0.94×) | S3 の GET |
-| 既存 10 MiB の途中に 4 KiB + fsync | 51.5 ms | 70.6〜84.2 ms | 変更前の全体 GET (AC-50) + 全体 PUT |
+- そこで kmod が VFS に FS を登録し (`kmod/vfs_ops.c`)、判断だけを BPF に出す。「仕組みは kmod、判断は BPF」の分け方で、sched_ext と同じ形 (Q7)。
+- kmod は自前の vtable (`struct s3fs_policy_ops`) を `register_bpf_struct_ops` で公開している (`kmod/policy_struct_ops.c`)。BPF から kmod を呼ぶ口は KFunc (Layer 0、`kmod/tree_traversal.c`)。
+- S3 との通信 (HTTP、認証、リトライ) は BPF でもカーネルでも書きたくないので、Go の daemon に置いた。sleep できる処理を BPF から直接は呼べないこともある (`docs/dev-notes/ebpf-ecosystem-gaps.md` §3)。
 
-- **arena に載せても速くならない。** どちらも S3 との転送が律速で、arena が効くのはデータがメモリに載った後。そこは pcache で 172× (§18.27)。arena から kmod が読むと GUP が増えるだけ (Q13)。
-- **chunk サイズの工夫も効果は小さい見込み。** `--partial-modify` は 16 MiB 未満では全体を読み書きする。しきい値を下げても、S3 の multipart は最後以外の part が 5 MiB 以上という制約があり、10 MiB (4 + 4 + 2 MiB の chunk) ではほぼ全体を運ぶうえ、往復が 3〜4 回増える。8 MiB にした計測はしていない。chunk の大きさ (4 MiB) は `S3FS_PCACHE_CHUNK_SHIFT` で、pin や pending の単位でもあるので、変えるなら回帰テスト一式をやり直す必要がある。
-- **prewarm で効く見込み。** 中身が先に chunk にあれば、cold read は warm (page cache) になり、途中の書き換えも AC-50 の読み込みが要らず PUT だけになる (推定 50 ms 前後)。どちらも実測していない。prewarm の読みは起動時に払うので、起動から最初の read までに時間があるワークロード向け。
+### Q16. FUSE passthrough (6.9) や FUSE over io_uring (6.14)、fuse-bpf ではだめなのか
+
+**この PoC では試していない。比べた相手は s3fs-fuse と mount-s3 だけ。** 以下は一般的な理解で、計測の裏付けはない。
+
+- **FUSE passthrough** は、daemon が開いたローカルの backing file に read / write を直接流す仕組み。S3 の場合はローカルにファイルを置いてからになるので、ローカルディスクのキャッシュがある構成 (fuse-cache 相当) を速くする手段。open / release の往復は残る。
+- **FUSE over io_uring** は /dev/fuse の往復を安くする (RFUSE と同じ方向、`docs/user/related-works.md`)。往復の回数は減らない。
+- **fuse-bpf** (Android 由来のパッチ) は upstream に入っていない。
+- この PoC の速さの源は「hit のときに daemon へ一度も行かない」こと (Q10、Q13)。FUSE 側にも往復を減らす手段はある (Q25) ので、「FUSE では原理的に無理」とは言わない。
+
+### Q17. struct_ops の BPF が変な値を返したり、遅かったり、daemon ごと落ちたりしたら、カーネルはどうなるか
+
+**壊れない設計にしている。最悪でも既定のポリシーに戻る。**
+
+- **変な victim:** kmod は `pick_victim` が返した ino が候補 (`cand[]`) にあり、まだ試していないときだけ evict する。候補にない ino なら `on_remove` で BPF に忘れさせて聞き直し、0 や試し済みなら score 順に戻る (`docs/design/ac58-pick-victim.md` §2)。容量の上限を守るのは kmod で、BPF は順番を決めるだけ。
+- **止まらない:** verifier がループの上限を検査するので、無限ループは load できない。`pick_victim` は kmod の mutex の中で呼ぶので、遅いと eviction 全体が待つ。8 候補で 0.5〜0.9 µs (§18.42)。候補が数千のときは未計測。
+- **daemon が落ちた:** struct_ops の link は daemon の fd が閉じると外れ、kmod の `unreg` が vtable を NULL に戻す (`kmod/policy_struct_ops.c` の `s3fs_policy_unreg`)。以後は kmod の既定の動き (score なし、古い順) になる。
+- **hot swap:** `BPF_LINK_UPDATE` で vtable のポインタを RCU で入れ替える。走っている呼び出しは古い vtable で完走する。ポリシーの状態 (map) は引き継がないので、新しいポリシーは空の状態から始まる。
+
+### Q18. 誰でも BPF のポリシーを差し込めるのか。権限とセキュリティは
+
+**root (CAP_BPF / CAP_SYS_ADMIN) が前提の PoC で、既定の設定は開発向け。**
+
+- BPF の load と struct_ops の attach には特権が要る。daemon は root で動かしている。
+- `/dev/s3fs_ebpf` は mode 0600 (`kmod/s3fs_ebpf_dev.c`)。
+- 利用者が書いた `.bpf.o` (Layer 3) は、`--policy-allowlist` を付けたときだけ SHA256 で許可を確かめる。付けなければ全部通る (`docs/user/writing-policies.md` の「Allowlist」)。
+- `POST /policy/reload` は `--metrics-token` を付けたときだけ Bearer 認証が要る。既定は空 (認証なし)。
+- verifier は「カーネルを壊さない」ことは保証するが、「よいポリシーである」ことは保証しない。わざと全部を追い出すポリシーも load できる。性能を下げる攻撃への備えはない。
+
+### Q19. `fentry/generic_file_read_iter` のような汎用関数へのフックは行儀が悪くないか。ほかの選択肢は
+
+**行儀は悪い。他の FS の read にも毎回 trampoline が乗る。** 採用の基準と注意点は `docs/design/read-iter-hook-overhead.md` §4〜§5 にまとめた。
+
+- 先頭で `s_magic` を見て、自分の FS でなければすぐ返す。それでも trampoline と判定の固定費が残り、fuse-raw 比 0.974 が上限になる。
+- 目的は「page cache で hit した read も policy に見せる」こと (on_hit)。kmod の `.read_iter` は自分で持っているので、本来は kmod の中で数えれば済む。BPF にしたのは、pattern-aware admit を BPF 側で試したかったため (R-01、`docs/design/ebpf-hook-gaps.md` §3)。
+- 今後の方向は、hit の経路から外して miss の経路 (`.read_folio` や upcall) で集めること (`read-iter-hook-overhead.md` §4.6)。
+- `--no-read-iter-hook` で外せる。AB-07 の gate (a) はフックなしで判定し、フックの負担は `hook_ratio` (現在 0.983) として別に出している (§18.43)。
+
+### Q20. BPF の負担はどうやって測ったのか
+
+**3 段で測った。1 スレッドの遅延だけでは見えなかったのが教訓。**
+
+1. **BPF プログラム単体:** `sysctl kernel.bpf_stats_enabled=1` で `run_time_ns` / `run_cnt` を取る。`pick_victim` 0.5〜0.9 µs、`on_hit` 0.3〜0.4 µs (§18.42)。
+2. **並列の A/B:** fio の 64 jobs psync read を、フックあり / なし (`--no-read-iter-hook`) と、処理を 1 つずつ抜いた BPF の変種 (V1〜V3) で比べた (`read-iter-hook-overhead.md` §3 の T4)。KVM ゲストでは `perf c2c` が動かなかった (memory events なし) ので、どの cacheline を取り合っているかはこの A/B で代わりに確かめた。
+3. **プロファイル:** fio 実行中の `perf record -a -g`。probe_read 6.8%、プログラム本体 5.6%、hash lookup 4.1%、trampoline ほか 2.4%。
+
+注: `/usr/bin/perf` は 6.12 用の linux-tools がないと止まるので、別版の perf バイナリを直接使った。KVM では `bpf_ktime_get_ns()` が pvclock の読み出しになり、それだけで約 2% かかった (`read-iter-hook-overhead.md` §4.8)。
+
+---
+
+## 6. FS としての振る舞い
+
+### Q21. daemon が落ちたら、読み書きはどうなるか
+
+**ハングはしないが、miss の read と fsync は失敗する。** カーネルの queue はメモリだけなので、落ちた時点で未処理のものは失われる。
+
+| 操作 | daemon がいないとき |
+|---|---|
+| hit する read (page cache / chunk にある) | そのまま返る。daemon を通らない |
+| miss する read | 2 秒待って再試行、3 回まで (`S3FS_UPCALL_WAIT_JIFFIES`、`S3FS_UPCALL_MAX_RETRIES`)。その後は手元の chunk で埋めるか失敗する |
+| fsync | 30 秒で -EIO (`docs/user/posix-and-practical-notes.md` E-01) |
+| close 後の非同期 PUT、unlink、rename | kmod の queue に残り、daemon が落ちると失われる (永続化は backlog H-01) |
+| ポリシー | struct_ops が外れ、既定の動きに戻る (Q17) |
+
+- 正常終了なら daemon が kmod のファイル一覧を起動時のもの (bootstrap) に戻す (`daemon/cmd/s3fs-ebpf/main.go` の sync clear)。
+- ino と S3 キーの対応は `--ino-state` を付けたときだけファイルに残る。付けないと、daemon の再起動で ino が振り直される。
+
+### Q22. 他のクライアントが S3 のオブジェクトを書き換えたら、見えるか (一貫性)
+
+**消えたキーは次の sync で消えるが、中身の書き換えはすぐには見えない。** この PoC は「1 つのマウントがそのバケットを主に使う」前提。
+
+- daemon は `--sync-every` (既定 30 秒) ごとにバケットを LIST し、kmod のファイル一覧を差し替える。消えたキーの admit は落とす (`daemon/cmd/s3fs-ebpf/main.go` の `pruneAdmitsTo`)。
+- 同じキーの中身が書き換わっても、ETag を見て page cache や chunk を捨てる処理は、コードを読んだ範囲では見当たらない。evict されるまでは古い中身が返りうる。
+- daemon のディスクキャッシュは ETag とサイズを照合する (AC-40、`docs/journal/history.md` §4.1)。
+- 書き込みの競合は「最後に PUT した者が勝つ」。途中の書き換え (`--partial-modify`) は ETag で copy 元を固定し、変わっていたら全体を PUT し直す (`docs/design/ac51-partial-modify.md`)。
+- close-to-open の一貫性 (NFS のような) も保証しない。
+
+### Q23. mmap、O_DIRECT、ディレクトリ操作、ハードリンクは使えるか
+
+**読む方の mmap は使える。それ以外は限定的か、ない。** コードから読んだ範囲で、テストしていないものを含む。
+
+- **mmap:** `.mmap = generic_file_mmap` なので読み出しは page cache 経由で動く。書き込み可能な共有 mapping は、`dirty_folio` が `noop_dirty_folio` で `writepages` もないので、変更が S3 に届かない (未テスト)。
+- **O_DIRECT:** `direct_IO` がないので使えない。
+- **ディレクトリ:** `lookup` / `create` / `unlink` / `rename` だけ。`mkdir` / `rmdir` / `link` / `symlink` はない。サブディレクトリは S3 のキーの `/` から見せている (G-01)。
+- **rename:** S3 に rename がないので CopyObject + Delete。原子性はない。`RENAME_NOREPLACE` 以外のフラグは EINVAL (`posix-and-practical-notes.md` E-02)。
+- **write:** write-back のみ。close では PUT を待たず、fsync で PUT の完了を待つ。
+
+### Q24. カーネルのロックや race のバグはどうやって見つけ、潰したのか
+
+**静かなデータ破損 (read が 0 を返す) が何度も出た。不変条件を文書にし、修正前に落ちるテストを書いて止めた。**
+
+- 経緯: populate と evict の race で、確保されていない chunk の 0 を返すバグが続けて出た (R1 / S1 / T2、`docs/journal/history.md` §4.2)。-EIO にならず exit 0 のまま中身が 0 になるので、sha256 の照合でしか気づけない。
+- 対策:
+  - ロック順と不変条件を `docs/kmod-pcache-invariants.md` にまとめ、kmod を触る前に必ず読むことにした (`fd->lock` → `s3fs_admits_lock`、R1「PCACHE entry があれば chunk は確保済み」など)。
+  - 実機の回帰テスト `make test-regression` (evict-race、capacity、write-existing、pick-victim-stale など。sha256 で中身を照合)。
+  - KUnit (`make test-kunit`、`docs/dev-notes/kunit.md`)。UML と qemu (SMP) で、lockdep (`PROVE_LOCKING`)、`DEBUG_ATOMIC_SLEEP`、KASAN を有効にしている。2 GiB を超える read が EOF になる、truncate と競合した read が -EIO になる、など 6 件をこれで見つけた。
+  - 修正前のコードで FAIL することを確かめる (AC-48、AC-50、AC-53、AC-64)。
+- 未完: 実機での lockdep 付きの検証 (AC-42)。
+
+---
+
+## 7. 計測の妥当性
+
+### Q25. open+read+close の 172 倍は公平か。FUSE でも往復を減らせるのではないか
+
+**比べた相手は s3fs-fuse の実装で、FUSE の上限ではない。** 倍率は「1 回の open+read+close で daemon に行く回数の差」から来ている。
+
+- s3fs-fuse (キャッシュなし) は 1 回で /dev/fuse を約 4 往復する (read_iter 2、flush 1、release 1、§11.2)。1 往復あたり約 423 µs。s3fs-ebpf は hit なら 0 往復。
+- キャッシュありの s3fs-fuse (`use_cache` + `kernel_cache`) でも 524.6 µs かかるので、read 以外の往復 (flush / release) が残っていると考えている。内訳は測っていない。
+- FUSE には往復を減らす手段がある。open に ENOSYS を返すと以後の open / release を送らない `FUSE_NO_OPEN_SUPPORT`、flush に ENOSYS を返すと flush を送らない、`entry_timeout` / `attr_timeout` を長くするなど。これらを使う FUSE の実装なら差はかなり縮むはずだが、試していない。
+- 実際に、mount-s3 (`--cache`) は同じ計測で 103.8 µs で、fuse-cache の約 5 倍速い (§18.27)。s3fs-ebpf はその 34 倍速い。
+- 言えること: 「FUSE ではなく、s3fs-fuse より」の倍率であること。構造の差として確かに残るのは、hit のときにユーザー空間のプロセスを一度も起こさないこと。
+
+### Q26. 計測環境は何か。数字はどこまで信用できるか
+
+**KVM ゲスト 1 台、ローカルの MinIO、回数は少ない。比で見てほしい。**
+
+- ホスト: KVM ゲスト、6 vCPU、Ubuntu 24.04、カーネル 6.12 (`docs/journal/benchmark-results.md` §1、§18 冒頭)。MinIO は同じホストの docker。
+- ネットワーク遅延がないので、S3 往復の差は小さく見え、miss のコストは実際の S3 よりずっと小さい。実際の S3 ではまだ測っていない。
+- 回数: microbench は 5000 iters の p50、fio は各条件 3 回、cold read は n=5〜10、小さいファイル 10,000 個は 1 回 (§18.31)。
+- run 間のばらつきは約 2% (gate の許容幅の根拠、`read-iter-hook-overhead.md` §6)。絶対値は run ごとに動くので、同じ run の中の比で見る。
+- 計測を無効にした例が多数ある (bench のバグ、修正前のビルド、ホストのメモリ回収)。`docs/journal/history.md` §4.4 に一覧がある。
+- 分かっていない: CPU の周波数固定や、ノイズの多い隣人の影響の切り分けはしていない。
+
+### Q27. 64 jobs で 1 byte ずつ 18 B のファイルを読む fio は、現実のワークロードを表しているか
+
+**表していない。read 経路の「固定費」と「共有データの取り合い」を最大に見せるための試験。**
+
+- `--size=1 --bs=1` なので、どの read も page cache で hit し、FS のコードの固定費 (フック、ロック、カウンタ) だけが並列度に応じて効く。フックの負担 (約 19%) はこの条件だから見えた (Q9)。
+- 大きい read では、コピーの時間に固定費が埋もれる。100 MiB の warm read では s3fs-ebpf の方が速い (§18.16 T6)。
+- 現実に近い場面の数字は Q10 の表 (小さいファイル 10,000 個、durable write、cold read)。
