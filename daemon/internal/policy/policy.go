@@ -36,13 +36,15 @@ type EntryInput struct {
 }
 
 // Engine holds compiled programs for each declared hook. Currently
-// `prewarm` (per-entry bool) and `policy` (global string returning a
-// Layer 2 program name / builtin:/file: URI) are wired.
+// `prewarm` (per-entry bool), `policy` (global string returning a
+// Layer 2 program name / builtin:/file: URI) and `prefetch_next`
+// (per-entry int, evaluated on a read miss) are wired.
 type Engine struct {
 	mu           sync.RWMutex
 	source       string      // originating file path, for logs
 	prewarm      cel.Program // may be nil (policy did not declare it)
 	policyName   cel.Program // returns string; global scope, no entry
+	prefetchNext cel.Program // returns int; may be nil (AC-68)
 }
 
 // Load reads a CEL policy from `path`. Format: newline-separated
@@ -50,9 +52,11 @@ type Engine struct {
 //
 //	prewarm: <cel expression returning bool>
 //
-// Comments start with `#`. Blank lines allowed. Unknown hook names
-// are ignored with a log line (forward-compat when older engines
-// meet newer policies).
+// Comments start with `#`. Blank lines allowed. A line that starts
+// with a space or tab continues the previous hook's expression, so a
+// long rule can be split across lines. Unknown hook names are ignored
+// with a log line (forward-compat when older engines meet newer
+// policies).
 //
 // Returns a working Engine with prewarm=nil when the file exists
 // but declares nothing — the daemon's default (prewarm=true) then
@@ -70,28 +74,30 @@ func Load(path string) (*Engine, error) {
 		return nil, fmt.Errorf("policy: build env: %w", err)
 	}
 	eng := &Engine{source: filepath.Base(path)}
-	// tiny hand-rolled parser — full YAML/HCL is overkill for one hook.
-	for lineno, line := range splitLines(raw) {
-		trim := trimSpace(line)
-		if trim == "" || trim[0] == '#' {
-			continue
-		}
-		name, expr, ok := cutColon(trim)
+	// tiny hand-rolled parser — full YAML/HCL is overkill for two hooks.
+	stmts, err := splitStatements(raw)
+	if err != nil {
+		return nil, fmt.Errorf("policy: %s:%w", path, err)
+	}
+	for _, st := range stmts {
+		name, expr, ok := cutColon(st.text)
 		if !ok {
-			return nil, fmt.Errorf("policy: %s:%d syntax: expected 'hook: expr'", path, lineno+1)
+			return nil, fmt.Errorf("policy: %s:%d syntax: expected 'hook: expr'", path, st.lineno)
 		}
 		prog, err := compileHook(env, expr)
 		if err != nil {
-			return nil, fmt.Errorf("policy: %s:%d compile %s: %w", path, lineno+1, name, err)
+			return nil, fmt.Errorf("policy: %s:%d compile %s: %w", path, st.lineno, name, err)
 		}
 		switch name {
 		case "prewarm":
 			eng.prewarm = prog
 		case "policy":
 			eng.policyName = prog
+		case "prefetch_next":
+			eng.prefetchNext = prog
 		default:
 			fmt.Fprintf(os.Stderr, "[policy] %s:%d ignoring unknown hook %q\n",
-				path, lineno+1, name)
+				path, st.lineno, name)
 		}
 	}
 	return eng, nil
@@ -108,15 +114,7 @@ func (e *Engine) EvalPrewarm(in EntryInput) bool {
 	if prog == nil {
 		return true
 	}
-	out, _, err := prog.Eval(map[string]any{
-		"entry": map[string]any{
-			"ino":    in.Ino,
-			"name":   in.Name,
-			"s3_key": in.S3Key,
-			"size":   in.Size,
-			"mode":   uint64(in.Mode),
-		},
-	})
+	out, _, err := prog.Eval(map[string]any{"entry": in.celMap()})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[policy] %s prewarm eval ino=%d: %v (defaulting true)\n",
 			e.source, in.Ino, err)
@@ -129,6 +127,67 @@ func (e *Engine) EvalPrewarm(in EntryInput) bool {
 		return true
 	}
 	return bool(b)
+}
+
+// MaxPrefetchNext caps what a prefetch_next expression may ask for, so a
+// typo like `100000` cannot make one miss read a whole directory.
+const MaxPrefetchNext = 64
+
+// HasPrefetchNext reports whether the policy declares prefetch_next.
+func (e *Engine) HasPrefetchNext() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.prefetchNext != nil
+}
+
+// EvalPrefetchNext returns how many of the entry's following siblings
+// (same directory, by name) to read ahead after a read miss on it
+// (AC-68). Default (not declared, eval error, non-int result) is 0;
+// results are clamped to [0, MaxPrefetchNext].
+func (e *Engine) EvalPrefetchNext(in EntryInput) int {
+	e.mu.RLock()
+	prog := e.prefetchNext
+	e.mu.RUnlock()
+	if prog == nil {
+		return 0
+	}
+	out, _, err := prog.Eval(map[string]any{"entry": in.celMap()})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[policy] %s prefetch_next eval ino=%d: %v (defaulting 0)\n",
+			e.source, in.Ino, err)
+		return 0
+	}
+	var n int64
+	switch v := out.(type) {
+	case types.Int:
+		n = int64(v)
+	case types.Uint:
+		if uint64(v) > MaxPrefetchNext {
+			return MaxPrefetchNext
+		}
+		n = int64(v)
+	default:
+		fmt.Fprintf(os.Stderr, "[policy] %s prefetch_next ino=%d: non-int result %v (defaulting 0)\n",
+			e.source, in.Ino, out.Value())
+		return 0
+	}
+	if n < 0 {
+		return 0
+	}
+	if n > MaxPrefetchNext {
+		return MaxPrefetchNext
+	}
+	return int(n)
+}
+
+func (in EntryInput) celMap() map[string]any {
+	return map[string]any{
+		"ino":    in.Ino,
+		"name":   in.Name,
+		"s3_key": in.S3Key,
+		"size":   in.Size,
+		"mode":   uint64(in.Mode),
+	}
 }
 
 // Source returns the loaded policy's file basename, for log context.
@@ -214,6 +273,34 @@ func compileHook(env *cel.Env, expr string) (cel.Program, error) {
 		return nil, issues.Err()
 	}
 	return env.Program(ast)
+}
+
+// statement is one `hook: expr` declaration, possibly joined from
+// several lines. lineno is the 1-based line it starts on.
+type statement struct {
+	text   string
+	lineno int
+}
+
+// splitStatements drops blank and comment lines and joins each line
+// that starts with a space or tab onto the statement before it.
+func splitStatements(b []byte) ([]statement, error) {
+	var out []statement
+	for i, line := range splitLines(b) {
+		trim := trimSpace(line)
+		if trim == "" || trim[0] == '#' {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			if len(out) == 0 {
+				return nil, fmt.Errorf("%d syntax: continuation line before any 'hook: expr'", i+1)
+			}
+			out[len(out)-1].text += " " + trim
+			continue
+		}
+		out = append(out, statement{text: trim, lineno: i + 1})
+	}
+	return out, nil
 }
 
 func splitLines(b []byte) []string {

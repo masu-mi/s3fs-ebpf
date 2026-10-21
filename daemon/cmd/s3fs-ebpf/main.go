@@ -412,6 +412,15 @@ func runFastpath(args []string) int {
 			"cache — no GUP per page. Eliminates the 1.7µs/page GUP overhead at the "+
 			"cost of one extra copy on admit. Does not require BPF arena allocation. "+
 			"Prewarm warms metadata only; bodies are fetched on the first read (AC-44).")
+	pcachePrewarm := fs.Bool("pcache-prewarm", false,
+		"[AC-67] with --arena-metadata-only, read each file the prewarm policy selects "+
+			"once through the mount after startup (and after each sync round with "+
+			"--prewarm-on-sync), so its first read is a page-cache hit. Reads use the "+
+			"normal miss path. Stops before capacity_bytes would be exceeded; set "+
+			"--cache-capacity, since the default capacity is unlimited.")
+	pcachePrewarmMnt := fs.String("pcache-prewarm-mount", "",
+		"[AC-67] mount point --pcache-prewarm reads through. Empty: the first "+
+			"s3fs_ebpf mount in /proc/self/mounts (waits up to 30 s for it).")
 	wtinylFUAgeInterval := fs.Uint64("wtinylfu-age-interval", 512,
 		"[Z-01] W-TinyLFU CMS aging interval: halve all CMS counters every N on_hit calls. "+
 			"Lower values age faster (suit short bench runs); higher values age slower "+
@@ -494,6 +503,12 @@ func runFastpath(args []string) int {
 	patternAwareAdmitEnabled = *patternAdmit
 	prefetchSeqEnabled = *prefetchSeq
 	arenaMetadataOnlyEnabled = *arenaMetadataOnly
+	if *pcachePrewarm && !*arenaMetadataOnly {
+		fmt.Fprintln(os.Stderr, "--pcache-prewarm requires --arena-metadata-only (arena mode already prewarms content)")
+		return 1
+	}
+	pcachePrewarmEnabled = *pcachePrewarm
+	pcachePrewarmMount = *pcachePrewarmMnt
 
 	if err := SetInoStatePath(*inoState); err != nil {
 		fmt.Fprintf(os.Stderr, "ino-state: %v\n", err)
@@ -516,6 +531,15 @@ func runFastpath(args []string) int {
 	}
 	if *policyPath != "" {
 		fmt.Printf("[policy] loaded %s\n", *policyPath)
+	}
+	// AC-68: prefetch_next reads siblings through the mount into the
+	// pcache; arena mode has no such path.
+	if pol.HasPrefetchNext() {
+		if arenaMetadataOnlyEnabled {
+			prefetchPolicy = pol
+		} else {
+			fmt.Fprintln(os.Stderr, "[policy] prefetch_next ignored: needs --arena-metadata-only")
+		}
 	}
 
 	// Layer 2 / Layer 3 BPF policy program (Week 4 (d)). --policy-bpf
@@ -873,6 +897,11 @@ func runFastpath(args []string) int {
 		// chunk of large files while the current chunk is still being
 		// read. No-op unless --prefetch-seq-admit is set.
 		go runSeqPrefetchLoop(ctx, *dev, progs, s3c)
+		// AC-67: the prewarm reads block on upcalls, so start after
+		// runReadMissLoop.
+		if pcachePrewarmEnabled || prefetchPolicy != nil {
+			go runPcachePrewarm(ctx)
+		}
 	}
 
 	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
@@ -1135,6 +1164,11 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 		reason := "policy=false"
 		if pcacheSkip {
 			reason = "arena-metadata-only"
+			if pcachePrewarmEnabled {
+				// AC-67: read through the mount once the upcall loop runs.
+				queuePcachePrewarm(entry.Ino, stub.Size)
+				reason = "arena-metadata-only, queued for pcache prewarm"
+			}
 		}
 		fmt.Printf("[prewarm] ino=%d name=%s content-skip (%s, stat=warm, cat=PathC)\n",
 			entry.Ino, entry.Name, reason)
