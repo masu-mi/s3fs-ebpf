@@ -30,89 +30,91 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 | Q11 | arena の壊れたポインタは安全か | カーネルは壊れない。データの正しさは自分で確かめる |
 | Q12 | admit 時に 1 回 pin すれば | 毎回の GUP は消えるが、解放との整合とメモリ管理が残る。試していない |
 | Q13 | KFunc で verifier の安全性は台無しか | 中身の安全は kmod の責任。verifier は呼び出しの形を見る |
+| Q14 | BPF のループの上限と、KFunc が長く回せる理由 | verifier が終わることを示すため。KFunc は終わる保証を kmod が持ち、sleepable |
+| Q15 | bpf_loop で十分では。walk は汎用か | この walk なら標準のループで十分。walk はデモ用で汎用ではなく、ポリシーとも無関係 |
 
 **3. struct_ops の vtable とキャッシュポリシー**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q14 | BPF 版の hit rate が simulator より低い | vtable の形が原因 (score だけで順序を渡せない) |
-| Q15 | 素性や統計を足せば SIEVE は直るか | 足りないのは順番を伝える口 |
-| Q16 | 汎用のフックは作れるか | 判断材料でなく役割で境界を切れば作れる |
-| Q17 | pick_victim とアプリのヒント | pick_victim は実装済み。ヒントは map で渡せるが未着手 |
-| Q18 | hit rate の実測値の変化 | pick_victim 版で旧版より 2〜7 ポイント高い |
-| Q19 | W-TinyLFU はどうなったか | pick_victim 版を作った。実機の計測は 1 回 |
-| Q20 | hit rate のベンチは小さすぎないか | 一般化できない。見たいのはカーネル版と simulator のずれ |
-| Q21 | なぜ fmod_ret でなく struct_ops か | 入れ替えが原子的。行数は 2.3 倍 |
+| Q16 | BPF 版の hit rate が simulator より低い | vtable の形が原因 (score だけで順序を渡せない) |
+| Q17 | 素性や統計を足せば SIEVE は直るか | 足りないのは順番を伝える口 |
+| Q18 | 汎用のフックは作れるか | 判断材料でなく役割で境界を切れば作れる |
+| Q19 | pick_victim とアプリのヒント | pick_victim は実装済み。ヒントは map で渡せるが未着手 |
+| Q20 | hit rate の実測値の変化 | pick_victim 版で旧版より 2〜7 ポイント高い |
+| Q21 | W-TinyLFU はどうなったか | pick_victim 版を作った。実機の計測は 1 回 |
+| Q22 | hit rate のベンチは小さすぎないか | 一般化できない。見たいのはカーネル版と simulator のずれ |
+| Q23 | なぜ fmod_ret でなく struct_ops か | 入れ替えが原子的。行数は 2.3 倍 |
 
 **4. struct_ops の運用**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q22 | BPF 側のデータ構造の排他 | 状態を変える呼び出しは kmod の mutex で直列化 |
-| Q23 | struct_ops を sleepable にできるか | この vtable ではできない (RCU の中で呼ぶ) |
-| Q24 | BPF が変な値を返したら / daemon が落ちたら | kmod が確かめ、最悪でも既定の動きに戻る |
-| Q25 | hot swap の使いどころと状態の整合 | cache を保ったままポリシーを変える。状態は引き継がず、正本の kmod から次の round で揃う |
-| Q26 | 権限とセキュリティ | root 前提。allowlist と認証は既定で off |
-| Q27 | CEL で複雑なポリシーを試したか | ない。CEL は prewarm とポリシーの選択だけ |
+| Q24 | BPF 側のデータ構造の排他 | 状態を変える呼び出しは kmod の mutex で直列化 |
+| Q25 | struct_ops を sleepable にできるか | この vtable ではできない (RCU の中で呼ぶ) |
+| Q26 | BPF が変な値を返したら / daemon が落ちたら | kmod が確かめ、最悪でも既定の動きに戻る |
+| Q27 | hot swap の使いどころと状態の整合 | cache を保ったままポリシーを変える。状態は引き継がず、正本の kmod から次の round で揃う |
+| Q28 | 権限とセキュリティ | root 前提。allowlist と認証は既定で off |
+| Q29 | CEL で複雑なポリシーを試したか | ない。CEL は prewarm とポリシーの選択だけ |
 
 **5. フックと BPF の負担**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q28 | 汎用関数へのフックは行儀が悪くないか | 悪い。他の FS の read にも乗る。miss の経路へ移したい |
-| Q29 | BPF の負担の測り方 | bpf_stats、並列の A/B、perf record の 3 段 |
-| Q30 | stat が FUSE と同じ速さなのはなぜか | どちらも inode のキャッシュで返るから |
+| Q30 | 汎用関数へのフックは行儀が悪くないか | 悪い。他の FS の read にも乗る。miss の経路へ移したい |
+| Q31 | BPF の負担の測り方 | bpf_stats、並列の A/B、perf record の 3 段 |
+| Q32 | stat が FUSE と同じ速さなのはなぜか | どちらも inode のキャッシュで返るから |
 
 **6. 性能と FUSE との比較**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q31 | 勝てる場面と使いどころ | open と fsync が速い FS。小さいファイルを大量に開く用途 |
-| Q32 | FUSE に勝つために残っていたこと | 律速は large folio ではなく read の fentry だった |
-| Q33 | ロックを RCU にしていれば | 勝てなかった。ロックなしの判定でも変わらなかった |
-| Q34 | large folio を有効にすれば | 試していない。64 jobs の説明としては外れた |
-| Q35 | 大きいファイルの cold read で負ける理由 | 最後はホストのメモリ回収待ち |
-| Q36 | pcache の prewarm と 10 MiB 前後の遅さ | prewarm は使える (AC-67)。10 MiB 前後は arena でも chunk でも縮まない |
-| Q37 | durable write が 1.37 倍速い理由 | 分解していない。write で daemon を通らない構造と推測 |
-| Q38 | S3 へのリクエストは減るか | 一覧と stat は減る。GET は同じ。LIST が定期的に出る |
-| Q39 | mount-s3 と比べると | open を繰り返すと速い。cold は同じくらい。機能の範囲が違う |
+| Q33 | 勝てる場面と使いどころ | open と fsync が速い FS。小さいファイルを大量に開く用途 |
+| Q34 | FUSE に勝つために残っていたこと | 律速は large folio ではなく read の fentry だった |
+| Q35 | ロックを RCU にしていれば | 勝てなかった。ロックなしの判定でも変わらなかった |
+| Q36 | large folio を有効にすれば | 試していない。64 jobs の説明としては外れた |
+| Q37 | 大きいファイルの cold read で負ける理由 | 最後はホストのメモリ回収待ち |
+| Q38 | pcache の prewarm と 10 MiB 前後の遅さ | prewarm は使える (AC-67)。10 MiB 前後は arena でも chunk でも縮まない |
+| Q39 | durable write が 1.37 倍速い理由 | 分解していない。write で daemon を通らない構造と推測 |
+| Q40 | S3 へのリクエストは減るか | 一覧と stat は減る。GET は同じ。LIST が定期的に出る |
+| Q41 | mount-s3 と比べると | open を繰り返すと速い。cold は同じくらい。機能の範囲が違う |
 
 **7. 計測の妥当性**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q40 | 172 倍は公平か | s3fs-fuse との比で、FUSE の上限ではない |
-| Q41 | 64 jobs × 1 byte の fio の意味 | 現実ではなく、固定費と取り合いを最大に見せる試験 |
-| Q42 | 計測環境と信頼性 | KVM 1 台、ローカルの MinIO、回数は少ない。比で見る |
+| Q42 | 172 倍は公平か | s3fs-fuse との比で、FUSE の上限ではない |
+| Q43 | 64 jobs × 1 byte の fio の意味 | 現実ではなく、固定費と取り合いを最大に見せる試験 |
+| Q44 | 計測環境と信頼性 | KVM 1 台、ローカルの MinIO、回数は少ない。比で見る |
 
 **8. FS としての振る舞い**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q43 | daemon が落ちたら | ハングはしない。miss の read と fsync は失敗、queue は失われる |
-| Q44 | 他のクライアントの上書きは見えるか | 削除は見えるが、上書きはすぐには見えない |
-| Q45 | mmap、O_DIRECT、ディレクトリ操作 | 読む mmap は可。共有書き込み mmap と O_DIRECT は不可 |
-| Q46 | 1 ディレクトリに大量のファイル | 10 万個まで件数に比例。上限は 26 万件 |
-| Q47 | メモリの制限と memcg | 既定は無制限。chunk は memcg に課金されない |
-| Q48 | ローカル FS へ素通しする段 (将来) | 原理的には可能。fuse-bpf / passthrough と同じ形。未実装・未計測 |
+| Q45 | daemon が落ちたら | ハングはしない。miss の read と fsync は失敗、queue は失われる |
+| Q46 | 他のクライアントの上書きは見えるか | 削除は見えるが、上書きはすぐには見えない |
+| Q47 | mmap、O_DIRECT、ディレクトリ操作 | 読む mmap は可。共有書き込み mmap と O_DIRECT は不可 |
+| Q48 | 1 ディレクトリに大量のファイル | 10 万個まで件数に比例。上限は 26 万件 |
+| Q49 | メモリの制限と memcg | 既定は無制限。chunk は memcg に課金されない |
+| Q50 | ローカル FS へ素通しする段 (将来) | 原理的には可能。fuse-bpf / passthrough と同じ形。未実装・未計測 |
 
 **9. 開発と検証**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q49 | race のバグをどう潰したか | 不変条件の文書化、修正前に落ちるテスト、KUnit と lockdep |
-| Q50 | cilium/ebpf でつまずいたこと | struct_ops の link の Update と arena 命令の marshal |
-| Q51 | verifier とツールチェーンの地雷 | arena のエラーは原因と表示が離れていた |
-| Q52 | どのカーネルで動くか | 開発と計測は 6.12 LTS。arena のレイアウト複製が弱点 |
+| Q51 | race のバグをどう潰したか | 不変条件の文書化、修正前に落ちるテスト、KUnit と lockdep |
+| Q52 | cilium/ebpf でつまずいたこと | struct_ops の link の Update と arena 命令の marshal |
+| Q53 | verifier とツールチェーンの地雷 | arena のエラーは原因と表示が離れていた |
+| Q54 | どのカーネルで動くか | 開発と計測は 6.12 LTS。arena のレイアウト複製が弱点 |
 
 **10. 振り返りと今後**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q53 | bpf_arena を使う意義はあったか | 性能ではなかった。境界を知る材料としてはあった |
-| Q54 | struct_ops と arena の用例 | 判断は struct_ops、共有する状態は arena |
-| Q55 | 本番で使えるか | 使えない。PoC。足りないものの一覧 |
-| Q56 | この先やりたいこと | フックの移動、実 S3 での計測、arena を共有状態に使う |
+| Q55 | bpf_arena を使う意義はあったか | 性能ではなかった。境界を知る材料としてはあった |
+| Q56 | struct_ops と arena の用例 | 判断は struct_ops、共有する状態は arena |
+| Q57 | 本番で使えるか | 使えない。PoC。足りないものの一覧 |
+| Q58 | この先やりたいこと | フックの移動、実 S3 での計測、arena を共有状態に使う |
 
 ---
 
@@ -124,7 +126,7 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 
 **BPF からは FS を登録できないから。** `register_filesystem` や `file_operations` / `address_space_operations` を BPF で実装する手段は upstream にない。struct_ops で差し替えられるのは、カーネル (またはモジュール) が vtable として公開したものだけで、VFS の ops はその対象ではない。
 
-- そこで kmod が VFS に FS を登録し (`kmod/vfs_ops.c`)、判断だけを BPF に出す。「仕組みは kmod、判断は BPF」の分け方で、sched_ext と同じ形 (Q16)。
+- そこで kmod が VFS に FS を登録し (`kmod/vfs_ops.c`)、判断だけを BPF に出す。「仕組みは kmod、判断は BPF」の分け方で、sched_ext と同じ形 (Q18)。
 - kmod は自前の vtable (`struct s3fs_policy_ops`) を `register_bpf_struct_ops` で公開している (`kmod/policy_struct_ops.c`)。BPF から kmod を呼ぶ口は KFunc (Layer 0、`kmod/tree_traversal.c`)。
 - S3 との通信 (HTTP、認証、リトライ) は BPF でもカーネルでも書きたくないので、Go の daemon に置いた。sleep できる処理を BPF から直接は呼べないこともある (`docs/dev-notes/ebpf-ecosystem-gaps.md` §3)。
 
@@ -135,7 +137,7 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 - **FUSE passthrough** は、daemon が開いたローカルの backing file に read / write を直接流す仕組み。S3 の場合はローカルにファイルを置いてからになるので、ローカルディスクのキャッシュがある構成 (fuse-cache 相当) を速くする手段。open / release の往復は残る。
 - **FUSE over io_uring** は /dev/fuse の往復を安くする (RFUSE と同じ方向、`docs/user/related-works.md`)。往復の回数は減らない。
 - **fuse-bpf** (Android 由来のパッチ) は upstream に入っていない。詳しい比較は Q3。
-- この PoC の速さの源は「hit のときに daemon へ一度も行かない」こと (Q31、Q53)。FUSE 側にも往復を減らす手段はある (Q40) ので、「FUSE では原理的に無理」とは言わない。
+- この PoC の速さの源は「hit のときに daemon へ一度も行かない」こと (Q33、Q55)。FUSE 側にも往復を減らす手段はある (Q42) ので、「FUSE では原理的に無理」とは言わない。
 
 ### Q3. fuse-bpf とはアプローチがどう違うのか
 
@@ -155,15 +157,15 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 | hit のときの中身 | 下位のローカル FS の backing file | kmod の chunk と page cache (メモリ) |
 | hit の経路 | VFS → FUSE → prefilter → backing FS の操作 → postfilter | VFS → kmod の `.read_iter` → page cache |
 | miss のとき | 普通の FUSE の要求 (`/dev/fuse`) | `/dev/s3fs_ebpf` の upcall (Q7) |
-| BPF が決めること | 操作ごとに「素通しか daemon か」と、引数・結果の書き換え | どれを追い出すか (キャッシュのポリシー、Q14〜Q25) |
+| BPF が決めること | 操作ごとに「素通しか daemon か」と、引数・結果の書き換え | どれを追い出すか (キャッシュのポリシー、Q16〜Q27) |
 | BPF の付け方 | struct_ops (`fuse_ops`、v4)。inode ごとに付けられる | struct_ops (`s3fs_policy_ops`)。FS 全体で 1 つ |
 | メタデータ | backing のディレクトリの lookup も素通しにできる | daemon が LIST した一覧を ioctl で kmod に入れる (`SYNC_ENTRIES`) |
 | upstream | 入っていない (RFC) | 入る予定はない (PoC、out-of-tree の kmod) |
 
 **S3 に当てはめたときの違い**
-- **ローカルのファイルが要る:** fuse-bpf の素通しの相手は下位のローカル FS。S3 のオブジェクトにはローカルのファイルがないので、daemon が先にディスクキャッシュへ落としてから backing にすることになる。これは fuse-cache (s3fs-fuse の `use_cache`) を速くする手段で、中身をメモリに持つ s3fs-ebpf とは置き場所が違う。初回の読み込み (cold) はどちらも S3 の GET が支配する (Q35)。
-- **open の往復も消せる:** passthrough と違い、fuse-bpf は open や lookup、getattr も backing に素通しできる。なので、ローカルのディスクキャッシュに載ったファイルなら、open+read+close で daemon に行かない構成が作れるはず。そうなれば、この PoC の「open が速い」(Q31、Q40) という差の大部分は fuse-bpf でも出せる。計測はしていない。
-- **カーネルに足すものの重さ:** fuse-bpf は upstream の FUSE を拡張する形なので、FS を 1 つ書く必要がない。この PoC は kmod の VFS 実装 (約 5000 行) と、その race のバグ (Q49) を自分で抱えている。逆に、kmod があるので page cache や chunk の扱いを自由に決められ、struct_ops の vtable (`pick_victim` など) を自分で設計できた。
+- **ローカルのファイルが要る:** fuse-bpf の素通しの相手は下位のローカル FS。S3 のオブジェクトにはローカルのファイルがないので、daemon が先にディスクキャッシュへ落としてから backing にすることになる。これは fuse-cache (s3fs-fuse の `use_cache`) を速くする手段で、中身をメモリに持つ s3fs-ebpf とは置き場所が違う。初回の読み込み (cold) はどちらも S3 の GET が支配する (Q37)。
+- **open の往復も消せる:** passthrough と違い、fuse-bpf は open や lookup、getattr も backing に素通しできる。なので、ローカルのディスクキャッシュに載ったファイルなら、open+read+close で daemon に行かない構成が作れるはず。そうなれば、この PoC の「open が速い」(Q33、Q42) という差の大部分は fuse-bpf でも出せる。計測はしていない。
+- **カーネルに足すものの重さ:** fuse-bpf は upstream の FUSE を拡張する形なので、FS を 1 つ書く必要がない。この PoC は kmod の VFS 実装 (約 5000 行) と、その race のバグ (Q51) を自分で抱えている。逆に、kmod があるので page cache や chunk の扱いを自由に決められ、struct_ops の vtable (`pick_victim` など) を自分で設計できた。
 - **BPF の使い道:** fuse-bpf の BPF は「どの操作をどこで処理するか」の振り分け役で、キャッシュの判断はしない (追い出すのは下位 FS と page cache、つまりカーネル)。この PoC の BPF は、キャッシュの追い出しのアルゴリズムを差し替えるのが主な役目。両者は排他ではなく、fuse-bpf の上でもキャッシュのポリシーを別の struct_ops で差し込む設計はありうる。
 
 **発表での言い方:** 「hit のときに daemon へ行かない、という狙いは fuse-bpf と同じ。fuse-bpf はローカルの下位 FS への素通しと操作ごとの filter でそれを実現し、FUSE のまま upstream を目指している。この PoC は自前の FS とメモリ上のキャッシュで実現し、BPF をキャッシュのポリシーに使った。S3 のようにローカルのファイルがないバックエンドで、メモリだけで hit を返したいときがこの PoC の形」。
@@ -184,7 +186,7 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 | lookup / getattr / readdir / open | 折り返さない | daemon が LIST した一覧を前もって `SYNC_ENTRIES` で入れる | kmod の表で答える。表にない名前は ENOENT |
 
 - **折り返す操作は kmod のコードで固定。** BPF (struct_ops のポリシー) は「どれを追い出すか」を返すだけで、「この操作を daemon に送る」とは言えない。新しい種類の折り返し (例: open の権限を daemon に聞く、xattr) を足すには、uapi と kmod の両方を変える。
-- **同期の折り返しは read の miss と fsync だけ。** 名前空間の操作は kmod の中で先に成功させ、S3 への反映は後から非同期に行う。速いが、失敗を呼んだプロセスに返せず、daemon が落ちると queue が失われる (Q43)。
+- **同期の折り返しは read の miss と fsync だけ。** 名前空間の操作は kmod の中で先に成功させ、S3 への反映は後から非同期に行う。速いが、失敗を呼んだプロセスに返せず、daemon が落ちると queue が失われる (Q45)。
 - **単位が S3 寄り。** miss は 4 MiB の chunk、書き戻しはファイル全体の PUT、名前は親の ino と basename。任意の offset の write のような、汎用の FS の要求を daemon に渡す形にはなっていない。
 - **daemon は専用。** libfuse で書いた既存の FUSE の daemon は動かない。
 
@@ -227,7 +229,7 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 
 切り替えた理由は、失敗談の「誰から見ると何に見えるか」の 3 行目。arena は BPF とユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない。スライド: 付録の next の 1 (page cache に戻す)。
 
-フラグ名の `--arena-metadata-only` は実態と合っていない。AB の検討では「arena を admit メタデータだけに縮退する」案だったが、実装ではメタデータも arena に置かなかった (Q53)。
+フラグ名の `--arena-metadata-only` は実態と合っていない。AB の検討では「arena を admit メタデータだけに縮退する」案だったが、実装ではメタデータも arena に置かなかった (Q55)。
 
 ### Q6. キャッシュを pcache (カーネルのメモリ) に持つのと、ローカルのディスクにキャッシュ用の FS を持つのは何が違うのか
 
@@ -239,11 +241,11 @@ meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた�
 | page cache から落ちた後の read | kmod が chunk から memcpy で埋め直す。daemon もディスクも通らない | ディスクから読み直す。passthrough なしの FUSE なら daemon の往復も入る |
 | 永続性 | 揮発。umount や daemon の再起動で消え、S3 から取り直す | 再起動しても残る |
 | 容量 | メモリ。`capacity_bytes` の既定は無制限 | ディスクの大きさまで |
-| メモリの回収 | chunk は memcg に課金されず、shrinker もない (Q47) | page cache はカーネルが普通に回収する |
+| メモリの回収 | chunk は memcg に課金されず、shrinker もない (Q49) | page cache はカーネルが普通に回収する |
 
 - **page cache から返る read は、どちらでも同じ。** 差が出るのは page cache から落ちた後だけ。
-- **open の往復は置き場所と別の話。** s3fs-fuse は `use_cache` + `kernel_cache` でも open+read+close に 524.6 µs かかる。flush / release で daemon に行くため (Q40)。s3fs-ebpf は 3.05 µs。fuse-bpf のように open もローカル FS に素通しできれば、ディスクキャッシュでもこの差の大部分は縮むはず (Q3、未計測)。
-- **中身が 2 か所に載る:** pcache は chunk と page cache の両方に載るので、最大 2 倍のメモリを使う。大きいファイルを続けて読むと、ホストのメモリ回収待ちが出た (Q35)。
+- **open の往復は置き場所と別の話。** s3fs-fuse は `use_cache` + `kernel_cache` でも open+read+close に 524.6 µs かかる。flush / release で daemon に行くため (Q42)。s3fs-ebpf は 3.05 µs。fuse-bpf のように open もローカル FS に素通しできれば、ディスクキャッシュでもこの差の大部分は縮むはず (Q3、未計測)。
+- **中身が 2 か所に載る:** pcache は chunk と page cache の両方に載るので、最大 2 倍のメモリを使う。大きいファイルを続けて読むと、ホストのメモリ回収待ちが出た (Q37)。
 - **cold read:** 初回はどちらも S3 の GET が支配する。ディスクへの書き込みは余分なコストになる。s3fs-ebpf でも、daemon の `--cache-dir` への同期の書き込みが cold read を遅くしていたので、非同期にした (AC-52)。
 - **s3fs-ebpf も 2 段になっている:** chunk になければ daemon のディスクキャッシュ (`--cache-dir`、ETag とサイズで検証、AC-40) を見て、そこにもなければ S3 に行く。pcache は、その上に置いたメモリの段。
 
@@ -328,10 +330,52 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 
 **KFunc の中身の安全は、書いた kmod の責任になる。** verifier が見るのは呼び出しの形 (引数の型、呼べるプログラムの種類、sleep の可否) まで。
 
-- verifier は BTF で引数の型を検査し、登録した prog type (この PoC は `BPF_PROG_TYPE_SYSCALL` など) からしか呼ばせない。`KF_SLEEPABLE` を付けた KFunc は sleepable なプログラムからしか呼べない (Q23)。
+- verifier は BTF で引数の型を検査し、登録した prog type (この PoC は `BPF_PROG_TYPE_SYSCALL` など) からしか呼ばせない。`KF_SLEEPABLE` を付けた KFunc は sleepable なプログラムからしか呼べない (Q25)。
 - その先は普通のカーネルコードなので、バグがあれば oops もメモリ破壊も起こる。kmod を入れる時点で root を信用しているのと同じ。
 - この PoC の walk (`s3fs_kfunc_arena_list_walk`) は、BPF から渡された番地を信用しない作りにした。番地は `copy_from_user` で読むので、不正な番地は `-EFAULT` で返る。ノード数は `max_nodes` で打ち切り、超えたら `-ELOOP` を返す (`kmod/tree_traversal.c`)。
 - 言い換えると、KFunc は「verifier を越える」のではなく「verifier が検査できない処理を、信用できるカーネルコードとして用意する」もの。
+
+### Q14. BPF のループ (bpf_loop / bpf_for / can_loop) には、なぜ上限があるのか。KFunc なら長く回せるのは sleepable だからか
+
+**上限があるのは、verifier が load の時点で「必ず終わる」ことを示す必要があるから。** KFunc が長く回せるのは sleepable だからだけではない。終わる保証を verifier ではなく kmod が引き受けているから。
+
+- 上限がかかっているのは helper ではなく、BPF のコード (ループの本体) の方。BPF は softirq や tracepoint の中など、sleep できず CPU を譲れない文脈でも動く。止まらないループは CPU を握ったままになり、RCU stall や watchdog を起こす。
+- そのため上限はどれにもある。`bpf_loop` は 2^23 回 (約 800 万回)。`bpf_for` も同じ。`can_loop` (may_goto) は 6.14 までが約 800 万回、6.15 以降の x86-64 は 250 ms (`docs/user/meetup-ebpf-outline.md` の追加調査、6.18 で確認)。
+- **sleepable は必要条件だが、十分条件ではない。** sleepable な BPF プログラムは標準にもある (`SEC("syscall")`、`fentry.s`、`lsm.s`)。その中で `bpf_loop` などを使っても、予算は同じで伸びない。ループの途中で CPU を譲って回り続ける標準の helper や kfunc は、知る限りない (知識からの説明。6.12 のソースでは確かめていない)。
+- この PoC の walk (`s3fs_kfunc_arena_list_walk`) が長く回せるのは、次の 2 つが揃っているから。
+  1. 本体が C で、終わる保証を自分で作っている。`max_nodes` (最大 2^24) を超えたら `-ELOOP`、kill されたら `-EINTR`。
+  2. `KF_SLEEPABLE` で、SYSCALL 型の sleepable なプログラムからしか呼ばせていない。1024 個ごとに `cond_resched` を挟める。
+- **終わる保証は、データ構造を把握していることに頼らない方がよい。** arena は BPF からも daemon からも書けるので、中身は壊れているかもしれず、循環しているかもしれない。walk はデータを信用しない。回数の上限とシグナルで止まり、番地は `copy_from_user` で読むので不正な番地は `-EFAULT` になる (Q13)。「この構造なら必ず終わる」に頼ると、データが壊れたときにカーネルが止まる。
+- sleep できない文脈の KFunc でもループは書ける。その場合は、普通のカーネルコードと同じく短い上限を付ける。
+
+スライド: 付録の loop-why。
+
+### Q15. データの中身に関係なく止まればよいなら、bpf_loop で十分ではないか。この PoC の KFunc の walk は汎用か。キャッシュアルゴリズムと結合しているか
+
+**この list walk なら、`bpf_loop` / `bpf_for` / `can_loop` で十分で、その方が速いはず。KFunc の walk は汎用ではなく、キャッシュアルゴリズムとも結合していない。** verifier が通さないループを kmod に出すとどうなるかを見せる、デモ用の対比。
+
+- 標準のループで足りる理由:
+  - どれも予算で必ず打ち切られる。データに循環があっても止まる。
+  - BPF から arena を読むと、JIT が kern_vm の番地に変換して直接ロードする。壊れた番地でも oops にならない (Q11)。KFunc の `copy_from_user` より安い (Q8)。
+  - `verifier-demo` で拒否されたのは、上限のない `while (n)` を書いたから。verifier が全経路をたどり切れず、1M 命令の検査上限に当たった。実行時の予算の問題ではないので、`can_loop` を足せば通る (Q53)。
+- KFunc が要るのは、予算や BPF の表現力を超える場合だけ。
+  - 予算を超えるほど長い走査。
+  - BPF からは読めないメモリ (別のプロセスのユーザーメモリ、BTF のないカーネルの構造)。
+  - 途中で sleep する、カーネルの API を呼ぶ処理。
+- 汎用ではない理由: node の形は `{u64 next; u64 payload}` に固定、処理は payload の合計に固定、daemon の syscall 文脈 (`current->mm`) が前提 (`kmod/tree_traversal.c`)。
+- 汎用にするなら、next のオフセットと node の大きさを引数にし、要素の処理を BPF のコールバックで渡す形になる。ただし外部モジュールの kfunc がコールバックを取れるかは未確認 (Q9)。verifier は `bpf_rbtree_add` の `less` のような特定の kfunc にしかコールバックを許していないと理解している (知識からの説明)。
+- キャッシュアルゴリズムとは結合していない。walk を呼ぶのは `bpf/kfunc_walk.bpf.c` (`verifier-demo`) だけで、SIEVE / LRU / S3-FIFO / W-TinyLFU のポリシーは呼ばない。ポリシーは BPF の map と struct_ops (`pick_victim`) で書かれていて、使う KFunc は `s3fs_kfunc_admit_count` / `s3fs_kfunc_softcap` / `s3fs_kfunc_ino_size` / `s3fs_kfunc_time_ns` などの読み出しだけ。これらは s3fs の kmod の状態には結合しているが、アルゴリズムとは独立している。
+- 標準のループとの違い:
+
+| | bpf_loop / bpf_for / can_loop | この PoC の KFunc の walk |
+|---|---|---|
+| ループの本体 | BPF (verifier が検査) | C (検査なし、kmod の責任) |
+| 呼べる文脈 | ほぼ全てのプログラム型 (sleep できない文脈を含む) | sleepable な SYSCALL 型だけ |
+| arena の読み方 | JIT が kern_vm に変換して直接ロード | `copy_from_user` (遅い) |
+| 打ち切り | 回数か時間の予算 | `max_nodes` とシグナル。`cond_resched` を挟めるので長く回せる |
+| 安定性 | helper は UAPI | kfunc はカーネルの版で変わりうる。新しい機能は helper ではなく kfunc で足す方針 (知識からの説明) |
+
+スライド: 付録の loop-why、KFunc の採用基準 (adopt-kfunc)。
 
 ---
 
@@ -339,7 +383,7 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 
 vtable の形とアルゴリズム、hit rate とその限界。
 
-### Q14. BPF 版の SIEVE / LRU の hit rate が simulator より低いのはなぜか。改善できるか
+### Q16. BPF 版の SIEVE / LRU の hit rate が simulator より低いのはなぜか。改善できるか
 
 **vtable の形が原因。** 2 点ある (`kmod/vfs_ops.c` の capacity モード)。
 
@@ -348,9 +392,9 @@ vtable の形とアルゴリズム、hit rate とその限界。
 
 改善案は 2 つ: A は score を段階的に返す (BPF だけで直る)、B は `pick_victim()` で BPF が victim を選ぶ (kmod の変更が要る)。trace モデルでは A の LRU が 39.0%、B の SIEVE が 46.8% (現行 33.3%)。
 
-その後: B を AC-58 として実装した (Q17)。
+その後: B を AC-58 として実装した (Q19)。
 
-### Q15. SIEVE が負けるのは、アルゴリズムに必要な素性を kmod が提供できていないからか。統計値を提供するか、コア並列で集計できるフックポイントを提供すれば解決するのではないか
+### Q17. SIEVE が負けるのは、アルゴリズムに必要な素性を kmod が提供できていないからか。統計値を提供するか、コア並列で集計できるフックポイントを提供すれば解決するのではないか
 
 **半分正しい。足りないのは素性 (統計値) ではなく、BPF が選んだ順番を kmod に伝える口。統計値を足しても SIEVE は直らない。**
 
@@ -358,7 +402,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 - 問題は `on_evict(ino)` が 1 つの ino に 0/1 を返すだけで、kmod が並べ替えと同点処理を持っていること (`kmod/policy_struct_ops.h`)。
 - 統計値やコア並列の集計フックは、頻度を使うポリシー (LFU、TinyLFU) には効く。共有 map への書き込みのコストも下がる (fentry の件と同じ理屈)。
 
-### Q16. victim を明確に指定できないと、サポートできるアルゴリズムは狭い。任意のアルゴリズムを差し込める汎用フックは、将来のアルゴリズムも踏まえた境界定義が要るので困難で、今見えている部分の境界を定めるのが限界ということか
+### Q18. victim を明確に指定できないと、サポートできるアルゴリズムは狭い。任意のアルゴリズムを差し込める汎用フックは、将来のアルゴリズムも踏まえた境界定義が要るので困難で、今見えている部分の境界を定めるのが限界ということか
 
 **前半はその通り。後半は少し違う。** 境界を「判断材料」ではなく「役割」で切れば汎用にできる。
 
@@ -372,7 +416,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 2. コスト。victim の選択は lock の下で呼ばれ、verifier のループ上限もある。hot path のフックが重いと fentry と同じことが起きる。
 3. 安全性。BPF が返した victim を kernel 側で必ず確かめる必要がある。
 
-### Q17. pick_victim 案を採用してチューニングで軽量化を目指す。アプリ側のヒントは eBPF maps 経由で渡して参照すれば、ある程度対応できるか
+### Q19. pick_victim 案を採用してチューニングで軽量化を目指す。アプリ側のヒントは eBPF maps 経由で渡して参照すれば、ある程度対応できるか
 
 **できる。** pick_victim の形 (BPF がポリシーの状態を持つ) と相性がよい。
 
@@ -387,7 +431,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 - read 経路のコストは、1 file を 1 byte ずつ読む最悪ケースの 64 jobs で、policy なし比 −4.6% (旧 SIEVE は on_hit の map update で −14.8%)。`pick_victim` 1 回は候補 8 件で 0.5〜0.9 µs。
 - アプリのヒントは未着手。
 
-### Q18. hit rate など実測値の変化はどうか (2026-10-18 時点)
+### Q20. hit rate など実測値の変化はどうか (2026-10-18 時点)
 
 | policy | 旧 (score 型) | pick_victim 版 | trace 再生 |
 |---|---|---|---|
@@ -397,11 +441,11 @@ vtable の形とアルゴリズム、hit rate とその限界。
 
 - trace 再生との差 (4〜11 ポイント) は、実機の eval が 25 access ごとにしか回らないため。LRU にも同じ差が出る。
 - **pcache モードの hit rate が 52〜54% (§18.1) から 29〜35% に下がって見えるのは退行ではない。** AC-44 で prewarm がメタデータだけになり、計測条件が変わった (§18.43)。発表で並べないこと。
-- AB-07 の性能 gate の変化は Q32。
+- AB-07 の性能 gate の変化は Q34。
 
 どれも n は 1〜10 と少なく、S3 はローカルの MinIO。
 
-### Q19. W-TinyLFU はどうなったか
+### Q21. W-TinyLFU はどうなったか
 
 **`pick_victim` で動く版を作ったが、実機の計測は 1 回だけ。** (AC-66、`docs/design/wtinylfu-pick-plan.md`)
 
@@ -409,19 +453,19 @@ vtable の形とアルゴリズム、hit rate とその限界。
 - 予算をバイトで持つため、vtable の末尾に `on_size(ino, bytes)` を足した (kmod の変更)。
 - trace-replay では、30 files / 容量 8 で S3-FIFO より上、容量を大きくすると 1〜4 ポイント下。
 - 実機 (1 回): `bench-hitrate` で S3-FIFO 37.80% に対して 38.55%。3 seed の計測と policy のコスト計測は残っている。
-- 旧版 (`wtinylfu_ops`、score 型) は 29.6% だった (§12.3)。score 型の vtable では admission と SLRU を表せなかった (Q14)。
+- 旧版 (`wtinylfu_ops`、score 型) は 29.6% だった (§12.3)。score 型の vtable では admission と SLRU を表せなかった (Q16)。
 
-### Q20. hit rate のベンチは 30 ファイル / 8 枠と小さい。結論は一般化できるか
+### Q22. hit rate のベンチは 30 ファイル / 8 枠と小さい。結論は一般化できるか
 
 **できない。目的は「同じ trace で、カーネル版と simulator 版がずれないか」を見ることで、ポリシーの順位を決めることではない。**
 
 - 条件: 30 ファイル、Zipf α=0.7、2000 access、容量 8 枠、seed 3 つ (§12.3、§18.41〜18.42)。
 - 上限の Belady (opt) は 64.15% (§12.3、seed 42)。ポリシーの差 (35〜40%) よりも上限との差の方が大きい。
-- 実機の eval は 25 access ごとにしか回らないので、trace-replay より 4〜11 ポイント低く出る (Q18)。
-- 大きい容量や実際の trace (CDN、学習データの読み込みなど) では測っていない。trace-replay では、容量を大きくすると順位が入れ替わる例が出ている (W-TinyLFU と S3-FIFO、Q19)。
+- 実機の eval は 25 access ごとにしか回らないので、trace-replay より 4〜11 ポイント低く出る (Q20)。
+- 大きい容量や実際の trace (CDN、学習データの読み込みなど) では測っていない。trace-replay では、容量を大きくすると順位が入れ替わる例が出ている (W-TinyLFU と S3-FIFO、Q21)。
 - 発表で言えるのは「vtable の形を変えたら、同じアルゴリズムの実装が simulator に近づいた」まで。
 
-### Q21. なぜ fmod_ret ではなく struct_ops でポリシーを差し込んだのか
+### Q23. なぜ fmod_ret ではなく struct_ops でポリシーを差し込んだのか
 
 **入れ替えが 1 回の操作で原子的になるから。** 実装の量は struct_ops の方が多い。両方を実装して比べた (`docs/design/policy-attach-comparison.md`)。
 
@@ -433,7 +477,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 | 合計 | 約 150 行 | 約 350 行 |
 
 - 1 回の呼び出しの負担はどちらも数十 ns と見積もったが、厳密には測っていない (`policy-attach-comparison.md` §1.4)。
-- 後から `pick_victim` などの method を足すときも、struct_ops なら vtable の末尾に足すだけで、既存の BPF プログラムはそのまま動く (Q17)。
+- 後から `pick_victim` などの method を足すときも、struct_ops なら vtable の末尾に足すだけで、既存の BPF プログラムはそのまま動く (Q19)。
 
 ---
 
@@ -441,16 +485,16 @@ vtable の形とアルゴリズム、hit rate とその限界。
 
 並行性、sleep、失敗時の動き、入れ替え、権限、CEL の範囲。
 
-### Q22. on_hit は並列に、pick_victim は eviction のたびに呼ばれる。BPF 側のデータ構造の排他はどうしているか
+### Q24. on_hit は並列に、pick_victim は eviction のたびに呼ばれる。BPF 側のデータ構造の排他はどうしているか
 
 **状態を変える呼び出しは kmod が直列化し、並列に来る on_hit は「なくなっても困らない更新」だけにした。**
 
 - `on_insert` / `on_remove` / `pick_victim` は、kmod の mutex (`s3fs_policy_evict_lock`) の中で呼ぶ。BPF 側の FIFO や ring は lock なしで更新できる (`docs/design/ac58-pick-victim.md` §2)。
 - BPF 側の `bpf_spin_lock` を使わなかったのは、lock を持っている間は map の helper を呼べず、リストの操作が書けないため。
 - `on_hit` は read の経路から並列に来るので、visited の 1 bit を立てる (SIEVE)、stamp を書く (LRU)、freq を上限 3 まで上げる (S3-FIFO) だけにした。取りこぼしても近似が少しずれるだけ。
-- on_hit は (CPU, ino) あたり jiffy に 1 回に間引いている (AC-47、Q28)。旧 SIEVE の on_hit は map の update で read 経路を 14.8% 落としたが、lookup と 1 bit の store にして 4.6% になった (§18.42)。
+- on_hit は (CPU, ino) あたり jiffy に 1 回に間引いている (AC-47、Q30)。旧 SIEVE の on_hit は map の update で read 経路を 14.8% 落としたが、lookup と 1 bit の store にして 4.6% になった (§18.42)。
 
-### Q23. struct_ops を sleepable にして、ポリシーから sleep する処理 (S3 への問い合わせなど) を呼べないか
+### Q25. struct_ops を sleepable にして、ポリシーから sleep する処理 (S3 への問い合わせなど) を呼べないか
 
 **この vtable ではできない。kmod が `rcu_read_lock()` の中から呼ぶため。**
 
@@ -459,16 +503,16 @@ vtable の形とアルゴリズム、hit rate とその限界。
 - sleep する KFunc (`KF_SLEEPABLE`) は、呼ぶ側のプログラムも sleepable でなければならない。この PoC の arena walk の KFunc は `SEC("syscall")` から呼んでいる。
 - S3 のような blocking I/O はポリシーに入れず、miss のときの upcall (kmod → `/dev/s3fs_ebpf` → daemon → ioctl で起こす) に任せた。ポリシーは eviction の lock の下で呼ばれるので、そこで待つのは筋が悪い。
 
-### Q24. struct_ops の BPF が変な値を返したり、遅かったり、daemon ごと落ちたりしたら、カーネルはどうなるか
+### Q26. struct_ops の BPF が変な値を返したり、遅かったり、daemon ごと落ちたりしたら、カーネルはどうなるか
 
 **壊れない設計にしている。最悪でも既定のポリシーに戻る。**
 
 - **変な victim:** kmod は `pick_victim` が返した ino が候補 (`cand[]`) にあり、まだ試していないときだけ evict する。候補にない ino なら `on_remove` で BPF に忘れさせて聞き直し、0 や試し済みなら score 順に戻る (`docs/design/ac58-pick-victim.md` §2)。容量の上限を守るのは kmod で、BPF は順番を決めるだけ。
 - **止まらない:** verifier がループの上限を検査するので、無限ループは load できない。`pick_victim` は kmod の mutex の中で呼ぶので、遅いと eviction 全体が待つ。8 候補で 0.5〜0.9 µs (§18.42)。候補が数千のときは未計測。
-- **daemon が落ちた:** daemon は struct_ops の link を pin していないので、プロセスが終わると link が外れ、kmod の `unreg` が vtable を NULL に戻す (`kmod/policy_struct_ops.c` の `s3fs_policy_unreg`)。以後は policy なしの既定の動き (score がすべて 0 で、同点処理の順、Q14) になる。
+- **daemon が落ちた:** daemon は struct_ops の link を pin していないので、プロセスが終わると link が外れ、kmod の `unreg` が vtable を NULL に戻す (`kmod/policy_struct_ops.c` の `s3fs_policy_unreg`)。以後は policy なしの既定の動き (score がすべて 0 で、同点処理の順、Q16) になる。
 - **hot swap:** `BPF_LINK_UPDATE` で vtable のポインタを RCU で入れ替える。走っている呼び出しは古い vtable で完走する。ポリシーの状態 (map) は引き継がないので、新しいポリシーは空の状態から始まる。
 
-### Q25. hot swap で切り替えたいケースはあるか。状態は引き継げるか、kmod と不整合にならないか
+### Q27. hot swap で切り替えたいケースはあるか。状態は引き継げるか、kmod と不整合にならないか
 
 **ケースはある。cache を捨てずにポリシーを変えたいとき。状態は引き継がないが、kmod と不整合にはならない。新しいポリシーは履歴のない状態から始まる。** (2026-10-21、`kmod/policy_struct_ops.c`、`kmod/vfs_ops.c` の capacity モード)
 
@@ -477,20 +521,20 @@ vtable の形とアルゴリズム、hit rate とその限界。
 - workload の変化 (scan が増えたら S3-FIFO にする)、ポリシーの修正や調整、デモや bench での A/B 比較。本番で必須というより、実験とデモで効く。
 
 不整合にならない理由:
-1. **正本は kmod。** admit 表、chunk、`live_bytes` は kmod が持つ。BPF の map はポリシーごとの派生状態で、kmod は信用しない。`pick_victim` が返した ino は候補にあるか確かめ、なければ `on_remove` で忘れさせて聞き直す。0 なら score 順に戻る (Q24)。
+1. **正本は kmod。** admit 表、chunk、`live_bytes` は kmod が持つ。BPF の map はポリシーごとの派生状態で、kmod は信用しない。`pick_victim` が返した ino は候補にあるか確かめ、なければ `on_remove` で忘れさせて聞き直す。0 なら score 順に戻る (Q26)。
 2. **候補の集合は次の round で揃う。** kmod は eviction の round ごとに、生きている全部の ino に `on_insert` (冪等) と `on_size` を呼ぶ。次の round で新しいポリシーも候補を全部知る (`docs/design/ac58-pick-victim.md` §2)。
 3. **旧 vtable の呼び出しは終わってから戻る。** `.update` は `rcu_assign_pointer` のあと `synchronize_rcu()` を待つ。旧 vtable の `on_hit` が走っていても、解放済みの map には書かない。
 
 引き継がないもの、注意:
 - 失うのはアクセスの履歴 (SIEVE の visited、LRU の stamp、S3-FIFO の freq と ghost)。旧ポリシーの map は link と一緒に解放される。FIFO の順も round 内の `on_insert` の順になるので、入れ替えの直後は、しばらく FIFO に近い動きになる。
-- `.update` は evict mutex (Q22) を取らない。round の途中で差し替わると、`on_insert` は旧 map に、`pick_victim` は新 map に届きうる。その round は新しいポリシーがほぼ空なので score 順のフォールバックになる。安全だが、1 round だけポリシーの判断が効かない。
-- fmod_ret (tracing link) は `BPF_LINK_UPDATE` に対応しないので、新旧が同時に走る間がある (Q21、`docs/design/policy-attach-comparison.md` §1.3)。
+- `.update` は evict mutex (Q24) を取らない。round の途中で差し替わると、`on_insert` は旧 map に、`pick_victim` は新 map に届きうる。その round は新しいポリシーがほぼ空なので score 順のフォールバックになる。安全だが、1 round だけポリシーの判断が効かない。
+- fmod_ret (tracing link) は `BPF_LINK_UPDATE` に対応しないので、新旧が同時に走る間がある (Q23、`docs/design/policy-attach-comparison.md` §1.3)。
 - 引き継ぐ方法として考えられるのは、map を pin しておき、新しいプログラムを load するときに同じ map を渡すこと (cilium/ebpf の `MapReplacements`)。同じポリシーの版上げなら使えるが、SIEVE と LRU のように状態の形が違うポリシーの間では意味がない。試していない。
 - 引き継がないことの利点もある。古いポリシーの状態が新しいポリシーの判断を汚さないので、入れ替えの効果を比べやすい。
 
 スライド: so-swap。
 
-### Q26. 誰でも BPF のポリシーを差し込めるのか。権限とセキュリティは
+### Q28. 誰でも BPF のポリシーを差し込めるのか。権限とセキュリティは
 
 **root (CAP_BPF / CAP_SYS_ADMIN) が前提の PoC で、既定の設定は開発向け。**
 
@@ -500,7 +544,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 - `POST /policy/reload` は `--metrics-token` を付けたときだけ Bearer 認証が要る。既定は空 (認証なし)。
 - verifier は「カーネルを壊さない」ことは保証するが、「よいポリシーである」ことは保証しない。わざと全部を追い出すポリシーも load できる。性能を下げる攻撃への備えはない。
 
-### Q27. CEL で複雑なキャッシュ / prewarm のポリシーを試したことはあるか (2026-10-21 時点)
+### Q29. CEL で複雑なキャッシュ / prewarm のポリシーを試したことはあるか (2026-10-21 時点)
 
 **ない。** 実際にマウントして使った CEL ポリシーは 1 行の単純なものだけで、複数行の「複雑な」サンプル 2 本はそもそも読み込めない状態だった。
 
@@ -518,7 +562,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 CEL でできることの範囲 (誤解しやすいので):
 - hook は 2 つだけ。`prewarm` (daemon 起動時に 1 回、ファイルごとに bool) と `policy` (起動時に 1 回、Layer 2 の BPF プログラム名)。**どれを追い出すか (キャッシュの eviction) は CEL では書けず、BPF の struct_ops (Layer 2 / 3) の役目。** CEL は「どの BPF ポリシーを使うか」を選ぶだけ。
 - 入力は `entry` の 5 項目 (ino / name / s3_key / size / mode) だけで、アクセス頻度や時刻、cgroup は見えない。
-- **pcache モードは中身の prewarm をしない (AC-44) ので、`prewarm` の CEL は arena モードでしか効かなかった。** 計測の主軸を pcache モードに移してからは、CEL の prewarm は実質的に使われていない。その後: `--pcache-prewarm` で pcache モードでも使えるようにした (AC-67、Q36)。
+- **pcache モードは中身の prewarm をしない (AC-44) ので、`prewarm` の CEL は arena モードでしか効かなかった。** 計測の主軸を pcache モードに移してからは、CEL の prewarm は実質的に使われていない。その後: `--pcache-prewarm` で pcache モードでも使えるようにした (AC-67、Q38)。
 - ポリシーを書き換えたら daemon の再起動が要る (BPF の `policy` は `POST /policy/reload` で差し替えられる)。
 
 例と判定表: `docs/user/writing-policies.md` のレシピ 5。
@@ -529,7 +573,7 @@ CEL でできることの範囲 (誤解しやすいので):
 
 hot path に置いた fentry の負担と、その測り方。
 
-### Q28. `fentry/generic_file_read_iter` のような汎用関数へのフックは行儀が悪くないか。ほかの選択肢は
+### Q30. `fentry/generic_file_read_iter` のような汎用関数へのフックは行儀が悪くないか。ほかの選択肢は
 
 **行儀は悪い。他の FS の read にも毎回 trampoline が乗る。** 採用の基準と注意点は `docs/design/read-iter-hook-overhead.md` §4〜§5 にまとめた。
 
@@ -538,7 +582,7 @@ hot path に置いた fentry の負担と、その測り方。
 - 今後の方向は、hit の経路から外して miss の経路 (`.read_folio` や upcall) で集めること (`read-iter-hook-overhead.md` §4.6)。
 - `--no-read-iter-hook` で外せる。AB-07 の gate (a) はフックなしで判定し、フックの負担は `hook_ratio` (現在 0.983) として別に出している (§18.43)。
 
-### Q29. BPF の負担はどうやって測ったのか
+### Q31. BPF の負担はどうやって測ったのか
 
 **3 段で測った。1 スレッドの遅延だけでは見えなかったのが教訓。**
 
@@ -548,14 +592,14 @@ hot path に置いた fentry の負担と、その測り方。
 
 注: `/usr/bin/perf` は 6.12 用の linux-tools がないと止まるので、別版の perf バイナリを直接使った。KVM では `bpf_ktime_get_ns()` が pvclock の読み出しになり、それだけで約 2% かかった (`read-iter-hook-overhead.md` §4.8)。
 
-### Q30. stat が FUSE と同じ速さなのはなぜか
+### Q32. stat が FUSE と同じ速さなのはなぜか
 
 **どちらも stat はカーネルの inode のキャッシュで返り、FS のコードの差が出ないから。**
 
 - microbench の stat は s3fs-ebpf 1.38 µs、s3fs-fuse 1.39 µs (§0、2026-09-22)。fio の並列 stat も 3 つのマウントでほぼ同じで、4 jobs あたりで約 23M IOPS の共通の上限に当たる (§10.3)。
 - s3fs-ebpf の getattr は `simple_getattr`。daemon が付けた `fentry/vfs_getattr_nosec` (`bpf/s3fs_fastpath.bpf.c` の `s3fs_fp_getattr`) は、hit / miss を数え、miss なら ringbuf で daemon に知らせるだけ。
-- このフックはまだ `BPF_CORE_READ` (probe_read) で引数をたどっている。read のフックで直した (Q28) のと同じ書き換えが効くはず。stat の並列 bench で差が出ていないので後回しにしている。
-- 差が出るのは stat ではなく open のある操作 (Q40)。`ls -l` の cold が 11 倍速いのは、HEAD を投げずに kmod の一覧から返すため (Q38)。
+- このフックはまだ `BPF_CORE_READ` (probe_read) で引数をたどっている。read のフックで直した (Q30) のと同じ書き換えが効くはず。stat の並列 bench で差が出ていないので後回しにしている。
+- 差が出るのは stat ではなく open のある操作 (Q42)。`ls -l` の cold が 11 倍速いのは、HEAD を投げずに kmod の一覧から返すため (Q40)。
 
 ---
 
@@ -563,7 +607,7 @@ hot path に置いた fentry の負担と、その測り方。
 
 勝てる場面と負ける場面、外れた仮説、ほかの実装との比較。
 
-### Q31. ベンチ結果では FUSE に負けているが、勝てるポイントや用例を再整理したい
+### Q33. ベンチ結果では FUSE に負けているが、勝てるポイントや用例を再整理したい
 
 **「read が速い FS」ではなく「open と fsync が速い FS」。** FUSE は 1 回の open+read+close で /dev/fuse を 4 往復するが、s3fs-ebpf は miss のときだけ upcall する。
 
@@ -585,7 +629,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 スライド: perf、perf-lose、fs-usecases。
 
-### Q32. FUSE に勝つためには、どういう検証と変更が残っているか (2026-10-16 時点)
+### Q34. FUSE に勝つためには、どういう検証と変更が残っているか (2026-10-16 時点)
 
 当時の回答: 負けていたのは page cache に載った後の読み込み (64 jobs の IOPS 0.66×、100 MiB の warm read 1.20×)。仮説として「kmod が large folio を有効にしていないので、folio の参照カウントの取り合いが起きている」を挙げ、folio の order の確認と `perf c2c` を提案した。
 
@@ -597,16 +641,16 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 スライド: fail-found、hook-tips。
 
-### Q33. admit 表のロックを RCU にしていれば、64 jobs で勝てたのでは
+### Q35. admit 表のロックを RCU にしていれば、64 jobs で勝てたのでは
 
 **勝てなかった。hit の判定をロックなしにしても変わらなかった。**
 
 - AA-01 で spinlock を rwlock にしたら悪化した (87% → 76%、§12.2)。rwlock は reader もロックの語に書くので、reader 同士がスケールしない。
 - AB-10 で、ファイルごとに世代番号 (`s3fs_admit_gen`) を持たせ、世代が変わっていなければロックを取らずに hit を判定するようにした。64 jobs の IOPS は変わらなかった (§15)。RCU にするのと同じ効果を狙ったもの。
-- 本当の原因は daemon の `fentry/generic_file_read_iter` だった (Q32、Q28)。フックを外すと fuse-raw と同じ IOPS になる。
+- 本当の原因は daemon の `fentry/generic_file_read_iter` だった (Q34、Q30)。フックを外すと fuse-raw と同じ IOPS になる。
 - 教訓は「仮説で実装する前に、計測で原因を分ける」。AA-01、AA-03、AB-10 はどれも推測で実装して外れた (`docs/journal/history.md` §4.5)。
 
-### Q34. large folio を有効にすれば、大きい read は速くなるのでは
+### Q36. large folio を有効にすれば、大きい read は速くなるのでは
 
 **試していない。64 jobs の差の説明としては外れた。**
 
@@ -615,7 +659,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 大きいファイルの順次 read では、folio を大きくすると folio ごとの処理 (lock、参照カウント、`.read_folio` の呼び出し) が減るので効く可能性はある。ただし 100 MiB の warm read はすでに fuse-cache より速い (9.5 / 10.5 ms)。
 - pcache の chunk は 4 MiB なので、large folio にしても chunk の境界をまたがない大きさに収める必要がある。
 
-### Q35. 大きいファイルの cold read で FUSE に負けるのはなぜか
+### Q37. 大きいファイルの cold read で FUSE に負けるのはなぜか
 
 **最後に残ったのは、FS の経路ではなくホストのメモリ回収待ち。** その前に daemon 側の問題を 2 つ直した。
 
@@ -627,7 +671,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 設計の問題として残っているのは、容量の既定が無制限でホストのメモリを見ないこと、4 並列の populate が短時間に大きく確保すること (§18.39.1)。
 - まだ確かめていないこと: ext4 で同じ読み方をしたときに同じ遅くなり方をするか。回収されたページのうち pcache と MinIO の内訳。
 
-### Q36. pcache モードでも prewarm を使えるか。10 MiB 以下が遅いのは、arena に載せるか chunk サイズの工夫で速くできるか (2026-10-21 時点)
+### Q38. pcache モードでも prewarm を使えるか。10 MiB 以下が遅いのは、arena に載せるか chunk サイズの工夫で速くできるか (2026-10-21 時点)
 
 **prewarm は使えるようにした (`--pcache-prewarm`、AC-67)。10 MiB 前後の遅さは、arena でも chunk サイズでもほぼ縮まない。効くのは prewarm の方。**
 
@@ -642,30 +686,30 @@ prewarm:
 | cold read 10 MiB | 19.2 ms | 20.5 ms (0.94×) | S3 の GET |
 | 既存 10 MiB の途中に 4 KiB + fsync | 51.5 ms | 70.6〜84.2 ms | 変更前の全体 GET (AC-50) + 全体 PUT |
 
-- **arena に載せても速くならない。** どちらも S3 との転送が律速で、arena が効くのはデータがメモリに載った後。そこは pcache で 172× (§18.27)。arena から kmod が読むと GUP が増えるだけ (Q53)。
+- **arena に載せても速くならない。** どちらも S3 との転送が律速で、arena が効くのはデータがメモリに載った後。そこは pcache で 172× (§18.27)。arena から kmod が読むと GUP が増えるだけ (Q55)。
 - **chunk サイズの工夫も効果は小さい見込み。** `--partial-modify` は 16 MiB 未満では全体を読み書きする。しきい値を下げても、S3 の multipart は最後以外の part が 5 MiB 以上という制約があり、10 MiB (4 + 4 + 2 MiB の chunk) ではほぼ全体を運ぶうえ、往復が 3〜4 回増える。8 MiB にした計測はしていない。chunk の大きさ (4 MiB) は `S3FS_PCACHE_CHUNK_SHIFT` で、pin や pending の単位でもあるので、変えるなら回帰テスト一式をやり直す必要がある。
 - **prewarm で効く見込み。** 中身が先に chunk にあれば、cold read は warm (page cache) になり、途中の書き換えも AC-50 の読み込みが要らず PUT だけになる (推定 50 ms 前後)。どちらも実測していない。prewarm の読みは起動時に払うので、起動から最初の read までに時間があるワークロード向け。
 
-### Q37. durable write (新規ファイル + fsync) で FUSE より 1.37 倍速いのはなぜか
+### Q39. durable write (新規ファイル + fsync) で FUSE より 1.37 倍速いのはなぜか
 
 **内訳は分解していない。** 以下は構造からの推測。
 
 - 数字: 1 / 10 / 100 MiB で fuse-raw の 1.37 / 1.35 / 1.37 倍 (§18.28)。S3 のオブジェクトの sha256 は一致。
-- s3fs-ebpf の write は kmod の chunk に書くだけで、daemon は通らない。fsync で daemon が `READ_DIRTY` で中身を読み、PUT して完了を知らせる (Q45、`posix-and-practical-notes.md` E-01)。
+- s3fs-ebpf の write は kmod の chunk に書くだけで、daemon は通らない。fsync で daemon が `READ_DIRTY` で中身を読み、PUT して完了を知らせる (Q47、`posix-and-practical-notes.md` E-01)。
 - s3fs-fuse は write のたびに /dev/fuse を往復し、daemon 側のバッファに溜めてから PUT する (と理解している)。100 MiB だと write の往復の回数が効く可能性がある。
 - 既存ファイルの上書きでは差がもっと大きかった (1.3〜1.7 倍、§8.3)。新規ファイルでは s3fs-fuse も create + 1 回の PUT で済むので差が小さい (§18.28 の注)。
-- close では PUT を待たないので、fsync なしの「書いて閉じる」はさらに速い (§8.3 の non-durable 列)。ただしそれは比べ方として公平ではない (Q40)。
+- close では PUT を待たないので、fsync なしの「書いて閉じる」はさらに速い (§8.3 の non-durable 列)。ただしそれは比べ方として公平ではない (Q42)。
 
-### Q38. S3 へのリクエストは減るのか (費用の面)
+### Q40. S3 へのリクエストは減るのか (費用の面)
 
 **一覧と stat は減る。中身の GET は同じ。一覧の LIST は定期的に出る。**
 
 - `ls -l` (10,000 個、cold): s3fs-fuse は HEAD を 10,000 回投げる。s3fs-ebpf は起動時と `--sync-every` ごとの LIST の結果 (kmod の表) から返すので、S3 に行かない (§18.31)。
 - 中身の初回の読み込み (cold cat) は、どちらも 1 ファイルに 1 回 GET する。cold cat 10,000 個は 2.7 倍速いが、GET の回数は同じ。
-- 代わりに、既定で 30 秒ごとに LIST する。10 万個のバケットなら LIST の 1 ページが 1000 件として約 100 リクエストを 30 秒ごとに出す。`--sync-every=0` で止められるが、他のクライアントの追加と削除が見えなくなる (Q44)。
-- 大きいオブジェクトの途中の書き換えは、`--partial-modify` で変更のない部分を `UploadPartCopy` (server-side copy) で運ぶので、転送量が減る (Q31)。
+- 代わりに、既定で 30 秒ごとに LIST する。10 万個のバケットなら LIST の 1 ページが 1000 件として約 100 リクエストを 30 秒ごとに出す。`--sync-every=0` で止められるが、他のクライアントの追加と削除が見えなくなる (Q46)。
+- 大きいオブジェクトの途中の書き換えは、`--partial-modify` で変更のない部分を `UploadPartCopy` (server-side copy) で運ぶので、転送量が減る (Q33)。
 
-### Q39. Mountpoint for Amazon S3 (mount-s3) と比べるとどうか
+### Q41. Mountpoint for Amazon S3 (mount-s3) と比べるとどうか
 
 **open を繰り返す読み方では速い。cold の小さいファイルは同じくらい。機能の範囲は違う。** 同じホスト・同じ MinIO で測った (`--cache` 付き)。
 
@@ -678,7 +722,7 @@ prewarm:
 
 (§18.27、§18.31。cold read の大きいファイルは AC-52 の前の数字しかないので並べない)
 
-- mount-s3 は FUSE なので、hit でも open / read の往復が残る。それでも s3fs-fuse の約 5 倍速い (Q40)。
+- mount-s3 は FUSE なので、hit でも open / read の往復が残る。それでも s3fs-fuse の約 5 倍速い (Q42)。
 - 機能: mount-s3 は既存オブジェクトの途中の書き換えをしない (読み込みと新規の順次書き込みが中心。公式の制限で、この PoC では確かめていない)。s3fs-ebpf は途中の書き換えと fsync で待つ書き込みができる。一方、mount-s3 は本番で使われている実装で、PoC と同じ土俵ではない。
 
 ---
@@ -687,7 +731,7 @@ prewarm:
 
 倍率の比べ方、試験の意味、環境の限界。
 
-### Q40. open+read+close の 172 倍は公平か。FUSE でも往復を減らせるのではないか
+### Q42. open+read+close の 172 倍は公平か。FUSE でも往復を減らせるのではないか
 
 **比べた相手は s3fs-fuse の実装で、FUSE の上限ではない。** 倍率は「1 回の open+read+close で daemon に行く回数の差」から来ている。
 
@@ -697,15 +741,15 @@ prewarm:
 - 実際に、mount-s3 (`--cache`) は同じ計測で 103.8 µs で、fuse-cache の約 5 倍速い (§18.27)。s3fs-ebpf はその 34 倍速い。
 - 言えること: 「FUSE ではなく、s3fs-fuse より」の倍率であること。構造の差として確かに残るのは、hit のときにユーザー空間のプロセスを一度も起こさないこと。
 
-### Q41. 64 jobs で 1 byte ずつ 18 B のファイルを読む fio は、現実のワークロードを表しているか
+### Q43. 64 jobs で 1 byte ずつ 18 B のファイルを読む fio は、現実のワークロードを表しているか
 
 **表していない。read 経路の「固定費」と「共有データの取り合い」を最大に見せるための試験。**
 
-- `--size=1 --bs=1` なので、どの read も page cache で hit し、FS のコードの固定費 (フック、ロック、カウンタ) だけが並列度に応じて効く。フックの負担 (約 19%) はこの条件だから見えた (Q32)。
+- `--size=1 --bs=1` なので、どの read も page cache で hit し、FS のコードの固定費 (フック、ロック、カウンタ) だけが並列度に応じて効く。フックの負担 (約 19%) はこの条件だから見えた (Q34)。
 - 大きい read では、コピーの時間に固定費が埋もれる。100 MiB の warm read では s3fs-ebpf の方が速い (§18.16 T6)。
-- 現実に近い場面の数字は Q31 の表 (小さいファイル 10,000 個、durable write、cold read)。
+- 現実に近い場面の数字は Q33 の表 (小さいファイル 10,000 個、durable write、cold read)。
 
-### Q42. 計測環境は何か。数字はどこまで信用できるか
+### Q44. 計測環境は何か。数字はどこまで信用できるか
 
 **KVM ゲスト 1 台、ローカルの MinIO、回数は少ない。比で見てほしい。**
 
@@ -722,7 +766,7 @@ prewarm:
 
 障害時、一貫性、サポートする操作、規模、メモリとそれを緩める案。
 
-### Q43. daemon が落ちたら、読み書きはどうなるか
+### Q45. daemon が落ちたら、読み書きはどうなるか
 
 **ハングはしないが、miss の read と fsync は失敗する。** カーネルの queue はメモリだけなので、落ちた時点で未処理のものは失われる。
 
@@ -732,12 +776,12 @@ prewarm:
 | miss する read | 2 秒待って再試行、3 回まで (`S3FS_UPCALL_WAIT_JIFFIES`、`S3FS_UPCALL_MAX_RETRIES`)。その後は手元の chunk で埋めるか失敗する |
 | fsync | 30 秒で -EIO (`docs/user/posix-and-practical-notes.md` E-01) |
 | close 後の非同期 PUT、unlink、rename | kmod の queue に残り、daemon が落ちると失われる (永続化は backlog H-01) |
-| ポリシー | struct_ops が外れ、既定の動きに戻る (Q24) |
+| ポリシー | struct_ops が外れ、既定の動きに戻る (Q26) |
 
 - 正常終了なら daemon が kmod のファイル一覧を起動時のもの (bootstrap) に戻す (`daemon/cmd/s3fs-ebpf/main.go` の sync clear)。
 - ino と S3 キーの対応は `--ino-state` を付けたときだけファイルに残る。付けないと、daemon の再起動で ino が振り直される。
 
-### Q44. 他のクライアントが S3 のオブジェクトを書き換えたら、見えるか (一貫性)
+### Q46. 他のクライアントが S3 のオブジェクトを書き換えたら、見えるか (一貫性)
 
 **消えたキーは次の sync で消えるが、中身の書き換えはすぐには見えない。** この PoC は「1 つのマウントがそのバケットを主に使う」前提。
 
@@ -747,7 +791,7 @@ prewarm:
 - 書き込みの競合は「最後に PUT した者が勝つ」。途中の書き換え (`--partial-modify`) は ETag で copy 元を固定し、変わっていたら全体を PUT し直す (`docs/design/ac51-partial-modify.md`)。
 - close-to-open の一貫性 (NFS のような) も保証しない。
 
-### Q45. mmap、O_DIRECT、ディレクトリ操作、ハードリンクは使えるか
+### Q47. mmap、O_DIRECT、ディレクトリ操作、ハードリンクは使えるか
 
 **読む方の mmap は使える。それ以外は限定的か、ない。** コードから読んだ範囲で、テストしていないものを含む。
 
@@ -757,7 +801,7 @@ prewarm:
 - **rename:** S3 に rename がないので CopyObject + Delete。原子性はない。`RENAME_NOREPLACE` 以外のフラグは EINVAL (`posix-and-practical-notes.md` E-02)。
 - **write:** write-back のみ。close では PUT を待たず、fsync で PUT の完了を待つ。
 
-### Q46. 1 つのディレクトリに大量のファイルがあるとどうなるか
+### Q48. 1 つのディレクトリに大量のファイルがあるとどうなるか
 
 **10 万個までは件数にほぼ比例する。上限は 26 万件 (262144)。** (AC-55、§18.40、1 回の計測)
 
@@ -772,7 +816,7 @@ prewarm:
 - 10 万個のとき、daemon の起動から全件が見えるまで 13 秒かかる。daemon の LIST が支配的で、kmod ではない。
 - 上限 262144 は kmod のメモリの保護として残している。
 
-### Q47. chunk と page cache のメモリはどう制限されるのか。cgroup のメモリ制限は効くか
+### Q49. chunk と page cache のメモリはどう制限されるのか。cgroup のメモリ制限は効くか
 
 **既定では制限がない。chunk は memcg に課金されない。**
 
@@ -780,16 +824,16 @@ prewarm:
 - 中身は chunk と page cache の 2 か所に置かれる。`.read_folio` が chunk から folio にコピーするので、両方に残っていれば最大で 2 倍のメモリを使う。
 - chunk は `kvmalloc(GFP_KERNEL)` で確保していて、`__GFP_ACCOUNT` を付けていない。shrinker もない。なので、コンテナのメモリ制限は chunk を抑えないし、メモリが足りなくなってもカーネルは chunk を回収できない。evict するのは容量の上限と policy だけ。
 - page cache の folio は普通の page cache なので、カーネルが回収できる (読んだプロセスの memcg に課金されるはず。未確認)。
-- 大きいファイルを続けて読むとホストのメモリ回収待ちが出た (Q35)。容量の既定値をホストのメモリから決める案がある (§18.39.1)。
-- ローカル FS の backing file に素通しする段を足して、chunk を減らす案もある (Q48、未実装)。
+- 大きいファイルを続けて読むとホストのメモリ回収待ちが出た (Q37)。容量の既定値をホストのメモリから決める案がある (§18.39.1)。
+- ローカル FS の backing file に素通しする段を足して、chunk を減らす案もある (Q50、未実装)。
 
-### Q48. メモリの上限を緩めるため、fuse-bpf のようにローカル FS へ素通しする段を足せないか (将来の検証項目)
+### Q50. メモリの上限を緩めるため、fuse-bpf のようにローカル FS へ素通しする段を足せないか (将来の検証項目)
 
 **原理的には可能で、hit の速さもおおむね保てる見込み。ただし未実装・未計測で、下の検証項目で確かめるまでは仮説。** 設計の案は `docs/design/backing-file-tier.md` に書いた。
 
 - 形: daemon がディスクキャッシュ (`--cache-dir`) に中身を書き終えたら、そのファイルの fd を ioctl で kmod に渡す。kmod は open のときに登録を見て、read と read-only mmap をそのファイルに素通しする。FUSE passthrough (6.9) の `FUSE_DEV_IOC_BACKING_OPEN` や fuse-bpf の backing file (Q3) と同じ形で、6.8 以降の `fs/backing-file.c` の helper (`backing_file_read_iter` など) を使う想定。module から使えるかはまだ確かめていない。
 - 2 段にする: 小さく熱いファイルは今の pcache (hot、`capacity_bytes` で上限を付ける)、大きいファイルと hot から追い出したファイルは backing file (warm)。段はファイル単位で open のときに決める。書き込むファイルは pcache の段に移す。
-- 保てるもの: open が daemon に行かないこと (open+read+close の速さ)、policy の判断 (hot の段)。中身は下位 FS の page cache に載るので、カーネルが回収でき、memcg に課金され、二重に載らない (Q47 の問題の多くが消える)。daemon の再起動後もディスクから返る。
+- 保てるもの: open が daemon に行かないこと (open+read+close の速さ)、policy の判断 (hot の段)。中身は下位 FS の page cache に載るので、カーネルが回収でき、memcg に課金され、二重に載らない (Q49 の問題の多くが消える)。daemon の再起動後もディスクから返る。
 - 悪くなるもの: page cache から落ちた後の read は chunk の memcpy ではなくディスクの read になる。cold read は「ディスクに書き終えてから登録」なので、そのままだと遅くなりうる (取得中は hot で返し、次の open から warm にすれば避けられる)。warm の段は read の fentry を通らないので、hit は kmod の `.read_iter` で数える。
 - 前提の変更: 今のキャッシュファイルは先頭に header (ETag、サイズ) があり、素通しできない。header を xattr か別ファイルに移す。一部だけ取得したファイルは、最初の版では warm に置かない。
 - Q6 の比較との関係: これは「pcache かディスクか」の二択をやめ、メモリには熱いものだけ置き、残りはディスクの page cache に任せる案。
@@ -798,11 +842,11 @@ prewarm:
 
 1. hit の速さ: open+read+close (§18.27 の条件) で warm が hot の 1.1 倍以内。
 2. 並列の read: 64 jobs の psync read で、warm がフックなしの hot の 0.98 倍以上。
-3. メモリ: §18.39 の大きいファイルの連続読みで、メモリ回収待ちが fuse-raw と同程度になる (Q35)。memcg を絞ったコンテナで上限を超えない。
+3. メモリ: §18.39 の大きいファイルの連続読みで、メモリ回収待ちが fuse-raw と同程度になる (Q37)。memcg を絞ったコンテナで上限を超えない。
 4. page cache から落ちた後: `drop_caches` の後の warm read の遅延。ディスクの種類も記録する。
 5. cold read: §18.37 の 10 / 100 / 300 MiB で、warm への登録が cold read を遅くしない。
 6. 再起動後: daemon の再起動直後の read が S3 に行かない (MinIO の GET の数で見る)。
-7. 正しさ: `make test-regression` 一式と、段の移動・evict・truncate・上書きを並行させたときの sha256 の一致。他のクライアントの上書きが、登録の取り消し後の open で見えること (Q44)。
+7. 正しさ: `make test-regression` 一式と、段の移動・evict・truncate・上書きを並行させたときの sha256 の一致。他のクライアントの上書きが、登録の取り消し後の open で見えること (Q46)。
 8. ディスクの追い出し: 開いている warm のファイルを daemon が追い出しても read が失敗しない。
 
 ---
@@ -811,7 +855,7 @@ prewarm:
 
 バグの潰し方、ツールチェーン、カーネルの版。
 
-### Q49. カーネルのロックや race のバグはどうやって見つけ、潰したのか
+### Q51. カーネルのロックや race のバグはどうやって見つけ、潰したのか
 
 **静かなデータ破損 (read が 0 を返す) が何度も出た。不変条件を文書にし、修正前に落ちるテストを書いて止めた。**
 
@@ -823,7 +867,7 @@ prewarm:
   - 修正前のコードで FAIL することを確かめる (AC-48、AC-50、AC-53、AC-64)。
 - 未完: 実機での lockdep 付きの検証 (AC-42)。
 
-### Q50. Go (cilium/ebpf) で書いていて、つまずいたことは
+### Q52. Go (cilium/ebpf) で書いていて、つまずいたことは
 
 **struct_ops まわりの API の不足と、arena 用の命令の marshal のバグ。**
 
@@ -834,18 +878,18 @@ prewarm:
 
 kmod 側では、struct_ops の glue (`verifier_ops` / `cfi_stubs` / `reg` / `unreg` / `update` / `init_member`) が多く、fmod_ret 版の 2.3 倍の行数になった (`ebpf-ecosystem-gaps.md` §2)。
 
-### Q51. verifier や BPF のツールチェーンで、ほかに苦しんだことは
+### Q53. verifier や BPF のツールチェーンで、ほかに苦しんだことは
 
 **arena まわりのエラーは原因と表示が離れていて、読み解くのに時間がかかった。** (`docs/journal/week2-implementation-notes.md` §0 に早見表)
 
-- `BPF_MOV uses reserved fields` が 2 つの原因で出た。1 つは cilium/ebpf の marshal のバグ (Q50)。もう 1 つは、プログラムが arena の map を一度も参照していないと verifier が arena を関連付けず、`addr_space_cast` を拒否すること。`asm volatile("" :: "r"(&s3fs_arena));` で参照を作って通した。
+- `BPF_MOV uses reserved fields` が 2 つの原因で出た。1 つは cilium/ebpf の marshal のバグ (Q52)。もう 1 つは、プログラムが arena の map を一度も参照していないと verifier が arena を関連付けず、`addr_space_cast` を拒否すること。`asm volatile("" :: "r"(&s3fs_arena));` で参照を作って通した。
 - arena は daemon が mmap してから BPF プログラムを load しないと `arena's user address must be set via map_extra or mmap()` になる。load の順番を 2 段に分けた。
 - `fentry/vfs_getattr` を付けても発火しなかった。今のカーネルの stat は `vfs_getattr_nosec` を直接呼ぶので、そちらに付け直した。
 - pahole が作る `vmlinux.h` に `BPF_MAP_TYPE_ARENA` がなかった (enum が途中で切れていた)。自分で define した。
 - clang 18 は `addr_space_cast` を出せないので clang 19 以上 (手元は 20) にした。
-- `while (n)` の pointer chase は `BPF program is too large. Processed 1000001 insn` で拒否される。これは発表のデモに使っている (`can_loop` を足せば通る話は Q8)。
+- `while (n)` の pointer chase は `BPF program is too large. Processed 1000001 insn` で拒否される。これは発表のデモに使っている (`can_loop` を足せば通る話は Q8、標準のループで足りるかは Q15)。
 
-### Q52. どのカーネルで動くか。カーネルを上げると壊れないか
+### Q54. どのカーネルで動くか。カーネルを上げると壊れないか
 
 **開発と計測は 6.12 LTS。他の版は一部だけ確かめた。**
 
@@ -861,7 +905,7 @@ kmod 側では、struct_ops の glue (`verifier_ops` / `cfi_stubs` / `reg` / `un
 
 arena を使った意義、適用範囲、本番との距離、これから。
 
-### Q53. bpf_arena を使う意義はあったか (2026-10-21 時点)
+### Q55. bpf_arena を使う意義はあったか (2026-10-21 時点)
 
 **性能の面ではなかった。学びと発表の材料としてはあった。** この PoC で arena が担った「ファイルの中身の置き場所」は arena に向かない役割で、速さの源は arena ではなく「hit のときに upcall しない」構造の方だった。arena に向く役割 (BPF と daemon が共有するポリシーの状態) には、結局まだ使っていない。
 
@@ -871,7 +915,7 @@ arena を使った意義、適用範囲、本番との距離、これから。
 - **kmod から見た arena は「daemon のユーザーメモリ」だった。** arena の「ゼロコピー」は BPF とユーザー空間の間の話で、kmod は kern_vm を正規には使えない (Q10、`dev-notes/ebpf-ecosystem-gaps.md` A1〜A3)。read のたびに GUP が要り、1 回約 1.7 µs、1 MiB のファイルでは 1 回の `read()` で約 442 µs になった (§13.1)。1 MiB の cat は page cache 経路の方が速かった (§13.2)。
 - **容量が固定だった。** arena は 128 MiB (BPF 側でコンパイル時に固定) で、100 MiB のオブジェクトが 1 つ入ると他が admit できなかった (§18.2)。大きいファイルのために chunk と range の admit を足し、それが AC-48 / AC-49 のバグを生んだ。
 - **pcache モードに移っても性能は落ちなかった。** 64 jobs の read IOPS、100 MiB の cat、microbench、write はどれも arena モードと同じか少し良い (§14、§16、§17)。hit rate も下がらなかった (§16.2)。
-- 注意: 64 jobs の read が fuse-raw に負けた主因は arena ではなかった。pcache モードでも 0.64× のままで (§14.1)、本当の律速は `fentry/generic_file_read_iter` だった (Q32)。arena を外しても、それだけで勝てたわけではない。
+- 注意: 64 jobs の read が fuse-raw に負けた主因は arena ではなかった。pcache モードでも 0.64× のままで (§14.1)、本当の律速は `fentry/generic_file_read_iter` だった (Q34)。arena を外しても、それだけで勝てたわけではない。
 
 **今の arena の使われ方 (コードで確認)**
 
@@ -880,13 +924,13 @@ arena を使った意義、適用範囲、本番との距離、これから。
 - hot path の BPF プログラム (`fentry/vfs_getattr_nosec`、`fentry/generic_file_read_iter`) は arena を読まない。ポリシーの状態は HASH / ARRAY map に置いている (`bpf/policy_*_ops.bpf.c`)。
 - arena を `__arena` ポインタで読むのは、verifier の拒否デモ (`s3fs_deep_walk_reject`)、prealloc、`make test-arena` などの syscall プログラムだけ (`bpf/s3fs_fastpath.bpf.c`)。
 - `fentry/generic_file_read_iter` が触るのは `s3fs_ino_slots` (per-CPU)、`s3fs_counters` (PERCPU_ARRAY)、`s3fs_inode_index` (HASH、daemon が書く)、`s3fs_events` (ringbuf) で、どれも普通の BPF map。arena の map 自体は、daemon が起動時にモードに関係なく作って mmap する。
-- daemon と BPF の間で状態を共有する候補は、アプリのヒント (AC-58 の残り、Q17)、W-TinyLFU の設定値 (AC-66 §9.5)、取得の前に断る admission (AC-66 §8、範囲外)。前の 2 つは小さい表なので map の update で足りる。3 つ目は miss のたびに daemon が BPF の sketch を読むので arena に一番近いが、計画には入っていない。
+- daemon と BPF の間で状態を共有する候補は、アプリのヒント (AC-58 の残り、Q19)、W-TinyLFU の設定値 (AC-66 §9.5)、取得の前に断る admission (AC-66 §8、範囲外)。前の 2 つは小さい表なので map の update で足りる。3 つ目は miss のたびに daemon が BPF の sketch を読むので arena に一番近いが、計画には入っていない。
 - AD-02 (arena GC) は「pcache モードでは arena がメタデータだけ」という誤った前提で書かれていたので、backlog で訂正した。GC が要るのは arena モードだけ。
 - kmod と daemon の間で共有したいなら、arena ではなく kmod が持つ共有メモリ (miscdev の `.mmap`) が使える。未実装 (`docs/design/kmod-daemon-shared-memory.md`)。
 
 **意義があったところ**
 
-1. **適用範囲の境界が実測で分かった。** 「判断は struct_ops、共有する状態は arena」(Q54) と、「arena は BPF ↔ ユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない」(Q5) は、arena を誤った場所で使って計測したから言える。発表の中心 (失敗談 AA-03) になっている。
+1. **適用範囲の境界が実測で分かった。** 「判断は struct_ops、共有する状態は arena」(Q56) と、「arena は BPF ↔ ユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない」(Q5) は、arena を誤った場所で使って計測したから言える。発表の中心 (失敗談 AA-03) になっている。
 2. **arena の仕組みを v6.12 のソースで確かめた。** 同じ物理ページを user_vm と kern_vm に二重にマップし、JIT が r12 = kern_vm_start で変換する、未割り当てのページは例外テーブルで 0 になる、という説明 (Q10) は arena を使ったから得られた。
 3. **verifier と KFunc のデモの土台になった。** arena 上の linked list を `while (n)` でたどると verifier が拒否し、KFunc に渡すと通る、というデモ (`daemon/cmd/s3fs-ebpf/verifier_demo_kfunc.go`) は arena がないと成り立たない。
 4. **カーネルと cilium/ebpf への具体的な要望が出た。** `bpf_arena_get_kern_vm_start` の export (K-01)、kern_vm の generic context 用 fault handler (K-02)、cilium/ebpf の `addr_space_cast` の Marshal 修正 (`docs/misc/`)。K-02 が入れば kmod から GUP なしで読めるので、arena に中身を置く設計の評価は変わりうる。
@@ -894,48 +938,48 @@ arena を使った意義、適用範囲、本番との距離、これから。
 **やり直すなら**
 
 - 中身は最初から page cache に置く (pcache モードの形)。
-- arena は、BPF のポリシーと daemon が共有する状態に使う。例: `pick_victim` の FIFO / ghost queue のような、ポインタを含むデータ構造 (いまは ARRAY map の添字で表している)、アプリのヒントの表 (Q17)、ヒストグラムなどの統計。daemon が syscall なしで読み書きでき、arena の利点がそのまま出る。ただし、このやり方での arena の効果はまだ測っていない。
+- arena は、BPF のポリシーと daemon が共有する状態に使う。例: `pick_victim` の FIFO / ghost queue のような、ポインタを含むデータ構造 (いまは ARRAY map の添字で表している)、アプリのヒントの表 (Q19)、ヒストグラムなどの統計。daemon が syscall なしで読み書きでき、arena の利点がそのまま出る。ただし、このやり方での arena の効果はまだ測っていない。
 - arena モードを既定から外すか、arena モードそのものを消すかは決めていない (`docs/design/pcache-mode.md` §9)。
 
 スライド: arena-who、失敗談 (AA-03)、usecases。
 
-### Q54. struct_ops と arena の適切な用例は
+### Q56. struct_ops と arena の適切な用例は
 
 **判断は struct_ops に、共有する状態は arena に。**
 
 - **struct_ops:** カーネルが判断を問い合わせる点と、アルゴリズムの判断単位が一致するときに向く。例は sched_ext (次に走らせるタスクを選ぶ)、TCP 輻輳制御 (`tcp_congestion_ops`)、HID-BPF。s3fs なら「どれを追い出すか」を聞く vtable (後の `pick_victim`)。
-- **bpf_arena:** BPF とユーザー空間が、ポインタを含むデータ構造を syscall なしで共有したいときに向く。例は sched_ext のタスクごとの状態、BPF 側のリスト・木・ハッシュ。s3fs の今の read 経路 (pcache モード) は arena を使っていない。中身は page cache と kmod の chunk 表、admit のメタデータは kmod の admit hash、policy の状態は普通の BPF map に置いている。arena が活きるのは、BPF の状態をユーザー空間が syscall なしで頻繁に読み書きする場面で、今の backlog にそういう項目はない (Q53)。
+- **bpf_arena:** BPF とユーザー空間が、ポインタを含むデータ構造を syscall なしで共有したいときに向く。例は sched_ext のタスクごとの状態、BPF 側のリスト・木・ハッシュ。s3fs の今の read 経路 (pcache モード) は arena を使っていない。中身は page cache と kmod の chunk 表、admit のメタデータは kmod の admit hash、policy の状態は普通の BPF map に置いている。arena が活きるのは、BPF の状態をユーザー空間が syscall なしで頻繁に読み書きする場面で、今の backlog にそういう項目はない (Q55)。
 
 スライド: usecases。
 
-### Q55. 本番で使えるか。使うなら何が足りないか
+### Q57. 本番で使えるか。使うなら何が足りないか
 
 **使えない。Linux 6.12 で、この 3 つの機能で FS を組めるかを試す PoC。** 足りないものは分かっている範囲で次のとおり。
 
-- **daemon が落ちたときの耐性:** close 後の PUT、unlink、rename の queue がメモリだけ (Q43、backlog H-01)。
-- **一貫性:** 他のクライアントによる上書きを検知しない (Q44)。
-- **メモリ:** pcache の容量は既定で無制限で、chunk は memcg に課金されない (Q47)。
-- **書き込み:** 書き込み可能な共有 mmap が S3 に届かない、O_DIRECT がない (Q45)。
-- **検証:** 実際の S3 での計測がない (Q42)。実機での lockdep 付きの検証がない (AC-42)。
-- **カーネル依存:** 6.12 でだけ確かめた箇所がある (Q52)。
+- **daemon が落ちたときの耐性:** close 後の PUT、unlink、rename の queue がメモリだけ (Q45、backlog H-01)。
+- **一貫性:** 他のクライアントによる上書きを検知しない (Q46)。
+- **メモリ:** pcache の容量は既定で無制限で、chunk は memcg に課金されない (Q49)。
+- **書き込み:** 書き込み可能な共有 mmap が S3 に届かない、O_DIRECT がない (Q47)。
+- **検証:** 実際の S3 での計測がない (Q44)。実機での lockdep 付きの検証がない (AC-42)。
+- **カーネル依存:** 6.12 でだけ確かめた箇所がある (Q54)。
 - **既定のモード:** 既定は今も arena モードで、計測と修正は pcache モードで行っている (`docs/design/pcache-mode.md` §9)。
 
-### Q56. この先やりたいこと、できそうなことは
+### Q58. この先やりたいこと、できそうなことは
 
 **優先順位の高いものと、構想だけのものがある。**
 
 実装に近いもの:
-- read のフックを hit の経路から外し、miss の経路で集める (Q28)。
-- W-TinyLFU の計測を 3 seed に増やす (Q19)。候補が数千のときの `pick_victim` の時間を測る。
-- 実際の S3 で計測する (Q42)。
-- KVM ではない環境で `perf c2c` を取り、A/B で推定した cacheline の取り合い (Q29) を直接確かめる (AC-06)。
-- arena を「ポリシーと daemon が共有する状態」に使う (Q53 の「やり直すなら」)。
-- pcache の下にローカル FS へ素通しする段を足し、メモリの上限を緩める (Q48、`docs/design/backing-file-tier.md`)。
+- read のフックを hit の経路から外し、miss の経路で集める (Q30)。
+- W-TinyLFU の計測を 3 seed に増やす (Q21)。候補が数千のときの `pick_victim` の時間を測る。
+- 実際の S3 で計測する (Q44)。
+- KVM ではない環境で `perf c2c` を取り、A/B で推定した cacheline の取り合い (Q31) を直接確かめる (AC-06)。
+- arena を「ポリシーと daemon が共有する状態」に使う (Q55 の「やり直すなら」)。
+- pcache の下にローカル FS へ素通しする段を足し、メモリの上限を緩める (Q50、`docs/design/backing-file-tier.md`)。
 
 構想 (`docs/design/ebpf-fuse-advantages-roadmap.md`、未実装):
-- cgroup ごとにポリシーを変える (`bpf_get_current_cgroup_id()`、Q17)。
+- cgroup ごとにポリシーを変える (`bpf_get_current_cgroup_id()`、Q19)。
 - `bpf_timer` で、アクセスがなくても期限切れを追い出す。
 - BPF iterator で arena の GC をする。
-- アプリのヒントを map で渡す (Q17)。
+- アプリのヒントを map で渡す (Q19)。
 
-upstream への提案: K-01 (`bpf_arena_get_kern_vm_start` の export)、K-02 (kern_vm の generic context 用の fault handler)、cilium/ebpf の marshal 修正 (Q50)。
+upstream への提案: K-01 (`bpf_arena_get_kern_vm_start` の export)、K-02 (kern_vm の generic context 用の fault handler)、cilium/ebpf の marshal 修正 (Q52)。

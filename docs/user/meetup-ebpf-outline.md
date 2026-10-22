@@ -28,7 +28,7 @@
 | 勝てるところ | **perf** / **perf-lose** / **fs-usecases** | perf: pcache モードで測り直した数字 (open+read+close 3.3× / 172×、4 KiB × 10,000 個の cat 2 回目 93×、`ls -l` 初回 11×、新規の durable write 1.37×)。perf-lose (新規): 負けていた大きいファイルの 2 場面を直した前後 (既存 100 MiB の途中の書き換えは互角、cold read 300 MiB は毎回キャッシュを空にすると 1.26×、続けて読むと 0.80×)。fs-usecases: 小さいファイルを大量に開く、短命なプロセスが多い、fsync で確実に書く、キャッシュの判断を変えたい。向かないのはメモリの少ないホストで大きいファイルを次々に読む使い方 |
 | 失敗談 | fail-title / fail-plan / fail-result / fail-why / **fail-found** / **hook-tips** | fail-found (新規): 64 jobs の律速は daemon の `fentry/generic_file_read_iter` だった。hook-tips (新規): hot path にフックを置くときの注意 6 項目 |
 | まとめ | lessons / next / **usecases** / takeaway / end | usecases (新規): 判断は struct_ops、共有する状態は arena。takeaway に fentry の行を追加。next の 3 を「案B を実装」に (W-TinyLFU も追加)。end のノートは 172× (pcache モード) |
-| 付録 (Q&A 用) | **arena-map** / **arena-loop** | arena-map: 同じ物理ページを daemon の user_vm と kernel の kern_vm に二重にマップしている。BPF は JIT が `r12 = kern_vm_start` を使うので、フック時のマップ切り替えはない。arena-loop: コストを決めるのはループの書き方ではなく「arena を読むのが BPF か普通のカーネル C か」 |
+| 付録 (Q&A 用) | **arena-map** / **arena-loop** / **loop-why** | arena-map: 同じ物理ページを daemon の user_vm と kernel の kern_vm に二重にマップしている。BPF は JIT が `r12 = kern_vm_start` を使うので、フック時のマップ切り替えはない。arena-loop: コストを決めるのはループの書き方ではなく「arena を読むのが BPF か普通のカーネル C か」。loop-why (2026-10-21 追加): BPF のループに上限がある理由、KFunc の walk が長く回せる理由 (終わる保証を kmod が持ち、sleepable)、walk はデモ用で汎用ではなく、止まればよいだけなら bpf_loop / can_loop で足りる (meetup-qa Q14 / Q15) |
 
 ### 後から加わった知見 (根拠)
 
