@@ -639,7 +639,13 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 100 MiB の warm read は fuse-cache より速い (9.5 / 10.5 ms)。§18.2 の 1.20× は再現しなかった。
 - 現在のビルド (`fd8f772`) では AB-07 の gate (a)(b)(c) がすべて PASS (§18.43)。64 jobs は fuse-raw の 0.983× (フックあり)、100 MiB の cat は 14.7 / 17.1 ms (fuse-cache)、microbench は arena モードの 1.07 倍速い。
 
-スライド: fail-found、hook-tips。
+敗北要因の整理 (2026-10-22、小さいファイルの並列 read、fuse-raw 比):
+1. **`fentry/generic_file_read_iter` (主因、64 jobs の A/B で確定)。** 外すと 1.00×、最適化して 0.94〜0.96×、フックの固定費だけで上限 0.974×。
+2. **policy の `on_hit` (A/B で確定)。** bs=1 の最悪ケースで旧 SIEVE −13〜15%、pick_victim 版 −5〜6% (§18.42)。
+3. **GUP と rwlock (並列の主因ではない)。** AA-03 の arena 経路にあったが、どちらを外しても 64 jobs は 0.63〜0.64× のまま (§14、§15)。大きいファイルの latency には効く。
+4. **1 job の「103% → 89% で逆転負け」は計測の誤り。** 「前」の 103% は U-05 (計測ごとの `drop_caches=1`) の前の run だった。同じ条件では 92.5% → 89% で、AA-03 の前から負けていた。1 job の差 (read 1 回あたり約 50 ns) は固定費で、AA-03 の前は fentry と on_hit、後は GUP と rwlock と見ている (1 job の A/B はなく推定)。
+
+スライド: fail-found、fail-factors、hook-tips。
 
 ### Q35. admit 表のロックを RCU にしていれば、64 jobs で勝てたのでは
 
