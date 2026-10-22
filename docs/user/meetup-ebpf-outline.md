@@ -284,10 +284,11 @@ while (remaining > 0) {
 |---|---|---:|---:|
 | microbench open+read+close p50 | ≤ 2 µs | 3.075 µs | **3.216 µs** (改善なし) |
 | fio read 64 jobs: ebpf / fuse-raw | ≥ 100% | 4638k / 5320k = 87% | **4045k / 5289k = 76%** (悪化) |
-| fio read 1 job: ebpf / fuse-raw | — | 1199k / 1165k = 103% | **1460k / 1636k = 89%** (逆転負け) |
+| fio read 1 job: ebpf / fuse-raw | — | 1495k / 1616k = 92.5% | 1460k / 1636k = 89% (ほぼ同じ) |
 
 - ebpf は **8 jobs で ~4300k に飽和**。fuse-raw / fuse-cache / mount-s3 は 64 jobs で ~5300k まで伸びる
-- 絶対値は run 間で動くので比で見る。**どの比でも悪化**
+- 絶対値は run 間で動くので比で見る。**どれも目標に届かず、並列は悪化**
+- 訂正 (2026-10-22): 1 job の「前」を以前は 1199k / 1165k = 103% (「逆転負け」) としていたが、これは U-05 (計測ごとの `drop_caches=1`) の前の run の数字だった。同じ条件の 10-11 の run (`br §10.2`) では 92.5% で、1 job は AA-03 の前から負けていた
 
 #### なぜ外れたか (コードから読める構造。perf/lockstat での裏取りは未)
 
@@ -300,6 +301,20 @@ while (remaining > 0) {
 3. **§2 の表の 3 行目を忘れていた**
    - 「arena はゼロコピー」を kmod にも当てはめてしまった。kmod から見た arena は**他プロセスのユーザーメモリ**で、アクセスごとに GUP 税がかかる。arena は BPF ↔ user のデータ共有には最適だが、**kmod のデータプレーン (毎 read で触る場所) には向かない**
    - 元の設計 (arena → folio に 1 回だけ充填、以降は page cache) のほうが筋が良かった
+
+#### 敗北要因の整理 (2026-10-22、スライド fail-factors)
+
+小さいファイルの並列 read、fuse-raw 比。上の「なぜ外れたか」はコードからの推測で、その後の計測で次のように切り分けた。
+
+| 要因 | いつ効くか | 効き方 | 確度 |
+|---|---|---|---|
+| `fentry/generic_file_read_iter` | page cache を通る read のたび (AA-03 の前と pcache モード) | 外すと 0.94 → 1.00。フックの固定費だけで上限 0.974 | 64 jobs の A/B で確定 (`br §18.16`、`§18.23`) |
+| policy の `on_hit` | hit の read のたび | 旧 SIEVE −13〜15%、pick_victim 版 −5〜6% | A/B で確定 (`br §18.42`) |
+| GUP と rwlock | AA-03 の arena 経路 | 外しても 64 jobs は 0.63〜0.64 のまま。大きいファイルの latency には効く | 並列の主因ではない (`br §14`、`§15`) |
+| 1 job の「103%」 | 比べ方 | U-05 の前の run。同条件では 92.5% → 89% | 計測の誤り |
+
+- 1 job の差 (7〜11%、read 1 回あたり約 50 ns) は固定費。AA-03 の前は fentry と on_hit、後は arena hit で `generic_file_read_iter` を通らないので fentry は動かず、GUP と rwlock と見ている。1 job で A/B を取ったことはなく、推定。
+- `br §13.1` の GUP 1.7 µs は別の負荷で 106 回だけ測った値で、1 job の read 1 回 (約 685 ns) と合わない。ここでは使わない。
 
 ### 7. 反省・知見と今後の対応 (3min)
 
