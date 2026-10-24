@@ -17,6 +17,8 @@ kmod から見た呼び出しは共通で、次の 4 つ。
 
 ## 1. LRU (Least Recently Used)
 
+LRU には「この論文が初出」と言える 1 本がない。比較の基準によく使う最適解 (Belady の OPT、未来を知っている場合の上限。スライド so-pitfall の 64.15%) は L. A. Belady, "A Study of Replacement Algorithms for a Virtual-Storage Computer", IBM Systems Journal 5(2), pp. 78–101, 1966
+
 いちばん長く使われていないものを追い出す。
 
 ```
@@ -31,6 +33,8 @@ kmod から見た呼び出しは共通で、次の 4 つ。
 - この PoC (`policy_lru_pick_ops`): 並べ替えの代わりに、ino ごとに最後に使った時刻 (`++clock`) を記録し、`pick_victim` が一番小さい時刻を探す。`on_hit` は時刻を 1 つ書くだけ。
 
 ## 2. SIEVE (NSDI 2024)
+
+論文: Yazhuo Zhang, Juncheng Yang, Yao Yue, Ymir Vigfusson, K. V. Rashmi, "SIEVE is Simpler than LRU: an Efficient Turn-Key Eviction Algorithm for Web Caches", NSDI '24 ([USENIX](https://www.usenix.org/conference/nsdi24/presentation/zhang-yazhuo)、[PDF](https://junchengyang.com/publication/nsdi24-SIEVE.pdf))
 
 FIFO に「訪問済み」の 1 ビットを足し、hand (針) が古い側から見て回る。
 
@@ -49,6 +53,8 @@ FIFO に「訪問済み」の 1 ビットを足し、hand (針) が古い側か�
 - この PoC (`policy_sieve_pick_ops`): FIFO はリング (`slots`)、hand は seq で持つ。旧版 (`policy_sieve_ops`) は「この ino を追い出してよいか」を 0/1 で答えるだけで hand を持てず、hit rate が simulator より 9〜13 pt 低かった (スライド so-pitfall)。
 
 ## 3. S3-FIFO (SOSP 2023)
+
+論文: Juncheng Yang, Yazhuo Zhang, Ziyue Qiu, Yao Yue, K. V. Rashmi, "FIFO Queues are All You Need for Cache Eviction", SOSP '23 ([DOI 10.1145/3600006.3613147](https://doi.org/10.1145/3600006.3613147)、[PDF](https://junchengyang.com/publication/sosp23-s3fifo.pdf)、[著者のブログ](https://blog.junchengyang.com/system/cache/2023/08/01/s3fifo))
 
 FIFO を 3 本使う。新しいものはまず小さい queue に入り、そこで 2 回以上使われたものだけが本体に上がる。
 
@@ -74,6 +80,8 @@ FIFO を 3 本使う。新しいものはまず小さい queue に入り、そ�
 - この PoC: `policy_s3fifo_pick_ops`。実機の bench-hitrate では 3 seed とも 4 つの中で一番高かった (36.7〜40.0%、スライド so-real)。
 
 ## 4. W-TinyLFU (TOS 2017、Caffeine の形)
+
+論文: Gil Einziger, Roy Friedman, Ben Manes, "TinyLFU: A Highly Efficient Cache Admission Policy", ACM Transactions on Storage 13(4), Article 35, 2017 ([arXiv:1512.00727](https://arxiv.org/abs/1512.00727))。W-TinyLFU はこの論文で提案された形で、Java のキャッシュライブラリ [Caffeine](https://github.com/ben-manes/caffeine) の既定の方式
 
 小さな LRU の窓と、頻度で入場を決める本体を組み合わせる。頻度は Count-Min sketch で近似する。
 
@@ -109,3 +117,10 @@ FIFO を 3 本使う。新しいものはまず小さい queue に入り、そ�
 | W-TinyLFU | W | sketch++ とビット | 候補と P の古いもののうち頻度が低いほう | 実装が一番重い |
 
 数字は `docs/journal/benchmark-results.md` §18.41〜18.42、比較の simulator は `daemon/internal/trace/`。
+
+## 6. 参考文献
+
+- SIEVE: [USENIX NSDI '24](https://www.usenix.org/conference/nsdi24/presentation/zhang-yazhuo)
+- S3-FIFO: [ACM SOSP '23 (DOI 10.1145/3600006.3613147)](https://doi.org/10.1145/3600006.3613147)
+- W-TinyLFU: [arXiv:1512.00727](https://arxiv.org/abs/1512.00727) (ACM TOS 13(4), 2017)
+- OPT: Belady, IBM Systems Journal 5(2), 1966
