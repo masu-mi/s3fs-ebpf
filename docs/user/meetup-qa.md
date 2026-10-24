@@ -340,7 +340,7 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 **上限があるのは、verifier が load の時点で「必ず終わる」ことを示す必要があるから。** KFunc が長く回せるのは sleepable だからだけではない。終わる保証を verifier ではなく kmod が引き受けているから。
 
 - 上限がかかっているのは helper ではなく、BPF のコード (ループの本体) の方。BPF は softirq や tracepoint の中など、sleep できず CPU を譲れない文脈でも動く。止まらないループは CPU を握ったままになり、RCU stall や watchdog を起こす。
-- そのため上限はどれにもある。`bpf_loop` は 2^23 回 (約 840 万回)。`bpf_for` も同じ。`can_loop` (may_goto) は 6.14 までが約 800 万回、6.15 以降の x86-64 は 250 ms (`docs/user/meetup-ebpf-outline.md` の追加調査、6.18 で確認)。
+- そのため上限はどれにもある。`bpf_loop` は 2^23 回 (約 840 万回)。`bpf_for` も同じ。`can_loop` (may_goto) は 6.14 までが約 840 万回、6.15 以降の x86-64 (arm64 は 6.18 以降) は 250 ms (`docs/user/meetup-ebpf-outline.md` の追加調査、6.18 で確認)。
 - **sleepable は必要条件だが、十分条件ではない。** sleepable な BPF プログラムは標準にもある (`SEC("syscall")`、`fentry.s`、`lsm.s`)。その中で `bpf_loop` などを使っても、予算は同じで伸びない。ループの途中で CPU を譲って回り続ける標準の helper や kfunc は、知る限りない (知識からの説明。6.12 のソースでは確かめていない)。
 - この PoC の walk (`s3fs_kfunc_arena_list_walk`) が長く回せるのは、次の 2 つが揃っているから。
   1. 本体が C で、終わる保証を自分で作っている。`max_nodes` (最大 2^24) を超えたら `-ELOOP`、kill されたら `-EINTR`。
@@ -901,7 +901,7 @@ kmod 側では、struct_ops の glue (`verifier_ops` / `cfi_stubs` / `reg` / `un
 
 - 必要な機能: `bpf_arena` (6.9+)、`BTF_KFUNCS_START` で作った kfunc の集合 (6.9+ で必須)、struct_ops の link の update (6.4+。それより古いカーネルでは attach して付け替える経路に戻る)。
 - 6.13 以降は `MODULE_IMPORT_NS` の書き方が変わり、ビルドが通らなかったので直した (`docs/dev-notes/kunit.md`)。KUnit は 6.14 のソースで回している。
-- `can_loop` の挙動は 6.18 で確かめた。may_goto の予算は 6.9〜6.14 が回数 (2^23、約 840 万回)、6.15 以降の x86-64 は時間 (250 ms) で、版で変わる。
+- `can_loop` の挙動は 6.18 で確かめた。may_goto の予算は 6.9〜6.14 が回数 (2^23、約 840 万回)、6.15 以降の x86-64 (arm64 は 6.18 以降) は時間 (250 ms) で、版で変わる。
 - 壊れやすい箇所: `struct bpf_arena` のレイアウトを BTF から複製している所 (`kmod/s3fs_ebpf_dev.c`)。6.12 未満では `#error` で止めるが、6.12 より新しい版でレイアウトが変わっても検出できない。ただし使っているのは起動時の kern_vm の番地の確認 (`PROBE_KVBASE`) だけで、read の経路は GUP なのでレイアウトに依存しない。
 - clang は 19 以上 (`addr_space_cast` のため)。ビルド環境の依存は `docs/dev-notes/build-env-dependencies.md` と `make doctor`。
 
