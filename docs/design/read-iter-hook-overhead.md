@@ -10,7 +10,7 @@ AB-07 の性能 gate (a)「64 jobs の psync read で、ebpf-pcache の IOPS が
   - pattern map の更新 (同じ ino の値に atomic 3 回と書き込み 1 回): 約 8%
   - inode_index の lookup と policy の hit 処理: 約 3%
   - trampoline / rcu / migrate: 約 2%
-- 1 つ目は、ポインタを直接たどる形に変えて解消した (a4e7b0f)。gate (a) は fuse-raw 比で 0.81 から 0.87 になった。挙動は変わらない。
+- 1 つ目は、ポインタを直接たどる形に変えて解消した (3eb6f7b)。gate (a) は fuse-raw 比で 0.81 から 0.87 になった。挙動は変わらない。
 - 2 つ目は、pattern map を per-CPU (`LRU_PERCPU_HASH`) にして大部分を解消した。gate (a) は 0.87 から 0.93 になった。並列で読むときの sequential の判定は改善した (§18.17)。
 - 3 つ目 (AC-47 の続き): pattern と inode_index の hash の lookup をやめ、CPU ごとの direct-mapped な slot 配列 (`s3fs_ino_slots`) 1 回の添字参照にまとめた。inode_index の在席は slot にキャッシュして 64 回に 1 回だけ確かめ直し、policy への on_hit は (CPU, ino) あたり jiffy に 1 回に間引き、カウンタは非 atomic にした。gate (a) は 0.93 から 0.94〜0.96 になった。
 - **フック自体の固定の負担 (trampoline と s_magic の判定) だけで fuse-raw 比 0.974 が上限**で、フックを付ける限り「fuse-raw 以上」には届かない。今の到達点 (0.94〜0.96) は、その上限から 1.5〜3.5% 下。gate (a) をどう判定するかは §5 の 6 のとおり決めが必要。
@@ -121,8 +121,8 @@ page cache で hit する read の経路に入るフックや変更は、次の�
 
 | 項目 | 負担 (fuse-raw 比) | 状態 |
 |---|---|---|
-| `BPF_CORE_READ` の probe_read | 約 7% | ✅ 直接参照に変更 (a4e7b0f) |
-| pattern map の共有 cacheline | 約 8% | ✅ per-CPU map (956f1cd)、さらに slot 配列へ (AC-47 続き) |
+| `BPF_CORE_READ` の probe_read | 約 7% | ✅ 直接参照に変更 (3eb6f7b) |
+| pattern map の共有 cacheline | 約 8% | ✅ per-CPU map (07e3bc2)、さらに slot 配列へ (AC-47 続き) |
 | pattern の hash lookup | 約 2.5% | ✅ slot 配列の添字参照に置き換え |
 | inode_index の lookup | 約 1.6% | ✅ slot にキャッシュ (64 回に 1 回確かめ直す) |
 | policy の kfunc (on_hit) | 約 1.7% | ✅ (CPU, ino) あたり jiffy に 1 回に間引き |
@@ -132,7 +132,7 @@ page cache で hit する read の経路に入るフックや変更は、次の�
 
 到達点: gate (a) は fuse-raw 比 0.94〜0.96 (フックなしの最低コストは 0.974)。残りは固定の負担と、slot の更新・counter の bump など read のたびにする最小限の仕事。これ以上を狙うなら、フックの目的 (miss のときの判断) を miss の経路で実現し、hit の経路から外す設計変更になる (§4.6)。
 
-**gate (a) の判定方法 (決定済み、2026-10-16)**: 文面どおりの「ebpf-pcache ≥ fuse-raw」は、フックが残る限り満たせない (フックを外した構成は 1.00〜1.03)。そこで `scripts/bench-ab-pcache.sh` の gate (a) を、**フックなしの pcache (`--no-read-iter-hook --pattern-aware-admit=false`) が fuse-raw の 0.98 倍以上** (`NOHOOK_TOLERANCE`、bench の run どうしのばらつきは約 2%) に変えた。フックの負担は gate には入れず、**`hook_ratio`** (フックありの pcache / fuse-raw) として毎回出し、0.90 (`HOOK_RATIO_MIN`) を下回ったら WARN を出す。2026-10-17 の現在のビルド (`fd8f772`) では gate (a) PASS、`hook_ratio` 0.983 (`docs/journal/benchmark-results.md` §18.43)。フックを足したり重くしたりする変更は、`hook_ratio` を §5 の基準で見る。
+**gate (a) の判定方法 (決定済み、2026-10-16)**: 文面どおりの「ebpf-pcache ≥ fuse-raw」は、フックが残る限り満たせない (フックを外した構成は 1.00〜1.03)。そこで `scripts/bench-ab-pcache.sh` の gate (a) を、**フックなしの pcache (`--no-read-iter-hook --pattern-aware-admit=false`) が fuse-raw の 0.98 倍以上** (`NOHOOK_TOLERANCE`、bench の run どうしのばらつきは約 2%) に変えた。フックの負担は gate には入れず、**`hook_ratio`** (フックありの pcache / fuse-raw) として毎回出し、0.90 (`HOOK_RATIO_MIN`) を下回ったら WARN を出す。2026-10-17 の現在のビルド (`4329711`) では gate (a) PASS、`hook_ratio` 0.983 (`docs/journal/benchmark-results.md` §18.43)。フックを足したり重くしたりする変更は、`hook_ratio` を §5 の基準で見る。
 
 ## 関連
 

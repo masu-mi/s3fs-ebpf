@@ -637,7 +637,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - **large folio の仮説は外れた。** 計測カーネル 6.12 では FUSE 側も order 0 だった。
 - **本当の律速は daemon が付けた `fentry/generic_file_read_iter` だった** (`docs/design/read-iter-hook-overhead.md`、§18.16 / 18.23 / 18.24)。フックなしでは fuse-raw の 1.00〜1.02×。BPF_CORE_READ の probe_read、同じ ino の値への atomic などが内訳。直接参照と per-CPU 化で 0.96× まで戻した。
 - 100 MiB の warm read は fuse-cache より速い (9.5 / 10.5 ms)。§18.2 の 1.20× は再現しなかった。
-- 現在のビルド (`fd8f772`) では AB-07 の gate (a)(b)(c) がすべて PASS (§18.43)。64 jobs は fuse-raw の 0.983× (フックあり)、100 MiB の cat は 14.7 / 17.1 ms (fuse-cache)、microbench は arena モードの 1.07 倍速い。
+- 現在のビルド (`4329711`) では AB-07 の gate (a)(b)(c) がすべて PASS (§18.43)。64 jobs は fuse-raw の 0.983× (フックあり)、100 MiB の cat は 14.7 / 17.1 ms (fuse-cache)、microbench は arena モードの 1.07 倍速い。
 
 敗北要因の整理 (2026-10-22、小さいファイルの並列 read、fuse-raw 比):
 1. **`fentry/generic_file_read_iter` (主因、64 jobs の A/B で確定)。** 外すと 1.00×、最適化して 0.94〜0.96×、フックの固定費だけで上限 0.974×。

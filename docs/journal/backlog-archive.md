@@ -33,7 +33,7 @@
 
 背景: softcap (8) は eviction 投票の発動条件で、容量ではない。そのため hit-rate ベンチ (`hr` Validity review) は容量で正規化されておらず、W-TinyLFU 88.5% は容量 8 の Belady 上限 61〜65% を超えている。下の順に着手する。S-01〜S-03 が終わるまで、hit 率を Meetup で数字として出さない。
 
-- [x] ✅ **S-01** 差分 invalidate — 実装済 (617f7ba、実機検証は S-06)。 (`as §4 P7`) — `s3fs_ebpf_admit_replace` は全置換のたびに一覧の全 ino の page cache を破棄している。1 ファイルの miss で、hot なファイルの page cache まで消える。前回の admit と (uaddr, size, offset) が同じ ino は破棄・`i_size_write` を省略する。旧エントリとの比較は staged 作成時に lock 下で行う。**受け入れ条件**: 1 ファイルの miss upcall の後も、他の admit 済みファイルの read が `.read_folio` に来ない (`folio_hits` / `read_miss_upcalls` が増えない)。目安 0.5 日
+- [x] ✅ **S-01** 差分 invalidate — 実装済 (f33af1f、実機検証は S-06)。 (`as §4 P7`) — `s3fs_ebpf_admit_replace` は全置換のたびに一覧の全 ino の page cache を破棄している。1 ファイルの miss で、hot なファイルの page cache まで消える。前回の admit と (uaddr, size, offset) が同じ ino は破棄・`i_size_write` を省略する。旧エントリとの比較は staged 作成時に lock 下で行う。**受け入れ条件**: 1 ファイルの miss upcall の後も、他の admit 済みファイルの read が `.read_folio` に来ない (`folio_hits` / `read_miss_upcalls` が増えない)。目安 0.5 日
 - [x] ✅ **S-02** バイト容量上限 + victim 選択 — 実装済 (方式 (a) スコア化。module param `capacity_bytes` / `softcap`、daemon `--cache-capacity` / `--softcap`。bench-hitrate は既定で capacity mode。in-flight の ino は evict しない。実機検証は S-06)。 (`as §4 P1-P3, §5`) — 内容は次の 4 点。目安 2〜3 日
   - daemon `--cache-capacity=<bytes>` (既定 = arena サイズ) を ioctl で kmod に渡す
   - kmod は投票の後もまだ上限を超えていれば、policy の順位で上限以下まで削る
@@ -42,7 +42,7 @@
 
   **受け入れ条件**: どの policy でも `adm` のバイト総量が上限以下。bench-hitrate の全行の hit 率が `opt` 以下になる
 - [x] ✅ **S-03** page cache hit を policy に供給 — 実装済。`kmod/tree_traversal.c` に `s3fs_kfunc_policy_hit(u64 ino)` KFunc を追加 (`BPF_PROG_TYPE_TRACING` に register)、`bpf/s3fs_fastpath.bpf.c` の `fentry/generic_file_read_iter` hit パス (`offp != NULL`) から呼び出す。page cache 経由の繰り返し read でも policy の `on_hit` が dispatch される。`.read_folio` (arena-hit) で既に `on_hit` を呼んでいるパスでの二重呼び出しはどの policy も idempotent / cap-bounded なので許容。BPF オブジェクト再生成 + kmod ビルド + Go テスト全通過。実機検証は S-06。
-- [x] ✅ **S-04** evict 反映の遅れ — 実装済 (8db7c82、push 直前に drain)。 (`as §4 P6`) — daemon の drain は 2 秒周期で、その間の全置換で evict 済み ino が再送・復活する。kmod が直近の evict 済み ino を覚えて再送を弾くか、ADMIT_ARENA ioctl の戻りで evict 結果を即時に返す。目安 0.5〜1 日
+- [x] ✅ **S-04** evict 反映の遅れ — 実装済 (66c932d、push 直前に drain)。 (`as §4 P6`) — daemon の drain は 2 秒周期で、その間の全置換で evict 済み ino が再送・復活する。kmod が直近の evict 済み ino を覚えて再送を弾くか、ADMIT_ARENA ioctl の戻りで evict 結果を即時に返す。目安 0.5〜1 日
 - [x] ✅ **S-05** 再計測 (S-01〜S-03 の後) — `hr` / `br` / `mo` を更新済。
   - ✅ `bench-hitrate.sh`: 3 seed × 10 policy (seed 42/1337/7)、`opt`/`adm_*` 併記、中央値とばらつき。`hr §"Result (2026-10-05)"` 参照。
   - ✅ `bench-write.sh`: `ebpf-fsync` 行取得済み。`br §8.2` 参照。
@@ -54,7 +54,7 @@
   - ✅ evict 時の page cache 破棄: 30/30 evict 後の cat が miss 経路を通ることを確認
   - ✅ `nocache=1`: 3x cat で delta_miss=3 (毎 open で S-09 evict_log_push + invalidate_inode_pages2 が動作)
   - ✅ S-01 差分 invalidate: hitrate_20 の miss upcall 後も hitrate_0/1 の page cache 保持 (re-read で upcall なし)
-- [x] ✅ **S-08** ebpf-fsync の固定オーバーヘッド (~90 ms) — 修正済 (commit c75247f、2026-10-06)。根本原因: daemon の flush ioctl が PUT 完了を非同期でポーリング (100ms 周期 ticker) していた。修正: `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え、kmod が flush event を受け取り次第即 wake。**結果**: 1 MiB ebpf-fsync min=19.7ms → fuse-raw (19.5ms) と同オーダーに達した。`br §8.4` 参照。
+- [x] ✅ **S-08** ebpf-fsync の固定オーバーヘッド (~90 ms) — 修正済 (commit cbcc66e、2026-10-06)。根本原因: daemon の flush ioctl が PUT 完了を非同期でポーリング (100ms 周期 ticker) していた。修正: `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え、kmod が flush event を受け取り次第即 wake。**結果**: 1 MiB ebpf-fsync min=19.7ms → fuse-raw (19.5ms) と同オーダーに達した。`br §8.4` 参照。
 - [x] ✅ **S-09** ebpf-nocache の tiny ファイル miss rate が低い (~18%) — 修正済 (2026-10-06)。根本原因 2 点: (1) kmod の `admit_drop_all_ranges` が evict_log に通知しないため daemon が re-push して admit が復活; (2) `invalidate_mapping_pages` が trylock で active folio を skip。修正: `s3fs_ebpf_file_open` nocache パスに `evict_log_push(ino)` + `invalidate_inode_pages2()` fallback を追加。**結果**: tiny ファイルの microbench miss 率が ~18% → ≈100% に改善、p50 = 558µs (vs fuse-raw 1.7ms で 3× 速い)。`br §7.7` 参照。
 - [x] ✅ **S-07** disk cache (A 層, `--cache-dir`) の上限管理 — 実装済。`DiskCache.maxBytes` フィールドを追加、`NewDiskCache` に `maxBytes int64` (0=unlimited) を追加、`Write` 前に `evictIfNeeded` (dir scan → mtime 昇順で古い順に削除) を呼ぶ。`s3.Config` / `gcs.Config` に `MaxCacheBytes` を追加、daemon に `--disk-cache-capacity` フラグ + `S3FS_DISK_CACHE_CAPACITY` env を追加。`TestDiskCache_Eviction` / `TestDiskCache_EvictionDisabled` で動作を pin。
 
@@ -126,7 +126,7 @@
 
 design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 architecture 決定済。実装は下記の順で:
 
-- [x] ✅ **P-01** `pe Q3` CEL syntax spike — 完 (commit 8cbc8d1)。`daemon/internal/policy/` + `policies/default.cel` を追加、`--policy` flag、prewarm hook が entry サイズ / 名前で判定
+- [x] ✅ **P-01** `pe Q3` CEL syntax spike — 完 (commit d7efccc)。`daemon/internal/policy/` + `policies/default.cel` を追加、`--policy` flag、prewarm hook が entry サイズ / 名前で判定
 - [x] ✅ **Layer 2 wiring** (P-01 の後続) — 完 (次 commit)。kmod に `s3fs_policy_on_admit` fentry anchor、`bpf/policy_observe.bpf.c` を出荷、daemon `--policy-bpf=builtin:policy_observe` で load + attach、policy_stats を /metrics に mirror
 - [x] ✅ **Layer 3 wiring** (P-01 の後続) — 完 (次 commit)。`--policy-bpf=file:<path>` で任意 .bpf.o を load、SEC 命名で attach、smoke で /tmp/user_policy.bpf.o の load + counter 増加を確認
 - [x] ✅ **P-02 (basic)** hot reload endpoint + in-flight semantics — 完 (次 commit)。POST /policy/reload 追加、新 program を先に attach → 旧 close の順、kmod unreg guard で "same vtable のみ clear" にして空 vtable 状態を防止。smoke で S3-FIFO → LRU が atomic swap、curl 一発で切替できる Meetup demo 用素材が揃った。P-02 の残: link.Update ベース (現状 close+re-attach、bpf_link_update 対応は cilium/ebpf 側 struct_ops 制限)
@@ -135,7 +135,7 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **P-04** trace harness (offline simulator) — 完 (次 commit)。`daemon/internal/trace/` に JSON Lines trace format + Zipf generator + strict LRU / paper-SIEVE の Go simulator を実装、`s3fs-ebpf trace-replay` CLI で ms-scale の policy 比較が可能に (200 events で 1ms、10000 events で 9ms、bench の 30s より 3000× 高速)。docs/trace-harness.md に format spec + sim ≠ BPF の divergence 説明 (LRU: sim 40% vs bench 7.5%、SIEVE: sim 45% vs bench 66%) + roadmap を書き起こし。kmod-side ring buffer recorder は P-04 followup として残り
 - [x] ✅ **P-05** user eBPF 署名検証 — 完 (次 commit)。`daemon/internal/policyprog/allowlist.go` に SHA256 allowlist reader + `Verify()`。`--policy-allowlist=<path>` flag、無指定は permissive dev mode、指定時は strict enforcement (未 listed の `file:` 系 load を 403 reject、`builtin:` は bypass)。startup 時の allowlist load 数を stdout に、match / miss を stderr にログ。smoke で unlisted rejection と listed acceptance の両 path 検証。`policies/allowlist.example.txt` template 追加
 - [x] ✅ **P-05 (CLI)** operator UX 補完 — 完 (次 commit)。`s3fs-ebpf hash-policy <path>...` subcommand を追加、`sha256sum` 互換 output format で allowlist.txt に直接 append 可能。`policyprog.HashFile()` を wrap するだけの薄い CLI
-- [x] ✅ **P-06 (S3-FIFO 部分)** built-in policy として S3-FIFO を出荷 — 完 (commit 6c29b2e / c62d8dc)。`bpf/policy_s3fifo.bpf.c` (fmod_ret) + `bpf/policy_s3fifo_ops.bpf.c` (struct_ops) の 2 版
+- [x] ✅ **P-06 (S3-FIFO 部分)** built-in policy として S3-FIFO を出荷 — 完 (commit a14d108 / ec1b7fe)。`bpf/policy_s3fifo.bpf.c` (fmod_ret) + `bpf/policy_s3fifo_ops.bpf.c` (struct_ops) の 2 版
 - [x] ✅ **P-06 (LRU 部分)** LRU-like (admit-order FIFO) を追加 — 完 (次 commit)。`bpf/policy_lru_ops.bpf.c` に struct_ops で。global epoch counter + per-ino seed で age-based eviction (LRU_CAP_AGE=3)。同 commit で kmod call site の bug fix (struct_ops on_admit/pressure が呼ばれていなかった)。smoke で "struct_ops voted evict on 11/14 entries" 実測。W-TinyLFU / SIEVE も同 template で追加可能
 - [x] ✅ **P-06 (SIEVE 部分)** SIEVE (NSDI 2024) を追加 — 完 (次 commit)。`bpf/policy_sieve_ops.bpf.c` に struct_ops で。per-ino 1-bit visited + second-chance clock semantics: first sight → seed=1 (grace)、on_evict で visited=1 → clear to 0 (second chance)、visited=0 → EVICT。smoke で round-by-round 挙動を実測 (round 1: 11 admit → 0 vote, round 2: 12 admit → 0 silent vote, round 3: 13 admit → 12/13 evict)。W-TinyLFU は P-07 の hit-rate 比較後に追加
 - [x] ✅ **P-14 on_hit hook** — 完 (次 commit)。vtable に 4 番目のメソッド `on_hit(ino)` 追加、`read_folio` の admit-hit 分岐から fmod_ret + struct_ops 両 path で dispatch。SIEVE: visited=1 復活、LRU: seed=current_epoch (age reset)、S3-FIFO: freq++ (up to 3)、observe: PSTAT_INVOCATIONS 加算。smoke で SIEVE の on_hit → 次 evict round で visited=1 → clear+keep、その後の cat 無ければ visited=0 → EVICT を alternating pattern (13→2→13→2→3→14→2→5) で観測。cat 継続の hello.txt は 4 round evict 生存、cat 停止した他 ino は round 3 で evict 実測
@@ -147,10 +147,10 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 - [x] ✅ **P-08** KFunc set の 1 次実装 — 完 (次 commit)。`s3fs_kfunc_admit_count()` (現 admit hash size)、`s3fs_kfunc_softcap()` (kmod-side const 8) を TRACING + STRUCT_OPS + SYSCALL prog types に register。kmod に `atomic_t s3fs_admits_count` を導入し admit_replace / evict path で updates。`bpf/policy_pressure_ops.bpf.c` を demo として追加 — pressure_ratio ≥ 1.5x で SIEVE の second-chance を skip する adaptive 版。bench で 52% hit + 30 admits → 19 evict (アクティブに aggressive 停止する挙動を dmesg で観測)
 - [x] ✅ **P-08 拡張** KFunc set 追加 — 完 (次 commit)。`s3fs_kfunc_evictions_total()` (累計 eviction 数、atomic_long_read) と `s3fs_kfunc_time_ns()` (ktime_get_boottime_ns) を追加、TRACING + STRUCT_OPS の両 register セットに揃える。`bpf/policy_time_decay_ops.bpf.c` を time-based decay LRU demo として追加 — per-ino last_hit_ns を on_hit で更新、on_evict で `now - last_hit > 5s` なら vote evict。smoke で 35 admit → 7s 後の eval round で 35/35 全て time decay 発動を dmesg 確認
 - [x] ✅ **P-08 拡張 (ino_size)** per-ino KFunc の 1 個目 — 完 (次 commit)。`s3fs_kfunc_ino_size(u64 ino)` が admit hash lookup で size を返す。`kmod/vfs_ops.c` に `s3fs_admit_size()` helper (spinlock 保持中の bucket walk) を切って exposed function として提供、tree_traversal.c の KFunc がそれを wrap。struct_ops + tracing の両 set に register。`bpf/policy_size_aware_ops.bpf.c` を demo として追加 — SIEVE 相当だが SMALL_THRESHOLD=4KB 未満のみ通常 evict、以上は BIG_MISS_CAP=2 rounds のグレース。verifier 通過 + 35/35 evict (44B files で small path) を smoke 確認
-- [x] ✅ **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 完 (commit 6c29b2e)。`s3fs_policy_on_evict(ino)` / `s3fs_policy_on_pressure(count, threshold)` の 2 hook を追加、admit_replace が毎 entry / capacity 越えで発火。BPF 側は evict_vote map に vote 書込 (verifier が fentry return を 0 固定強制するため side channel)。daemon-side vote 消費は future work
+- [x] ✅ **P-09** eviction hook (on_evict / on_pressure) を kmod に追加 — 完 (commit a14d108)。`s3fs_policy_on_evict(ino)` / `s3fs_policy_on_pressure(count, threshold)` の 2 hook を追加、admit_replace が毎 entry / capacity 越えで発火。BPF 側は evict_vote map に vote 書込 (verifier が fentry return を 0 固定強制するため side channel)。daemon-side vote 消費は future work
 - [x] ✅ **P-10 fmod_ret 化** — 完 (次 commit)。register_btf_fmodret_id_set で hook を fmod_ret 対象に、`return 1` が kmod call site の retval に naturally 反映。side-channel map 削除、smoke で "policy voted evict on 11/12 entries" 観測
-- [x] ✅ **P-11 struct_ops 化** — 完 (commit c62d8dc)。`struct s3fs_policy_ops` を kmod に定義 + `register_bpf_struct_ops`、BPF は SEC(".struct_ops.link") vtable で書く。rcu_dereference で atomic hot swap。smoke で "struct_ops voted evict on 11/12 entries" 観測。fmod_ret と struct_ops の比較 doc は docs/policy-attach-comparison.md
-- [x] ✅ **P-12 vote 消費 (actual eviction)** — 完 (commit 8563639)。admit_replace が struct_ops eval_evict の retval を消費し、softcap 超過時に admit hash から実 hash_del。s3fs_evictions_total atomic counter + S3FS_IOC_STATS ioctl で daemon に export、metrics.PolicyEvictionsTotal → Prometheus。smoke で 11 entries が softcap=8 で evicted、`s3fs_ebpf_policy_evictions_total 11` を実測
+- [x] ✅ **P-11 struct_ops 化** — 完 (commit ec1b7fe)。`struct s3fs_policy_ops` を kmod に定義 + `register_bpf_struct_ops`、BPF は SEC(".struct_ops.link") vtable で書く。rcu_dereference で atomic hot swap。smoke で "struct_ops voted evict on 11/12 entries" 観測。fmod_ret と struct_ops の比較 doc は docs/policy-attach-comparison.md
+- [x] ✅ **P-12 vote 消費 (actual eviction)** — 完 (commit b3ff672)。admit_replace が struct_ops eval_evict の retval を消費し、softcap 超過時に admit hash から実 hash_del。s3fs_evictions_total atomic counter + S3FS_IOC_STATS ioctl で daemon に export、metrics.PolicyEvictionsTotal → Prometheus。smoke で 11 entries が softcap=8 で evicted、`s3fs_ebpf_policy_evictions_total 11` を実測
 - [x] ✅ **P-13 eviction feedback loop** — 完 (次 commit)。kmod に S3FS_EVICT_LOG_CAP=512 の ring buffer + S3FS_IOC_DRAIN_EVICTIONS ioctl、daemon の drainEvictionsLoop が 2s ごとに読んで admits snapshot から drop。oscillation (daemon 再送 → kmod 再 evict) 解消、smoke で kmod 9 evict → daemon `[evict-drain] dropped 9 admits fed back` → `admits_current 12→3` 実測
 
 ---
@@ -181,8 +181,8 @@ design doc (`pe`) は完成、CEL + built-in eBPF + user eBPF + KFunc の 3 層 
 
 - [x] ✅ **T-02** `dropAdmitsLocked` 戻り値の意味ズレ — 修正済。`dropped` カウンタを別途管理し `len(freedRanges)` ではなく実際に削除した ino 数を返すよう変更。回帰テスト `TestDropAdmitsLocked_ReturnsDroppedCount` を追加。
 - [x] ✅ **T-03** `drainEvictions` / `readStats` がポーリング毎に fd open/close — 修正済。`drainEvictionsOn(devFd int)` / `readStatsOn(devFd int)` を追加し、`drainEvictionsLoop` / `sampleKmodStats` が起動時に 1 回 open して各ティックで再利用するよう変更。既存の `drainEvictions(devPath)` / `readStats(devPath)` は `reconcileEvictionsLocked` 等の呼び出し元のため保持。
-- [x] ✅ **T-04** `planReplaceAdmit` が複数 range 持つ ino の旧チャンクを 1 個しか解放しない (latent arena リーク) — 修正済 (commit cda8595)。`freed []arenaChunkPair` を返す形に変更し全マッチを `append`。`TestPlanReplaceAdmit_MultiRangeFreesAllChunks` で回帰テスト追加。
-- [x] ✅ **T-05** `arenaChunkPair.offset/size` が `uint32` で arena 4 GiB 超に対応できない (latent truncation) — 修正済 (commit 2ab0c57)。`arenaChunkPair`, `arenaChunk`, `cacheNextOff`, `FreeArenaChunk`, `AdmitContent` を uint64 に昇格。BPF map (`s3fs_inode_index`) の value 型 `__u32` 制約は WarmCache の call site で `uint32(nextOff)` キャストを保持しコメントを追記。
+- [x] ✅ **T-04** `planReplaceAdmit` が複数 range 持つ ino の旧チャンクを 1 個しか解放しない (latent arena リーク) — 修正済 (commit 611c023)。`freed []arenaChunkPair` を返す形に変更し全マッチを `append`。`TestPlanReplaceAdmit_MultiRangeFreesAllChunks` で回帰テスト追加。
+- [x] ✅ **T-05** `arenaChunkPair.offset/size` が `uint32` で arena 4 GiB 超に対応できない (latent truncation) — 修正済 (commit d861941)。`arenaChunkPair`, `arenaChunk`, `cacheNextOff`, `FreeArenaChunk`, `AdmitContent` を uint64 に昇格。BPF map (`s3fs_inode_index`) の value 型 `__u32` 制約は WarmCache の call site で `uint32(nextOff)` キャストを保持しコメントを追記。
 
 ### Q. セキュリティ強化 (P1 — 2026-10-10 レビュー)
 
@@ -418,10 +418,10 @@ P2: V2-01 DiskCache サイズ追跡改善 ✅ 完了 2026-10-10
 - ✅ T-01 `pruneAdmitsTo` arena リーク
 - ✅ T-02 `dropAdmitsLocked` 戻り値の意味ズレ
 - ✅ T-03 fd per-call overhead
-- ✅ T-04 `planReplaceAdmit` 複数 range arena リーク (commit cda8595)
-- ✅ T-05 `arenaChunkPair` uint32 → uint64 昇格 (commit 2ab0c57)
-- ✅ S-08 ebpf-fsync ~90ms 固定オーバーヘッド (commit c75247f)
-- ✅ S-09 nocache tiny ファイル miss 率 ~18% (commit a6a6757)
+- ✅ T-04 `planReplaceAdmit` 複数 range arena リーク (commit 611c023)
+- ✅ T-05 `arenaChunkPair` uint32 → uint64 昇格 (commit d861941)
+- ✅ S-08 ebpf-fsync ~90ms 固定オーバーヘッド (commit cbcc66e)
+- ✅ S-09 nocache tiny ファイル miss 率 ~18% (commit 804e12c)
 
 S-01〜S-05/S-07 は実装済 ✅ 参照。
 
@@ -445,21 +445,21 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 ## AC. pcache モード修正 (P1〜P6 / Q1〜Q4、2026-10-13 レビュー、`br §14〜16`)
 | # | 内容 | 優先度 | 状態 |
 |---|---|---|---|
-| AC-01 | P1: fc_pcache_check が pos を無視 → 分割 admit でゼロ読み | P0 必須 | ✅ 修正済 (commit efe7a08) |
-| AC-02 | P2: populate_pages にオーバーフロー検査なし → 範囲外書き込み | P0 必須 | ✅ 修正済 (commit efe7a08) |
-| AC-03 | P3: admit_insert_pcache 重複 + admit_replace でエントリ消去 + 容量未適用 | P0 | ✅ 修正済 (commit 1271adf) |
-| AC-04 | P4: fc_pcache_check のメモリ順序 (smp_acquire/release 欠如) | P1 | ✅ 修正済 (commit 879dbfa) |
+| AC-01 | P1: fc_pcache_check が pos を無視 → 分割 admit でゼロ読み | P0 必須 | ✅ 修正済 (commit 98a85bf) |
+| AC-02 | P2: populate_pages にオーバーフロー検査なし → 範囲外書き込み | P0 必須 | ✅ 修正済 (commit 98a85bf) |
+| AC-03 | P3: admit_insert_pcache 重複 + admit_replace でエントリ消去 + 容量未適用 | P0 | ✅ 修正済 (commit a53d229) |
+| AC-04 | P4: fc_pcache_check のメモリ順序 (smp_acquire/release 欠如) | P1 | ✅ 修正済 (commit c1aafc2) |
 | AC-05 | P5: bench-ab-pcache の gate (b) が 10 MiB / timed_reads に startup コスト | P1 | ✅ デフォルト 100 MiB + hyperfine に変更 |
-| AC-07 | Q1: s3fs_file_data_reset が i_size_write(0) → stat/read が eviction 後に壊れる | P0 必須 | ✅ 修正済 (commit b3ae6e8) |
-| AC-08 | Q2: populate_pages と eviction の race → pcache 経路でゼロ読み (NULL buf) | P0 必須 | ✅ 修正済 (commit b3ae6e8) |
-| AC-09 | Q3: S3FS_POPULATE_MAX_END=4GiB → offset>4GB の chunk admit が全て弾かれる | P1 | ✅ 修正済 (commit b6d42d1) |
-| AC-10 | Q4: timed_reads の awk が gawk 専用 + µs パース誤り → bench 計測値が不正 | P1 | ✅ 修正済 (commit 214813d) |
-| AC-11 | R1: populate/evict race → pcache entry が NULL fd->buf を指しゼロ返し (データ破損) | P0 必須 | ✅ 修正済 (commit caf0b7f) |
-| AC-12 | R2: timed_reads fallback が silent → 計測方法が記録に残らない | P1 | ✅ 修正済 (commit b911a03 + 633dfe8) |
+| AC-07 | Q1: s3fs_file_data_reset が i_size_write(0) → stat/read が eviction 後に壊れる | P0 必須 | ✅ 修正済 (commit 002a039) |
+| AC-08 | Q2: populate_pages と eviction の race → pcache 経路でゼロ読み (NULL buf) | P0 必須 | ✅ 修正済 (commit 002a039) |
+| AC-09 | Q3: S3FS_POPULATE_MAX_END=4GiB → offset>4GB の chunk admit が全て弾かれる | P1 | ✅ 修正済 (commit 1e1b85b) |
+| AC-10 | Q4: timed_reads の awk が gawk 専用 + µs パース誤り → bench 計測値が不正 | P1 | ✅ 修正済 (commit 3415faf) |
+| AC-11 | R1: populate/evict race → pcache entry が NULL fd->buf を指しゼロ返し (データ破損) | P0 必須 | ✅ 修正済 (commit 070ff01) |
+| AC-12 | R2: timed_reads fallback が silent → 計測方法が記録に残らない | P1 | ✅ 修正済 (commit fa533d3 + 3ddb9e5) |
 | AC-13 | R3: Q1 修正前ビルドの §16 計測が無効 → R1 ビルドで再計測が必要 | P0 必須 | ✅ 再計測済み (`br §18` / `§18.43`): 現在のビルドで AB-07 gate (a)(b)(c) すべて PASS、hit rate は opt 以下、arena は §12.3 と整合、sha256 は全一致。lockdep は実行していない (AC-42: 静的なロック順の確認だけで閉じた。`CONFIG_PROVE_LOCKING` 付きカーネルが要る) |
-| AC-14 | S1: check/fill 間の TOCTOU → eviction+populate が重なるとゼロ返し | P0 必須 | ✅ 修正済 (commit 8eeab28) |
-| AC-15 | S2: timed_reads を subshell から呼ぶと TIMED_READS_METHOD が消える → AB07-RESULT の method= が常に hyperfine | P1 | ✅ 修正済 (commit 633dfe8) |
-| AC-16 | S3: evict-race テストが eviction ゼロでも通過 / lockdep 無効時に PASS 表記 / grep パターン不足 | P1 | ✅ 修正済 (commit 633dfe8) |
+| AC-14 | S1: check/fill 間の TOCTOU → eviction+populate が重なるとゼロ返し | P0 必須 | ✅ 修正済 (commit 315b182) |
+| AC-15 | S2: timed_reads を subshell から呼ぶと TIMED_READS_METHOD が消える → AB07-RESULT の method= が常に hyperfine | P1 | ✅ 修正済 (commit 3ddb9e5) |
+| AC-16 | S3: evict-race テストが eviction ゼロでも通過 / lockdep 無効時に PASS 表記 / grep パターン不足 | P1 | ✅ 修正済 (commit 3ddb9e5) |
 | AC-17 | S5: upcall 完了後の eviction 窓 (signal_admit → wakeup) でゼロ返し → retry ループで防御 | P1 | ✅ 修正済 |
 | AC-18 | S7: invalidate_mapping_pages がロック中 folio をスキップ → 古い uptodate page が eviction 後も残存 | P1 | ✅ 修正済 |
 | AC-19 | S8: populate_pages が i_size を縮小方向に更新 → 部分 re-populate で VFS ファイルサイズが縮む | P1 | ✅ 修正済 |
@@ -470,19 +470,19 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-24 | T3: evict ioctl が invalidate_inode_pages2 で folio lock を待ちデッドロック | P1 | ✅ 修正済 |
 | AC-25 | T4: retry 上限到達の -EIO がデータ破損と区別できない (retry_exhausted カウンタ未実装) | P2 | ✅ 修正済 |
 | AC-26 | T5: チャンク単位 bit が部分 populate を有効扱い — fallback 経路の over-count | P2 | ✅ 修正済 (pcache 経路は T2 で解消済) |
-| AC-27 | T6: T1〜T3 修正後ビルドで §18.1〜18.4 を再計測 + §18.5〜18.8 追加 | P0 必須 | ✅ 計測済 (`br §18`, d3d550c) |
+| AC-27 | T6: T1〜T3 修正後ビルドで §18.1〜18.4 を再計測 + §18.5〜18.8 追加 | P0 必須 | ✅ 計測済 (`br §18`, 7ed6abe) |
 | AC-28 | U1: test-populate-boundary.sh が kmod ソース grep → 実 ioctl 呼び出しに置き換え | P0 必須 | ✅ 修正済 |
 | AC-29 | U2: test-evict-readback.sh の eviction 0 回が WARNING → FAIL（metrics 不可時のみ SKIP） | P0 必須 | ✅ 修正済 |
 | AC-30 | U3: test-write-readback.sh にサブテスト 4（flush+drop_caches 再 read）追加 | P0 必須 | ✅ 修正済 |
 | AC-31 | U4: Makefile test-regression に test-pcache-multiread + test-pcache-evict-race-short 追加 | P0 必須 | ✅ 修正済 |
 | AC-32 | U5: flush 完了時（signal_flush err==0）に fd->size 以下の全 chunk bit を立てる | P1 推奨 | ✅ 修正済 |
 | AC-33 | U6: populate_pages の eof を fd->size → i_size_read(inode) に変更（evict 後 fd->size=0 対策） | P1 推奨 | ✅ 修正済 |
-| AC-34 | U7: U1〜U6 入り後に make test-regression + §18.1/18.2 bench を実行し結果を記録 | P0 必須 | ✅ 計測済 (`br §18`, d3d550c) |
-| AC-35 | W1: close 後・flush PUT 前に inode が evict されると未 PUT の fd->buf を破棄 (書き込み消失) → flush 完了まで ihold で pin | P0 必須 | ✅ 修正済 (commit 25dc831) |
-| AC-36 | pending_exists が chunk_offset≠0 の pending を見落とす → hash key を ino 単独に | P1 | ✅ 修正済 (commit 6846872) |
-| AC-37 | W2: .create したファイルの inode が evict されると再 lookup で i_size=0 → evict 時に i_size をエントリへ書き戻す | P0 必須 | ✅ 修正済 (commit d3d550c) |
-| AC-38 | M1: fd->buf 確保量ゲージ + skip_reset カウンタを常設、evict-race に「停止後 fd_buf ≤ capacity」判定 | P1 | ✅ 実装済 (commit 0c47ff7) |
-| AC-39 | U10 (pcache ヒット経路の buf_readers 増減) を A/B で不要と確認し削除 | P1 | ✅ 削除済 (commit f44e2b4、`br §18.10`) |
+| AC-34 | U7: U1〜U6 入り後に make test-regression + §18.1/18.2 bench を実行し結果を記録 | P0 必須 | ✅ 計測済 (`br §18`, 7ed6abe) |
+| AC-35 | W1: close 後・flush PUT 前に inode が evict されると未 PUT の fd->buf を破棄 (書き込み消失) → flush 完了まで ihold で pin | P0 必須 | ✅ 修正済 (commit 694d2a1) |
+| AC-36 | pending_exists が chunk_offset≠0 の pending を見落とす → hash key を ino 単独に | P1 | ✅ 修正済 (commit 5bf11a3) |
+| AC-37 | W2: .create したファイルの inode が evict されると再 lookup で i_size=0 → evict 時に i_size をエントリへ書き戻す | P0 必須 | ✅ 修正済 (commit 7ed6abe) |
+| AC-38 | M1: fd->buf 確保量ゲージ + skip_reset カウンタを常設、evict-race に「停止後 fd_buf ≤ capacity」判定 | P1 | ✅ 実装済 (commit b376edd) |
+| AC-39 | U10 (pcache ヒット経路の buf_readers 増減) を A/B で不要と確認し削除 | P1 | ✅ 削除済 (commit 892e1be、`br §18.10`) |
 | AC-40 | daemon のディスクキャッシュが size/ETag を検証せず、上書きされた object の古い body を返す (ab-pcache で 10 MiB 版が残り -EIO) | P1 | ✅ 修正 (2026-10-17): cache ファイルの先頭に header (形式 tag、ETag、size) を持たせ、List / Stat / Get が観測した remote の ETag・size と食い違う body、header のない旧形式、長さが size と合わない body は miss にして消す (`DiskCache.Observe` / `Read`)。daemon は起動時に List してから prewarm するので、再起動をまたいだ古い body も止まる。以後の外部上書きは次の sync (`--sync-every`) で検出する (それまでは古い body が返りうる)。GCS は generation で比較。`TestDiskCache_StaleBodyIsNotServed`、MinIO を使う `TestGet_DiskCacheFollowsExternalOverwrite` (`Observe` を無効にすると FAIL)。旧形式の cache は最初の Get で捨てられる |
 | AC-41 | fd->buf が capacity_bytes の 10 倍まで膨らむ — `s3fs_file_data_reserve` が populate 範囲の終端まで確保し、容量判定 (`live_bytes`) は admit 済み chunk しか数えない | P1 | ✅ 第一案で修正 (`br §18.11`): 容量判定を pcache ino の fd->cap で行い、populate は切り上げなし確保。test-pcache-capacity-tail 追加。残: 読み込み中の一時的なピーク (evict-race 36 MiB) は抑えない → AC-45。将来案 (chunk 単位確保) は未着手。追加検証 (`br §18.12`): test-regression 7 本 PASS、M2 照合で drift 0、切り上げ廃止による cold read の悪化なし |
 | AC-43 | pcache モードで prewarm が 1 件も admit しないと `s3fs_admitted_mm` が未設定のままになり、upcall が飛ばず全 read が失敗する (`prewarm-meta-only.cel` で再現) | P1 | ✅ 修正 (`br §18.13`): count=0 の admit ioctl でも daemon の mm を渡し、`s3fs_admitted_mm` を設定する。test-pcache-prewarm-none 追加 (修正前 FAIL / 修正後 PASS) |
@@ -490,7 +490,7 @@ S-01〜S-05/S-07 は実装済 ✅ 参照。
 | AC-45 | 読み込み中の fd->buf ピークは capacity で抑えられない (evict-race で 36 MiB / capacity 4 MiB)。原因は 3 つ: (1) pcache の populate 後に capacity の evict が走らない、(2) fd->buf がファイル全体の連続領域、(3) pending / buf_readers の ino は丸ごと evict できない | P2 | ✅ 修正 (`br §18.19`〜`§18.21`): C1 fd を 4 MiB の chunk の表に、C2 populate 後に daemon が capacity の pass を走らせ成功 signal でデータの存在を確かめる、C3 chunk 単位の pin と shed。capacity より大きいファイルの順次読みのピーク 40 → 12 MiB、evict-race のピーク 36 → 17〜22 MiB。C4 (受け入れ待ち) は不要と判断 |
 | AC-46 | 順番に読む populate で chunk ごとに fd->buf を再確保し全体を memcpy (O(n²))。300 MiB の cold read が 100 MiB の 5.7 倍 (2.4 s)。AC-41 前からある問題。案: 再確保の上限を i_size にしたうえで倍々に確保する (AC-41 の末尾 chunk の件と両立させる) | P2 | ✅ 修正 (`br §18.14`): populate の reserve を `max(needed, min(2 × cap, max(end, i_size)))` にした。cold read 300 MiB 2.33 s → 0.78 s、100 MiB 0.42 s → 0.27 s (比 5.6 → 2.9)。容量は最大で読み込み済み範囲の約 2 倍を数える |
 | AC-47 | AB-07 gate (a) (64 jobs psync read) の残り差は `fentry/generic_file_read_iter` の負担。フックを外すと fuse-raw と同じ IOPS | P2 | ✅ 完了 (`br §18.16` / `§18.17` / `§18.23` / `§18.24`): 直接参照 (0.81→0.87)、per-CPU pattern (→0.93)、slot 配列 + 在席キャッシュ + on_hit の間引き + 非 atomic カウンタ (→0.94〜0.96)。フックの固定コストで 0.974 が上限のため、gate (a) の判定を「フックなしの pcache ≥ 0.98 × fuse-raw」に変更し、フックの負担は `hook_ratio` (今 0.96、0.90 未満で WARN) として別に追う |
-| AC-48 | arena モードで 10 MiB のファイルを chunk 単位に admit すると、ファイルサイズが 4 MiB に縮み、読み込みが途中で EOF になる (sha256 不一致)。原因は admit_replace が entry の `size` (range の長さ) で `i_size_write` していたこと (306cc9a の全体 admit 前提が D-01 で崩れていた)。W2 で evict 時に誤ったサイズが entry に書き戻される | P1 | ✅ 修正 (`br §18.18`): i_size は新しい中身の range 終端までだけ伸ばし、縮めない。write/flush 中の inode には触らない。test-arena-partial-readback 追加 (修正前 FAIL / 修正後 PASS) |
+| AC-48 | arena モードで 10 MiB のファイルを chunk 単位に admit すると、ファイルサイズが 4 MiB に縮み、読み込みが途中で EOF になる (sha256 不一致)。原因は admit_replace が entry の `size` (range の長さ) で `i_size_write` していたこと (55dbc7d の全体 admit 前提が D-01 で崩れていた)。W2 で evict 時に誤ったサイズが entry に書き戻される | P1 | ✅ 修正 (`br §18.18`): i_size は新しい中身の range 終端までだけ伸ばし、縮めない。write/flush 中の inode には触らない。test-arena-partial-readback 追加 (修正前 FAIL / 修正後 PASS) |
 | AC-49 | arena モードの chunk admit で、`replaceAdmit` (planReplaceAdmit) が同じ ino の他の range を落とすので、[0, 4) MiB を admit すると [4, 8) MiB が消え、次に読むとき同じ chunk をもう一度 GET する。D-01 の range list と噛み合っていない | P3 | ✅ 修正 (`br §18.25`): chunk admit は `replaceAdmitRange` で、重なる range だけを置き換えて arena を解放する。test-arena-partial-readback に「各 chunk の取得は 1 回」を追加 (修正前 4 回 / 3 chunk で FAIL → 3 回で PASS) |
 | AC-42 | lockdep 未検証 — CONFIG_PROVE_LOCKING=y カーネルで evict-race / write-readback を実行 (W1 で fd->lock 内側の s3fs_flush_pins_lock を追加) | P2 | ✅ 静的確認で閉じた (2026-10-18、lockdep の実行はしない判断):  `s3fs_policy_evict_lock` (AC-58) を取るのは `admit_replace` だけで、その呼び出し元は ioctl のみ (他のロックを持たずに入る)。mutex の中で取るのは既存の `fd->lock` → `admits_lock` の順だけで、逆向きの辺はない。lockdep の実行には `CONFIG_PROVE_LOCKING=y` のカーネルのビルドと再起動が要る (インストール済みの 6.8 / 6.12 はどれも無効) |
 

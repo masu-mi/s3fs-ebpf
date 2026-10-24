@@ -322,7 +322,7 @@ to evict roughly `N_ACCESS - SOFTCAP` times.
 
 ## Naming honesty (Oct 2026)
 
-Until commit 4e4e3f1 the "S3-FIFO" built-in was actually a
+Until commit cb9f201 the "S3-FIFO" built-in was actually a
 single-tier per-ino 2-bit counter with decrement-on-evict
 semantics — closer to Generalized CLOCK than S3-FIFO. It was
 kept because it was our first spike and worked for the fmod_ret

@@ -66,7 +66,7 @@ Week 1〜4 (a)(b)(c)(e) を通して、週次ノート (`docs/weekN-*.md`) に�
 
 **対処**: `invalidate_inode_pages2` (blocking folio_lock) を `invalidate_mapping_pages` (folio_trylock) に置換。in-flight folio はスキップされるが「まだ initial content で埋まる前の空 folio」なので、reader は目覚めた後に re-fetch して新 arena を叩く。
 
-**一般化**: **daemon → kmod → daemon の 3 段 upcall path では「daemon 側が呼ぶ ioctl が、その ioctl の完了を待っている kmod 側 waiter と同じロックを取らないか」を必ず設計時に確認する**。folio_lock、mmap_sem、i_rwsem あたりが要注意。ロックの blocking 版と trylock 版があるなら upcall path では trylock を優先。詳細 `docs/journal/week4c-implementation-notes.md` (実は Week 4 c の作業ではなく 4 a の fix commit 640a7b2 で導入)。
+**一般化**: **daemon → kmod → daemon の 3 段 upcall path では「daemon 側が呼ぶ ioctl が、その ioctl の完了を待っている kmod 側 waiter と同じロックを取らないか」を必ず設計時に確認する**。folio_lock、mmap_sem、i_rwsem あたりが要注意。ロックの blocking 版と trylock 版があるなら upcall path では trylock を優先。詳細 `docs/journal/week4c-implementation-notes.md` (実は Week 4 c の作業ではなく 4 a の fix commit d2d4cdf で導入)。
 
 ### 1.4 rwlock は dir_emit を含めない — sleepable な reader が要る (Week 4 (b))
 

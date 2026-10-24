@@ -2,13 +2,13 @@
 
 `make compose-up; make all; make bench` が失敗する報告を受けて Grafana ダッシュボード + bench 起動フローを直したセッションの記録。次に環境を触る人が同じ落とし穴を踏まないよう、**壊れていた原因** と **残っている使いにくさ** の両方をメモとして残す。
 
-対応 commit: `3e60310 chore(observability): wire runtime metrics + fix Grafana provisioning`、`5634f3d fix(bench): make bench works end-to-end from a clean host`。
+対応 commit: `e8d3967 chore(observability): wire runtime metrics + fix Grafana provisioning`、`237acf6 fix(bench): make bench works end-to-end from a clean host`。
 
 ---
 
 ## 1. 壊れていた 3 レイヤ
 
-### 1.1 Grafana ダッシュボードが空 (`3e60310`)
+### 1.1 Grafana ダッシュボードが空 (`e8d3967`)
 
 3 個の壊れが重なっていた:
 
@@ -16,7 +16,7 @@
 - **`metrics.Global.FastPathHits/SlowPathMisses` の `Add()` 呼出が 0 件** — 型定義は Week 0 で先に作ったが実際に counter を bump する場所が付いていなかった。endpoint が上がっても値は常に 0 になる。
 - **Grafana datasource UID が pin されていない** — `deploy/grafana/provisioning/datasources/prometheus.yaml` が `uid` を指定していなかったので Grafana が起動ごとに `PBFA97CFB590B2093` のような auto UID を割り当てる。dashboard JSON の `"datasource": { "uid": "prometheus" }` と mismatch し、全 panel が "Datasource not found" になる。
 
-### 1.2 `make bench` が動かない (`5634f3d`)
+### 1.2 `make bench` が動かない (`237acf6`)
 
 - **`make bench` が Week 0/1 skeleton (`bench/runner.sh`) を呼んでいた** — `/mnt/s3data` (実際の mount 先は `/mnt/s3demo`) 前提 + `nrfiles=10000` の事前配置 + bcc install 必須。現行 PoC のどの前提とも噛み合わない。
 - **`scripts/bench-latency.sh` は s3fuse を pre-mount 前提** — 手順が Makefile / README のどこにも書かれておらず `"$MP_FUSE not mounted"` で即 exit。

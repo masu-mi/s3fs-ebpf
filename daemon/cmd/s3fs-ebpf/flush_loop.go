@@ -357,7 +357,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	// arena admit refresh). Defer covers every return branch so
 	// the histogram reflects Put-failure retries and no-backend
 	// drops, not just the success path — matches the symmetric
-	// handleReadMiss timing added in 1cd4d37.
+	// handleReadMiss timing added in 32eea25.
 	flush_started := time.Now()
 	// Track the PUT outcome so the deferred signalFlush knows what
 	// to hand back to the fsync() waiter. Zero = success; negated

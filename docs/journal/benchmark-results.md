@@ -460,7 +460,7 @@ byte-for-byte roundtrip (`diff`) は全 3 サイズで MATCH。
 
 ### 8.3 S-08 後の全サイズ再計測 (2026-10-11、RUNS=10)
 
-**修正内容** (commit c75247f): `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え。旧実装は 100ms ticker loop でポーリングしており、1 MiB と 10 MiB の `ebpf-fsync` がいずれも ~100ms になっていた。
+**修正内容** (commit cbcc66e): `S3FS_IOC_POP_FLUSH_WAIT` blocking ioctl に切り替え。旧実装は 100ms ticker loop でポーリングしており、1 MiB と 10 MiB の `ebpf-fsync` がいずれも ~100ms になっていた。
 
 | Size    | ebpf (non-durable) | fuse-raw     | fuse-cache    | ebpf-fsync (durable) | fsync vs raw |
 |:--------|-------------------:|-------------:|--------------:|---------------------:|-------------:|
@@ -978,7 +978,7 @@ pcache モードは Linux page cache を第 2 キャッシュ層として活用�
 > **⚠️ 数値は無効 (P3 バグ + R1 前) — §18 に再計測結果**
 >
 > この計測は P3 バグ (admit_insert_pcache 重複挿入 + admit_replace が pcache エントリを保持しない + capacity 制限が pcache に効かない) が存在する状態で実施されました。
-> さらに Q1 修正前のビルド (1271adf〜7ddb0d7) では evict 後の再 read が EOF になっていた可能性があるため、R1 修正後ビルドでの再計測が必要でした。
+> さらに Q1 修正前のビルド (a53d229〜6443015) では evict 後の再 read が EOF になっていた可能性があるため、R1 修正後ビルドでの再計測が必要でした。
 >
 > - `evictions=0` は capacity mode が pcache エントリを eviction 対象に含めていなかった結果。
 > - hit_rate 94% は fd->buf が eviction されずに Linux page cache に残り続けたため達成された見かけ上の値で、`capacity_bytes=352` の制限内に収まったキャッシュによるものではありません。
@@ -1029,15 +1029,15 @@ arena モードを同条件 (RUNS=10, 2026-10-13) で再計測したところ:
 
 ## 18. R1/T1〜T3 修正後 再計測 (AC-11/AC-13/AC-27、計画 2026-10-14 / 計測 2026-10-16)
 
-Q1 修正前ビルド (1271adf〜7ddb0d7) で取得した §16/§17 の数値は evict 後の再 read が EOF になっていた可能性があるため無効と判定。R1 (populate/evict race 修正) と T1〜T3 修正 (AC-22〜AC-24) に加え、計測準備中に見つかった W1/P1/W2 を含むビルドで §18.1〜18.8 を計測した。
+Q1 修正前ビルド (a53d229〜6443015) で取得した §16/§17 の数値は evict 後の再 read が EOF になっていた可能性があるため無効と判定。R1 (populate/evict race 修正) と T1〜T3 修正 (AC-22〜AC-24) に加え、計測準備中に見つかった W1/P1/W2 を含むビルドで §18.1〜18.8 を計測した。
 
-- **計測ビルド**: `d3d550c` (kmod/daemon)。§18.2 のみ `scripts/bench-ab-pcache.sh` のキャッシュ初期化 (下記) を加えた作業ツリーで実行
+- **計測ビルド**: `7ed6abe` (kmod/daemon)。§18.2 のみ `scripts/bench-ab-pcache.sh` のキャッシュ初期化 (下記) を加えた作業ツリーで実行
 - **環境**: §1 と同じホスト、kernel 6.12.0-061200-generic、MinIO (docker compose)
 - **計測中に修正したもの** (いずれも §18 の計測前に確認済み):
-  - **W1** (`25dc831`): close 後の flush PUT 前に drop_caches / reclaim で inode が evict されると、未 PUT の `fd->buf` が破棄され書き込みが消失していた。flush 完了まで inode を `ihold` で pin する
-  - **P1** (`6846872`): `pending_exists()` が chunk_offset≠0 の pending を見落とし、upcall 待ち中の ino を evict し得た。pending の hash key を ino 単独に変更
-  - **W2** (`d3d550c`): `.create` したファイルの inode が flush 後に evict されると、再 lookup で i_size=0 になり空ファイルとして読めていた。evict 時に i_size をエントリへ書き戻す
-  - テスト側: evict-readback / evict-race の `/metrics` 取得が SIGPIPE で `46\n-1` のような 2 行になり、delta=0 の誤 FAIL を出していた (`6870066`)
+  - **W1** (`694d2a1`): close 後の flush PUT 前に drop_caches / reclaim で inode が evict されると、未 PUT の `fd->buf` が破棄され書き込みが消失していた。flush 完了まで inode を `ihold` で pin する
+  - **P1** (`5bf11a3`): `pending_exists()` が chunk_offset≠0 の pending を見落とし、upcall 待ち中の ino を evict し得た。pending の hash key を ino 単独に変更
+  - **W2** (`7ed6abe`): `.create` したファイルの inode が flush 後に evict されると、再 lookup で i_size=0 になり空ファイルとして読めていた。evict 時に i_size をエントリへ書き戻す
+  - テスト側: evict-readback / evict-race の `/metrics` 取得が SIGPIPE で `46\n-1` のような 2 行になり、delta=0 の誤 FAIL を出していた (`a9b996b`)
 
 ### 18.1 AC-03 bench-hitrate.sh 再計測
 
@@ -1175,7 +1175,7 @@ AC-05 の (a) は §14 以来の未達が続いている。(b)(c) は今回の 1
 
 ### 18.10 追加検証: U10 A/B と fd->buf メモリ (M1、2026-10-16)
 
-§18.2 の性能低下と、容量制限がバッファ側で効いていない疑いの両方について、pcache ヒット経路の `buf_readers` 増減 (U10) を外す A/B で確認した。あわせて `fd->buf` の確保量を常設メトリクスとして追加した (`0c47ff7`: `s3fs_ebpf_fd_buf_bytes` / `s3fs_ebpf_reset_skipped_total`)。
+§18.2 の性能低下と、容量制限がバッファ側で効いていない疑いの両方について、pcache ヒット経路の `buf_readers` 増減 (U10) を外す A/B で確認した。あわせて `fd->buf` の確保量を常設メトリクスとして追加した (`b376edd`: `s3fs_ebpf_fd_buf_bytes` / `s3fs_ebpf_reset_skipped_total`)。
 
 **ab-pcache** (LARGE_BYTES=100 MiB、§18.2 と同じ条件、A → B → A → B の順に各 2 回):
 
@@ -1192,12 +1192,12 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 |---|---:|---:|---:|---:|---:|
 | A (U10 あり) | 0 | 0 | 1,086 | 40 MiB | 0 |
 | B (U10 なし) | 0 | 0 | 1,112 | 40 MiB | 0 |
-| B 最終ビルド #1 / #2 (`f44e2b4`) | 0 / 0 | 0 / 0 | 1,137 / 1,112 | 40 / 40 MiB | 0 / 0 |
+| B 最終ビルド #1 / #2 (`892e1be`) | 0 / 0 | 0 / 0 | 1,137 / 1,112 | 40 / 40 MiB | 0 / 0 |
 
 30 s 版 (`test-pcache-evict-race-short`) は B で 6 回実行。retry_exh は 1 回だけ 10 で、残り 5 回は 0。その 1 回も gen0_fail = 0、EIO = 0 で、gen=0 フォールバックで救えていた。
 
 結論:
-- U10 は不要と判断し削除した (`f44e2b4`、hot path で `fd->lock` を 2 回取る処理がなくなる)。計装とはコミットを分けたので、retry が増えた場合は単独で revert できる。
+- U10 は不要と判断し削除した (`892e1be`、hot path で `fd->lock` を 2 回取る処理がなくなる)。計装とはコミットを分けたので、retry が増えた場合は単独で revert できる。
 - 読み込み停止後に `fd->buf` は 0 まで戻る。skip_reset で解放が遅れた buf が残り続ける状況は観測されなかった。evict-race に「停止後の fd_buf ≤ capacity_bytes」を PASS 条件として追加済み。
 - **容量制限が効いていない本当の原因は U10 ではなく buf の確保サイズ**。ピーク 40 MiB は capacity 4 MiB の 10 倍で、4 ファイル × 9 MiB をそれぞれ 2 MiB 単位に切り上げた 10 MiB ずつに当たる。`s3fs_file_data_reserve` が populate 範囲の終端まで確保するので、末尾 chunk 1 つの populate でファイル全体分の buf ができる。一方 kmod の容量判定 (`live_bytes`) は admit 済み chunk のバイト数しか数えない。対策は backlog AC-41 に記録した。
 
@@ -1212,7 +1212,7 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 
 | kmod | fd_buf (読み込みごと) | 最終 fd_buf | evictions | 判定 |
 |---|---|---:|---:|---|
-| 修正前 (`d160714`) | 10 → 20 → 30 → 40 MiB | 40 MiB | 0 | ❌ FAIL (capacity の 3.3 倍) |
+| 修正前 (`048d474`) | 10 → 20 → 30 → 40 MiB | 40 MiB | 0 | ❌ FAIL (capacity の 3.3 倍) |
 | 修正後 | 9 → 9 → 9 → 9 MiB | 9 MiB | 3 | ✅ PASS |
 
 修正前は末尾 chunk 1 MiB ずつしか数えないので、4 ファイルでも合計 4 MiB で「容量内」と判定され、evict されない。修正後は 1 ファイル 9 MiB として数えるので、常に 1 ファイルだけが残る。
@@ -1284,7 +1284,7 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 
 | kmod | 100 MiB | 300 MiB | 300 / 100 |
 |---|---:|---:|---:|
-| 修正前 (cd0e125) | 0.420〜0.429 s | 2.332〜2.351 s | 5.5 |
+| 修正前 (cd0dea3) | 0.420〜0.429 s | 2.332〜2.351 s | 5.5 |
 | 修正後 | 0.266〜0.277 s | 0.770〜0.793 s | 2.9 |
 
 修正前の数字は §18.12 (0.419〜0.441 s / 2.378〜2.410 s) と同じ水準。sha256 は全回一致。
@@ -1301,7 +1301,7 @@ A と B の差は同じ variant の 2 回の差より小さく、ノイズの範
 
 | daemon | prewarm_admits | fd_buf_peak | 結果 |
 |---|---:|---:|---|
-| 修正前 (99a8461) | 4 | 0 | FAIL (9 MiB × 4 が arena admit になり、末尾読みも arena から返る) |
+| 修正前 (e76e660) | 4 | 0 | FAIL (9 MiB × 4 が arena admit になり、末尾読みも arena から返る) |
 | 修正後 | 0 | 9 MiB | PASS |
 
 **make test-regression (8 本)**: 全 PASS、exit 0。`fd_buf_audit` は全テストで drift 0。go test も ok。
@@ -1391,7 +1391,7 @@ fentry を外すと差は消える。kmod の hit 経路 (`fc_pcache_check` → 
 - 4 つ並列で全体を読んだ場合も、全員の sha256 が合わない。
 - pcache モードでは起きない。§18.17 の rand-arena / par-arena の BAD はこれだった (`10m.bin` は中身が 0 なので、データではなくサイズで不一致になっていた)。
 
-**原因**: `s3fs_ebpf_admit_replace` が、admit した entry ごとに `i_size_write(inode, entries[i].size)` をしていた。306cc9a (read 経路の最初の実装) の時点では entry はいつもファイル全体だったが、D-01 で entry は range になり、`size` は range の長さになった。chunk [4, 8) MiB を admit すると i_size が 4 MiB になり、それより後ろは EOF になる。さらに W2 (`evict_inode` → `s3fs_entry_record_size`) が、この誤ったサイズを entry テーブルに書き戻すので、次の同期までそのまま残る。
+**原因**: `s3fs_ebpf_admit_replace` が、admit した entry ごとに `i_size_write(inode, entries[i].size)` をしていた。55dbc7d (read 経路の最初の実装) の時点では entry はいつもファイル全体だったが、D-01 で entry は range になり、`size` は range の長さになった。chunk [4, 8) MiB を admit すると i_size が 4 MiB になり、それより後ろは EOF になる。さらに W2 (`evict_inode` → `s3fs_entry_record_size`) が、この誤ったサイズを entry テーブルに書き戻すので、次の同期までそのまま残る。
 
 **修正**: i_size は、中身が変わった entry (`changed[i]`) の range 終端 (`offset + size`) まで伸ばすだけにして、縮めない。dirty/flushing の inode (`s3fs_fd_buf_owned`) には触らない。S3 側でファイルが小さくなった場合は、`entries_replace` が dcache を縮めて再 lookup させるので、そちらで反映される。ローカルで truncate したあとに admit_replace (miss や eval のたびに呼ばれる) が i_size を S3 のサイズに戻してしまう可能性も、この変更でなくなった。
 
@@ -1610,7 +1610,7 @@ evict-race のピークが capacity 4 MiB まで下がらないのは、reader 3
 
 §11 / §8 の arena モード時代の数字を、pcache モード (`--arena-metadata-only`) の現行コードで測り直し、既存オブジェクトの途中への write、cold read、小さいファイル大量の項目を足した。
 
-- **計測ビルド**: AC-50 の race 修正 (`84ebf2f`) と、fsync の修正 (`44f9270`) を含み、以降に入れた「append 済みファイルの再 load」「SYNC_ENTRIES の上限」の修正を加えた作業ツリー (§18.26 を参照)
+- **計測ビルド**: AC-50 の race 修正 (`a14204c`) と、fsync の修正 (`1c0a0d5`) を含み、以降に入れた「append 済みファイルの再 load」「SYNC_ENTRIES の上限」の修正を加えた作業ツリー (§18.26 を参照)
 - **環境**: §1 と同じホスト (KVM ゲスト 6 vCPU)、MinIO はローカルの docker。ネットワーク遅延がないので、S3 往復の差は小さく見える
 - **スクリプト**: `scripts/bench-pcache-remeasure.sh` (`STEPS="A B C D E"`)。値は中央値 (A は microbench の p50)。ebpf は `--arena-metadata-only --cache-dir=... --sync-every=0`、fuse-raw は `s3fs` のキャッシュなし、fuse-cache は `use_cache + kernel_cache`、mount-s3 は `--cache` 付き
 - **回数が少ない**: B / C は 5 回、D は 3 回、E は 1 回。D の差が小さい箇所 (10 MiB) は誤差の範囲
@@ -1700,14 +1700,14 @@ arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準
 
 ### 18.33 AC-50 の race 修正 (部分的に未対応の項目を含む)
 
-- **修正した**: `s3fs_fd_load_for_modify` の pin を、書き込みが dirty にするまで持つ (`struct s3fs_mpin`)。write / setattr は `fd->lock` 下で必要な chunk が populated かを確かめ、足りなければ読み込みからやり直す。pin を unpin してから lock を取る方式 (最初の修正案) は、capacity (12 MiB) より大きい 24 MiB のファイルを 8 並列で変更すると、必要な chunk を全部同時に持てず -EIO になったので採らなかった。変更中のファイルは capacity を一時的に超える。回帰テストは `test-write-existing-capacity` (capacity 12 MiB、24 MiB のオブジェクト 8 個の途中への write と truncate を並列に、40 MiB の読みを背景で回し続け、3 ラウンドで sha256 を比較)。修正前のコード (`84ebf2f^` の kmod と daemon) では round 1 で 12 件中 10 件が FAIL し、HEAD は 3 ラウンド全件 PASS (AC-53 で確認)。
+- **修正した**: `s3fs_fd_load_for_modify` の pin を、書き込みが dirty にするまで持つ (`struct s3fs_mpin`)。write / setattr は `fd->lock` 下で必要な chunk が populated かを確かめ、足りなければ読み込みからやり直す。pin を unpin してから lock を取る方式 (最初の修正案) は、capacity (12 MiB) より大きい 24 MiB のファイルを 8 並列で変更すると、必要な chunk を全部同時に持てず -EIO になったので採らなかった。変更中のファイルは capacity を一時的に超える。回帰テストは `test-write-existing-capacity` (capacity 12 MiB、24 MiB のオブジェクト 8 個の途中への write と truncate を並列に、40 MiB の読みを背景で回し続け、3 ラウンドで sha256 を比較)。修正前のコード (`a14204c^` の kmod と daemon) では round 1 で 12 件中 10 件が FAIL し、HEAD は 3 ラウンド全件 PASS (AC-53 で確認)。
 - **修正した**: 2 つの write が同時に clean なファイルに来たときの EIO。後の loader が daemon の -EBUSY を受けたとき、fd がすでに dirty なら 0 を返す。`test-write-existing-capacity` に 1 object 2 writer のケースを入れた。
 - **修正した**: i_size > Fallback の EIO (§18.26 の 2)。
 - **未対応 (LOW)**: AC-48 の `i_size_write` が同時の truncate を巻き戻す窓、dirty の fd に PCACHE エントリが穴の上に入り容量を水増しする件。
 
 ### 18.34 cold read の切り分け (AC-52 手順 1〜2、n=5、ローカル MinIO)
 
-**手順 1: cache-dir への書き込みを非同期にした** (`DiskCache.WriteAsync`、`9d369f3`)。cold read の中央値 (ebpf、前 → 後): 10 MiB 23.6 → 19.7 ms (fuse-raw 19.9)、100 MiB 247 → 149 ms (fuse-raw 99)、300 MiB 805 → 765 ms (fuse-raw 312)。300 MiB はほとんど動かない。
+**手順 1: cache-dir への書き込みを非同期にした** (`DiskCache.WriteAsync`、`e6cbcb6`)。cold read の中央値 (ebpf、前 → 後): 10 MiB 23.6 → 19.7 ms (fuse-raw 19.9)、100 MiB 247 → 149 ms (fuse-raw 99)、300 MiB 805 → 765 ms (fuse-raw 312)。300 MiB はほとんど動かない。
 
 **手順 2: 段階ごとの時間** (daemon の `handleReadMiss` に一時的に時計を入れた。コミットしていない)。sequential read は pattern-aware で **全体 admit** になり、`s3c.Get` 1 本で全体を読んだあと POPULATE し、そのあとで reader が起きる。
 
@@ -1740,7 +1740,7 @@ arena モード (§11: 1.691 ms / 527 µs / 519 µs / 3.075 µs) と同じ水準
 
 **退行確認 (warm read と 64 jobs、`bench-ab-pcache.sh`、100 MiB、fio 64 jobs × 5 s、手順 3 の前後の daemon を 2 回ずつ交互に)**:
 
-| 指標 | 前 (`096682a`) 1 回目 / 2 回目 | 後 (`c0f641d`) 1 回目 / 2 回目 |
+| 指標 | 前 (`2ea5473`) 1 回目 / 2 回目 | 後 (`4dd473c`) 1 回目 / 2 回目 |
 |---|---:|---:|
 | 64 jobs read IOPS (pcache、hook あり) | 5,799k / 5,812k | 5,802k / 5,925k |
 | 64 jobs read IOPS (pcache、hook なし) | 6,084k / 6,211k | 6,160k / 6,173k |
@@ -1931,13 +1931,13 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 
 `make test-regression`: 17 件 PASS。
 
-### 18.43 AC-13: 現在のビルドでの再計測 (2026-10-17、`fd8f772`)
+### 18.43 AC-13: 現在のビルドでの再計測 (2026-10-17、`4329711`)
 
-§18 (`d3d550c`) の再計測を、AC-47 / AC-50〜58 / AC-40 / AC-65 を含む現在のビルドでやり直した。
+§18 (`7ed6abe`) の再計測を、AC-47 / AC-50〜58 / AC-40 / AC-65 を含む現在のビルドでやり直した。
 
 **AB-07 (`bench-ab-pcache.sh`、100 MiB、バケットは hello / big / 10m だけ、cache-dir は消してから)**
 
-| 指標 | §18.2 (`d3d550c`) | 今回 |
+| 指標 | §18.2 (`7ed6abe`) | 今回 |
 |---|---|---|
 | gate (a) 64 jobs psync read | FAIL (0.66×) | **PASS** (pcache 5759k vs fuse-raw 5857k、hook なし 6172k、`hook_ratio` 0.983 [OK]) |
 | gate (b) 100 MiB cat | FAIL (1.20×) | **PASS** (pcache 14.7 ms vs fuse-cache 17.1 ms) |

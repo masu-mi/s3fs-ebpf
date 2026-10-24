@@ -4,11 +4,11 @@ E-01 / E-02 / E-03 / D-01 / D-02 の各拡張で「POSIX 準拠として何を
 保証し、S3 という eventually-consistent object store の上でどう
 折り合いをつけたか」を 1 枚にまとめた資料。実装細部は各 commit 参照。
 
-- E-01: blocking fsync (commit `e3f1018`)
-- E-02: unlink + rename (commit `93f5f10`, `ebb5c6f`)
-- E-03: flush coalescing (commit `0049303`)
-- D-01: admit range list + partial admit (commit `b0a62c7`, `c419541`)
-- D-02: arena free-list (commit `c419541`)
+- E-01: blocking fsync (commit `47be420`)
+- E-02: unlink + rename (commit `123c1d5`, `42a6e23`)
+- E-03: flush coalescing (commit `cd2c2fd`)
+- D-01: admit range list + partial admit (commit `ba70091`, `c6e1e7a`)
+- D-02: arena free-list (commit `c6e1e7a`)
 
 ## 一覧: POSIX / 実用性 のスコアカード
 

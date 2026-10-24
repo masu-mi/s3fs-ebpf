@@ -6,7 +6,7 @@
 
 arena モードでは、ファイルの中身を `bpf_arena` (daemon と BPF の共有メモリ) に置き、kmod は daemon の arena を GUP で読む (`docs/design/read-path-design.md` Path B)。kmod から見ると arena は「別プロセスのユーザー空間」なので、hot path の read のたびに GUP が要り (1 回約 1.7 µs)、64 並列の read が伸びなかった (AA-03、`br §14`)。arena は BPF とユーザー空間で状態を共有するのには向くが、kmod の hot path から毎回読む場所には向かない (`docs/design/bpf-arena-use-cases.md`)。
 
-そこで中身を kernel 側に置き、2 回目以降の read を普通の page cache で返すことにした (AB-04〜、`1db272e`)。arena には中身もメタデータも置かない (フラグ名の `--arena-metadata-only` とは違う。admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない)。
+そこで中身を kernel 側に置き、2 回目以降の read を普通の page cache で返すことにした (AB-04〜、`ecf3990`)。arena には中身もメタデータも置かない (フラグ名の `--arena-metadata-only` とは違う。admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない)。
 
 ## 2. 2 つのモードの違い
 
@@ -69,7 +69,7 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 ## 7. 性能 (ローカル MinIO、`docs/journal/benchmark-results.md`)
 
 - open+read+close は fuse-cache の 172 倍、小さいファイル 10,000 個の warm cat は 93 倍 (§18.26〜18.32)。
-- AB-07 の gate (`fd8f772`、§18.43): 64 jobs psync read は fuse-raw 比 0.983 (フックなしの pcache は fuse-raw 以上)、100 MiB の cat は fuse-cache より速い (14.7 ms 対 17.1 ms)、microbench は arena モードより速い。
+- AB-07 の gate (`4329711`、§18.43): 64 jobs psync read は fuse-raw 比 0.983 (フックなしの pcache は fuse-raw 以上)、100 MiB の cat は fuse-cache より速い (14.7 ms 対 17.1 ms)、microbench は arena モードより速い。
 - 負けている所: 大きいファイルの cold read (300 MiB で fuse-raw の中央値 0.80×、§18.37〜18.39)。既存オブジェクトの途中書き換えは `--partial-modify` で fuse-raw 並み (§18.36)。
 - hit rate は §18.43 で 29〜35%。prewarm がメタデータだけになったので、§18.1 の 52〜54% とは条件が違う。並べないこと。
 
