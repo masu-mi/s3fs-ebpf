@@ -878,7 +878,7 @@ prewarm:
 **struct_ops まわりの API の不足と、arena 用の命令の marshal のバグ。**
 
 1. **struct_ops の link の Update が未対応:** cilium/ebpf の `structOpsLink.Update` は upstream main でも `ErrNotSupported`。hot swap は `BPF_LINK_UPDATE` を raw syscall で呼んでいる (`daemon/internal/policyprog/loader.go` の `SwapFrom`)。
-2. **`addr_space_cast` の marshal バグ:** plain な `Mov` 命令の `Offset` が `Instruction.Marshal` で 0 に上書きされ、arena のポインタ変換 (`addr_space_cast`) が `BPF_MOV uses reserved fields` で verifier に拒否される。vendor したコードにパッチを当てた (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`)。upstream への PR はまだ出していない。
+2. **`addr_space_cast` の marshal バグ:** plain な `Mov` 命令の `Offset` が `Instruction.Marshal` で 0 に上書きされ、arena のポインタ変換 (`addr_space_cast`) が `BPF_MOV uses reserved fields` で verifier に拒否される。vendor したコードにパッチを当てた (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`)。upstream への PR はまだ出していないが、今 `go.mod` が指す cilium/ebpf の commit (2026-10-08) には同等の修正が入っていて、vendor は外した。arena と struct_ops を cilium/ebpf から使うときの課題と要望の一覧は `docs/dev-notes/cilium-ebpf-arena-and-struct-ops.md`。
 3. **verifier のエラーが切り詰められる:** 長いログの肝心な行が見えないことがある (`docs/dev-notes/ebpf-ecosystem-gaps.md` §4.2)。
 4. **bpf2go の `.o` が toolchain で変わる:** ソースを変えなくても作り直すとバイナリが少し変わる。A/B の基準はコミット済みの `.o` ではなく、作り直したもの (B0) にした (`docs/design/read-iter-hook-overhead.md` §3)。
 
