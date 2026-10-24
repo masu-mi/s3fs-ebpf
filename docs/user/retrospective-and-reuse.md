@@ -95,7 +95,7 @@
 
 | 項目 | 内容 | 見込み |
 |---|---|---|
-| cilium/ebpf の marshal 修正 | `addr_space_cast` の Offset が 0 に潰れる (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`) | 小さく具体的で出しやすい。いまの依存は `v0.22.1-0.20261008…` なので、upstream で直っていないかを先に確かめる |
+| cilium/ebpf の marshal 修正 | `addr_space_cast` の Offset が 0 に潰れる (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`) | 済み: 自分で出し、cilium/ebpf の main に `cc4947e` として取り込まれた (2026-10-24 に確認。リリースはまだ)。いまの依存 `v0.22.1-0.20261008…` はこれを含む |
 | K-01 `bpf_arena_get_kern_vm_start` の export | 1 行の変更 | 低い。in-tree に使う側のない、out-of-tree の kmod のための export は通りにくい (一般的な傾向。未確認) |
 | K-02 kern_vm の generic context 用 fault handler | 約 50 行の見込み | 低い。arena の設計の前提 (BPF の実行中だけの shadow mapping) に踏み込む。強い use case が要る (`docs/dev-notes/ebpf-ecosystem-gaps.md` §1.2) |
 
@@ -104,7 +104,7 @@
 ## 5. 優先順位の案
 
 1. 発表では、この振り返り (失敗ではなく、手段の仮説が外れ、構造の仮説が当たった) をまとめの節で話す。スライドは「振り返り」の 1 枚 (`retro`)。
-2. cilium/ebpf の marshal 修正の upstream の状況を確かめ、直っていなければ PR を出す。
+2. ~~cilium/ebpf の marshal 修正の upstream の状況を確かめ、直っていなければ PR を出す。~~ 済み (自分の修正が main に `cc4947e` で入っている、2026-10-24 確認)。
 3. FUSE passthrough を使う daemon で同じベンチを取り、open の往復の差を数字にする (4.4)。
 4. その数字を持って、fuse-bpf / FUSE passthrough の議論に参加するか判断する。
 5. Rust は、daemon の書き直しを学習として、または kmod の小さい部分の試作として、余力があれば。
