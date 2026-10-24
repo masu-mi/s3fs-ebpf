@@ -14,7 +14,7 @@
 
 | # | 課題 | 症状 | この PoC の回避策 | 今の状態 |
 |---|---|---|---|---|
-| C1 | `addr_space_cast` の Marshal バグ | `Instruction.Marshal` が plain な `Mov` の `Offset` を 0 に上書きし、arena のポインタ変換が `BPF_MOV uses reserved fields` で verifier に拒否される | Week 2 に cilium/ebpf を vendor してパッチ (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`) | 今 `go.mod` が指す commit (2026-10-08) の `asm/instruction.go` には同等の修正が入っており、vendor は外した。タグ付きリリースに入ったかは未確認 |
+| C1 | `addr_space_cast` の Marshal バグ | `Instruction.Marshal` が plain な `Mov` の `Offset` を 0 に上書きし、arena のポインタ変換が `BPF_MOV uses reserved fields` で verifier に拒否される | Week 2 に cilium/ebpf を vendor してパッチ (`../misc/cilium-ebpf-addr-space-cast-marshal.patch`) | **この PoC の作者 (Masumi Kanai) が upstream に出して取り込まれた修正。** cilium/ebpf の main の commit `cc4947e` ("asm: conditionally set ins.Offset when marshaling Movs"、2026-09-24 作成、Timo Beckers が commit)。`go.mod` が指す commit (2026-10-08) はこれを含むので vendor は外した。タグ付きリリースにはまだ入っていない (2026-10-24 時点、`git tag --contains` が空) |
 | C2 | load の順番 | arena を mmap して `user_vm_start` が決まる前に program を load すると、`addr_space_cast` が拒否される (`arena's user address must be set via map_extra or mmap()`)。`LoadAndAssign` は map の作成と program の load を一度にやるので、間に mmap を挟めない | arena の map だけ先に `ebpf.NewMap` で作り、mmap してから `CollectionOptions.MapReplacements` で渡す 2 段の load (`daemon/internal/ebpf/loader.go` の `Load` / `LoadRejectDemo`) | 回避策のまま |
 | C3 | base 番地が取れない | `Map.Memory()` は Arena にも対応したが、mmap した先頭番地を返す API がない。BPF 側でポインタを組み立てるには user_vm の base が要る | `unix.Mmap` を自前で呼ぶ (`daemon/internal/arena/arena.go`)。base は syscall program の ctx (`arena_base_uaddr`) で BPF に渡す | 回避策のまま |
 | C4 | `__arena` のグローバル変数が使えない | libbpf は `.addr_space.1` セクションの `__arena` グローバル変数を arena に置いて skeleton から見せるが、cilium/ebpf の ELF reader はこのセクションを扱わない (`addr_space` の記述がない) | arena 上のデータは「base + offset」で毎回組み立てる。リストの先頭も ctx で渡す | 回避策のまま |
@@ -92,7 +92,7 @@ struct_ops は、カーネル (またはカーネルモジュール) が定義�
 | Linux | K-02: kern_vm に BPF 以外のコンテキスト向けの fault handler を足す | A1。入れば kmod から GUP なしで読める | 未提出 |
 | Linux | `struct bpf_arena` の最小の accessor (kern_vm の start、size) | K-01 が通らなかったときの代案 | 未提出 |
 | Linux | struct_ops の glue (`cfi_stubs` / `init_member` / `verifier_ops`) を生成するマクロ、外部モジュールの最小例を selftests に | S3 | 未提出 |
-| cilium/ebpf | `addr_space_cast` の Marshal 修正をリリースに入れ、回帰テストを足す | C1 | 修正入りの commit を利用中。リリースへの取り込みは未確認 |
+| cilium/ebpf | `addr_space_cast` の Marshal 修正 | C1 | **提出済み・main に取り込み済み** (この PoC の作者による `cc4947e`)。リリース待ち。回帰テストの追加は未 |
 | cilium/ebpf | arena の map を作成時に mmap する (または load の前に mmap する手段を用意する) | C2 | 未提出 |
 | cilium/ebpf | `Memory` から mmap 先の番地を取れるようにする | C3 | 未提出 |
 | cilium/ebpf | `.addr_space.1` (`__arena` グローバル変数) に対応する | C4 | 未提出 |

@@ -104,7 +104,7 @@ Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel �
 
 ## 4. 横断的な ecosystem の穴
 
-### 4.1 cilium/ebpf の marshal bug (patch 済み、upstream PR 未提出)
+### 4.1 cilium/ebpf の marshal bug (upstream の main に取り込み済み、`cc4947e`)
 
 `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` 参照。
 
@@ -112,7 +112,7 @@ Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel �
 - **影響**: **addr_space_cast を使う人は誰でも踏む** (LLVM 19+ + `-mattr=+addr_space_cast` の組合せ)
 - **patch**: 10 LOC。cilium/ebpf `asm/instruction.go:192` 付近に条件付き分岐
 - **次アクション**: upstream PR 化。手元の patch はテスト済 (`make test-arena` で verified)、maintainers への説明 template も同 patch ヘッダに準備済
-- **追記 (2026-10-24)**: 今 `daemon/go.mod` が指す cilium/ebpf の commit (`5aef01488cf5`、2026-10-08) の `asm/instruction.go` には同等の修正が入っており、vendor は外している。タグ付きリリースに入ったかは未確認。最新の状態は [`cilium-ebpf-arena-and-struct-ops.md`](cilium-ebpf-arena-and-struct-ops.md) の C1
+- **追記 (2026-10-24)**: この patch はこの PoC の作者 (Masumi Kanai) が upstream に出し、cilium/ebpf の main に `cc4947e` ("asm: conditionally set ins.Offset when marshaling Movs") として取り込まれた。今 `daemon/go.mod` が指す commit (`5aef01488cf5`、2026-10-08) はこれを含むので、vendor は外している。タグ付きリリースにはまだ入っていない。最新の状態は [`cilium-ebpf-arena-and-struct-ops.md`](cilium-ebpf-arena-and-struct-ops.md) の C1
 
 ### 4.2 VerifierError の truncation
 
