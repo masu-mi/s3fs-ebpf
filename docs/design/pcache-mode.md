@@ -21,6 +21,8 @@ arena モードでは、ファイルの中身を `bpf_arena` (daemon と BPF の
 
 ## 3. データ構造
 
+chunk 表のレイアウト (構造体、番地の対応、状態、容量の数え方) は [`pcache-chunk-table.md`](pcache-chunk-table.md)。
+
 - **chunk の表**: inode の `s3fs_file_data` (fd) が 4 MiB (`S3FS_CHUNK_SIZE`) の chunk の配列を持つ。chunk は触った分だけ、必要な大きさちょうどで確保する (46 B のファイルは 46 B、AC-41 / AC-45 C1)。chunk ごとに `populated` (S3 の中身で埋まった) と `readers` (pin) を持つ。上限は 1 TiB (`S3FS_MAX_CHUNKS`)。
 - **PCACHE の admit entry**: kmod の admit hash に `S3FS_ADMIT_FLAG_PCACHE` 付き (uaddr=0) で入る。「この範囲は fd の chunk にある」という印で、R1 (entry があれば chunk は確保済み) で守る。
 - **fd ごとの admit cache**: `fc_pcache_check` は `s3fs_admit_gen` が変わっていなければ rwlock を取らずに hit を判定する (AB-10)。
