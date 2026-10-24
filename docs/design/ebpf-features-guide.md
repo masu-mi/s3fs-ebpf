@@ -42,7 +42,7 @@
 
 **制限・落とし穴**
 
-- フック名の調査コストが高い。`vfs_getattr` ではなく `vfs_getattr_nosec` が正解（`vfs_getattr` は `vfs_fstat` 等の legacy パスのみ。`ftrace` での実地確認が必須）
+- フック名の調査コストが高い。`vfs_getattr` ではなく `vfs_getattr_nosec` が正解（v6.12 の `vfs_getattr` は `fs/stat.c` の中で `vfs_statx_path` に inline され、stat では関数として呼ばれない。`ftrace` での実地確認が必須。`docs/journal/week2-implementation-notes.md` §5）
 - BTF が必要。ディストリビューション kernel に `/sys/kernel/btf/vmlinux` がない環境では動かない（古い RHEL 系等）
 - 戻り値を変えられない。ヒット時に「内容を BPF から直接返す」は原理的に不可能で kmod 側が必要になる
 
