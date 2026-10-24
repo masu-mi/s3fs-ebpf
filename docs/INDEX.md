@@ -116,6 +116,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`dev-notes/build-env-dependencies.md`](dev-notes/build-env-dependencies.md) | ビルド・検証環境の依存箇所 (カーネル版 / ヘッダ / コンパイラ / ツール / テストツール) と解消方法。`make doctor` の ID 対応表 |
 | [`dev-notes/kunit.md`](dev-notes/kunit.md) | kmod の KUnit テスト (`make test-kunit`): 実行方法、suite の対象、テストで見つけて直したバグ |
 | [`dev-notes/ebpf-ecosystem-gaps.md`](dev-notes/ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠) |
+| [`dev-notes/arena-address-translation.md`](dev-notes/arena-address-translation.md) | arena のポインタがどこで kern_vm の番地になるか (BPF の load、kfunc の `__arena` 引数、x86 / arm64 JIT の命令)。6.12 / 7.2 / 7.3 の違い |
 | [`dev-notes/cilium-ebpf-arena-and-struct-ops.md`](dev-notes/cilium-ebpf-arena-and-struct-ops.md) | cilium/ebpf から bpf_arena を使うときの課題 (C1〜C9) と回避策、struct_ops の使い方 (kmod / BPF / daemon)、Linux と cilium/ebpf への要望の表 (2026-10-24 時点の最新版) |
 
 > 新規環境構築手順は `user/getting-started.md` と `Makefile` (`doctor` / `setup-kernel` / `setup-toolchain` / `setup-kbuild`) に正本があり、依存箇所ごとの症状と解消は `dev-notes/build-env-dependencies.md`、週 1 の `journal/week1-build-runtime-notes.md` に初回踏破時のメモが残っている。
