@@ -29,7 +29,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 
 ### 1.1 T7 (ioctl) の内訳
 
-`/dev/s3fs_ebpf` 上の 16 個の ioctl (magic `0xE3`)。詳細は `include/s3fs_ebpf_uapi.h`。
+`/dev/s3fs_ebpf` 上の 16 個の ioctl (magic `0xE3`)。詳細は `include/s3fs_ebpf_uapi.h`、構造体のフィールドと miss イベントの flags は [`dev-s3fs-ebpf-protocol.md`](dev-s3fs-ebpf-protocol.md)。
 
 | nr | 名前 | 方向 | 目的 | 発火頻度 |
 |---:|---|---|---|---|
@@ -387,5 +387,5 @@ evict feedback を持たないと oscillation が起きる根拠と実装は `km
 ## 8. 更新運用
 
 - kmod / daemon / BPF program で新しい通信路を追加したら **§1 の一覧表と該当 mermaid 図の両方** を更新
-- ioctl を追加する場合は §1.1、BPF map を追加する場合は §1.2 も更新
+- ioctl を追加する場合は §1.1 と `dev-s3fs-ebpf-protocol.md` §3、BPF map を追加する場合は §1.2 も更新
 - 大きな path (read-miss / flush / policy) の handshake を変えたら §3-§5 の sequence 図を編集
