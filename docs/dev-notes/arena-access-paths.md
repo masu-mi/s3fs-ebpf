@@ -81,6 +81,9 @@ for each page:
 [page cache の folio] ─▶ <<copy_to_iter: folio → read のバッファ>>              コピー 1 回、GUP なし
 ```
 
+- 中身は kmod の page cache にあり、arena は読み出しに使わない。BPF のオブジェクト (`bpf/s3fs_fastpath.bpf.c` の `s3fs_arena`) を読み込むので arena の map 自体は作られるが、フラグ名と違ってメタデータも arena には置かない。
+- 数えているのは page cache から read のバッファへの通常の 1 回。miss のときに daemon が `S3FS_IOC_POPULATE_PAGES` で page cache に書き込む 1 回 (admit 側) は、読み出し経路ではないので数えていない。
+
 ### 2.7 まとめ (6.12)
 
 | 経路 | 入口の番地 | ロック・pin | コピー | 制約 |
