@@ -95,3 +95,5 @@ struct_ops のコールバックの引数に `__arena` が付いている場合�
 - ISA: RFC 9669 "BPF Instruction Set Architecture" (32 bit の ALU は上位 32 bit を 0 にする)
 - 7.2 の議論: https://ratatoskr.run/lkml/2026/04/3531050/t, https://ratatoskr.run/bpf/2026/05/17020464/t
 - `__arena` 引数の議論: https://ratatoskr.run/bpf/2026/07/17249083/t, https://ratatoskr.run/bpf/2026/08/17385603/t
+
+経路ごとの手順とコピー回数の比較は [`arena-access-paths.md`](arena-access-paths.md)。
