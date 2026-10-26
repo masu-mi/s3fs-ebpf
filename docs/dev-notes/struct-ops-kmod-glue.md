@@ -26,6 +26,7 @@ fmod_ret は「既存の関数の戻り値を上書きする」ので、呼び�
   - `cfi_stubs` が NULL だと `bpf_struct_ops_desc_init()` が `-EINVAL` を返す (必須)。
   - 各 member の trampoline は、対応する stub の関数ポインタを渡して作られる (`bpf_struct_ops_prepare_trampoline()`)。kCFI が有効なカーネルでは、間接呼び出しの型チェックに使う型の情報をここから取る。
   - stub が NULL の member は `bpf_struct_ops_supported()` で非対応 (`-ENOTSUPP`) になる。member を足すときは stub も足す必要がある。
+  - kCFI の仕組みと trampoline へのハッシュの写し方は [`kcfi-basics.md`](kcfi-basics.md)。
 
 ### 2.3 `verifier_ops` (`get_func_proto` と `is_valid_access`)
 

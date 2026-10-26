@@ -119,6 +119,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`dev-notes/arena-address-translation.md`](dev-notes/arena-address-translation.md) | arena のポインタがどこで kern_vm の番地になるか (BPF の load、kfunc の `__arena` 引数、x86 / arm64 JIT の命令)。6.12 / 7.2 / 7.3 の違い |
 | [`dev-notes/arena-access-paths.md`](dev-notes/arena-access-paths.md) | arena の 1 ページを daemon / BPF / KFunc / kmod がそれぞれどう読むか (GUP、ページのコピー回数) を図で比較。6.12 と 7.2〜7.3 の差分 |
 | [`dev-notes/struct-ops-kmod-glue.md`](dev-notes/struct-ops-kmod-glue.md) | struct_ops を kmod から提供するときの glue (cfi_stubs / verifier_ops / init / reg / unreg / update / 呼び出し側) が何のために要るか。fmod_ret との行数の差の理由 |
+| [`dev-notes/kcfi-basics.md`](dev-notes/kcfi-basics.md) | kCFI の基本動作 (x86 の命令列、FineIBT) と、BPF prog / struct_ops の trampoline にハッシュを付ける仕組み。cfi_stubs が要る理由 |
 | [`dev-notes/cilium-ebpf-arena-and-struct-ops.md`](dev-notes/cilium-ebpf-arena-and-struct-ops.md) | cilium/ebpf から bpf_arena を使うときの課題 (C1〜C9) と回避策、struct_ops の使い方 (kmod / BPF / daemon)、Linux と cilium/ebpf への要望の表 (2026-10-24 時点の最新版) |
 
 > 新規環境構築手順は `user/getting-started.md` と `Makefile` (`doctor` / `setup-kernel` / `setup-toolchain` / `setup-kbuild`) に正本があり、依存箇所ごとの症状と解消は `dev-notes/build-env-dependencies.md`、週 1 の `journal/week1-build-runtime-notes.md` に初回踏破時のメモが残っている。
