@@ -890,7 +890,7 @@ kmod 側では、struct_ops の glue (`verifier_ops` / `cfi_stubs` / `reg` / `un
 
 - `BPF_MOV uses reserved fields` が 2 つの原因で出た。1 つは cilium/ebpf の marshal のバグ (Q52)。もう 1 つは、プログラムが arena の map を一度も参照していないと verifier が arena を関連付けず、`addr_space_cast` を拒否すること。`asm volatile("" :: "r"(&s3fs_arena));` で参照を作って通した。
 - arena は daemon が mmap してから BPF プログラムを load しないと `arena's user address must be set via map_extra or mmap()` になる。load の順番を 2 段に分けた。
-- `fentry/vfs_getattr` を付けても発火しなかった。今のカーネルの stat は `vfs_getattr_nosec` を直接呼ぶので、そちらに付け直した。
+- `fentry/vfs_getattr` を付けても発火しなかったので、`vfs_getattr_nosec` に付け直したら発火した。6.12 のソースでは stat も `vfs_statx_path` から `vfs_getattr` を通るので、同じ `fs/stat.c` の中で inline されたと見ているが、逆アセンブルや ftrace での確認は記録していない。
 - pahole が作る `vmlinux.h` に `BPF_MAP_TYPE_ARENA` がなかった (enum が途中で切れていた)。自分で define した。
 - clang 18 は `addr_space_cast` を出せないので clang 19 以上 (手元は 20) にした。
 - `while (n)` の pointer chase は `BPF program is too large. Processed 1000001 insn` で拒否される。これは発表のデモに使っている (`can_loop` を足せば通る話は Q8、標準のループで足りるかは Q15)。
