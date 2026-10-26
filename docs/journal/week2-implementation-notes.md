@@ -124,7 +124,7 @@ spec.LoadAndAssign(&Objs, {MapReplacements: {s3fs_arena: arenaMap}})
 
 **症状:** `SEC("fentry/vfs_getattr")` として BPF プログラムを attach しても、`stat` 系 syscall を叩いてもカウンタが動かない。attach 自体は成功している (`bpftool link list` で確認可)。
 
-**原因:** 現行 kernel (v6.12) の `stat` / `newfstatat` syscall は `vfs_statx()` → `vfs_getattr_nosec()` を **直接** 呼ぶ。`vfs_getattr()` は `vfs_fstat()` など一部の legacy パスからしか呼ばれない。
+**原因:** v6.12 のソースでは `stat` / `newfstatat` も `vfs_statx()` → `vfs_statx_path()` → `vfs_getattr()` → `vfs_getattr_nosec()` と通るが、`vfs_getattr()` は同じ `fs/stat.c` の `vfs_statx_path()` に inline されている。シンボルは export のために残っていて attach はできるが、stat の経路では関数として呼ばれないので fentry が発火しない (2026-10-24 にソースを読み直して訂正。以前は「`vfs_statx()` が `vfs_getattr_nosec()` を直接呼ぶ」と書いていた)。
 
 **確認方法 (ftrace):**
 

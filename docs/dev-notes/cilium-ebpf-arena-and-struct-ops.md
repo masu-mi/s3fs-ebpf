@@ -18,7 +18,7 @@
 | C2 | load の順番 | arena を mmap して `user_vm_start` が決まる前に program を load すると、`addr_space_cast` が拒否される (`arena's user address must be set via map_extra or mmap()`)。`LoadAndAssign` は map の作成と program の load を一度にやるので、間に mmap を挟めない | arena の map だけ先に `ebpf.NewMap` で作り、mmap してから `CollectionOptions.MapReplacements` で渡す 2 段の load (`daemon/internal/ebpf/loader.go` の `Load` / `LoadRejectDemo`) | 回避策のまま |
 | C3 | base 番地が取れない | `Map.Memory()` は Arena にも対応したが、mmap した先頭番地を返す API がない。BPF 側でポインタを組み立てるには user_vm の base が要る | `unix.Mmap` を自前で呼ぶ (`daemon/internal/arena/arena.go`)。base は syscall program の ctx (`arena_base_uaddr`) で BPF に渡す | 回避策のまま |
 | C4 | `__arena` のグローバル変数が使えない | libbpf は `.addr_space.1` セクションの `__arena` グローバル変数を arena に置いて skeleton から見せるが、cilium/ebpf の ELF reader はこのセクションを扱わない (`addr_space` の記述がない) | arena 上のデータは「base + offset」で毎回組み立てる。リストの先頭も ctx で渡す | 回避策のまま |
-| C5 | verifier のログが切れる | `VerifierError.Error()` は 1 行に切り詰める。arena や `addr_space_cast` の拒否理由が見えない | エラー経路だけ `%+v` で全文を出す (`loader.go`) | 回避策のまま |
+| C5 | verifier のログが切れる | `VerifierError.Error()` は 1 行に切り詰める。arena や `addr_space_cast` の拒否理由が見えない | エラー経路だけ `%+v` で全文を出す (`loader.go`) | 回避策で足りる。`%+v` は以前からある正規の出し方で、main (2026-10-08) に `%+v` / `%-10v` / `%d` の使い分けの文書 (`docs/ebpf/concepts/verifier-errors.md`) が入った |
 | C6 | clang の版を検出しない | clang 18 以下は `__BPF_FEATURE_ADDR_SPACE_CAST` を定義せず、`__arena` が普通のポインタに落ちたままビルドが通る。load して初めて `invalid mem access 'scalar'` になる | `make daemon-gen` が clang 19 未満を拒否、`TestEmbeddedObjectHasArenaCasts` がコミット済みの `.o` に cast があるかを見る (`daemon/internal/ebpf/arena_cast_test.go`) | 回避策のまま (bpf2go 側の問題) |
 | C7 | arena の map を参照しないと関連付かない | program が arena の map を一度も参照しないと verifier が arena を関連付けず、`addr_space_cast` を拒否する | `asm volatile("" :: "r"(&s3fs_arena));` で参照を作る (`bpf/s3fs_fastpath.bpf.c`) | 回避策のまま (カーネル側の仕様) |
 | C8 | `vmlinux.h` に `BPF_MAP_TYPE_ARENA` がない | pahole が作った `vmlinux.h` の enum が途中で切れていた | 自分で `#define BPF_MAP_TYPE_ARENA 33` | 回避策のまま (toolchain) |
@@ -98,6 +98,6 @@ struct_ops は、カーネル (またはカーネルモジュール) が定義�
 | cilium/ebpf | `.addr_space.1` (`__arena` グローバル変数) に対応する | C4 | 未提出 |
 | cilium/ebpf | struct_ops link の map の差し替え (`Update` の map 版) | S1 | 未提出 |
 | cilium/ebpf | struct_ops と arena の docs | S2 | 未提出 |
-| cilium/ebpf | `VerifierError` の全文を出す手段を分かりやすくする | C5 | 未提出 |
+| cilium/ebpf | `VerifierError` の全文を出す手段を分かりやすくする | C5 | 不要になった (main に文書が入った、2026-10-24 確認) |
 
 libbpf が arena の map を作成時に mmap すること、`__arena` グローバル変数に対応していることは知識からの説明で、この PoC では確かめていない。

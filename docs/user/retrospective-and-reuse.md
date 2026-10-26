@@ -31,7 +31,7 @@
 | bpf_arena は性能に効かなかった。kmod からは GUP が要り (1 回約 1.7 µs)、容量はコンパイル時に固定 (128 MiB) | Q10、Q55、§13.1、§18.2 |
 | 推測で 3 回直して動かなかった (lock → rwlock、GUP、per-file cache)。AA 系は受け入れ条件を満たさないまま閉じた | `docs/journal/history.md` §2.4、§4.5 |
 | 大きいファイルの cold read は続けて読むと 0.80 倍で負け (ホストのメモリ回収待ち) | Q37、§18.39 |
-| 自前の VFS (kmod の C は KUnit を除いて約 7,200 行、`vfs_ops.c` だけで約 5,500 行) の正しさを保つのに時間の大半を使った。データ破損と race が続けて出た | `docs/journal/history.md` §4.1〜§4.3。fuse-bpf なら抱えずに済んだコスト (Q3) |
+| 自前の VFS (kmod の C は KUnit を除いて約 7,100 行、`vfs_ops.c` だけで約 5,500 行) の正しさを保つのに時間の大半を使った。データ破損と race が続けて出た | `docs/journal/history.md` §4.1〜§4.3。fuse-bpf なら抱えずに済んだコスト (Q3) |
 | 本番には使えない。daemon が落ちると queue が失われる、上書きの検知がない、pcache の容量が既定で無制限で memcg に課金されない、など | Q57 |
 | 既定のモードが今も arena モードで、計測と修正は pcache モードで行っている | `docs/design/pcache-mode.md` §9 |
 
@@ -98,6 +98,8 @@
 | cilium/ebpf の marshal 修正 | `addr_space_cast` の Offset が 0 に潰れる (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`) | 済み: 自分で出し、cilium/ebpf の main に `cc4947e` として取り込まれた (2026-10-24 に確認。リリースはまだ)。いまの依存 `v0.22.1-0.20261008…` はこれを含む |
 | K-01 `bpf_arena_get_kern_vm_start` の export | 1 行の変更 | 低い。in-tree に使う側のない、out-of-tree の kmod のための export は通りにくい (一般的な傾向。未確認) |
 | K-02 kern_vm の generic context 用 fault handler | 約 50 行の見込み | 低い。arena の設計の前提 (BPF の実行中だけの shadow mapping) に踏み込む。強い use case が要る (`docs/dev-notes/ebpf-ecosystem-gaps.md` §1.2) |
+
+> **2026-10-24 追記 (7.2 / 7.3 のソースで確認、試してはいない)**: 7.2 で「bpf/arena: Direct kernel-side access」が入った。kfunc が kern_vm の未割り当てのページに触れると `bpf_arena_handle_page_fault` (x86 / arm64 の fault 経路) が scratch page を張って続ける。ただし `bpf_prog_find_from_stack()` で BPF プログラムが stack にいるときだけ働くので、kmod の read 経路のように BPF の外から読む K-01 / K-02 の用途は残る。`bpf_arena_map_kern_vm_start()` / `bpf_prog_arena()` も足されたが、EXPORT_SYMBOL はされていない。 7.3 では kfunc の引数名に `__arena` (または `__arena__nullable`) を付けると、verifier がその引数を arena のポインタとして検査し、JIT (`emit_kfunc_arena_args`、x86 / arm64) が呼び出しの直前に `kern_vm_start + (u32)rN` に付け替える。struct_ops の `__arena` 引数は trampoline が逆向き (kern_vm の番地 → arena のポインタ) に変換する。これで BPF から呼ばれた kfunc は GUP なしで arena を読み書きできる。
 
 ---
 

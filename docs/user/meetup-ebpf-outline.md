@@ -137,7 +137,7 @@ n = n->next;             // ユーザーが書いた next がそのまま使え�
 ### 3. verifierの壁 → KFunc (2.5min, 圧縮版)
 
 - arena 上の linked-list walk を素の `while (n)` で書くと verifier が `BPF program is too large. Processed 1000001 insn` で拒否 (`n->next` が `scalar()` でループ終了が証明不能)。再現: `sudo ./bin/s3fs-ebpf dev verifier-demo`
-- **先に自分で言う: 「`can_loop` を足せば通る」** (may_goto, 6.9+)。ただし予算切れ (6.9〜6.14: 800 万回 / 6.15+ x86-64: 250 ms) で**エラーなく途中で抜ける**、sleep できない、`copy_from_user` などカーネル API は呼べない
+- **先に自分で言う: 「`can_loop` を足せば通る」** (may_goto, 6.9+)。ただし予算切れ (6.9〜6.14: 約 840 万回 / 6.15+ x86-64、6.18+ arm64: 250 ms) で**エラーなく途中で抜ける**、sleep できない、`copy_from_user` などカーネル API は呼べない
 - → 完走保証・sleep・カーネル API が要る処理は KFunc に逃がす:
 
 ```c
