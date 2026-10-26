@@ -3,10 +3,17 @@
 # steps are skipped for a private repo); set the CODECOV_TOKEN secret then.
 name: test
 
+# Docs-only changes skip the tests (Actions minutes are limited).
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
   workflow_dispatch:
 
 concurrency:
