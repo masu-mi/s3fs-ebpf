@@ -473,7 +473,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 |---|---|---|
 | hot swap | hook ごとに新しい link を attach してから古い link を close。途中で on_admit は新、on_evict は旧、という状態がありうる | `BPF_LINK_UPDATE` 1 回。RCU で vtable のポインタを入れ替えるので、全 method が新か旧のどちらか |
 | attach の失敗 | 一部だけ attach された状態の後始末が要る | 成功か全部失敗か |
-| kmod 側の行数 | 約 15 行 (kfunc の集合 + register) | 約 220 行 (`verifier_ops` / `cfi_stubs` / `reg` / `unreg` / `update` / `init_member`) |
+| kmod 側の行数 | 約 15 行 (kfunc の集合 + register) | 約 220 行、比較した時点 (今は 8 member で約 370 行) (`verifier_ops` / `cfi_stubs` / `reg` / `unreg` / `update` / `init_member`) |
 | 合計 | 約 150 行 | 約 350 行 |
 
 - 1 回の呼び出しの負担はどちらも数十 ns と見積もったが、厳密には測っていない (`policy-attach-comparison.md` §1.4)。
@@ -619,7 +619,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 | open+read+close (キャッシュあり同士) | 172× |
 | 4 KiB × 10,000 個の cat (2 回目) | 93× (fuse-cache 比 32×) |
 | 4 KiB × 10,000 個の `ls -l` (初回) | 11× |
-| 新規ファイルの durable write 1〜100 MiB | 1.37× |
+| 新規ファイルの durable write 1〜100 MiB | 1.35〜1.37× |
 
 向く使い方: 小さいファイルを大量に開く (学習データ、ログの走査)、短命なプロセスが多い (バッチ、CI)、新しいファイルに書いて fsync する (チェックポイント)、キャッシュの判断をワークロードごとに変えたい (機能の差)。
 
