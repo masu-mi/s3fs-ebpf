@@ -71,3 +71,17 @@ score と同点処理 (`on_evict`、tiebreak) は、`pick_victim` を持たな�
 ## 7. アプリのヒント (未着手)
 
 map で渡す。キーは ino (`st_ino`)。更新権限は daemon が持ち、アプリは daemon の API か xattr で渡す。アプリを変えない手段は `fadvise` / `madvise` の fentry。この変更の範囲外。
+
+## 8. Future work: `admit_replace` の全件の問い合わせ (AC-69)
+
+2026-10-26 にコードを読んで気づいた点。**計測はしていない。**
+
+- `s3fs_ebpf_admit_replace` (`kmod/vfs_ops.c`、Phase 1 は 1398 行付近) は、admit 表を入れ替えるたびに、表にある ino (arena の entry と pcache の entry) を重複なしで集め、**全件** に `on_evict(ino)` を呼ぶ。`pick_victim` を持つ vtable では、全件に `on_insert(ino)` も呼ぶ (1420 / 1461 行付近)。容量を超えていない回も同じで、その回の結果は使われない。
+- 走るのは admit 表の入れ替えのときだけ (arena モードの admit、容量が有効な pcache モードの populate の後 (`enforceCapacityAfterPopulate`)、定期の sync、`/policy/eval`)。page cache の hit の read では走らない。
+- BPF 側のコストは §6 の値 (`on_hit` 0.3〜0.4 µs、`on_insert` 約 0.4 µs) から、1 ino あたり 1 µs 弱と見積もれる。1,000 ino なら 1 回の入れ替えで 1 ms 近い。
+- kmod 側の重複除去は配列の線形探索 (`eval_inos`、`cand`、`pcache_inos`、1370 / 1405 / 1446 / 1485 / 1497 / 1527 / 1539 行付近) で、全体は O(N²)。数千件ではこちらが効くはず。
+- 改善案:
+  1. `pick_victim` を持つ vtable では、`on_evict` を容量を超えたとき (score 順に戻るとき) だけ呼ぶ。
+  2. `on_insert` は新しく入った ino にだけ呼ぶ (前回の表との差分を kmod が持つ)。
+  3. 重複除去をハッシュにして O(N) にする。
+- 計測: ino 数 (100 / 1,000 / 10,000) を振って、`admit_replace` 1 回の時間 (bpftrace か ftrace の function_graph)、`bpf_stats_enabled` で `on_evict` / `on_insert` の合計、miss の latency への影響を見る。改善の前後で同じ計測を取り、`docs/journal/benchmark-results.md` に書く。
