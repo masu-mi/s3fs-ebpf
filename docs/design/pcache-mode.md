@@ -36,7 +36,7 @@ chunk 表のレイアウト (構造体、番地の対応、状態、容量の数
 4. daemon (`handleReadMiss`) は miss を含む 4 MiB の range GET (4 MiB を超える大きいファイル) か全体 GET をして、`POPULATE_PAGES` で kmod に渡す。kmod は chunk にコピーして `populated` を立て、`fd->lock` を持ったまま PCACHE entry を入れる。全体 admit になる大きいファイルは chunk ごとに並列で取り、取れた chunk から populate して signal する (AC-52、`admit_chunkload.go`)。
 5. daemon は `SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を付けて reader を起こす。chunk がもう evict されていれば kmod は `-EAGAIN` を返し、daemon は populate をやり直す (最大 3 回)。
 
-page cache で返る read も policy に見えるように、`fentry/generic_file_read_iter` が KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ (S-03。CPU と ino ごとに jiffy 1 回に間引き、AC-47)。
+page cache で返る read も policy に見えるように、`fentry/generic_file_read_iter` が KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ (S-03。CPU と ino ごとに jiffy 1 回に間引き、AC-47)。issue #22 の `hit_accum=1` では、この経路と `.read_folio` の `on_hit` を止め、kmod の `.read_iter` で open したファイルごとに 1 回数えて、`admit_replace` の Phase 1 で evict の前にまとめて反映する (`hit-signal-percpu-accumulation.md`。実装済みで、計測は `journal/benchmark-results.md` §18.44。既定は off)。
 
 ## 4.1 prewarm (`--pcache-prewarm`、AC-67、既定 off)
 
@@ -46,7 +46,7 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 - マウントは `--pcache-prewarm-mount`、空なら `/proc/self/mounts` の最初の `s3fs_ebpf` (30 秒まで待つ)。
 - `capacity_bytes` が設定されていれば、合計がそれを超える手前で止める (超えた分は読んでもすぐ evict されるだけ)。既定の容量は無制限なので、使うときは `--cache-capacity` を付ける。
 - `--prewarm-on-sync` のとき、sync で増えたファイルも同じように読む。
-- prewarm の読みも `fentry/generic_file_read_iter` を通るので、pattern-aware の判定と policy の `on_hit` に 1 回分入る (普通の最初の read と同じ扱い)。
+- prewarm の読みも `fentry/generic_file_read_iter` を通るので、pattern-aware の判定と policy の `on_hit` に 1 回分入る (普通の最初の read と同じ扱い。`hit_accum=1` では `policy_seen` が偽の最初の反映が捨てられる)。
 - 回帰テスト: `make test-pcache-prewarm` (選ばれたファイルの最初の read で upcall が出ないこと、選ばれていないファイルは upcall すること、sha256)。
 
 **兄弟の先読み (`prefetch_next`、AC-68)**: CEL に `prefetch_next: <int>` があると、ファイルの最初の chunk の miss を処理したあとで、そのファイルについて式を評価し、同じディレクトリで名前順に後ろの N 個 (上限 64) を同じ worker のキューに積む (`prefetch_next.go`)。

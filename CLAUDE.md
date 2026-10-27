@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 ## セッション開始時
-- kmod の read/pcache/eviction 周りに触れるときは、最初に `docs/kmod-pcache-invariants.md` だけを読む（ロック順、R1、pending のキー、buf_readers、reset の条件）。コードから読み直さない。
+- kmod の read/pcache/eviction 周りに触れるときは、最初に `docs/kmod-pcache-invariants.md` だけを読む（ロック順、R1、pending のキー、chunk の pin、reset の条件）。コードから読み直さない。
 - 不変条件を変えるコード変更をしたら、同じ変更でこのメモも更新する。
 
 ## kmod/vfs_ops.c の読み方

@@ -22,7 +22,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
-| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
+| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 
 ---
 
@@ -51,7 +51,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/design.md`](design/design.md) | 統合設計書 (initial pitch, §0 で現状との相違メモ付き) |
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
 | [`design/dev-s3fs-ebpf-protocol.md`](design/dev-s3fs-ebpf-protocol.md) | `/dev/s3fs_ebpf` の miss イベント (`read(2)`) と 16 個の ioctl の構造体・フィールド・戻り値 |
-| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
+| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
 | [`design/pcache-mode.md`](design/pcache-mode.md) | pcache モード (`--arena-metadata-only`) の全体像: arena モードとの違い、chunk の表、read / eviction / write の流れ、性能と残課題 |
 | [`design/pcache-chunk-table.md`](design/pcache-chunk-table.md) | pcache の chunk 表 (`fd->chunks[]`) のレイアウト: 構造体、4 MiB の番地の対応、chunk の状態、admit entry と容量の関係 |
@@ -60,6 +60,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計 (実装済み、`--partial-modify`、既定 off) |
 | [`design/ac58-pick-victim.md`](design/ac58-pick-victim.md) | AC-58: policy の vtable に `on_insert` / `on_remove` / `pick_victim` を足し、victim の選択を BPF に渡す設計 (実装済み、SIEVE / LRU / S3-FIFO の `*_pick_ops`) |
 | [`design/wtinylfu-pick-plan.md`](design/wtinylfu-pick-plan.md) | AC-66: W-TinyLFU を `pick_victim` で動かす計画 (現行とのずれ、BPF 側の設計、kmod に足す `on_size`、手順。未実装) |
+| [`design/hit-signal-percpu-accumulation.md`](design/hit-signal-percpu-accumulation.md) | issue #22: hit の信号を `.read_iter` で per-CPU に数え、`admit_replace` の evict の前に policy へ反映する (実装済み、`hit_accum`、既定 off、計測は §18.44。再計測の手順と採否の基準つき) |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
 | [`design/kmod-daemon-shared-memory.md`](design/kmod-daemon-shared-memory.md) | kmod と daemon の共有メモリ (miscdev の `.mmap`): 仕組み、arena との違い、この実装で使う場合の候補と注意。未実装・未計測 |
