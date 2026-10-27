@@ -82,6 +82,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 | doc | 内容 |
 |---|---|
+| [`journal/issue22-hit-accum-investigation.md`](journal/issue22-hit-accum-investigation.md) | issue #22 (`hit_accum`) の調査まとめ: 効果 (read 経路のコスト、hit rate への上乗せは小さい)、途中で見つけた 3 つのずれ (bench の capacity、in-flight の miss の `on_insert`、S3-FIFO の ghost の下限)、見つけ方、間違えたこと (2026-10-27) |
 | [`journal/history.md`](journal/history.md) | 開発史: 年表、backlog の系列ごとの課題、トラブル (データ破損 / race / oops / 計測の無効化 / 外れた仮説) と教訓 |
 | [`journal/early-walkthroughs.md`](journal/early-walkthroughs.md) | 以前 README にあった Week 1〜3 の動作確認手順 (test-arena / fastpath / verifier-demo / s3-list) とスプリントのロードマップ |
 | [`journal/week1-build-runtime-notes.md`](journal/week1-build-runtime-notes.md) | Week 1: kernel 6.12 + clang-20 + kmod build 疎通 |
