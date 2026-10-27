@@ -1339,6 +1339,87 @@ static void s3k_pending_concurrent(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, pending_exists(ino));
 }
 
+/* -- Issue #22: hit accumulation ------------------------------------------ */
+
+static u64 s3k_hit_order[8];
+static u32 s3k_hit_n;
+
+static void s3k_hit_rec_on_hit(u64 ino)
+{
+	if (s3k_hit_n < ARRAY_SIZE(s3k_hit_order))
+		s3k_hit_order[s3k_hit_n++] = ino;
+}
+
+static void s3k_hit_bump(struct s3fs_file_data *fd, u64 n, u64 tick)
+{
+	struct s3fs_hit_acc *acc = get_cpu_ptr(fd->hit);
+
+	acc->count += n;
+	acc->last_tick = tick;
+	put_cpu_ptr(fd->hit);
+}
+
+static void s3k_hit_delta_once(struct kunit *test)
+{
+	struct s3fs_file_data *fd = s3fs_file_data_new(NULL, 0);
+	struct s3fs_hit_rec rec = {};
+
+	KUNIT_ASSERT_NOT_NULL(test, fd);
+	/* policy_seen is false: the first look discards what was counted. */
+	s3k_hit_bump(fd, 5, 100);
+	KUNIT_EXPECT_FALSE(test, s3fs_hit_collect_fd(fd, S3K_INO_BASE, &rec));
+	KUNIT_EXPECT_TRUE(test, fd->policy_seen);
+	KUNIT_EXPECT_EQ(test, fd->hit_flushed, 5ull);
+	/* Nothing new: nothing to replay. */
+	KUNIT_EXPECT_FALSE(test, s3fs_hit_collect_fd(fd, S3K_INO_BASE, &rec));
+	/* Counts between two looks are handed over once, as a difference. */
+	s3k_hit_bump(fd, 2, 110);
+	s3k_hit_bump(fd, 1, 120);
+	KUNIT_EXPECT_TRUE(test, s3fs_hit_collect_fd(fd, S3K_INO_BASE, &rec));
+	KUNIT_EXPECT_EQ(test, rec.d, 3ull);
+	KUNIT_EXPECT_EQ(test, rec.last_tick, 120ull);
+	KUNIT_EXPECT_FALSE(test, s3fs_hit_collect_fd(fd, S3K_INO_BASE, &rec));
+	/* Reads between the populate and the first look count. */
+	fd->policy_seen = false;
+	fd->hit_base = fd->hit_flushed;	/* sum so far */
+	fd->hit_base_set = true;
+	s3k_hit_bump(fd, 2, 125);
+	KUNIT_EXPECT_TRUE(test, s3fs_hit_collect_fd(fd, S3K_INO_BASE, &rec));
+	KUNIT_EXPECT_EQ(test, rec.d, 2ull);
+	KUNIT_EXPECT_FALSE(test, fd->hit_base_set);
+	/* After on_remove the next look is a first look again. */
+	fd->policy_seen = false;
+	s3k_hit_bump(fd, 4, 130);
+	KUNIT_EXPECT_FALSE(test, s3fs_hit_collect_fd(fd, S3K_INO_BASE, &rec));
+	s3fs_file_data_free(fd);
+}
+
+static void s3k_hit_replay_order(struct kunit *test)
+{
+	struct s3fs_hit_rec recs[3] = {
+		{ .ino = S3K_INO_BASE + 3, .d = 1, .last_tick = 20 },
+		{ .ino = S3K_INO_BASE + 2, .d = 20, .last_tick = 10 },
+		{ .ino = S3K_INO_BASE + 1, .d = 1, .last_tick = 20 },
+	};
+	const unsigned int old_max = s3fs_hit_replay_max;
+	long before = atomic_long_read(&s3fs_hits_replayed_total);
+
+	s3k_hit_n = 0;
+	s3fs_hit_replay_max = 2;
+	s3fs_hit_replay(recs, 3, S3FS_HIT_SEEN, s3k_hit_rec_on_hit);
+	s3fs_hit_replay_max = old_max;
+
+	/* oldest last_tick first (capped at hit_replay_max calls), then the
+	 * tied ticks by ino. */
+	KUNIT_ASSERT_EQ(test, s3k_hit_n, 4u);
+	KUNIT_EXPECT_EQ(test, s3k_hit_order[0], S3K_INO_BASE + 2);
+	KUNIT_EXPECT_EQ(test, s3k_hit_order[1], S3K_INO_BASE + 2);
+	KUNIT_EXPECT_EQ(test, s3k_hit_order[2], S3K_INO_BASE + 1);
+	KUNIT_EXPECT_EQ(test, s3k_hit_order[3], S3K_INO_BASE + 3);
+	/* the counter is the delta before the cut */
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&s3fs_hits_replayed_total) - before, 22l);
+}
+
 static struct kunit_case s3k_data_cases[] = {
 	KUNIT_CASE(s3k_populate_fills_chunk),
 	KUNIT_CASE(s3k_chunk_populate_sizes),
@@ -1352,6 +1433,8 @@ static struct kunit_case s3k_data_cases[] = {
 	KUNIT_CASE(s3k_mop_needs_data),
 	KUNIT_CASE(s3k_mpin_balanced),
 	KUNIT_CASE(s3k_modify_ready_and_remote),
+	KUNIT_CASE(s3k_hit_delta_once),
+	KUNIT_CASE(s3k_hit_replay_order),
 	{}
 };
 

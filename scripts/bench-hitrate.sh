@@ -234,6 +234,8 @@ run_one() {
 	f_read_iter_hits=$(read_counter s3fs_ebpf_read_iter_hits_total)
 	f_read_iter_pos0_hits=$(read_counter s3fs_ebpf_read_iter_pos0_hits_total)
 	f_read_iter_pos0_hits=${f_read_iter_pos0_hits:-0}
+	# Issue #22: accesses replayed into the policy (0 unless HIT_ACCUM=1).
+	f_replayed=$(read_counter s3fs_ebpf_policy_hits_replayed_total)
 
 	local d_miss d_evict d_folio_hits d_read_iter_hits d_read_iter_pos0_hits d_page_cache_hits total rate_arena hit_rate iter_mult ms_per
 	d_miss=$((f_miss - b_miss))
@@ -273,6 +275,7 @@ run_one() {
 	# iter_mult=iter_hits/pos0_hits (≈2 confirms data+EOF double-fire).
 	printf 'RESULT policy=%-14s  folio=%5d  pc=%5d  miss=%5d  err=%3d  rate_arena=%6s%%  hit_rate=%6s%%  evictions=%5d  adm_mean=%5s  adm_max=%3d  iter_mult=%s  ms/access=%s\n' \
 		"$pol" "$d_folio_hits" "$d_page_cache_hits" "$d_miss" "$errs" "$rate_arena" "$hit_rate" "$d_evict" "$adm_mean" "$adm_max" "$iter_mult" "$ms_per" | tee -a "$OUT/summary.txt"
+	echo "DETAIL policy=$pol hits_replayed=${f_replayed:-0} n_access=$N_ACCESS upcalls=$d_miss" | tee -a "$OUT/summary.txt"
 }
 
 # Reference bounds on the exact trace the live runs used. trace-replay

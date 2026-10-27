@@ -282,6 +282,9 @@ struct s3fs_mark_dirty {
  *                              _upcalls) for true hit ratio)
  *   [2] s3fs_admit_invalidations — page-cache invalidations by
  *                              admit_replace for new/moved ranges
+ *   [14] s3fs_hits_replayed_total — hit_accum: accesses counted in
+ *                              .read_iter and replayed into the policy
+ *                              (before the hit_replay_max cut)
  */
 #define S3FS_STATS_MAX 16
 struct s3fs_stats {

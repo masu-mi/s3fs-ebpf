@@ -104,6 +104,13 @@ extern atomic_long_t s3fs_evictions_total;
  * hit). Divide by (this + read_miss_upcalls) for the true kmod-side
  * cache hit ratio. */
 extern atomic_long_t s3fs_folio_hits;
+
+/* Issue #22: hit_accum=1 counts hits in .read_iter (per-CPU, per inode)
+ * and replays them into the policy from admit_replace Phase 1; the
+ * direct on_hit calls (fentry KFunc, .read_folio) then do nothing.
+ * s3fs_hits_replayed_total is IOC_STATS slot 14. */
+extern bool s3fs_hit_accum;
+extern atomic_long_t s3fs_hits_replayed_total;
 extern atomic_long_t s3fs_admit_invalidations;
 
 /* Running admit hash size. Read from s3fs_kfunc_admit_count() in
