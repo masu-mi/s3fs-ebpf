@@ -7,7 +7,7 @@ issue #22 (hit の信号を per-CPU で集計し、evict の前に policy へ反
 - **`hit_accum=1` の効き目は read 経路のコストと、数える単位が揃うこと**。hit rate への上乗せは小さい (§3)。
 - 測定の途中で、`hit_accum` と無関係な **3 つのずれ** が見つかった。bench の capacity の 1 個ずれ、in-flight の miss の `on_insert`、S3-FIFO の ghost の下限。直したあとは live が simulator と ±3 pt で一致する。
 - 最初に報告した「`hit_accum=1` で sieve_pick / wtinylfu_pick が +9〜11 pt」は、**大半が上の 3 つのずれで、`hit_accum` の効果ではなかった** (訂正済み)。
-- 既定は off のまま (判断は保留)。hit rate への上乗せは小さいが、read 経路のコスト、単位の統一、G5 の解消という利点がある。残っているのは lockdep だけ。
+- **`hit_accum=1` を既定にした (2026-10-27)**。hit rate への上乗せは小さいが、read 経路のコスト、単位の統一、G5 の解消という利点がある。残っているのは lockdep だけ。`hit_accum=0` で従来の信号に戻せる。
 
 ## 2. 何を実装したか
 

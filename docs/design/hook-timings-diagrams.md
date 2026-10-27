@@ -593,7 +593,7 @@ App          VFS         kmod                       daemon          S3
 | `admit_replace` per entry | `on_evict(ino)` | admit 数 (最大 hash size) | 1 = vote evict, 0 = keep |
 | `.read_folio` (admit hit) | `on_hit(ino)` | per folio | freq/visited-bit 更新 |
 | `fentry/generic_file_read_iter` (page cache hit だけでなくこの FS のすべての read) | `on_hit(ino)` (KFunc `s3fs_kfunc_policy_hit` 経由、S-03。`hit_accum=1` では何もしない) | per read (CPU と ino ごとに jiffy 1 回に間引き、AC-47) | page cache で返る read も policy に見せる |
-| `s3fs_ebpf_read_iter` + `admit_replace` Phase 1 (`hit_accum=1`、#22) | `on_hit(ino)` を数えた回数ぶん (上限 `hit_replay_max`) | open したファイルごとに 1 回数え、反映は admit_replace ごと | evict の判断の前にまとめて反映 ((§18.44 で計測。この kfunc を外した効果は read のコストが policy なしと同等まで下がった)、既定 off) |
+| `s3fs_ebpf_read_iter` + `admit_replace` Phase 1 (`hit_accum=1`、#22) | `on_hit(ino)` を数えた回数ぶん (上限 `hit_replay_max`) | open したファイルごとに 1 回数え、反映は admit_replace ごと | evict の判断の前にまとめて反映 (既定、§18.44〜18.45。`hit_accum=0` でこの行の代わりに上の 2 行) |
 | `admit_replace` の容量パス (Phase 1) | `on_insert(ino)` (struct_ops のみ、AC-58) | 候補 ino ごと (冪等) | policy の FIFO / queue に候補を入れる |
 | `admit_replace` (容量超過) | `pick_victim()` (struct_ops のみ、AC-58) | evict する件数ぶん | 次に捨てる ino を返す。0 なら score 順に戻る |
 | `admit_replace` (evict 後) | `on_remove(ino)` (struct_ops のみ、AC-58) | evict した ino ごと | policy の構造から外す |

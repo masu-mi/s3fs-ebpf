@@ -125,7 +125,7 @@ page cache で hit する read の経路に入るフックや変更は、次の�
 | pattern map の共有 cacheline | 約 8% | ✅ per-CPU map (07e3bc2)、さらに slot 配列へ (AC-47 続き) |
 | pattern の hash lookup | 約 2.5% | ✅ slot 配列の添字参照に置き換え |
 | inode_index の lookup | 約 1.6% | ✅ slot にキャッシュ (64 回に 1 回確かめ直す) |
-| policy の kfunc (on_hit) | 約 1.7% | ✅ (CPU, ino) あたり jiffy に 1 回に間引き。issue #22 の `hit_accum=1` なら kmod の `.read_iter` で数えるので、この kfunc 自体が no-op になる ((§18.44 で計測。この kfunc を外した効果は read のコストが policy なしと同等まで下がった)) |
+| policy の kfunc (on_hit) | 約 1.7% | ✅ (CPU, ino) あたり jiffy に 1 回に間引き。issue #22 の `hit_accum=1` (既定) なら kmod の `.read_iter` で数えるので、この kfunc 自体が no-op になる 既定の `hit_accum=1` では測定済み (§18.44) |
 | ktime の読み出し (KVM) | 約 2% (間引きに使った場合) | ✅ jiffies に変更 |
 | per-CPU カウンタの locked add | 約 1% | ✅ 非 atomic に変更 |
 | trampoline と s_magic の判定 (固定) | 約 2.6% | フックを付ける限り残る |

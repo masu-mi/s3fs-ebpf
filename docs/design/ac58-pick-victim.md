@@ -24,7 +24,7 @@ u64 (*pick_victim)(void);        /* 次に捨てる ino。0 = 決められない
 2026-10-20 (AC-66): さらに末尾に `int (*on_size)(u64 ino, u64 bytes);` を足した。Phase 1 で `on_insert` の直後に、kmod がその ino に課金するバイト数 (arena は entry の合計、pcache は `fd->cap`) を渡す。`capacity_bytes > 0` のときだけ呼ぶ。W-TinyLFU が window / main の予算をバイトで持つため (`docs/design/wtinylfu-pick-plan.md`)。
 
 - `on_hit(ino)` は既存。これが access の通知。
-- 非 sleepable。`on_insert` / `on_remove` / `pick_victim` は **kmod 側の mutex (`s3fs_policy_evict_mutex`) で直列化**して呼ぶ。BPF 側は状態の更新に lock を要らない (bpf_spin_lock の中では map helper を呼べず、リスト操作が書けないため)。`on_hit` だけは並行に来るので、visited の 1 ビットを立てるだけにする (落ちた更新は害がない)。issue #22 の `hit_accum=1` では `on_hit` も Phase 1 の mutex の下から呼ぶので直列になる (`hit-signal-percpu-accumulation.md`、計測は §18.44。既定は並行のまま)。
+- 非 sleepable。`on_insert` / `on_remove` / `pick_victim` は **kmod 側の mutex (`s3fs_policy_evict_mutex`) で直列化**して呼ぶ。BPF 側は状態の更新に lock を要らない (bpf_spin_lock の中では map helper を呼べず、リスト操作が書けないため)。`on_hit` だけは並行に来るので、visited の 1 ビットを立てるだけにする (落ちた更新は害がない)。既定の `hit_accum=1` (issue #22) では `on_hit` も Phase 1 の mutex の下から呼ぶので直列になる (`hit-signal-percpu-accumulation.md`、`benchmark-results.md` §18.44)。`hit_accum=0` のときは上のとおり並行に来る。
 
 ### kmod の呼び方 (`s3fs_ebpf_admit_replace` の capacity パス)
 

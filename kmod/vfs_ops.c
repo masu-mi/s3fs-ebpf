@@ -567,7 +567,7 @@ atomic_long_t s3fs_folio_hits = ATOMIC_LONG_INIT(0);
 
 /*
  * Issue #22 (docs/design/hit-signal-percpu-accumulation.md).
- * hit_accum=1: .read_iter counts one access per open file in a per-CPU
+ * hit_accum=1 (default): .read_iter counts one access per open file in a per-CPU
  * slot of the inode's s3fs_file_data; admit_replace Phase 1 replays the
  * delta into the policy's on_hit under the evict mutex.  The direct
  * on_hit calls (fentry KFunc, .read_folio, arena read) then do nothing.
@@ -575,10 +575,10 @@ atomic_long_t s3fs_folio_hits = ATOMIC_LONG_INIT(0);
  *                      (0 = once per open)
  *   hit_replay_max     on_hit calls per ino per Phase 1 (delta is cut)
  */
-bool s3fs_hit_accum;
+bool s3fs_hit_accum = true;
 module_param_named(hit_accum, s3fs_hit_accum, bool, 0644);
 MODULE_PARM_DESC(hit_accum,
-	"Issue #22: count hits per CPU in .read_iter and replay them to the policy from admit_replace (default off = direct on_hit)");
+	"Issue #22: count hits per CPU in .read_iter and replay them to the policy from admit_replace (default on; 0 = the direct on_hit calls)");
 static unsigned int s3fs_hit_rearm_jiffies = HZ / 10;
 module_param_named(hit_rearm_jiffies, s3fs_hit_rearm_jiffies, uint, 0644);
 MODULE_PARM_DESC(hit_rearm_jiffies,

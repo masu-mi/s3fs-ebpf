@@ -36,7 +36,7 @@ chunk 表のレイアウト (構造体、番地の対応、状態、容量の数
 4. daemon (`handleReadMiss`) は miss を含む 4 MiB の range GET (4 MiB を超える大きいファイル) か全体 GET をして、`POPULATE_PAGES` で kmod に渡す。kmod は chunk にコピーして `populated` を立て、`fd->lock` を持ったまま PCACHE entry を入れる。全体 admit になる大きいファイルは chunk ごとに並列で取り、取れた chunk から populate して signal する (AC-52、`admit_chunkload.go`)。
 5. daemon は `SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を付けて reader を起こす。chunk がもう evict されていれば kmod は `-EAGAIN` を返し、daemon は populate をやり直す (最大 3 回)。
 
-page cache で返る read も policy に見えるように、`fentry/generic_file_read_iter` が KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ (S-03。CPU と ino ごとに jiffy 1 回に間引き、AC-47)。issue #22 の `hit_accum=1` では、この経路と `.read_folio` の `on_hit` を止め、kmod の `.read_iter` で open したファイルごとに 1 回数えて、`admit_replace` の Phase 1 で evict の前にまとめて反映する (`hit-signal-percpu-accumulation.md`。実装済みで、計測は `journal/benchmark-results.md` §18.44。既定は off)。
+page cache で返る read も policy に見えるように、`fentry/generic_file_read_iter` が KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ (S-03。CPU と ino ごとに jiffy 1 回に間引き、AC-47)。既定の `hit_accum=1` (issue #22) では、この経路と `.read_folio` の `on_hit` は止まり、kmod の `.read_iter` が open したファイルごとに 1 回数えて、`admit_replace` の Phase 1 で evict の前にまとめて反映する (`hit-signal-percpu-accumulation.md`、測定は `journal/benchmark-results.md` §18.44〜18.45)。`hit_accum=0` で上の方式に戻る。
 
 ## 4.1 prewarm (`--pcache-prewarm`、AC-67、既定 off)
 

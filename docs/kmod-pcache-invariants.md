@@ -73,8 +73,8 @@
 - フォールバック (412 のあとの全体 PUT) で、現在の object が remote chunk の範囲より短いとき (外部の truncate) は、足りない bytes を 0 で埋めて警告を出す (`getNowClamped` + `fillRange` の非 pinned)。
 - **flush 成功で `populated` にしない chunk:** remote の chunk は buffer (`p`) を持っていても、flush が copy したのは object のバイトで buffer ではない。`signal_flush` は `p` を持つ chunk のうち remote でないものだけを populated にする (途中までしか埋まっていない chunk を clean として返さない)。
 
-## hit の集計 (issue #22、`hit_accum`、既定 off)
-- 設計は `docs/design/hit-signal-percpu-accumulation.md`。`hit_accum=1` のとき、`.read_iter` は `s3fs_file_data` の per-CPU 値 (`fd->hit`、fd と同じ寿命) を進めるだけで、ロックを取らない。`on_hit` の直接の呼び出し (fentry の KFunc、`.read_folio`、arena 直読み) は何もしない。
+## hit の集計 (issue #22、`hit_accum`、既定 on)
+- 設計は `docs/design/hit-signal-percpu-accumulation.md`。`hit_accum=1` (既定) のとき、`.read_iter` は `s3fs_file_data` の per-CPU 値 (`fd->hit`、fd と同じ寿命) を進めるだけで、ロックを取らない。`on_hit` の直接の呼び出し (fentry の KFunc、`.read_folio`、arena 直読み) は何もしない。
 - `fd->hit_flushed` / `fd->policy_seen` は **`s3fs_policy_evict_lock` の下でだけ** 触る。`admit_replace` の Phase 1 が `pv || hit_accum` のときにこの mutex を取り、`ilookup` で fd を引いて差分を集め (`iput` は mutex の中、`s3fs_ino_buf_bytes` と同じ)、Phase 1 のあとで `last_tick` の昇順に `on_hit` を呼び、その後で `on_evict` の票を取る。`on_remove` を呼ぶ所は `s3fs_hit_forget` で `policy_seen` を落とす。
 - 反映の順序: Phase 1 のループの前に全 ino の差分を集め、既知の ino (`policy_seen`) の hit を先に、新しい ino の hit を `on_insert` のあとに反映する。populate (fd->lock 下) は `hit_base` / `hit_base_set` を書き、`policy_seen` が偽のときの最初の look が読む (READ_ONCE/WRITE_ONCE、lock なし)。`.splice_read` も `s3fs_hit_count` を呼ぶ。
 - **policy への通知は `s3fs_policy_track` / `s3fs_policy_untrack` だけが行う** (`on_insert` / `on_size` / `on_remove` を直接呼ばない)。hit の状態を忘れるのは、この `untrack` と `admit_evict_ino` (丸ごとの evict の唯一の出口) だけ。`scripts/check-kmod-invariants.sh` (`make check-invariants`、`make test-regression` に含む) が、それ以外の呼び出しを見つけたら落ちる。

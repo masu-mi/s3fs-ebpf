@@ -1,6 +1,6 @@
 # hit の信号を per-CPU で集計し、evict の前に policy へ反映する (issue #22)
 
-状態: **実装済み (2026-10-27)。module param `hit_accum` で切り替え、既定は 0 (従来の方式)。`make test-regression` は 0 / 1 とも PASS、§5.2〜§5.5 を測った (§8、`benchmark-results.md` §18.44)。測定の途中で、bench の capacity のずれと、hit_accum と無関係な 2 つの不具合 (in-flight の miss の `on_insert`、S3-FIFO の ghost の下限) を見つけて直した。hit rate への上乗せは小さい。既定は off のまま (残りは §9)。**
+状態: **実装済み (2026-10-27)。module param `hit_accum` で切り替え、**既定は 1** (2026-10-27 に既定化。0 で従来の方式)。`make test-regression` は 0 / 1 とも PASS、§5.2〜§5.5 を測った (§8、`benchmark-results.md` §18.44)。測定の途中で、bench の capacity のずれと、hit_accum と無関係な 2 つの不具合 (in-flight の miss の `on_insert`、S3-FIFO の ghost の下限) を見つけて直した。hit rate への上乗せは小さい。既定化の根拠は §6 と §9。**
 コードの位置は `51e9e50` から実装後の `kmod/vfs_ops.c` に合わせている。issue の原文 (問題の整理、採らなかった案を含む) は GitHub issue #22。ここには実装した形と、実装で決めたことだけを書く。
 
 ## 1. 何を直すか
@@ -28,7 +28,7 @@ module param (`/sys/module/s3fs_kfunc/parameters/`):
 
 | param | 既定 | 意味 |
 |---|---|---|
-| `hit_accum` | 0 | 0 = 従来、1 = この方式 |
+| `hit_accum` | 1 | 1 = この方式 (既定)、0 = 従来 |
 | `hit_rearm_jiffies` | HZ/10 | 開いたままのファイルがもう 1 回数えるまでの jiffies。0 = open ごとに 1 回。既定は §5.3 の計測で決める (bench は毎回 open し直すので差は出ないはず) |
 | `hit_replay_max` | 15 | 1 回の Phase 1 で 1 ino に呼ぶ `on_hit` の上限 (S3-FIFO / freq2bit は 3、W-TinyLFU の sketch は 15 で飽和) |
 
@@ -68,7 +68,7 @@ module param (`/sys/module/s3fs_kfunc/parameters/`):
 
 ## 6. 採否の基準
 
-次をすべて満たしたら `hit_accum=1` を既定にする。
+次をすべて満たしたら `hit_accum=1` を既定にする。**既定にした (2026-10-27)**。lockdep を除いて、下の基準は §8 の測定で満たした。
 
 - 5.1 がすべて通る。
 - 5.2 で反映した回数が hit の数に近い (2 倍にならない)。

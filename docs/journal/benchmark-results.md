@@ -2057,3 +2057,5 @@ per-access の hit/miss を simulator と突き合わせた (`bench-hitrate.sh` 
 `hit_accum=0` では large の 1 access が約 82 回の `on_hit` (folio ごと) になり、small の約 2.6 回の 30 倍以上。W-TinyLFU の sketch や S3-FIFO の freq を大きいファイルが飽和させる。`hit_accum=1` では 1 access が高々 1 回で、large と small の比が access の比に近づく (合計 85 は、cache hit になった access の数)。この bench の hit_rate は pcache では意味を持たない (miss が N_ACCESS を超え −9%) ので、ここでは on_hit の回数だけを比べた。
 
 **SIEVE の hand のバグ**: `policy_sieve_pick_ops` は、hand が newest 端 (head) にあるとき、次の `on_insert` の新しい item の上に hand が乗り、次の `pick_victim` が newest の item を evict していた。参照 (simulator) は hand を nil にして次は oldest から始める。`on_insert` で hand が head 以上なら tail に戻すように直した。per-access で simulator と食い違う数は 337 から約 230 に減った (seed 42)。残り (約 9〜12%) は run ごとにばらつく。
+
+**既定の変更 (2026-10-27)**: 以上の結果から、module param `hit_accum` の既定を 1 にした。従来の信号に戻すには `hit_accum=0`。A/B の bench は `HIT_ACCUM=0|1` を明示する。

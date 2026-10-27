@@ -578,7 +578,7 @@ hot path に置いた fentry の負担と、その測り方。
 **行儀は悪い。他の FS の read にも毎回 trampoline が乗る。** 採用の基準と注意点は `docs/design/read-iter-hook-overhead.md` §4〜§5 にまとめた。
 
 - 先頭で `s_magic` を見て、自分の FS でなければすぐ返す。それでも trampoline と判定の固定費が残り、fuse-raw 比 0.974 が上限になる。
-- 目的は 2 つ。page cache で hit した read も policy に見せる (on_hit) ことと、`ki_pos` と長さからアクセスパターン (順次 / ランダム) を BPF で判定して admit や先読みに使うこと (R-01、`docs/design/ebpf-hook-gaps.md` §2.3、§3)。kmod は `.read_iter` を自分で持っているので、前者は本来 kmod の中で数えれば済む。issue #22 で実装した (`hit_accum=1`、per-CPU で数えて `admit_replace` から反映、既定 off、(§18.44 で計測。この kfunc を外した効果は read のコストが policy なしと同等まで下がった)。`docs/design/hit-signal-percpu-accumulation.md`)。
+- 目的は 2 つ。page cache で hit した read も policy に見せる (on_hit) ことと、`ki_pos` と長さからアクセスパターン (順次 / ランダム) を BPF で判定して admit や先読みに使うこと (R-01、`docs/design/ebpf-hook-gaps.md` §2.3、§3)。kmod は `.read_iter` を自分で持っているので、前者は本来 kmod の中で数えれば済む。issue #22 で実装した (`hit_accum=1` が既定。per-CPU で数えて `admit_replace` から反映する。`docs/design/hit-signal-percpu-accumulation.md`)。
 - 今後の方向は、hit の経路から外して miss の経路 (`.read_folio` や upcall) で集めること (`read-iter-hook-overhead.md` §4.6)。
 - `--no-read-iter-hook` で外せる。AB-07 の gate (a) はフックなしで判定し、フックの負担は `hook_ratio` (現在 0.983) として別に出している (§18.43)。
 

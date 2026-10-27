@@ -184,7 +184,7 @@ page cache は最速 (hit なら kmod にも来ない) で、kernel が全体の
 | A disk cache | arena に載らない分の第二層 | 上限管理を追加 (今は無制限) |
 | S3 | 正本 | — |
 
-page cache hit を policy に見せる方法は 2 つある。(1) S-03 (実装済み、既定): `bpf/s3fs_fastpath.bpf.c` の `fentry/generic_file_read_iter` が全 read で発火し、KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ。(CPU, ino) ごとに jiffy 1 回へ間引くので回数が落ち、`.read_folio` の `on_hit` と単位が揃わない。(2) issue #22 (実装済み、`hit_accum=1`、既定 off、計測は §18.44): kmod の `.read_iter` で、開いたファイルごとに per-CPU で数え、`admit_replace` の Phase 1 で evict の判断の前にまとめて `on_hit` として反映する (`hit-signal-percpu-accumulation.md`)。
+page cache hit を policy に見せる方法は 2 つある。(1) S-03 (実装済み、`hit_accum=0` のときの経路): `bpf/s3fs_fastpath.bpf.c` の `fentry/generic_file_read_iter` が全 read で発火し、KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ。(CPU, ino) ごとに jiffy 1 回へ間引くので回数が落ち、`.read_folio` の `on_hit` と単位が揃わない。(2) issue #22 (実装済み、`hit_accum=1`、既定 on、計測は §18.44〜18.45): kmod の `.read_iter` で、開いたファイルごとに per-CPU で数え、`admit_replace` の Phase 1 で evict の判断の前にまとめて `on_hit` として反映する (`hit-signal-percpu-accumulation.md`)。
 
 ### 6.4 結局どこが速いのか (ベンチとの対応)
 
@@ -212,7 +212,7 @@ page cache hit を policy に見せる方法は 2 つある。(1) S-03 (実装�
 | S-02 (P1〜P3) | 実装済 | module param `capacity_bytes` (>0 で capacity mode) と `softcap` (実行時に可変)。daemon `--cache-capacity` / `--softcap` で設定する。capacity mode では `on_evict` の戻り値をスコアとして扱う (高い順 → 0 は古い順) |
 | S-04 (P6) | 実装済 | daemon は push の直前に evict log を drain する (`reconcileEvictionsLocked`)。kmod が evict するのは daemon の push 中だけなので、復活の窓が無くなる |
 | 追加 | 実装済 | miss upcall で reader が待っている ino はどちらのモードでも evict しない (`pending_exists`)。以前は、自分の push で入れた ino をその場で追い出し、reader が placeholder buffer に落ちる可能性があった |
-| S-03 (P5) | 実装済 | KFunc `s3fs_kfunc_policy_hit` を `fentry/generic_file_read_iter` の hit パスから呼び、page cache で返る read でも `on_hit` が dispatch される。間引きによる回数の欠落と単位の不揃いは issue #22 (`hit_accum`、`hit-signal-percpu-accumulation.md`、(§18.44 で計測。この kfunc を外した効果は read のコストが policy なしと同等まで下がった)) で直す |
+| S-03 (P5) | 実装済 | KFunc `s3fs_kfunc_policy_hit` を `fentry/generic_file_read_iter` の hit パスから呼び、page cache で返る read でも `on_hit` が dispatch される。間引きによる回数の欠落と単位の不揃いは issue #22 (`hit_accum`、既定で有効、`hit-signal-percpu-accumulation.md`、`benchmark-results.md` §18.44〜18.45) で直した |
 | AC-58 (P3、P4 の一部) | 実装済 (2026-10-17) | vtable に `on_insert` / `on_remove` / `pick_victim` を追加。これを持つ policy (SIEVE / LRU / S3-FIFO の `*_pick_ops`) は容量超過のとき「次に捨てる ino」を自分で選び、kmod は必要な分だけ evict する。持たない policy は従来の score 順 (`docs/design/ac58-pick-victim.md`) |
 
 capacity mode でも残る点:

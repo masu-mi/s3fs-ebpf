@@ -7,11 +7,11 @@ kmod から見た呼び出しは共通で、次の 4 つ。
 | member | いつ呼ばれるか | policy がすること |
 |---|---|---|
 | `on_insert(ino)` | ino がキャッシュに入った | 自分の queue に足す |
-| `on_hit(ino)` | read のたび (hot path、並行に走る)。`hit_accum=1` では `admit_replace` の中で evict の mutex の下に、数えた回数ぶんまとめて呼ばれる (#22、(§18.44 で計測。この kfunc を外した効果は read のコストが policy なしと同等まで下がった)) | 印を付けるだけ (1 ビットや小さいカウンタ)。`hit_accum=1` なら直列になるので制限は緩む |
+| `on_hit(ino)` | read のたび (hot path、並行に走る)。既定の `hit_accum=1` では `admit_replace` の中で evict の mutex の下に、数えた回数ぶんまとめて呼ばれる (#22、§18.44〜18.45 | 印を付けるだけ (1 ビットや小さいカウンタ)。`hit_accum=1` なら直列になるので制限は緩む |
 | `pick_victim()` | 容量を超えた | 追い出す ino を 1 つ返す |
 | `on_remove(ino)` | kmod が別の経路で追い出した | 忘れる |
 
-`on_hit` は(既定では) read の hot path でロックなしに並行して走るので、どの実装も「値を 1 つ書くだけ」にし、queue の並べ替えは kmod が直列化する `on_insert` / `pick_victim` の中だけで行う (AC-58、hot path で map を update すると 64 jobs で 14.8% 落ちた)。
+`on_hit` は(`hit_accum=0` では) read の hot path でロックなしに並行して走るので、どの実装も「値を 1 つ書くだけ」にし、queue の並べ替えは kmod が直列化する `on_insert` / `pick_victim` の中だけで行う (AC-58、hot path で map を update すると 64 jobs で 14.8% 落ちた)。
 
 ---
 
