@@ -1416,7 +1416,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				if (pv) {
+				/* A miss in flight is not a victim candidate yet:
+				 * its pending keeps the kmod from evicting it, but
+				 * a policy that picked it would already have moved
+				 * it to its ghost / hand.  Insert it next round. */
+				if (pv && !pending_exists(ino)) {
 					s3fs_policy_ops_insert(ino);
 					/* AC-66: the bytes this ino adds to
 					 * live_bytes (all of its ranges). */
@@ -1457,7 +1461,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				if (pv) {
+				if (pv && !pending_exists(ino)) {
 					s3fs_policy_ops_insert(ino);
 					/* AC-66: charged by fd->cap, as live_bytes. */
 					if (cap_bytes)
