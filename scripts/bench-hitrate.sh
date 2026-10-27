@@ -202,6 +202,12 @@ run_one() {
 			errs=$((errs + 1))
 		fi
 		i=$((i + 1))
+		[ -n "${ACCESS_SLEEP:-}" ] && sleep "$ACCESS_SLEEP"
+		# PER_ACCESS_LOG=<file>: "idx file miss_total" per access, for
+		# diffing against `dev trace-replay --per-access` (issue #22).
+		if [ -n "${PER_ACCESS_LOG:-}" ]; then
+			echo "$i $idx $(read_counter s3fs_ebpf_read_miss_upcalls_total)" >>"$PER_ACCESS_LOG.$pol"
+		fi
 		# Interleave policy eval rounds so per-hit signal (CMS bump,
 		# visited bit, freq counter) has a chance to influence
 		# eviction decisions. Without this, policies that populate
@@ -290,7 +296,12 @@ seed_bucket
 
 # Materialise the trace once: the live loop and the reference sims read
 # the same file, and it is kept with the results for later replay.
-gen_workload > "$OUT/workload.txt"
+if [ -n "${WORKLOAD_FILE:-}" ]; then
+	cp "$WORKLOAD_FILE" "$OUT/workload.txt"	# debugging: replay a given sequence of file indexes
+	N_ACCESS=$(wc -l <"$OUT/workload.txt")
+else
+	gen_workload > "$OUT/workload.txt"
+fi
 awk '{ printf "{\"ts\":%d,\"ino\":%d,\"op\":\"read\"}\n", (NR-1)*1000000, 100+$1 }' \
 	"$OUT/workload.txt" > "$OUT/trace.jsonl"
 
