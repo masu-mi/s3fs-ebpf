@@ -65,7 +65,7 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
+.PHONY: check-invariants test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
@@ -329,7 +329,13 @@ test-daemon-cov: ## go test with coverage -> coverage/daemon.out
 	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) test -covermode=atomic -coverprofile=$(CURDIR)/coverage/daemon.out ./...
 
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
-test-regression: test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale ## Run all regression tests
+check-invariants: ## Static checks on kmod/vfs_ops.c and the bench seeds (no root)
+	@$(SCRIPTS_DIR)/check-kmod-invariants.sh
+
+test-policy-conformance: kmod daemon ## Live pick_victim policies vs their simulators, per access (issue #22)
+	@$(SCRIPTS_DIR)/test-policy-conformance.sh
+
+test-regression: check-invariants test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
