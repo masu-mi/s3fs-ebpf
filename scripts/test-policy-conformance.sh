@@ -20,7 +20,7 @@
 # <= 2.2 pt for every policy; the faults above gave 4.2 pt (ghost bound),
 # 5.3 pt (in-flight on_insert) and 6 pt (both).  The differing share is a
 # per-policy ceiling just above what the build shows (lru 2.7 %, s3fifo
-# 9.3 %, wtinylfu 16.5 %, sieve 20.2 %).  sieve and wtinylfu differ from their
+# 9.3 %, wtinylfu 16.5 %, sieve 12.4 % after the hand fix, 20.2 % before).  sieve and wtinylfu differ from their
 # simulators on ~1 access in 5 without losing hit rate: the BPF versions are
 # not step-for-step the simulators (open item, issue #22 notes).
 set -euo pipefail
@@ -59,7 +59,7 @@ for pol in $POLICIES; do
 	lru) dmax=${DIFF_MAX_PCT_LRU:-6} ;;
 	s3fifo) dmax=${DIFF_MAX_PCT_S3FIFO:-13} ;;
 	wtinylfu) dmax=${DIFF_MAX_PCT_WTINYLFU:-22} ;;
-	sieve) dmax=${DIFF_MAX_PCT_SIEVE:-26} ;;
+	sieve) dmax=${DIFF_MAX_PCT_SIEVE:-15} ;;
 	*) dmax=${DIFF_MAX_PCT:-12} ;;
 	esac
 	res=$(python3 - "$OUT/live.$pol" "$OUT/sim.$sim" "$HIT_TOL_PT" "$dmax" <<'PY'
