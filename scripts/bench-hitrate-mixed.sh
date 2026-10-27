@@ -33,7 +33,7 @@ BUCKET=${BUCKET:-s3fs-test}
 N_LARGE=${N_LARGE:-3}               # large files (index 0..N_LARGE-1, hottest Zipf ranks)
 N_SMALL=${N_SMALL:-10}              # small files (index N_LARGE..N_TOTAL-1)
 LARGE_FILE_BYTES=${LARGE_FILE_BYTES:-5242880}  # 5 MiB — above 4 MiB partial-admit threshold
-SMALL_FILE_BYTES=44                  # same as bench-hitrate.sh
+SMALL_FILE_BYTES=60                  # printf in seed: "hitrate mixed small NNN lineK\n" x2
 N_TOTAL=$((N_LARGE + N_SMALL))
 
 N_ACCESS=${N_ACCESS:-500}            # shorter than single-type bench; large-file GETs are slow

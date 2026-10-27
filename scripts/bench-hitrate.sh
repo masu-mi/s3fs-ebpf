@@ -42,7 +42,7 @@ N_ACCESS=${N_ACCESS:-2000}      # workload length; 200 was too short for aging/g
 ZIPF_ALPHA=${ZIPF_ALPHA:-0.7}   # skew — smaller = more uniform
 SEED=${SEED:-42}                # random seed for workload generation
 SOFTCAP=${SOFTCAP:-8}           # slots; passed to kmod (--softcap) and the reference sims
-FILE_BYTES=44                   # size of each seeded hitrate_<N>.txt (see seed_bucket)
+FILE_BYTES=46                   # size of each seeded hitrate_<N>.txt (see seed_bucket)
 CAPACITY_BYTES=${CAPACITY_BYTES:-$((SOFTCAP * FILE_BYTES))}  # 0 = legacy vote mode
 # Softcap converges from N → 8 in 3 sync rounds (grace + clear +
 # evict), so we need >=3 sync-every intervals of settle. Also lets
