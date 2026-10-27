@@ -1071,6 +1071,7 @@ static void s3fs_file_data_reset(u64 ino);
  * check but before admit_drop_all_ranges, causing drop to remove the entry
  * while reset was never called — leaving fd->buf allocated outside the
  * capacity limit. */
+static void s3fs_hit_forget(u64 ino);
 static bool admit_evict_ino(u64 ino, u64 *freed)
 {
 	bool had_pcache = false;
@@ -1081,6 +1082,9 @@ static bool admit_evict_ino(u64 ino, u64 *freed)
 	s3fs_evict_page_cache(ino);
 	if (had_pcache)
 		s3fs_file_data_reset(ino);
+	/* #22: every whole-ino eviction ends here, so this is the one place
+	 * that resets the per-ino hit state (the next populate starts afresh). */
+	s3fs_hit_forget(ino);
 	return true;
 }
 
@@ -1102,6 +1106,45 @@ static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool first,
 static void s3fs_hit_forget(u64 ino);
 static void s3fs_hit_signal(u64 ino);
 static void s3fs_hit_set_base(struct s3fs_file_data *fd);
+
+/* Policy bookkeeping.  The only callers of the policy's on_insert / on_size /
+ * on_remove: keep the rules about WHEN here, not at each call site.
+ *  - A miss in flight (pending) is not a candidate yet.  Pending keeps the
+ *    kmod from evicting the ino, but a policy that picked it would already
+ *    have moved it to its ghost / hand.  It is tracked next round.
+ *  - Whatever leaves the policy also forgets its hit state (idempotent with
+ *    admit_evict_ino, which forgets for policies without pick_victim).
+ * scripts/check-kmod-invariants.sh fails if another file position calls the
+ * raw ops. */
+static bool s3fs_policy_trackable(u64 ino)
+{
+	return !pending_exists(ino);
+}
+
+static void s3fs_policy_track(u64 ino, u64 bytes, bool sized)
+{
+	s3fs_policy_ops_insert(ino);
+	if (sized)
+		s3fs_policy_ops_size(ino, bytes);
+}
+
+static void s3fs_policy_untrack(u64 ino)
+{
+	s3fs_policy_ops_remove(ino);
+	s3fs_hit_forget(ino);
+}
+
+/* Bytes the arena entries from index @from on charge to @ino. */
+static u64 s3fs_arena_ino_bytes(const struct s3fs_admit_entry *entries,
+				u32 count, u32 from, u64 ino)
+{
+	u64 b = 0;
+
+	for (; from < count; from++)
+		if (entries[from].ino == ino)
+			b += entries[from].size;
+	return b;
+}
 
 struct s3fs_victim {
 	int score;     /* policy on_evict return value, clamped >= 0 */
@@ -1152,8 +1195,7 @@ static void s3fs_capacity_evict_one(u64 ino, u64 *live_bytes, u32 *evicted,
 		return;
 	(*evicted)++;
 	if (pv)
-		s3fs_policy_ops_remove(ino);
-	s3fs_hit_forget(ino);
+		s3fs_policy_untrack(ino);
 	/* AC-41: arena bytes from the dropped entries plus what reset actually
 	 * released (0 on skip_reset, so the loop keeps evicting while still
 	 * over capacity). */
@@ -1449,11 +1491,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		 * on new inos follow their on_insert (after the loops). */
 		if (hrec) {
 			for (i = 0; i < count; i++)
-				if (!pending_exists(entries[i].ino) &&
+				if (s3fs_policy_trackable(entries[i].ino) &&
 				    s3fs_hit_collect(entries[i].ino, &hrec[nhrec]))
 					nhrec++;
 			for (pi = 0; pi < pcache_remaining; pi++)
-				if (!pending_exists(pcache_inos[pi]) &&
+				if (s3fs_policy_trackable(pcache_inos[pi]) &&
 				    s3fs_hit_collect(pcache_inos[pi], &hrec[nhrec]))
 					nhrec++;
 			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_SEEN, s3fs_hit_signal);
@@ -1482,24 +1524,12 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				/* A miss in flight is not a victim candidate yet:
-				 * its pending keeps the kmod from evicting it, but
-				 * a policy that picked it would already have moved
-				 * it to its ghost / hand.  Insert it next round. */
-				if (pv && !pending_exists(ino)) {
-					s3fs_policy_ops_insert(ino);
-					/* AC-66: the bytes this ino adds to
-					 * live_bytes (all of its ranges). */
-					if (cap_bytes) {
-						u64 b = 0;
-						u32 k;
-
-						for (k = i; k < count; k++)
-							if (entries[k].ino == ino)
-								b += entries[k].size;
-						s3fs_policy_ops_size(ino, b);
-					}
-				}
+				/* AC-66: the bytes this ino adds to live_bytes
+				 * (all of its ranges). */
+				if (pv && s3fs_policy_trackable(ino))
+					s3fs_policy_track(ino,
+						cap_bytes ? s3fs_arena_ino_bytes(entries, count, i, ino) : 0,
+						cap_bytes);
 
 				if (fr_vote != 0)
 					fmodret_votes++;
@@ -1529,13 +1559,11 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				if (pv && !pending_exists(ino)) {
-					s3fs_policy_ops_insert(ino);
-					/* AC-66: charged by fd->cap, as live_bytes. */
-					if (cap_bytes)
-						s3fs_policy_ops_size(ino,
-							s3fs_ino_buf_bytes(ino));
-				}
+				/* AC-66: charged by fd->cap, as live_bytes. */
+				if (pv && s3fs_policy_trackable(ino))
+					s3fs_policy_track(ino,
+						cap_bytes ? s3fs_ino_buf_bytes(ino) : 0,
+						cap_bytes);
 
 				if (fr_vote != 0)
 					fmodret_votes++;
@@ -1605,11 +1633,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				continue;
 			if (pending_exists(ino))
 				continue;
-			if (admit_evict_ino(ino, NULL)) {
+			if (admit_evict_ino(ino, NULL))
 				evicted++;
-				/* #22: the next populate is a first look */
-				s3fs_hit_forget(ino);
-			}
 		}
 		/* P3: Phase 2 continued — pcache inos */
 		for (pi = 0; pi < pcache_remaining; pi++) {
@@ -1650,11 +1675,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				continue;
 			if (pending_exists(ino))
 				continue;
-			if (admit_evict_ino(ino, NULL)) {
+			if (admit_evict_ino(ino, NULL))
 				evicted++;
-				/* #22: the next populate is a first look */
-				s3fs_hit_forget(ino);
-			}
 		}
 
 		kfree(eval_inos);
@@ -1680,8 +1702,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 					/* Not a candidate any more (evicted by
 					 * another route): let the policy forget
 					 * it and ask again. */
-					s3fs_policy_ops_remove(v);
-					s3fs_hit_forget(v);
+					s3fs_policy_untrack(v);
 					continue;
 				}
 				if (cand[j].tried)
