@@ -46,7 +46,7 @@ score と同点処理 (`on_evict`、tiebreak) は、`pick_victim` を持たな�
 - `on_insert`: idx にあれば何もしない。なければ `slots[head % N]` に visited=0 で入れ、`head++`。満杯 (`head - tail >= N`) なら最古を捨てる。
 - `on_remove`: idx から引いて `valid=0`。
 - `pick_victim`: `hand` を tail 側から head 側に進める (bounded loop)。無効な slot は飛ばす。visited=1 なら 0 にして進む。visited=0 なら victim (slot を無効にして idx から消す、`hand = seq + 1`)。head に達したら tail に戻る。
-- SIEVE の性質: 新しい item は head に入り、hand は動かず、promotion がない。
+- SIEVE の性質: 新しい item は head に入り、hand は動かず、promotion がない。ただし hand が newest 端 (head) まで進んでいるときは、`on_insert` で oldest に戻す (そのままだと新しい item の上に乗り、次の pick が newest を evict する。issue #22 の調査で修正、`benchmark-results.md` §18.45)。
 
 ## 4. 測ること (計画時)
 

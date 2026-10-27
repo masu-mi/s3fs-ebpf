@@ -112,10 +112,9 @@ module param (`/sys/module/s3fs_kfunc/parameters/`):
 - **大きいファイル (§5.4)**: `bench-hitrate-mixed.sh` の hit_rate は pcache では意味を持たない (chunk ごとの upcall で miss が N_ACCESS を超える)。miss 数は acc=0 / 1 でほぼ同じ (541/579 対 546/590)。G5 が消えたかは ino ごとの反映回数を見ないと言えず、未測定。
 ## 9. 残っていること
 
-- S3-FIFO の per-access の食い違い (seed 42 で 159 件、hit 907 対 936)。残りは両方向に散っていて、simulator との細かい実装差 (ghost の長さの数え方など) の可能性が高い。同じ突き合わせを sieve、wtinylfu でも行う。
-- `INTERLEAVE=1` を修正後の kmod で取り直す。
-- G5: ino ごとの反映回数を見て、大きいファイルの水増しが消えたかを確かめる。`bench-hitrate-mixed.sh` は capacity を直したので、取り直せば hit rate の意味が出るか確かめる (pcache では miss が N_ACCESS を超える問題は残る)。
-- `bench-ab-pcache.sh` gate (b) の取り直し (既存の揺れ)。
+- sieve (約 9〜12%)、wtinylfu (約 16%)、s3fifo (約 8%) の per-access の食い違い。hit 率は ±2 pt で合っている。SIEVE は hand の端のバグを 1 つ直した (§18.45)。wtinylfu は未調査。run ごとにばらつくので、タイミング由来の揺れもある。
+- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。lockdep 付きカーネルが要る。
 - `fentry` の KFunc 呼び出しを BPF 側で飛ばす案: read のコストは policy なしと同等まで下がっているので、効果が測れるまで入れない。
-- lockdep (AC-42)、`make test-kunit` (KSRC が要る)。
-- 既定を 1 にするかの判断。read 経路のコストと数える単位の利点は確かめた。hit rate の上乗せは小さい。gate (b) の取り直しと lockdep が残る。
+- 既定を 1 にするかの判断 (理由は read 経路のコスト、単位の統一、G5 の解消)。hit rate の上乗せは小さい。
+
+確認済み (2026-10-27): `make test-kunit` (UML、41 件、`s3k_hit_delta_once` / `s3k_hit_replay_order` を含む) PASS、`INTERLEAVE=1` の取り直し (評価の間隔は効かない)、gate (b) (`hit_accum` と無関係の同点)、G5 (large の `on_hit` が 1 access あたり約 82 回から高々 1 回)。数値は `journal/benchmark-results.md` §18.45。

@@ -7,7 +7,7 @@ issue #22 (hit の信号を per-CPU で集計し、evict の前に policy へ反
 - **`hit_accum=1` の効き目は read 経路のコストと、数える単位が揃うこと**。hit rate への上乗せは小さい (§3)。
 - 測定の途中で、`hit_accum` と無関係な **3 つのずれ** が見つかった。bench の capacity の 1 個ずれ、in-flight の miss の `on_insert`、S3-FIFO の ghost の下限。直したあとは live が simulator と ±3 pt で一致する。
 - 最初に報告した「`hit_accum=1` で sieve_pick / wtinylfu_pick が +9〜11 pt」は、**大半が上の 3 つのずれで、`hit_accum` の効果ではなかった** (訂正済み)。
-- 既定は off のまま。理由は、hit rate への上乗せが小さいことと、gate (b) の取り直しと lockdep が残っていること。
+- 既定は off のまま (判断は保留)。hit rate への上乗せは小さいが、read 経路のコスト、単位の統一、G5 の解消という利点がある。残っているのは lockdep だけ。
 
 ## 2. 何を実装したか
 
@@ -90,11 +90,15 @@ bench の capacity のずれは、1 slot 足りないと simulator との差が�
 
 ## 8. 残っていること
 
-- per-access の食い違い: s3fifo 約 8%、sieve 約 17〜19%、wtinylfu 約 16% (hit 率は ±2 pt で合っている)。BPF 版と simulator の一手ずつの差。sieve の hand、wtinylfu の admission の順序などを突き合わせる。
-- `INTERLEAVE=1` を修正後の kmod で取り直す。
-- G5 (大きいファイルの頻度の水増し): ino ごとの反映回数を見る。mixed bench は capacity を直したので取り直す。
-- `bench-ab-pcache.sh` gate (b) の取り直し。lockdep (AC-42)、`make test-kunit` (KSRC が要る)。
-- 既定を 1 にするかの判断 (read 経路のコストと単位の統一だけが理由になる)。
+- per-access の食い違い: s3fifo 約 8%、sieve 約 9〜12%、wtinylfu 約 16% (hit 率は ±2 pt で合っている)。SIEVE は hand の端のバグを 1 つ直した (食い違い 337→約 230)。wtinylfu は未調査で、run ごとのばらつきもある。
+- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。lockdep 付きカーネルが要る。
+- 既定を 1 にするかの判断 (理由は read 経路のコスト、単位の統一、G5 の解消)。
+
+調査の続きで確認したこと (`benchmark-results.md` §18.45):
+- `INTERLEAVE=1` にしても hit rate は上がらない。評価の間隔は simulator との差の原因ではなかった。
+- gate (b) は 10 MiB の cat が 16 ms 前後の同点で、ベースライン (`51e9e50`) は PASS、現在は `hit_accum` 0 / 1 とも FAIL だが差は 0.7% でノイズ内。`hit_accum` の影響ではない。
+- G5: large の 1 access が `on_hit` 約 82 回 (folio ごと) だったのが、`hit_accum=1` で高々 1 回になった。
+- `make test-kunit` (UML、41 件) PASS。
 
 ## 9. 関連
 

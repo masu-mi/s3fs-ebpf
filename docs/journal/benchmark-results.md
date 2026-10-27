@@ -2023,3 +2023,37 @@ per-access の hit/miss を simulator と突き合わせた (`bench-hitrate.sh` 
 **大きいファイル** (`bench-hitrate-mixed.sh`、s3fifo_pick_ops / wtinylfu_pick_ops): この bench の hit_rate は pcache では意味を持たない (大きいファイルは chunk ごとに upcall が出て miss が N_ACCESS を超え、−9%〜−18% になる)。miss 数は acc=0 が 541 / 579、acc=1 が 546 / 590 でほぼ同じ。G5 が消えたかは、ino ごとの反映回数を見ないと言えない (未測定)。
 
 **正しさ**: `make test-regression` は `hit_accum` 0 / 1 のどちらも全件 PASS (最終版は design doc §8)。
+
+### 18.45 issue #22 の残りの測定: INTERLEAVE、gate (b)、G5、SIEVE の hand (2026-10-27)
+
+§18.44 の続き。修正 (capacity、in-flight の `on_insert`、S3-FIFO の ghost) 済みの kmod で、3 seed の中央値 (%)。
+
+**`INTERLEAVE` と `hit_accum`** (`bench-hitrate-multi.sh`、後述の SIEVE の hand の修正を含む):
+
+| policy | il=25 acc=0 | il=25 acc=1 | il=1 acc=0 | il=1 acc=1 | simulator |
+|---|---|---|---|---|---|
+| wtinylfu_pick_ops | 48.1 | 52.0 | 46.9 | 49.7 | 48.4 |
+| s3fifo_pick_ops | 48.5 | 49.0 | 46.7 | 46.4 | 47.2 |
+| sieve_pick_ops | 46.4 | 46.4 | 46.0 | 45.4 | 46.8 |
+| lru_pick_ops | 38.2 | 38.4 | 38.1 | 38.2 | 39.2 |
+| sieve_ops (旧) | 32.8 | 32.4 | 31.0 | 30.6 | — |
+| time_decay_ops | 29.9 | 29.2 | 29.1 | 30.2 | — |
+| observe | 30.8 | 29.4 | 28.1 | 28.1 | — |
+
+評価の間隔 (il) を 25 から 1 にしても hit rate は上がらない (むしろ 1〜2 pt 下がる)。simulator との差は live がずっと小さい (±3 pt)。`hit_accum=1` の効果は wtinylfu で +2.8〜3.9 pt、他は ±1 pt (ノイズ内)。
+
+**gate (b)** (`bench-ab-pcache.sh`、10 MiB の cat の中央値、ms): 現在のビルドは `hit_accum` 0 / 1 の 6 回すべて FAIL だが、差は pcache 16.05〜16.41 対 fuse-cache 15.54〜16.21 と、ほぼ同点。ベースライン (`51e9e50` の kmod) は 3 回とも PASS (pcache 15.85〜16.23 対 fuse-cache 16.27〜16.89)。pcache の cat は 16.09 ms (ベースライン) と 16.21 ms (現在) で 0.7% 違うだけで、fuse-cache 側のばらつき (15.5〜16.9 ms) のほうが大きい。**判定が 1 ms 未満の同点で決まる gate であり、`hit_accum` の影響ではない**。`hit_accum` 0 と 1 の差 (16.13 と 16.30) もノイズ内。gate (a) と (c) は 6 回とも PASS、`hook_ratio` は 0.929〜0.976。
+
+**G5 (大きいファイルの頻度の水増し)** (`bench-hitrate-mixed.sh`、`s3fifo_pick_ops`、500 access、large 3 個 (5 MiB) + small 10 個。bpftrace で `s3fs_policy_ops_eval_hit` を ino ごとに数えた):
+
+| ファイル | access | on_hit (`hit_accum=0`) | on_hit (`hit_accum=1`) |
+|---|---|---|---|
+| large 0 | 107 | 8771 | 28 |
+| large 1 | 78 | 6878 | 9 |
+| large 2 | 51 | 4747 | 4 |
+| small 3〜12 (各) | 18〜37 | 47〜99 | 1〜9 |
+| 合計 | 500 | 21120 | 85 |
+
+`hit_accum=0` では large の 1 access が約 82 回の `on_hit` (folio ごと) になり、small の約 2.6 回の 30 倍以上。W-TinyLFU の sketch や S3-FIFO の freq を大きいファイルが飽和させる。`hit_accum=1` では 1 access が高々 1 回で、large と small の比が access の比に近づく (合計 85 は、cache hit になった access の数)。この bench の hit_rate は pcache では意味を持たない (miss が N_ACCESS を超え −9%) ので、ここでは on_hit の回数だけを比べた。
+
+**SIEVE の hand のバグ**: `policy_sieve_pick_ops` は、hand が newest 端 (head) にあるとき、次の `on_insert` の新しい item の上に hand が乗り、次の `pick_victim` が newest の item を evict していた。参照 (simulator) は hand を nil にして次は oldest から始める。`on_insert` で hand が head 以上なら tail に戻すように直した。per-access で simulator と食い違う数は 337 から約 230 に減った (seed 42)。残り (約 9〜12%) は run ごとにばらつく。

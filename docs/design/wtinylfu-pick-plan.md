@@ -107,7 +107,7 @@ kmod は 1 round で最大 `ncand` 回 `pick_victim` を呼び、試し済みの
 - **doorkeeper は入れなかった**。Caffeine の既定にもなく、小さい容量では 1 回目の hit を捨てる害の方が大きい。
 - **window の予算はバイトで、最低 1 件の床がない**。容量 8 件 (4 KiB ずつ) なら 1 % は 327 B で、新しい ino はすぐ probation の候補になる (Caffeine の weigher と同じ)。件数モードでは 1 件の床がある。
 - **G9 (容量を超える ino の特別扱い) は入れなかった**。daemon が capacity を超えるファイルを全体 admit にしないので (`fullAdmitExceedsCapacity`)、policy から見える重みは容量を超えない。
-- **G5 (頻度の粒度) は触っていない**。`bench-hitrate-mixed` を回してから決める。
+- **G5 (頻度の粒度)**: `hit_accum=1` で解消した。large の 1 access が `on_hit` 約 82 回から高々 1 回になった (`benchmark-results.md` §18.45)。`hit_accum=0` のままでは残る。
 - duel に勝った候補は probation に残り、hit すれば protected に上がる。probation の最古が候補自身のときは duel をせず、そのまま victim にする。
 
 ### 9.3 trace-replay の結果
