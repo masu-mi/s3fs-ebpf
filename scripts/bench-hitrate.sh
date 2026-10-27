@@ -42,7 +42,12 @@ N_ACCESS=${N_ACCESS:-2000}      # workload length; 200 was too short for aging/g
 ZIPF_ALPHA=${ZIPF_ALPHA:-0.7}   # skew — smaller = more uniform
 SEED=${SEED:-42}                # random seed for workload generation
 SOFTCAP=${SOFTCAP:-8}           # slots; passed to kmod (--softcap) and the reference sims
-FILE_BYTES=46                   # size of each seeded hitrate_<N>.txt (see seed_bucket)
+# One definition of the seeded content: FILE_BYTES (and so CAPACITY_BYTES) is
+# measured from it and seed_bucket verifies the stored size.  A hand-written
+# FILE_BYTES once drifted from the real file size (44 vs 46), which left the
+# bench one slot short of the simulator's capacity (issue #22).
+hitrate_content() { printf 'hitrate file %03d line1\nhitrate file %03d line2\n' "$1" "$1"; }
+FILE_BYTES=$(hitrate_content 0 | wc -c)   # size of each seeded hitrate_<N>.txt
 CAPACITY_BYTES=${CAPACITY_BYTES:-$((SOFTCAP * FILE_BYTES))}  # 0 = legacy vote mode
 # Softcap converges from N → 8 in 3 sync rounds (grace + clear +
 # evict), so we need >=3 sync-every intervals of settle. Also lets
@@ -82,10 +87,18 @@ seed_bucket() {
 	# assignment from correlating with Zipf rank (Y-04).
 	local i
 	for i in $(seq 0 $((N_FILES-1))); do
-		printf 'hitrate file %03d line1\nhitrate file %03d line2\n' "$i" "$i" \
+		hitrate_content "$i" \
 			| docker exec -i "$MINIO_CONTAINER" \
 				mc pipe "local/$BUCKET/hitrate_$(printf '%03d' "$i").txt" >/dev/null
 	done
+	# The capacity above assumes FILE_BYTES per file: check what S3 stored.
+	local got
+	got=$(docker exec "$MINIO_CONTAINER" mc stat "local/$BUCKET/hitrate_000.txt" 2>/dev/null |
+		awk '/^Size/ { print $3 }')
+	if [ "$got" != "$FILE_BYTES" ]; then
+		echo "bench-hitrate: seeded file is ${got:-?} B but FILE_BYTES=$FILE_BYTES; capacity would be wrong" >&2
+		exit 1
+	fi
 }
 
 # --- workload ------------------------------------------------------------
