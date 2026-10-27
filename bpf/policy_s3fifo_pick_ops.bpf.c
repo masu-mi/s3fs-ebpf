@@ -267,11 +267,17 @@ static __always_inline void reclaim_ghost(struct sf_state *s)
 		forget(s, (__u32)slot, it);
 }
 
-/* Item (already out of its queue) becomes a ghost; |G| is kept <= |M|. */
+/* Item (already out of its queue) becomes a ghost; |G| is kept <= 90 % of
+ * the live items (what |M| is when S holds its 10 %).  The floor is 1: an
+ * earlier floor of 16 let a small cache (the bench's 8 slots) remember twice
+ * as many evicted inos as the reference, and promote them straight to M. */
 static __always_inline void to_ghost(struct sf_state *s, __u32 slot,
 				     struct sf_item *it)
 {
-	__u32 cap = s->live[Q_M] > 16 ? s->live[Q_M] : 16;
+	__u32 cap = (s->live[Q_S] + s->live[Q_M]) * 9 / 10;
+
+	if (cap < 1)
+		cap = 1;
 
 	it->freq = 0;
 	push(s, Q_G, slot, it);
