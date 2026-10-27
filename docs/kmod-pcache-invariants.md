@@ -77,7 +77,8 @@
 - 設計は `docs/design/hit-signal-percpu-accumulation.md`。`hit_accum=1` のとき、`.read_iter` は `s3fs_file_data` の per-CPU 値 (`fd->hit`、fd と同じ寿命) を進めるだけで、ロックを取らない。`on_hit` の直接の呼び出し (fentry の KFunc、`.read_folio`、arena 直読み) は何もしない。
 - `fd->hit_flushed` / `fd->policy_seen` は **`s3fs_policy_evict_lock` の下でだけ** 触る。`admit_replace` の Phase 1 が `pv || hit_accum` のときにこの mutex を取り、`ilookup` で fd を引いて差分を集め (`iput` は mutex の中、`s3fs_ino_buf_bytes` と同じ)、Phase 1 のあとで `last_tick` の昇順に `on_hit` を呼び、その後で `on_evict` の票を取る。`on_remove` を呼ぶ所は `s3fs_hit_forget` で `policy_seen` を落とす。
 - 反映の順序: Phase 1 のループの前に全 ino の差分を集め、既知の ino (`policy_seen`) の hit を先に、新しい ino の hit を `on_insert` のあとに反映する。populate (fd->lock 下) は `hit_base` / `hit_base_set` を書き、`policy_seen` が偽のときの最初の look が読む (READ_ONCE/WRITE_ONCE、lock なし)。`.splice_read` も `s3fs_hit_count` を呼ぶ。
-- **pending 中の ino は `on_insert` / collect しない** (Phase 1、`pick_victim` を持つ policy)。pending は kmod の丸ごとの evict を止める (shed になる) が、policy がその ino を victim に選ぶと ghost / hand が動いて policy と kmod の状態がずれる。次の round (pending が消えてから) に回す。
+- **policy への通知は `s3fs_policy_track` / `s3fs_policy_untrack` だけが行う** (`on_insert` / `on_size` / `on_remove` を直接呼ばない)。hit の状態を忘れるのは、この `untrack` と `admit_evict_ino` (丸ごとの evict の唯一の出口) だけ。`scripts/check-kmod-invariants.sh` (`make check-invariants`、`make test-regression` に含む) が、それ以外の呼び出しを見つけたら落ちる。
+- **pending 中の ino は `on_insert` / collect しない** (`s3fs_policy_trackable`、Phase 1、`pick_victim` を持つ policy)。pending は kmod の丸ごとの evict を止める (shed になる) が、policy がその ino を victim に選ぶと ghost / hand が動いて policy と kmod の状態がずれる。次の round (pending が消えてから) に回す。
 - fd->lock は取らない。fd の確保 (`s3fs_file_data_new`) で `alloc_percpu`、解放 (`s3fs_file_data_free`) で `free_percpu`。
 
 ## flush pin (W1)

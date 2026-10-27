@@ -61,15 +61,42 @@ KVM ゲスト (6 vCPU、HZ=1000)、ローカル MinIO、pcache モード。
 - 反映の遅れを「末尾の取りこぼし」と推測して、確認しないまま書いた (27〜34 件の不足)。今は populate 時点を基準にしたので窓は閉じているが、不足が 0 になったかは測っていない。
 - `sleep` を入れて access を遅くした実験は、daemon の周期 sync で inode が落ちて miss が増え、別の現象を測っていた (cache の寿命の話で、policy とは無関係)。タイミングで相関を取る実験は、周期処理を止めてから。
 
-## 7. 残っていること
+## 7. 再発の防ぎ方 (回帰テストと、直した設計)
 
-- S3-FIFO の per-access の食い違いがまだ 159 件 (hit 907 対 simulator 936)。両方向に散っていて、細かい実装差と思われる。sieve と wtinylfu でも同じ突き合わせをする。
+不具合は「同時に直すべき場所が散らばっていた」ことから起きていた。(1) bench の `FILE_BYTES` と seed の内容が別々、(2) policy への `on_insert` が 2 つのループにコピーされていて、pending の規則が片方にしかない、(3) policy の状態を忘れる処理が evict の経路ごとに散っていた (§4 の 4)、(4) ghost の長さが simulator と別の定数。次のように、規則を 1 箇所に集め、外れたら落ちる検査を足した。
+
+| 防ぎ方 | 内容 |
+|---|---|
+| bench の seed (集約) | `hitrate_content()` / `small_content()` が内容の唯一の定義。`FILE_BYTES` / `SMALL_FILE_BYTES` はそこから測る。seed 後に `mc stat` で保存されたサイズを確かめ、違えば止まる |
+| kmod の policy 通知 (集約) | `on_insert` / `on_size` / `on_remove` は `s3fs_policy_track` / `s3fs_policy_untrack` だけが呼ぶ。pending の規則は `s3fs_policy_trackable` の 1 箇所。2 つの Phase 1 ループの重複していた処理も同じ関数になった。hit の状態を忘れるのは `untrack` と `admit_evict_ino` だけ |
+| 静的検査 `make check-invariants` | `scripts/check-kmod-invariants.sh`。上の呼び出し制限と、bench の file size が書き込みでないことを grep で見る。root も kernel も要らない。`make test-regression` の先頭に入れた。わざと生の呼び出しを足す、`FILE_BYTES=44` に戻す、のどちらでも落ちることを確かめた |
+| 回帰テスト `make test-policy-conformance` | `scripts/test-policy-conformance.sh`。4 つの pick_victim policy を live で動かし (`hit_accum=1`、capacity = 8 ファイル)、同じ trace を simulator に通して per-access で比べる。条件は hit 数の差 ≤ 3.5 pt と、食い違う access の割合が policy ごとの上限以下 (lru 6%、s3fifo 13%、wtinylfu 22%、sieve 26%)。`make test-regression` に入れた |
+
+回帰テストが過去の不具合を捕まえるか、元に戻して確かめた (seed 42、s3fifo_pick_ops):
+
+| 戻したもの | hit 数の差 | 結果 |
+|---|---|---|
+| なし (現在) | 1.8〜2.2 pt | PASS |
+| ghost の下限 16 | 4.2 pt | FAIL |
+| pending の ino を `on_insert` | 5.3 pt | FAIL |
+| (3 つとも直す前) | 約 6 pt | (FAIL する) |
+
+bench の capacity のずれは、1 slot 足りないと simulator との差が全 policy に出る。今は `FILE_BYTES` を測るので起きない。起きたら静的検査と seed 後の `mc stat` が止める。
+
+テストの限界:
+- `hit_accum=0` (旧の信号) では、旧信号が一部の hit を落とす (jiffy に 1 回の間引き) ので、hit 数の差が 3.3 pt まで出てテストが揺れた。テストは既定で `hit_accum=1` で測る (`CONF_HIT_ACCUM=0` で旧信号を測れる)。
+- sieve と wtinylfu は、hit 率が合っていても 16〜19% の access で simulator と食い違う。BPF 版が simulator と一手ずつ同じではない (下の未調査)。上限はその値のすぐ上に置いてあり、これを超える悪化は捕まえるが、現状の差の原因は説明できていない。
+- kmod 側の pending の規則を単体で試す KUnit は書いていない (Phase 1 は mount と daemon を要する)。live のテストで捕まえる。
+
+## 8. 残っていること
+
+- per-access の食い違い: s3fifo 約 8%、sieve 約 17〜19%、wtinylfu 約 16% (hit 率は ±2 pt で合っている)。BPF 版と simulator の一手ずつの差。sieve の hand、wtinylfu の admission の順序などを突き合わせる。
 - `INTERLEAVE=1` を修正後の kmod で取り直す。
 - G5 (大きいファイルの頻度の水増し): ino ごとの反映回数を見る。mixed bench は capacity を直したので取り直す。
 - `bench-ab-pcache.sh` gate (b) の取り直し。lockdep (AC-42)、`make test-kunit` (KSRC が要る)。
 - 既定を 1 にするかの判断 (read 経路のコストと単位の統一だけが理由になる)。
 
-## 8. 関連
+## 9. 関連
 
 - [`../design/hit-signal-percpu-accumulation.md`](../design/hit-signal-percpu-accumulation.md) — 設計、測定の手順、採否の基準
 - [`benchmark-results.md`](benchmark-results.md) §18.41 (訂正済み)、§18.44
