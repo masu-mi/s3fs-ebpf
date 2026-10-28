@@ -19,11 +19,18 @@
 #                         same series as `uname -r` (>= 6.12 is required).
 #   SRC_DIR=$HOME/src/linux-lockdep   where the tree is unpacked and built
 #   BASE_CONFIG=/boot/config-$(uname -r)   config to start from
+#   LOCALMOD=1            keep only the modules loaded now (make localmodconfig).
+#                         Start docker / MinIO and mount s3fs_ebpf once before, so the
+#                         modules they need (overlay, veth, bridge, netfilter...) are loaded.
+#                         LOCALMOD=0 builds every module of the base config.
+#   MIN_FREE_GB=15        refuse to start with less free space in SRC_DIR (40 if LOCALMOD=0)
 #   JOBS=$(nproc)         make -j
 #   LOCALVERSION=-s3fs-lockdep        suffix of the new kernel (uname -r)
 #   ASSUME_YES=1          do not ask before installing
 #
-# Time and space: 40-90 minutes and ~25 GB (debug info is on: BTF needs it).
+# Time and space: with LOCALMOD=1 (default) about 20-40 minutes and 10-15 GB; with
+# LOCALMOD=0 (every distro module) 60-120 minutes and 40+ GB (debug info is on:
+# BTF needs it).  The build stops early if SRC_DIR has less than MIN_FREE_GB.
 # Run it on the machine that will boot the kernel (the kmod is built against
 # its headers); reboot afterwards, then run `make setup-toolchain` and
 # `scripts/test-lockdep.sh`.  docs/dev-notes/lockdep-kernel.md has the details
@@ -38,6 +45,8 @@ SRC_DIR="${SRC_DIR:-$HOME/src/linux-lockdep}"
 BASE_CONFIG="${BASE_CONFIG:-/boot/config-$(uname -r)}"
 JOBS="${JOBS:-$(nproc)}"
 LOCALVERSION="${LOCALVERSION:--s3fs-lockdep}"
+LOCALMOD="${LOCALMOD:-1}"
+if [[ "$LOCALMOD" == 1 ]]; then MIN_FREE_GB="${MIN_FREE_GB:-15}"; else MIN_FREE_GB="${MIN_FREE_GB:-40}"; fi
 PREPARE_ONLY="${PREPARE_ONLY:-0}"
 BUILD_ONLY="${BUILD_ONLY:-0}"
 MAJOR="${VERSION%%.*}"
@@ -60,6 +69,14 @@ if ((${#missing[@]})); then
     warn "missing: ${missing[*]}"
     info "sudo apt install build-essential flex bison bc libssl-dev libelf-dev rsync fakeroot dpkg-dev debhelper"
     [[ "$DRY_RUN" == 1 || "$PREPARE_ONLY" == 1 ]] || die "install the prerequisites and run again"
+fi
+
+mkdir -p "$SRC_DIR"
+free_gb=$(df -P --block-size=1G "$SRC_DIR" | awk 'NR==2 { print $4 }')
+if ((free_gb < MIN_FREE_GB)); then
+    warn "only ${free_gb} GB free in $SRC_DIR (need $MIN_FREE_GB; a full build ran out of space at the module BTF step)"
+    info "free space, set SRC_DIR= to a bigger disk, or keep LOCALMOD=1 (default) to build far fewer modules"
+    [[ "$DRY_RUN" == 1 || "$PREPARE_ONLY" == 1 ]] || die "not enough disk space"
 fi
 
 PAHOLE=$(detect_pahole) || warn "pahole is older than the base kernel's CONFIG_PAHOLE_VERSION; BTF may be empty (scripts/setup-toolchain.sh kbuild builds one into \$HOME/.local)"
@@ -105,11 +122,25 @@ fetch_source() {
 # (KASAN, KCSAN) are separate runs (kmod/kunit-kasan.config).
 configure() {
     log "configuring $TREE"
+    # A half-finished earlier build (out of space) leaves objects and debian/ behind.
+    if [[ -e "$TREE/vmlinux" || -d "$TREE/debian" || -e "$TREE/.config" ]]; then
+        run "$KMAKE mrproper"
+        run rm -rf "$TREE/debian"
+    fi
     run cp "$BASE_CONFIG" "$TREE/.config"
+    if [[ "$LOCALMOD" == 1 ]]; then
+        # Only the modules this machine has loaded now (the build is otherwise ~4000 modules).
+        command -v docker >/dev/null 2>&1 && ! docker ps >/dev/null 2>&1 && warn "docker is not running: its modules (overlay, veth, br_netfilter...) may be dropped; start it and run again"
+        run "lsmod > $SRC_DIR/lsmod.txt"
+        # `yes` dies of SIGPIPE when make ends: not a failure (the subshell's status is make's).
+        run "( set +o pipefail; yes '' | $KMAKE LSMOD=$SRC_DIR/lsmod.txt localmodconfig )"
+    fi
     local sc="$TREE/scripts/config --file $TREE/.config"
     # No distro signing keys / certs in a self-built tree (they are not in the tarball).
     run "$sc --set-str SYSTEM_TRUSTED_KEYS '' --set-str SYSTEM_REVOCATION_KEYS '' --disable MODULE_SIG_FORCE"
     run "$sc --disable DEBUG_INFO_NONE --enable DEBUG_INFO --enable DEBUG_INFO_DWARF5 --enable DEBUG_INFO_BTF --enable DEBUG_INFO_BTF_MODULES"
+    # Compressed debug sections: about half the disk.
+    run "$sc --disable DEBUG_INFO_COMPRESSED_NONE --enable DEBUG_INFO_COMPRESSED_ZSTD"
     run "$sc --set-str LOCALVERSION '$LOCALVERSION' --disable LOCALVERSION_AUTO"
     # The point of this kernel.
     run "$sc --enable PROVE_LOCKING --enable DEBUG_LOCKDEP --enable DEBUG_LOCK_ALLOC --enable LOCK_STAT"
@@ -140,7 +171,8 @@ configure() {
 # --- build / install ---------------------------------------------------------
 build() {
     log "building (make -j$JOBS bindeb-pkg); this takes a while"
-    run "$KMAKE -j$JOBS KDEB_PKGVERSION=1 bindeb-pkg"
+    # -P...nokerneldbg: skip the linux-image-*-dbg package (vmlinux and every module with full debug info, many GB).
+    run "$KMAKE -j$JOBS KDEB_PKGVERSION=1 DPKG_FLAGS=-Ppkg.linux-upstream.nokerneldbg bindeb-pkg"
 }
 
 install_debs() {

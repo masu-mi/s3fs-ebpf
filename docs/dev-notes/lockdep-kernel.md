@@ -7,7 +7,10 @@ issue #22 で、`hit_accum` が既定になり、`pick_victim` を持たない p
 ## 手順
 
 ```bash
-# 1. lockdep 付きカーネルを build して入れる (40〜90 分、約 25 GB)
+# 0. docker / MinIO を起動し、s3fs_ebpf を一度 mount しておく (そのとき読み込まれている module だけを build する。LOCALMOD=1)
+make compose-up && make all && make test-write-readback    # どれか 1 つ通れば足りる
+
+# 1. lockdep 付きカーネルを build して入れる (LOCALMOD=1 で 20〜40 分、10〜15 GB。SRC_DIR に空きが要る)
 sudo apt install build-essential flex bison bc libssl-dev libelf-dev rsync fakeroot dpkg-dev debhelper
 make setup-kernel-lockdep          # = scripts/setup-kernel-lockdep.sh
 #   PREPARE_ONLY=1 で config までで止めて .config を確認できる
@@ -78,7 +81,8 @@ lockdep (`PROVE_LOCKING`、`LOCK_STAT`、`DEBUG_*`) は mutex / spinlock を何�
 | `pahole: error while loading shared libraries` で Kconfig が失敗する | Kconfig 自体が pahole を呼ぶ。スクリプトは `detect_pahole` で動くものを選び、`LD_LIBRARY_PATH` と `PAHOLE=` を付けて make する。`scripts/setup-toolchain.sh kbuild` で `$HOME/.local` に pahole を入れてから |
 | BTF 生成で `Skipping BTF generation` / insmod で kfunc 登録に失敗 | pahole が古い。`make doctor` の C-4。再起動後に `make setup-toolchain` を忘れていないか (`$KDIR/vmlinux` が要る、H-2) |
 | 起動しない / 署名エラー | Secure Boot が有効だと、署名のない自前カーネルは起動しない。BIOS で Secure Boot を切るか、MOK で署名する |
-| ディスク不足 | `DEBUG_INFO` のため build に約 25 GB。`SRC_DIR=` を広い場所に |
+| `No space left on device` (`objcopy` / `btf_encoder__write_elf` / `Failed to encode BTF`) | 全 module (distro の config は約 6,400 個) を debug info 付きで build すると 40 GB 以上になる。スクリプトの既定は `LOCALMOD=1` (今 `lsmod` にある module だけ、手元の確認では 6,391 → 95 個)、debug info の zstd 圧縮、`-dbg` パッケージなし。それでも足りなければ `SRC_DIR=` を広い所に。途中まで進んだ build は、次の実行が `mrproper` と `rm -rf debian` から始めるのでそのまま再実行できる |
+| `LOCALMOD=1` にしたら起動後に docker や network が動かない | build した時に読み込まれていなかった module が落ちている。docker と MinIO を起動し、s3fs_ebpf を一度 mount してから (`lsmod` に出てから) 再実行する。足りない module を足すなら `LMC_KEEP="drivers/net:net/netfilter"` のようにパスを渡す。全部入れるなら `LOCALMOD=0` |
 | `make kmod` が `warning: the compiler differs` | 自前ビルドと同じ gcc を使う限り無害 (C-3) |
 | 元のカーネルに戻したい | grub で標準カーネルを選ぶ。不要なら `sudo apt remove linux-image-<ver>-s3fs-lockdep linux-headers-<ver>-s3fs-lockdep`。`grub-reboot` は一度きりなので、次の再起動で標準に戻る |
 
