@@ -192,6 +192,15 @@ install_debs() {
     sudo dpkg -i "${debs[@]}"
     rel=$(dpkg-deb -f "$(printf '%s\n' "${debs[@]}" | grep linux-image | head -n1)" Package | sed 's/^linux-image-//')
     log "installed kernel $rel"
+    # 6.12's headers package leaves out tools/bpf/resolve_btfids/resolve_btfids, which
+    # Kbuild runs on every out-of-tree module with BTF ("resolve_btfids: not found").
+    local rb="$TREE/tools/bpf/resolve_btfids/resolve_btfids"
+    if [[ -x "$rb" ]]; then
+        sudo install -D -m 0755 "$rb" "/usr/src/linux-headers-$rel/tools/bpf/resolve_btfids/resolve_btfids"
+        info "installed resolve_btfids into /usr/src/linux-headers-$rel"
+    else
+        warn "$rb not found; copy it into /usr/src/linux-headers-$rel/tools/bpf/resolve_btfids/ by hand"
+    fi
     info "1. sudo reboot, and pick 'Advanced options for Ubuntu' > 'Ubuntu, with Linux $rel' in grub."
     info "   To boot it once and fall back to the current kernel afterwards (GRUB_DEFAULT=saved needed):"
     info "     sudo grub-reboot 'Advanced options for Ubuntu>Ubuntu, with Linux $rel' && sudo reboot"

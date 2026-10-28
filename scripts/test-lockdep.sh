@@ -49,6 +49,19 @@ info "kernel $(uname -r), lockdep on; classes: $(lockdep_classes)"
 # --- MinIO (the tests read and write the bucket) -------------------------------------
 docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^s3fs-ebpf-minio$' || die "s3fs-ebpf-minio is not running: make compose-up"
 
+# --- headers of a self-built kernel miss resolve_btfids -------------------------------
+KDIR_NOW="/lib/modules/$(uname -r)/build"
+RB="$KDIR_NOW/tools/bpf/resolve_btfids/resolve_btfids"
+if [[ ! -x "$RB" ]]; then
+	SRC_RB=$(ls "${SRC_DIR:-$HOME/src/linux-lockdep}"/linux-*/tools/bpf/resolve_btfids/resolve_btfids 2>/dev/null | head -n1 || true)
+	if [[ -n "$SRC_RB" ]]; then
+		info "installing $SRC_RB into $KDIR_NOW (6.12's headers package leaves it out)"
+		sudo install -D -m 0755 "$SRC_RB" "$RB"
+	else
+		die "$RB is missing and no build tree found: copy tools/bpf/resolve_btfids/resolve_btfids from the kernel source tree there"
+	fi
+fi
+
 # --- build for THIS kernel ------------------------------------------------------
 log "make kmod daemon bpf (against $(uname -r))"
 make kmod daemon bpf >"$OUT/build.log" 2>&1 || { tail -20 "$OUT/build.log" >&2; die "build failed; run make doctor"; }
