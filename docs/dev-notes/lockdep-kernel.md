@@ -17,7 +17,7 @@ make setup-kernel-lockdep          # = scripts/setup-kernel-lockdep.sh
 #   DRY_RUN=1 で手順だけ表示
 
 # 2. 再起動して新しいカーネルを選ぶ
-sudo grub-reboot 'Advanced options for Ubuntu>Ubuntu, with Linux 6.12.0-s3fs-lockdep'   # 一度だけ。GRUB_DEFAULT=saved が要る
+scripts/boot-kernel.sh lockdep --once                # 一度だけ。GRUB_DEFAULT=saved が要る (下の「起動するカーネルを固定する」)
 sudo reboot
 uname -r                            # ...-s3fs-lockdep
 ls /proc/lockdep_stats              # あれば lockdep 有効
@@ -93,6 +93,25 @@ lockdep (`PROVE_LOCKING`、`LOCK_STAT`、`DEBUG_*`) は mutex / spinlock を何�
 | `LOCALVERSION=-s3fs-lockdep` | `uname -r` で見分ける。標準カーネルは消えない |
 
 `olddefconfig` のあと `PROVE_LOCKING` / `DEBUG_LOCK_ALLOC` / `DEBUG_INFO_BTF` / `BPF_JIT` / `BPF_SYSCALL` / `KUNIT` が `y` でなければ、スクリプトは止まる (依存が外れている)。
+
+## 起動するカーネルを固定する (GRUB_DEFAULT=saved)
+
+Ubuntu の既定は `GRUB_DEFAULT=0` で、menu の先頭、つまり**一番新しいカーネル**で起動する。lockdep カーネルを入れると、それが以後の既定になってしまう (性能の測定を取り違える)。`GRUB_DEFAULT=saved` にして、起動するカーネルを明示的に選んで保存する。
+
+```bash
+# 一度だけ (開発機では 2026-10-28 に実施済み。元のファイルは /etc/default/grub.bak-before-saved-default)
+sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub && sudo update-grub
+
+scripts/boot-kernel.sh                  # 一覧、保存されている既定、いま動いているカーネル
+scripts/boot-kernel.sh generic          # 6.12.0-061200-generic を既定にする (性能の測定用)
+scripts/boot-kernel.sh lockdep --once   # 次の 1 回だけ lockdep カーネルで起動 (既定は変わらない)
+scripts/boot-kernel.sh lockdep          # lockdep カーネルを既定にする
+```
+
+- 新しいカーネルのパッケージを入れても、保存した既定は変わらない。
+- `--once` は `grub-reboot` で、起動に使われたら消える。lockdep の検証は `--once` で足りる。再起動すれば標準のカーネルに戻る。
+- grub の menu は `GRUB_TIMEOUT_STYLE=hidden` / `GRUB_TIMEOUT=0` で表示されない。対話で選びたいときは `/etc/default/grub` を `GRUB_TIMEOUT_STYLE=menu`、`GRUB_TIMEOUT=5` にして `sudo update-grub`。
+- 保存された値は `sudo grub-editenv list` で見る (`saved_entry=gnulinux-advanced-<uuid>>gnulinux-<version>-advanced-<uuid>`)。
 
 ## つまずいたとき
 
