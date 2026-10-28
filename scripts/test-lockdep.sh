@@ -37,11 +37,17 @@ mkdir -p "$OUT"
 rm -f "$OUT"/dmesg-*.log "$OUT"/run-*.log
 
 # --- is this a lockdep kernel? ------------------------------------------------
-[[ -r /proc/lockdep_stats ]] || die "/proc/lockdep_stats is absent: $(uname -r) has no CONFIG_PROVE_LOCKING. Build one with scripts/setup-kernel-lockdep.sh and boot it."
-lockdep_on() { awk '/debug_locks:/ { print $2 }' /proc/lockdep_stats; }
+# /proc/lockdep_stats is mode 0400 (root only): test and read it through sudo.
+# (A plain [[ -r ]] as a normal user said "absent" on a correct lockdep kernel.)
+ldstats() { sudo cat /proc/lockdep_stats; }
+sudo test -e /proc/lockdep_stats || die "/proc/lockdep_stats is absent: $(uname -r) has no CONFIG_PROVE_LOCKING. Build one with scripts/setup-kernel-lockdep.sh and boot it."
+lockdep_on() { ldstats | awk '/debug_locks:/ { print $2 }'; }
+lockdep_classes() { ldstats | awk '/lock-classes:/ { print $2 }'; }
 [[ "$(lockdep_on)" == 1 ]] || die "lockdep is already off on this boot (debug_locks: 0, an earlier report). Reboot."
-info "kernel $(uname -r), lockdep on; classes: $(awk '/lock-classes:/ { print $2 }' /proc/lockdep_stats)"
-sudo -n true 2>/dev/null || warn "sudo needs a password; the tests ask for it once"
+info "kernel $(uname -r), lockdep on; classes: $(lockdep_classes)"
+
+# --- MinIO (the tests read and write the bucket) -------------------------------------
+docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^s3fs-ebpf-minio$' || die "s3fs-ebpf-minio is not running: make compose-up"
 
 # --- build for THIS kernel ------------------------------------------------------
 log "make kmod daemon bpf (against $(uname -r))"
@@ -99,6 +105,6 @@ for mode in $MODES; do
 done
 
 sudo scripts/kmod-unload.sh s3fs_kfunc >/dev/null 2>&1 || true
-info "lockdep classes now: $(awk '/lock-classes:/ { print $2 }' /proc/lockdep_stats); stats: /proc/lockdep_stats, /proc/lock_stat"
+info "lockdep classes now: $(lockdep_classes); stats: /proc/lockdep_stats, /proc/lock_stat"
 echo "RESULT name=test-lockdep status=$status kernel=$(uname -r)$detail"
 [[ "$status" == PASS ]]
