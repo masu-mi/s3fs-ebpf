@@ -113,8 +113,9 @@ module param (`/sys/module/s3fs_kfunc/parameters/`):
 ## 9. 残っていること
 
 - sieve (約 9〜12%)、wtinylfu (約 16%)、s3fifo (約 8%) の per-access の食い違い。hit 率は ±2 pt で合っている。SIEVE は hand の端のバグを 1 つ直した (§18.45)。wtinylfu は未調査。run ごとにばらつくので、タイミング由来の揺れもある。
-- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。`make setup-kernel-lockdep` で lockdep 付きカーネルを入れ、`make test-lockdep` で回す (手順は `dev-notes/lockdep-kernel.md`、まだ実行していない)。
 - `fentry` の KFunc 呼び出しを BPF 側で飛ばす案: read のコストは policy なしと同等まで下がっているので、効果が測れるまで入れない。
-- 既定を 1 にするかの判断 (理由は read 経路のコスト、単位の統一、G5 の解消)。hit rate の上乗せは小さい。
+- 
+
+確認済み (2026-10-28): lockdep 付きカーネルで `make test-lockdep` PASS (`hit_accum` 1 / 0 の `test-regression` と、120 秒の evict-race で報告 0 件、`dev-notes/lockdep-kernel.md`)。
 
 確認済み (2026-10-27): `make test-kunit` (UML、41 件、`s3k_hit_delta_once` / `s3k_hit_replay_order` を含む) PASS、`INTERLEAVE=1` の取り直し (評価の間隔は効かない)、gate (b) (`hit_accum` と無関係の同点)、G5 (large の `on_hit` が 1 access あたり約 82 回から高々 1 回)。数値は `journal/benchmark-results.md` §18.45。

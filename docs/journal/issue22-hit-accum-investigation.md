@@ -7,7 +7,7 @@ issue #22 (hit の信号を per-CPU で集計し、evict の前に policy へ反
 - **`hit_accum=1` の効き目は read 経路のコストと、数える単位が揃うこと**。hit rate への上乗せは小さい (§3)。
 - 測定の途中で、`hit_accum` と無関係な **3 つのずれ** が見つかった。bench の capacity の 1 個ずれ、in-flight の miss の `on_insert`、S3-FIFO の ghost の下限。直したあとは live が simulator と ±3 pt で一致する。
 - 最初に報告した「`hit_accum=1` で sieve_pick / wtinylfu_pick が +9〜11 pt」は、**大半が上の 3 つのずれで、`hit_accum` の効果ではなかった** (訂正済み)。
-- **`hit_accum=1` を既定にした (2026-10-27)**。hit rate への上乗せは小さいが、read 経路のコスト、単位の統一、G5 の解消という利点がある。残っているのは lockdep だけ。`hit_accum=0` で従来の信号に戻せる。
+- **`hit_accum=1` を既定にした (2026-10-27)**。hit rate への上乗せは小さいが、read 経路のコスト、単位の統一、G5 の解消という利点がある。lockdep も通った (2026-10-28)。`hit_accum=0` で従来の信号に戻せる。
 
 ## 2. 何を実装したか
 
@@ -91,10 +91,12 @@ bench の capacity のずれは、1 slot 足りないと simulator との差が�
 ## 8. 残っていること
 
 - per-access の食い違い: s3fifo 約 8%、sieve 約 9〜12%、wtinylfu 約 16% (hit 率は ±2 pt で合っている)。SIEVE は hand の端のバグを 1 つ直した (食い違い 337→約 230)。wtinylfu は未調査で、run ごとのばらつきもある。
-- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。`make setup-kernel-lockdep` → 再起動 → `make test-lockdep` (手順は `docs/dev-notes/lockdep-kernel.md`、まだ実行していない)。
 - 既定を 1 にするかの判断 (理由は read 経路のコスト、単位の統一、G5 の解消)。
 
+- wtinylfu の per-access の食い違い (約 16%) の原因。
+
 調査の続きで確認したこと (`benchmark-results.md` §18.45):
+- **lockdep (AC-42)**: lockdep 付きカーネル (6.12.0-s3fs-lockdep) で `make test-lockdep` が PASS (2026-10-28)。`hit_accum` 1 / 0 の `test-regression` と 120 秒の evict-race で lockdep / sleeping-in-atomic / RCU の報告が 0 件。evict の mutex の中の `ilookup` / `iput` を含む。手順と踏んだこと: `docs/dev-notes/lockdep-kernel.md`。
 - `INTERLEAVE=1` にしても hit rate は上がらない。評価の間隔は simulator との差の原因ではなかった。
 - gate (b) は 10 MiB の cat が 16 ms 前後の同点で、ベースライン (`51e9e50`) は PASS、現在は `hit_accum` 0 / 1 とも FAIL だが差は 0.7% でノイズ内。`hit_accum` の影響ではない。
 - G5: large の 1 access が `on_hit` 約 82 回 (folio ごと) だったのが、`hit_accum=1` で高々 1 回になった。

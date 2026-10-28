@@ -1961,7 +1961,7 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 
 **正しさのテスト**: `make test-regression` 18 件 PASS (multiread、evict-race-short の sha256 を含む)。dmesg に oops / BUG / hung task なし。
 
-**lockdep は未検証**。計測カーネル (6.12.0-061200) は `CONFIG_PROVE_LOCKING` が無効で、インストール済みのどのカーネルも同じ (AC-42)。
+**lockdep は、この時点では未検証**。計測カーネル (6.12.0-061200) は `CONFIG_PROVE_LOCKING` が無効だった (AC-42)。2026-10-28 に lockdep 付きカーネルで `make test-lockdep` を実行し、報告 0 件で通った (`docs/dev-notes/lockdep-kernel.md`)。
 
 ### 18.44 issue #22: `hit_accum` (hit を `.read_iter` で per-CPU に数え、`admit_replace` から反映) の A/B (2026-10-27)
 

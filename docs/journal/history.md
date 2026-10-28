@@ -88,7 +88,7 @@ s3fs-ebpf は、S3 (と GCS) のバケットをローカルのファイルシス
 | §18.26〜18.32 (10-17) | `a14204c` + `1c0a0d5` ほか | pcache モードで open+read+close が fuse-cache 比 172 倍、小ファイル 10,000 個の warm cat が 93 倍。大ファイルの cold read と途中書き換えは負け |
 | §18.43 (10-17) | `4329711` | AB-07 gate (a)(b)(c) すべて PASS (a は 5759k 対 5857k、`hook_ratio` 0.983)、hit rate は opt 以下、test-regression 18 件 PASS |
 
-AC-42 (lockdep) は、`CONFIG_PROVE_LOCKING` 付きのカーネルがないため実行せず、静的なロック順の確認だけで 2026-10-18 に閉じました (`5a34cfb`)。
+AC-42 (lockdep) は、`CONFIG_PROVE_LOCKING` 付きのカーネルがないため実行せず、静的なロック順の確認だけで 2026-10-18 に閉じました (`5a34cfb`)。2026-10-28 に lockdep 付きカーネルを用意して `make test-lockdep` を実行し、報告 0 件で通りました。
 
 ---
 
@@ -137,7 +137,7 @@ backlog の ID 系列ごとの内容と件数です。件数は backlog のチ�
 ### 3.2 完了扱いだが残りが書かれている項目
 
 - AC-41: 将来案 (chunk 単位の確保) は未着手と記載。
-- AC-42: lockdep は未実行 (静的確認で閉じた)。
+- AC-42: 2026-10-28 に lockdep 付きカーネルで実行し PASS。
 - AC-51: 10 MiB の途中書き換えはまだ 1.6 倍遅い。しきい値 (`partial_modify_min` 16 MiB) を下げた計測と、実 S3 での計測は未実施 (`br §18.36`)。
 - AC-52: 300 MiB の cold read は中央値 0.80 倍で目標 0.9 倍に未達 (`br §18.37`)。メモリ回収の内訳と ext4 との比較は未確認 (`br §18.39.1`)。
 - AC-58: 候補が数千のときの `pick_victim` の時間、W-TinyLFU の移行、アプリのヒントが残り。

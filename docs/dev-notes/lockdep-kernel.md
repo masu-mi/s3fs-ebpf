@@ -47,6 +47,26 @@ make test-lockdep                   # = scripts/test-lockdep.sh
 | `KUNIT=1` | 先に KUnit 付きの kmod (`KUNIT=1 make kmod`) をロードして、suite を lockdep の下で動かす。このカーネルは `CONFIG_KUNIT=y` にしてある。**この経路は書いただけで、まだ試していない** |
 | `OUT=/tmp/test-lockdep` | 出力先 |
 
+## 結果 (2026-10-28、6.12.0-s3fs-lockdep)
+
+`make test-lockdep` が PASS した。
+
+| 回 | 対象 | 結果 |
+|---|---|---|
+| `hit_accum=1` (既定) | `make test-regression` 20 件 (19 PASS + conformance は SKIP) | lockdep の報告 0 件、`debug_locks: 1` のまま終了 |
+| `hit_accum=0` | 同上 | 同上 |
+| 両方 | `make test-pcache-evict-race` (120 秒、32 reader + `/policy/eval` の連打) | `lockdep=PASS`、sha256_fail=0、read_err=0、evict 9,179 回 / 8,916 回 |
+
+lock class は起動時 1,691 個から、kmod を載せて動かすと 1,842 個まで増えた (kmod の `fd->lock`、`s3fs_admits_lock`、evict の mutex、`s3fs_entries_mtx` などが登録された)。`kmod-pcache-invariants.md` のロック順 (evict の mutex → `fd->lock` → `s3fs_admits_lock`) に反する取り方は、この負荷の範囲では出なかった。
+
+この結果の範囲: `make test-regression` と evict-race の 120 秒。長時間 (数時間) の soak、複数マウント、daemon の再起動中の mount/umount は回していない。
+
+## 実際に踏んだこと
+
+- `/proc/lockdep_stats` は **mode 0400 (root 専用)**。一般ユーザーの `[[ -r ]]` は「無い」と答える。`test-lockdep.sh` は `sudo test -e` / `sudo cat` で見る (最初の版は誤って「PROVE_LOCKING が無い」と言った)。
+- 6.12 の `bindeb-pkg` が作る headers には `tools/bpf/resolve_btfids/resolve_btfids` が入らず、kmod のビルドが `resolve_btfids: not found` (BTF の段階で Error 127) になる。`setup-kernel-lockdep.sh` はインストール後に build tree からコピーし、`test-lockdep.sh` も無ければコピーする。
+- `make test-policy-conformance` (live の hit 数を simulator と比べる) は、lockdep カーネルでは hit 数が 3.8〜5.7 pt ずれて FAIL する (通常のカーネルでは 0.2〜2.2 pt)。タイミングの検査なので、lockdep カーネルでは SKIP にした (`CONFORMANCE_ON_LOCKDEP=1` で実行できる)。
+
 ## 読み方
 
 - lockdep は最初の報告のあとで自分を止める (`debug_locks: 0`)。1 回の起動で見つかるのは 1 件。直して再起動し、もう一度回す。

@@ -871,7 +871,7 @@ prewarm:
   - 実機の回帰テスト `make test-regression` (evict-race、capacity、write-existing、pick-victim-stale など。sha256 で中身を照合)。
   - KUnit (`make test-kunit`、`docs/dev-notes/kunit.md`)。UML と qemu (SMP) で、lockdep (`PROVE_LOCKING`)、`DEBUG_ATOMIC_SLEEP`、KASAN を有効にしている。2 GiB を超える read が EOF になる、truncate と競合した read が -EIO になる、など 6 件をこれで見つけた。
   - 修正前のコードで FAIL することを確かめる (AC-48、AC-50、AC-53、AC-64)。
-- 未完: 実機での lockdep 付きの検証 (AC-42)。
+- lockdep 付きカーネルでの検証 (AC-42) は 2026-10-28 に通った (`make test-lockdep`、`docs/dev-notes/lockdep-kernel.md`)。
 
 ### Q52. Go (cilium/ebpf) で書いていて、つまずいたことは
 
@@ -966,7 +966,7 @@ arena を使った意義、適用範囲、本番との距離、これから。
 - **一貫性:** 他のクライアントによる上書きを検知しない (Q46)。
 - **メモリ:** pcache の容量は既定で無制限で、chunk は memcg に課金されない (Q49)。
 - **書き込み:** 書き込み可能な共有 mmap が S3 に届かない、O_DIRECT がない (Q47)。
-- **検証:** 実際の S3 での計測がない (Q44)。実機での lockdep 付きの検証がない (AC-42)。
+- **検証:** 実際の S3 での計測がない (Q44)。lockdep 付きカーネルでの検証は 2026-10-28 に通った (AC-42、`make test-regression` と evict-race の範囲)。
 - **カーネル依存:** 6.12 でだけ確かめた箇所がある (Q54)。
 - **既定のモード:** 既定は今も arena モードで、計測と修正は pcache モードで行っている (`docs/design/pcache-mode.md` §9)。
 
