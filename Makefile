@@ -65,7 +65,7 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: check-invariants test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
+.PHONY: setup-kernel-lockdep test-lockdep check-invariants test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
@@ -275,6 +275,12 @@ toolchain: ## Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
 	@printf '%-12s %s\n' CLANG '$(CLANG)' BPFTOOL '$(BPFTOOL)' KDIR '$(KDIR)' \
 	  KMOD_CC '$(KMOD_CC)' KMOD_PAHOLE '$(KMOD_PAHOLE)' KMOD_LDLIB '$(KMOD_LDLIB)' \
 	  KMOD_KCFLAGS '$(KMOD_KCFLAGS)' GO '$(GO)' GO_ROOT '$(GO_ROOT)'
+
+setup-kernel-lockdep: ## Build + install a 6.12 kernel with CONFIG_PROVE_LOCKING (docs/dev-notes/lockdep-kernel.md)
+	$(SCRIPTS_DIR)/setup-kernel-lockdep.sh
+
+test-lockdep: ## Run the regression suite on a lockdep kernel, fail on lock-order reports (AC-42)
+	$(SCRIPTS_DIR)/test-lockdep.sh
 
 setup-kernel: ## Install mainline Linux 6.12 LTS kernel (Ubuntu; reboot after)
 	$(SCRIPTS_DIR)/setup-kernel-6.12.sh

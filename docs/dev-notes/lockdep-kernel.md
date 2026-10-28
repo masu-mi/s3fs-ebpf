@@ -1,0 +1,93 @@
+# lockdep 付きカーネルで回帰テストを通す (AC-42)
+
+kmod のロック順 (`fd->lock` → `s3fs_admits_lock`、evict の mutex、spinlock 群。`docs/kmod-pcache-invariants.md`) は、これまで lockdep で確かめていない。Ubuntu の標準カーネルも、`make setup-kernel` が入れる kernel.ubuntu.com の mainline ビルドも `CONFIG_PROVE_LOCKING` が無効で、`/proc/lockdep_stats` が無い。そのため `test-pcache-evict-race` の lockdep 判定は SKIP のままだった。
+
+issue #22 で、`hit_accum` が既定になり、`pick_victim` を持たない policy でも `admit_replace` が evict の mutex (`s3fs_policy_evict_lock`) を取るようになった。evict の mutex は `fd->lock` / `s3fs_admits_lock` より外側にある前提 (`kmod-pcache-invariants.md` の「ロック順」) で、`s3fs_hit_collect` と `s3fs_hit_forget` は mutex の中で `ilookup` / `iput` を呼ぶ。この順序を lockdep に見てもらう。
+
+## 手順
+
+```bash
+# 1. lockdep 付きカーネルを build して入れる (40〜90 分、約 25 GB)
+sudo apt install build-essential flex bison bc libssl-dev libelf-dev rsync fakeroot dpkg-dev debhelper
+make setup-kernel-lockdep          # = scripts/setup-kernel-lockdep.sh
+#   PREPARE_ONLY=1 で config までで止めて .config を確認できる
+#   DRY_RUN=1 で手順だけ表示
+
+# 2. 再起動して新しいカーネルを選ぶ
+sudo grub-reboot 'Advanced options for Ubuntu>Ubuntu, with Linux 6.12.0-s3fs-lockdep'   # 一度だけ。GRUB_DEFAULT=saved が要る
+sudo reboot
+uname -r                            # ...-s3fs-lockdep
+ls /proc/lockdep_stats              # あれば lockdep 有効
+
+# 3. 新しいカーネル用の headers / vmlinux / pahole (カーネルを替えるたびに必要)
+make setup-toolchain
+make doctor
+
+# 4. 回帰テスト
+make test-lockdep                   # = scripts/test-lockdep.sh
+```
+
+`make test-lockdep` は `make test-regression` を `hit_accum=1` (既定) と `0` で回し、各回の前に `dmesg -C` して、終わったら dmesg を見る。次のどれかがあれば FAIL。
+
+- `make` が失敗した (回帰テスト自体の失敗)
+- dmesg に lockdep の報告 (`possible circular locking`、`inconsistent lock state`、`possible recursive locking`、`bad unlock balance` ほか)、`BUG: sleeping function called from invalid context`、`suspicious RCU usage`、oops
+- 終了時に `/proc/lockdep_stats` が `debug_locks: 0` (lockdep が自分で止まった)
+
+結果は `/tmp/test-lockdep/` に残る (`run-<mode>.log`、`dmesg-<mode>.log`、報告の前後 30 行を画面にも出す)。最後の 1 行は `RESULT name=test-lockdep status=PASS|FAIL ...`。
+
+主な環境変数:
+
+| 変数 | 意味 |
+|---|---|
+| `MODES="1 0"` | `hit_accum` の値。既定は両方 |
+| `TARGETS="test-regression"` | 回す make target。個別に絞れる (`TARGETS="test-pcache-evict-race test-pick-victim-stale"`) |
+| `KUNIT=1` | 先に KUnit 付きの kmod (`KUNIT=1 make kmod`) をロードして、suite を lockdep の下で動かす。このカーネルは `CONFIG_KUNIT=y` にしてある。**この経路は書いただけで、まだ試していない** |
+| `OUT=/tmp/test-lockdep` | 出力先 |
+
+## 読み方
+
+- lockdep は最初の報告のあとで自分を止める (`debug_locks: 0`)。1 回の起動で見つかるのは 1 件。直して再起動し、もう一度回す。
+- 報告の `Possible unsafe locking scenario` と、スタックの `s3fs_ebpf_admit_replace` / `s3fs_policy_*` / `s3fs_hit_*` / `s3fs_ebpf_populate_pages` のどこが `fd->lock`、`s3fs_admits_lock`、`s3fs_policy_evict_mutex` を取っているかを見る。確認したい順序は「evict の mutex (外) → `fd->lock` → `s3fs_admits_lock` (内)」。逆順で取るパスが見つかったら、`kmod-pcache-invariants.md` のロック順を直すか、コードを直す。
+- `ilookup` / `iput` を evict の mutex の中で呼ぶパス (`s3fs_hit_collect`、`s3fs_hit_forget`、`s3fs_ino_buf_bytes`) で、`iput` が `evict_inode` まで走って `s3fs_ebpf_evict_inode` が `s3fs_entries_mtx` を取る経路は、lockdep が一番疑う所。
+- `blocked for more than`: T3 のデッドロック (folio lock と daemon の upcall の待ち合い) の症状。
+
+## このカーネルで性能を測らない
+
+lockdep (`PROVE_LOCKING`、`LOCK_STAT`、`DEBUG_*`) は mutex / spinlock を何倍も遅くする。`bench-*` の数字は通常のカーネルで取る。このカーネルで見るのは、報告が出ないことと、回帰テストの合否だけ。
+
+## カーネルの config (`setup-kernel-lockdep.sh` が足すもの)
+
+動いているカーネルの `/boot/config-$(uname -r)` を土台にして、次を足す。
+
+| 設定 | 理由 |
+|---|---|
+| `PROVE_LOCKING`、`DEBUG_LOCKDEP`、`DEBUG_LOCK_ALLOC`、`LOCK_STAT` | lock 順序の検証 |
+| `DEBUG_MUTEXES`、`DEBUG_SPINLOCK`、`DEBUG_RWSEMS`、`DEBUG_ATOMIC_SLEEP`、`PROVE_RCU`、`DEBUG_LIST`、`DEBUG_PREEMPT` | sleeping-in-atomic、RCU の誤用、リスト破壊 |
+| `BOOTPARAM_HUNG_TASK_PANIC` 無効、`PANIC_ON_OOPS` 無効 | 報告が出てもマシンを止めない |
+| `SYSTEM_TRUSTED_KEYS=""`、`SYSTEM_REVOCATION_KEYS=""` | 自前ビルドのツリーに distro の署名鍵は無い |
+| `DEBUG_INFO_BTF`、`DEBUG_INFO_BTF_MODULES`、`BPF*`、`FUSE_FS`、`KPROBES`、`FPROBE` | kmod の kfunc と daemon、bpftrace |
+| `KUNIT`、`KUNIT_DEFAULT_ENABLED` | `KUNIT=1` の kmod をその場で動かす |
+| `LOCALVERSION=-s3fs-lockdep` | `uname -r` で見分ける。標準カーネルは消えない |
+
+`olddefconfig` のあと `PROVE_LOCKING` / `DEBUG_LOCK_ALLOC` / `DEBUG_INFO_BTF` / `BPF_JIT` / `BPF_SYSCALL` / `KUNIT` が `y` でなければ、スクリプトは止まる (依存が外れている)。
+
+## つまずいたとき
+
+| 症状 | 対処 |
+|---|---|
+| `pahole: error while loading shared libraries` で Kconfig が失敗する | Kconfig 自体が pahole を呼ぶ。スクリプトは `detect_pahole` で動くものを選び、`LD_LIBRARY_PATH` と `PAHOLE=` を付けて make する。`scripts/setup-toolchain.sh kbuild` で `$HOME/.local` に pahole を入れてから |
+| BTF 生成で `Skipping BTF generation` / insmod で kfunc 登録に失敗 | pahole が古い。`make doctor` の C-4。再起動後に `make setup-toolchain` を忘れていないか (`$KDIR/vmlinux` が要る、H-2) |
+| 起動しない / 署名エラー | Secure Boot が有効だと、署名のない自前カーネルは起動しない。BIOS で Secure Boot を切るか、MOK で署名する |
+| ディスク不足 | `DEBUG_INFO` のため build に約 25 GB。`SRC_DIR=` を広い場所に |
+| `make kmod` が `warning: the compiler differs` | 自前ビルドと同じ gcc を使う限り無害 (C-3) |
+| 元のカーネルに戻したい | grub で標準カーネルを選ぶ。不要なら `sudo apt remove linux-image-<ver>-s3fs-lockdep linux-headers-<ver>-s3fs-lockdep`。`grub-reboot` は一度きりなので、次の再起動で標準に戻る |
+
+## 結果の記録先
+
+通ったときも、見つかったときも、`docs/design/hit-signal-percpu-accumulation.md` §9 の lockdep の項と、`docs/journal/issue22-hit-accum-investigation.md` §8 を更新する。見つかったロック順の修正は `docs/kmod-pcache-invariants.md` の「ロック順」に反映する。
+
+## 関連
+
+- `scripts/setup-kernel-lockdep.sh`、`scripts/test-lockdep.sh`、`scripts/test-pcache-evict-race.sh` (lockdep の判定をこのテストも持つ)
+- `docs/dev-notes/build-env-dependencies.md` (カーネル入替後の H / C / T の手当て)
+- `docs/dev-notes/kunit.md` (UML での KUnit。KASAN 付きは通常の `make test-kunit`)

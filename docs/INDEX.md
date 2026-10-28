@@ -116,6 +116,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 |---|---|
 | [`dev-notes/lessons-learned.md`](dev-notes/lessons-learned.md) | Week 1-4 横断の実装ハマりポイント (arena / new_inode / invalidate deadlock / rwlock sleep / pending race) |
 | [`dev-notes/build-env-dependencies.md`](dev-notes/build-env-dependencies.md) | ビルド・検証環境の依存箇所 (カーネル版 / ヘッダ / コンパイラ / ツール / テストツール) と解消方法。`make doctor` の ID 対応表 |
+| [`dev-notes/lockdep-kernel.md`](dev-notes/lockdep-kernel.md) | lockdep (`CONFIG_PROVE_LOCKING`) 付きカーネルを build して入れ、`make test-lockdep` で回帰テストを通す手順 (AC-42): config、grub、読み方、戻し方 |
 | [`dev-notes/kunit.md`](dev-notes/kunit.md) | kmod の KUnit テスト (`make test-kunit`): 実行方法、suite の対象、テストで見つけて直したバグ |
 | [`dev-notes/ebpf-ecosystem-gaps.md`](dev-notes/ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠) |
 | [`dev-notes/arena-address-translation.md`](dev-notes/arena-address-translation.md) | arena のポインタがどこで kern_vm の番地になるか (BPF の load、kfunc の `__arena` 引数、x86 / arm64 JIT の命令)。6.12 / 7.2 / 7.3 の違い |

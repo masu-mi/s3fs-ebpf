@@ -113,7 +113,7 @@ module param (`/sys/module/s3fs_kfunc/parameters/`):
 ## 9. 残っていること
 
 - sieve (約 9〜12%)、wtinylfu (約 16%)、s3fifo (約 8%) の per-access の食い違い。hit 率は ±2 pt で合っている。SIEVE は hand の端のバグを 1 つ直した (§18.45)。wtinylfu は未調査。run ごとにばらつくので、タイミング由来の揺れもある。
-- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。lockdep 付きカーネルが要る。
+- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。`make setup-kernel-lockdep` で lockdep 付きカーネルを入れ、`make test-lockdep` で回す (手順は `dev-notes/lockdep-kernel.md`、まだ実行していない)。
 - `fentry` の KFunc 呼び出しを BPF 側で飛ばす案: read のコストは policy なしと同等まで下がっているので、効果が測れるまで入れない。
 - 既定を 1 にするかの判断 (理由は read 経路のコスト、単位の統一、G5 の解消)。hit rate の上乗せは小さい。
 

@@ -91,7 +91,7 @@ bench の capacity のずれは、1 slot 足りないと simulator との差が�
 ## 8. 残っていること
 
 - per-access の食い違い: s3fifo 約 8%、sieve 約 9〜12%、wtinylfu 約 16% (hit 率は ±2 pt で合っている)。SIEVE は hand の端のバグを 1 つ直した (食い違い 337→約 230)。wtinylfu は未調査で、run ごとのばらつきもある。
-- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。lockdep 付きカーネルが要る。
+- lockdep (AC-42): このマシンのカーネルは `CONFIG_PROVE_LOCKING` が無効。`make setup-kernel-lockdep` → 再起動 → `make test-lockdep` (手順は `docs/dev-notes/lockdep-kernel.md`、まだ実行していない)。
 - 既定を 1 にするかの判断 (理由は read 経路のコスト、単位の統一、G5 の解消)。
 
 調査の続きで確認したこと (`benchmark-results.md` §18.45):
