@@ -71,14 +71,6 @@ if ((${#missing[@]})); then
     [[ "$DRY_RUN" == 1 || "$PREPARE_ONLY" == 1 ]] || die "install the prerequisites and run again"
 fi
 
-mkdir -p "$SRC_DIR"
-free_gb=$(df -P --block-size=1G "$SRC_DIR" | awk 'NR==2 { print $4 }')
-if ((free_gb < MIN_FREE_GB)); then
-    warn "only ${free_gb} GB free in $SRC_DIR (need $MIN_FREE_GB; a full build ran out of space at the module BTF step)"
-    info "free space, set SRC_DIR= to a bigger disk, or keep LOCALMOD=1 (default) to build far fewer modules"
-    [[ "$DRY_RUN" == 1 || "$PREPARE_ONLY" == 1 ]] || die "not enough disk space"
-fi
-
 PAHOLE=$(detect_pahole) || warn "pahole is older than the base kernel's CONFIG_PAHOLE_VERSION; BTF may be empty (scripts/setup-toolchain.sh kbuild builds one into \$HOME/.local)"
 PAHOLE_LIB=$(pahole_libdir "$PAHOLE")
 info "pahole: $PAHOLE ${PAHOLE_LIB:+(LD_LIBRARY_PATH=$PAHOLE_LIB)}"
@@ -86,6 +78,22 @@ info "pahole: $PAHOLE ${PAHOLE_LIB:+(LD_LIBRARY_PATH=$PAHOLE_LIB)}"
 # needs the working one, not the first on PATH.
 KMAKE="make -C $TREE PAHOLE=$PAHOLE"
 [[ -n "$PAHOLE_LIB" ]] && KMAKE="LD_LIBRARY_PATH=$PAHOLE_LIB\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH} $KMAKE"
+
+# A half-finished earlier build (it ran out of space) leaves ~20 GB of objects and
+# debian/ in the tree.  Remove them before the space check, not after it.
+if [[ -e "$TREE/vmlinux" || -d "$TREE/debian" || -e "$TREE/.config" ]]; then
+    log "cleaning the previous build in $TREE"
+    run "$KMAKE mrproper"
+    run rm -rf "$TREE/debian"
+fi
+
+mkdir -p "$SRC_DIR"
+free_gb=$(df -P --block-size=1G "$SRC_DIR" | awk 'NR==2 { print $4 }')
+if ((free_gb < MIN_FREE_GB)); then
+    warn "only ${free_gb} GB free in $SRC_DIR (need $MIN_FREE_GB; a full build ran out of space at the module BTF step)"
+    info "free space, set SRC_DIR= to a bigger disk, or keep LOCALMOD=1 (default) to build far fewer modules"
+    [[ "$DRY_RUN" == 1 || "$PREPARE_ONLY" == 1 ]] || die "not enough disk space"
+fi
 
 # --- source ------------------------------------------------------------------
 fetch_source() {
@@ -122,11 +130,6 @@ fetch_source() {
 # (KASAN, KCSAN) are separate runs (kmod/kunit-kasan.config).
 configure() {
     log "configuring $TREE"
-    # A half-finished earlier build (out of space) leaves objects and debian/ behind.
-    if [[ -e "$TREE/vmlinux" || -d "$TREE/debian" || -e "$TREE/.config" ]]; then
-        run "$KMAKE mrproper"
-        run rm -rf "$TREE/debian"
-    fi
     run cp "$BASE_CONFIG" "$TREE/.config"
     if [[ "$LOCALMOD" == 1 ]]; then
         # Only the modules this machine has loaded now (the build is otherwise ~4000 modules).
