@@ -61,6 +61,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/ac58-pick-victim.md`](design/ac58-pick-victim.md) | AC-58: policy の vtable に `on_insert` / `on_remove` / `pick_victim` を足し、victim の選択を BPF に渡す設計 (実装済み、SIEVE / LRU / S3-FIFO の `*_pick_ops`) |
 | [`design/wtinylfu-pick-plan.md`](design/wtinylfu-pick-plan.md) | AC-66: W-TinyLFU を `pick_victim` で動かす計画 (現行とのずれ、BPF 側の設計、kmod に足す `on_size`、手順。未実装) |
 | [`design/hit-signal-percpu-accumulation.md`](design/hit-signal-percpu-accumulation.md) | issue #22: hit の信号を `.read_iter` で per-CPU に数え、`admit_replace` の evict の前に policy へ反映する (実装済み、`hit_accum`、既定 on、計測は §18.44〜18.45。再計測の手順と採否の基準つき) |
+| [`design/design-review-checklist.md`](design/design-review-checklist.md) | 設計・実装・測定の検討観点 (issue #22 で見つけた不具合から): 規則の集約、周期処理の副作用、2 つの持ち主の状態、「数える」意味、参照との 1 手ずつの比較、測定の対照、テストが落ちることの確認、ロック、機能の出し方。レビュー用チェックリストつき |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
 | [`design/kmod-daemon-shared-memory.md`](design/kmod-daemon-shared-memory.md) | kmod と daemon の共有メモリ (miscdev の `.mmap`): 仕組み、arena との違い、この実装で使う場合の候補と注意。未実装・未計測 |
