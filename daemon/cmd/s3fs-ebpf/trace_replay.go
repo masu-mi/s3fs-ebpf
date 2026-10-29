@@ -21,6 +21,7 @@ import (
 // scripts/bench-hitrate.sh for the real numbers.
 func runTraceReplay(args []string) int {
 	fs := flag.NewFlagSet("trace-replay", flag.ExitOnError)
+	perAccess := fs.String("per-access", "", "write one line per read (policy idx ino H|M) to this file, for diffing against a live run")
 	tracePath := fs.String("trace", "",
 		"Path to JSON Lines trace (see docs/design/trace-harness.md format). "+
 			"Overrides --zipf when set.")
@@ -76,6 +77,12 @@ func runTraceReplay(args []string) int {
 			return 1
 		}
 		r := trace.Replay(p, events)
+		if *perAccess != "" {
+			if err := dumpPerAccess(*perAccess+"."+name, makePolicyMust(name, *softcap, events), events); err != nil {
+				fmt.Fprintf(os.Stderr, "trace-replay: %v\n", err)
+				return 1
+			}
+		}
 		fmt.Printf("  %-10s %10d %10d %10d %7.2f%%\n",
 			r.Policy, r.Accesses, r.Hits, r.Misses, 100*r.Rate)
 	}
@@ -133,4 +140,36 @@ func makePolicy(name string, cap int, events []trace.Event) (trace.Policy, error
 		return nil, fmt.Errorf("unknown policy %q — available: %s",
 			name, strings.Join(availablePolicies(), ","))
 	}
+}
+
+func makePolicyMust(name string, cap int, events []trace.Event) trace.Policy {
+	p, err := makePolicy(name, cap, events)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
+
+// dumpPerAccess writes "idx ino H|M" for every read event.
+func dumpPerAccess(path string, p trace.Policy, events []trace.Event) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	i := 0
+	for _, e := range events {
+		switch e.Op {
+		case trace.OpRead:
+			hm := "M"
+			if p.Access(e.Ino) {
+				hm = "H"
+			}
+			fmt.Fprintf(f, "%d %d %s\n", i, e.Ino, hm)
+			i++
+		case trace.OpWrite:
+			p.Invalidate(e.Ino)
+		}
+	}
+	return nil
 }

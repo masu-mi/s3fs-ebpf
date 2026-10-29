@@ -24,7 +24,7 @@ u64 (*pick_victim)(void);        /* 次に捨てる ino。0 = 決められない
 2026-10-20 (AC-66): さらに末尾に `int (*on_size)(u64 ino, u64 bytes);` を足した。Phase 1 で `on_insert` の直後に、kmod がその ino に課金するバイト数 (arena は entry の合計、pcache は `fd->cap`) を渡す。`capacity_bytes > 0` のときだけ呼ぶ。W-TinyLFU が window / main の予算をバイトで持つため (`docs/design/wtinylfu-pick-plan.md`)。
 
 - `on_hit(ino)` は既存。これが access の通知。
-- 非 sleepable。`on_insert` / `on_remove` / `pick_victim` は **kmod 側の mutex (`s3fs_policy_evict_mutex`) で直列化**して呼ぶ。BPF 側は状態の更新に lock を要らない (bpf_spin_lock の中では map helper を呼べず、リスト操作が書けないため)。`on_hit` だけは並行に来るので、visited の 1 ビットを立てるだけにする (落ちた更新は害がない)。
+- 非 sleepable。`on_insert` / `on_remove` / `pick_victim` は **kmod 側の mutex (`s3fs_policy_evict_mutex`) で直列化**して呼ぶ。BPF 側は状態の更新に lock を要らない (bpf_spin_lock の中では map helper を呼べず、リスト操作が書けないため)。`on_hit` だけは並行に来るので、visited の 1 ビットを立てるだけにする (落ちた更新は害がない)。既定の `hit_accum=1` (issue #22) では `on_hit` も Phase 1 の mutex の下から呼ぶので直列になる (`hit-signal-percpu-accumulation.md`、`benchmark-results.md` §18.44)。`hit_accum=0` のときは上のとおり並行に来る。
 
 ### kmod の呼び方 (`s3fs_ebpf_admit_replace` の capacity パス)
 
@@ -46,7 +46,7 @@ score と同点処理 (`on_evict`、tiebreak) は、`pick_victim` を持たな�
 - `on_insert`: idx にあれば何もしない。なければ `slots[head % N]` に visited=0 で入れ、`head++`。満杯 (`head - tail >= N`) なら最古を捨てる。
 - `on_remove`: idx から引いて `valid=0`。
 - `pick_victim`: `hand` を tail 側から head 側に進める (bounded loop)。無効な slot は飛ばす。visited=1 なら 0 にして進む。visited=0 なら victim (slot を無効にして idx から消す、`hand = seq + 1`)。head に達したら tail に戻る。
-- SIEVE の性質: 新しい item は head に入り、hand は動かず、promotion がない。
+- SIEVE の性質: 新しい item は head に入り、hand は動かず、promotion がない。ただし hand が newest 端 (head) まで進んでいるときは、`on_insert` で oldest に戻す (そのままだと新しい item の上に乗り、次の pick が newest を evict する。issue #22 の調査で修正、`benchmark-results.md` §18.45)。
 
 ## 4. 測ること (計画時)
 
@@ -57,7 +57,8 @@ score と同点処理 (`on_evict`、tiebreak) は、`pick_victim` を持たな�
 ## 5. LRU と S3-FIFO (`policy_lru_pick_ops.bpf.c` / `policy_s3fifo_pick_ops.bpf.c`)
 
 - LRU: slot ごとに `on_hit` で単調増加の stamp を付け、`pick_victim` は使用中の slot の最高位置までを走査して最小の stamp を返す (候補数に比例、N=4096 まで)。
-- S3-FIFO: S (新規、約 10%) / M (main) / G (ghost) の 3 queue を ring で持つ。`on_hit` は freq を 3 まで上げるだけ。`pick_victim` は S の最古を見て freq > 1 なら M に移し、そうでなければ victim にして G に入れる。M では freq を減らしながら一周させる。G にある ino が `on_insert` で戻ると M に入る。`on_remove` は G に入れる。
+- S3-FIFO: S (新規、約 10%) / M (main) / G (ghost) の 3 queue を ring で持つ。`on_hit` は freq を 3 まで上げるだけ。`pick_victim` は S の最古を見て freq > 1 なら M に移し、そうでなければ victim にして G に入れる。M では freq を減らしながら一周させる。G にある ino が `on_insert` で戻ると M に入る。`on_remove` は G に入れる。G の長さは (S+M) の 90% まで (下限 1)。以前は max(|M|, 16) で、8 slot の bench では simulator の 2 倍の ino を覚えて M に直行させていた (issue #22 の調査で修正、`benchmark-results.md` §18.44)。
+- kmod は、miss が in-flight (`pending_exists`) の ino を `on_insert` しない (次の round に回す)。pending は kmod の evict を止めるが、policy が victim に選ぶと ghost / hand が動いてしまうため。
 - score 型の policy (`freq2bit_ops` / `time_decay_ops` / `size_aware_ops` / `pressure_ops`) は kmod の score 順で同じ結果になるので移していない。W-TinyLFU は admission window と SLRU と sketch があり、別の設計が要るので見送った。
 
 ## 6. 結果 (`docs/journal/benchmark-results.md` §18.41 / §18.42 / §18.43)

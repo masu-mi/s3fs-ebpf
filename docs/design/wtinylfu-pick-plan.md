@@ -28,7 +28,7 @@
 | G2 | **新しい ino は最初の capacity pass では必ず pending**。refresh は signal の前なので、候補を返しても kmod は丸ごと evict せず shed する (pin された chunk は残る)。AC-58 の約束では BPF は pick した ino を構造から外すので、次の round の `on_insert` で「新規」として window に入り直す | BPF 側に **limbo** (pick したが `on_remove` が来ていない ino と、その時の区画) を持つ。`on_insert` で limbo から戻ってきた ino は元の区画に戻す。admission で負けて戻ってきた ino は `rejected` 区画に入れ、次の `pick_victim` で最初に返す |
 | G3 | **policy は ino のバイト数を知らない**。kmod の課金は pcache なら `fd->cap` (`s3fs_ino_buf_bytes`)、arena なら entry の合計。`s3fs_kfunc_ino_size` は「どれか 1 つの range のサイズ」で、課金と一致しない (`s3fs_admit_size` のコメント) | 2 段目で `on_size(ino, bytes)` を足す (§5)。1 段目は 1 ino = 1 単位、容量 = `capacity_bytes / 平均サイズ` を config map で daemon が渡す |
 | G4 | **`on_hit` は並行に来て lock を持たない**。probation → protected の移動や LRU の先頭への移動をその場でできない (AC-58 §2 と同じ制約) | `on_hit` は sketch の加算と ino ごとの `hit` ビットだけ。区画の移動は `on_insert` / `pick_victim` (kmod の mutex の中) で遅延して行う。各区画の LRU は SIEVE / CLOCK の近似 (hit ビットで 1 周の猶予) にする。厳密な LRU ではない点を結果に書く |
-| G5 | **頻度の信号の粒度**。`on_hit` は `fentry/generic_file_read_iter` から (CPU, ino) ごとに jiffy 1 回に間引かれる (AC-47)。1 回の `read(2)` の複数の read_iter はまとまるが、大きいファイルを順に読むと jiffy をまたぐたびに加算され、頻度が水増しされる。`.read_folio` の on_hit と二重にもなる | 1 段目はそのまま (bench は小さいファイル)。sketch の counter は 4-bit で飽和するので害は限られる。`bench-hitrate-mixed` で大きいファイルが不当に残るなら、2 段目で「pos == 0 の read だけ数える」fastpath の flag を足すか、`on_hit` に `pos` を渡すかを測って決める |
+| G5 | **頻度の信号の粒度** (issue #22 の `hit_accum=1` が対象。read_iter で open ごとに 1 回数えるので水増しは消える。既定の `hit_accum=1` で解消済み、`benchmark-results.md` §18.45)。以下は `hit_accum=0` の場合。`on_hit` は `fentry/generic_file_read_iter` から (CPU, ino) ごとに jiffy 1 回に間引かれる (AC-47)。1 回の `read(2)` の複数の read_iter はまとまるが、大きいファイルを順に読むと jiffy をまたぐたびに加算され、頻度が水増しされる。`.read_folio` の on_hit と二重にもなる | 1 段目はそのまま (bench は小さいファイル)。sketch の counter は 4-bit で飽和するので害は限られる。`bench-hitrate-mixed` で大きいファイルが不当に残るなら、2 段目で「pos == 0 の read だけ数える」fastpath の flag を足すか、`on_hit` に `pos` を渡すかを測って決める |
 | G6 | **aging の契機**。既存の full 版は `on_admit` の回数 (round 数) で半減させるが、round の頻度は miss と eval で変わり、アクセス数と結びつかない | `on_hit` で加算回数の counter を atomic に増やし、sample size に達したら flag を立てるだけにする。半減 (`bpf_loop`) は次の `on_insert` / `pick_victim` の中で行う (read 経路で sketch 全体を回さない) |
 | G7 | **evict 済み ino の扱い**。capacity 以外の経路 (sync の prune、truncate、別 round) で消えた ino は AC-64 の聞き直しで `on_remove` が来る | `on_remove` は区画と limbo から外すが、sketch は消さない (再来時の admission に使う) |
 | G8 | **eviction は round 単位**で、アクセスごとではない。1 round の新規 ino は Phase 1 の配列の順 (arena の entry → pcache の ino) で `on_insert` される | 他の `*_pick_ops` と同じ近似。pcache モードでは miss ごとに refresh するので、1 round の新規はたいてい 1 つ |
@@ -107,7 +107,7 @@ kmod は 1 round で最大 `ncand` 回 `pick_victim` を呼び、試し済みの
 - **doorkeeper は入れなかった**。Caffeine の既定にもなく、小さい容量では 1 回目の hit を捨てる害の方が大きい。
 - **window の予算はバイトで、最低 1 件の床がない**。容量 8 件 (4 KiB ずつ) なら 1 % は 327 B で、新しい ino はすぐ probation の候補になる (Caffeine の weigher と同じ)。件数モードでは 1 件の床がある。
 - **G9 (容量を超える ino の特別扱い) は入れなかった**。daemon が capacity を超えるファイルを全体 admit にしないので (`fullAdmitExceedsCapacity`)、policy から見える重みは容量を超えない。
-- **G5 (頻度の粒度) は触っていない**。`bench-hitrate-mixed` を回してから決める。
+- **G5 (頻度の粒度)**: `hit_accum=1` で解消した。large の 1 access が `on_hit` 約 82 回から高々 1 回になった (`benchmark-results.md` §18.45)。`hit_accum=0` のままでは残る。
 - duel に勝った候補は probation に残り、hit すれば protected に上がる。probation の最古が候補自身のときは duel をせず、そのまま victim にする。
 
 ### 9.3 trace-replay の結果

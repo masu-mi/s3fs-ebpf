@@ -1348,6 +1348,9 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 						metrics.Global.FdBufWalkBytes.Store(vals[12])
 						metrics.Global.FdBufPcacheBytes.Store(vals[13])
 					}
+					if len(vals) >= 15 {
+						metrics.Global.HitsReplayed.Store(vals[14])
+					}
 				}
 			}
 

@@ -132,7 +132,7 @@ W-TinyLFU は evict 票が少ない (161 回) ので 30 件近くが残ったま
 | P2 | **件数ベース**。44 B のファイルも 100 MiB のファイルも 1 件 | 本当の制約は arena のバイト数。件数 8 では arena 128 MiB の使い方を制御できず、溢れると `AdmitContent` が ENOMEM |
 | P3 | **「victim を選ぶ」ではなく「全件に yes/no を聞く」API** | 必要数だけ追い出す、が書けない。過剰に追い出すと再取得が連鎖する (ベンチの LRU は 200 アクセスで 9884 回 evict) |
 | P4 | **判定タイミングがアクセスではなく全置換**。miss / sync / eval のたびに全件評価 | LRU や SIEVE は近似にしかならない。新規 admit が同じラウンドで即 evict されうる |
-| P5 | **page cache hit が policy に見えない**。`on_hit` は `.read_folio` の admit hit でしか呼ばれない | よく読まれるファイルほど page cache で返り、policy からは「冷えている」ように見える。頻度系 (LFU / W-TinyLFU) の統計が逆向きに歪む |
+| P5 | **page cache hit が policy に見えない** (S-03 で見えるようになったが、間引きと単位の不揃いが残る。#22)。もとは `on_hit` が `.read_folio` の admit hit でしか呼ばれなかった | よく読まれるファイルほど page cache で返り、policy からは「冷えている」ように見える。頻度系 (LFU / W-TinyLFU) の統計が逆向きに歪む |
 | P6 | **evict の daemon 反映が最大 2 秒遅れる**。その間に別の miss で全置換が起きると、daemon は evict 済み ino を送り直す | 追い出したものが復活し、もう一度投票される |
 | P7 | **全置換のたびに一覧全体の page cache を破棄する** (§2.3 の 1) | 1 ファイルの miss で、admit 済みの全ファイルの page cache が消える。hot なファイルも次の read で `.read_folio` からやり直し |
 
@@ -167,7 +167,7 @@ page cache は最速 (hit なら kmod にも来ない) で、kernel が全体の
 | **明示的に制御できる (policy / CEL / BPF)** | page cache の追い出しは kernel の LRU 任せで、アプリの知識 (このファイルは次も使う、このジョブ終了後は不要) を入れられない |
 | **一貫性の制御点** | daemon が S3 の変更を検知したら admit を差し替え、kmod が該当 page cache を破棄する。page cache だけだと、いつ古い内容を捨てるかの手がかりが無い |
 | **page cache が落ちても S3 まで行かない** | メモリ圧迫や drop_caches で page cache が消えても、再充填は arena からの μs。B が無いと S3 の ms になる |
-| **policy が観測できる** | `.read_folio` は kmod を通るので on_hit が取れる。page cache hit は kmod を通らない |
+| **policy が観測できる** | `.read_folio` は kmod を通るので on_hit が取れる。page cache hit は `.read_folio` を通らないが、`.read_iter` は通る (fentry の S-03、または #22 の `hit_accum`) |
 
 ### 6.2 その代わりのコスト
 
@@ -184,7 +184,7 @@ page cache は最速 (hit なら kmod にも来ない) で、kernel が全体の
 | A disk cache | arena に載らない分の第二層 | 上限管理を追加 (今は無制限) |
 | S3 | 正本 | — |
 
-page cache hit を policy に見せる方法は既にある材料で作れる。`bpf/s3fs_fastpath.bpf.c` の `fentry/generic_file_read_iter` は page cache hit を含む全 read で発火している (今は read pattern 計測にだけ使用)。ここから policy の `on_hit` 相当 (例えば per-ino のアクセスカウンタ map を policy と共有) を出せば、P5 が解消する。
+page cache hit を policy に見せる方法は 2 つある。(1) S-03 (実装済み、`hit_accum=0` のときの経路): `bpf/s3fs_fastpath.bpf.c` の `fentry/generic_file_read_iter` が全 read で発火し、KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ。(CPU, ino) ごとに jiffy 1 回へ間引くので回数が落ち、`.read_folio` の `on_hit` と単位が揃わない。(2) issue #22 (実装済み、`hit_accum=1`、既定 on、計測は §18.44〜18.45): kmod の `.read_iter` で、開いたファイルごとに per-CPU で数え、`admit_replace` の Phase 1 で evict の判断の前にまとめて `on_hit` として反映する (`hit-signal-percpu-accumulation.md`)。
 
 ### 6.4 結局どこが速いのか (ベンチとの対応)
 
@@ -212,7 +212,7 @@ page cache hit を policy に見せる方法は既にある材料で作れる。
 | S-02 (P1〜P3) | 実装済 | module param `capacity_bytes` (>0 で capacity mode) と `softcap` (実行時に可変)。daemon `--cache-capacity` / `--softcap` で設定する。capacity mode では `on_evict` の戻り値をスコアとして扱う (高い順 → 0 は古い順) |
 | S-04 (P6) | 実装済 | daemon は push の直前に evict log を drain する (`reconcileEvictionsLocked`)。kmod が evict するのは daemon の push 中だけなので、復活の窓が無くなる |
 | 追加 | 実装済 | miss upcall で reader が待っている ino はどちらのモードでも evict しない (`pending_exists`)。以前は、自分の push で入れた ino をその場で追い出し、reader が placeholder buffer に落ちる可能性があった |
-| S-03 (P5) | 実装済 | KFunc `s3fs_kfunc_policy_hit` を `fentry/generic_file_read_iter` の hit パスから呼び、page cache で返る read でも `on_hit` が dispatch される |
+| S-03 (P5) | 実装済 | KFunc `s3fs_kfunc_policy_hit` を `fentry/generic_file_read_iter` の hit パスから呼び、page cache で返る read でも `on_hit` が dispatch される。間引きによる回数の欠落と単位の不揃いは issue #22 (`hit_accum`、既定で有効、`hit-signal-percpu-accumulation.md`、`benchmark-results.md` §18.44〜18.45) で直した |
 | AC-58 (P3、P4 の一部) | 実装済 (2026-10-17) | vtable に `on_insert` / `on_remove` / `pick_victim` を追加。これを持つ policy (SIEVE / LRU / S3-FIFO の `*_pick_ops`) は容量超過のとき「次に捨てる ino」を自分で選び、kmod は必要な分だけ evict する。持たない policy は従来の score 順 (`docs/design/ac58-pick-victim.md`) |
 
 capacity mode でも残る点:

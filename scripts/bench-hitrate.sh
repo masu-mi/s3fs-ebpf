@@ -42,7 +42,12 @@ N_ACCESS=${N_ACCESS:-2000}      # workload length; 200 was too short for aging/g
 ZIPF_ALPHA=${ZIPF_ALPHA:-0.7}   # skew — smaller = more uniform
 SEED=${SEED:-42}                # random seed for workload generation
 SOFTCAP=${SOFTCAP:-8}           # slots; passed to kmod (--softcap) and the reference sims
-FILE_BYTES=44                   # size of each seeded hitrate_<N>.txt (see seed_bucket)
+# One definition of the seeded content: FILE_BYTES (and so CAPACITY_BYTES) is
+# measured from it and seed_bucket verifies the stored size.  A hand-written
+# FILE_BYTES once drifted from the real file size (44 vs 46), which left the
+# bench one slot short of the simulator's capacity (issue #22).
+hitrate_content() { printf 'hitrate file %03d line1\nhitrate file %03d line2\n' "$1" "$1"; }
+FILE_BYTES=$(hitrate_content 0 | wc -c)   # size of each seeded hitrate_<N>.txt
 CAPACITY_BYTES=${CAPACITY_BYTES:-$((SOFTCAP * FILE_BYTES))}  # 0 = legacy vote mode
 # Softcap converges from N → 8 in 3 sync rounds (grace + clear +
 # evict), so we need >=3 sync-every intervals of settle. Also lets
@@ -82,10 +87,18 @@ seed_bucket() {
 	# assignment from correlating with Zipf rank (Y-04).
 	local i
 	for i in $(seq 0 $((N_FILES-1))); do
-		printf 'hitrate file %03d line1\nhitrate file %03d line2\n' "$i" "$i" \
+		hitrate_content "$i" \
 			| docker exec -i "$MINIO_CONTAINER" \
 				mc pipe "local/$BUCKET/hitrate_$(printf '%03d' "$i").txt" >/dev/null
 	done
+	# The capacity above assumes FILE_BYTES per file: check what S3 stored.
+	local got
+	got=$(docker exec "$MINIO_CONTAINER" mc stat "local/$BUCKET/hitrate_000.txt" 2>/dev/null |
+		awk '/^Size/ { print $3 }')
+	if [ "$got" != "$FILE_BYTES" ]; then
+		echo "bench-hitrate: seeded file is ${got:-?} B but FILE_BYTES=$FILE_BYTES; capacity would be wrong" >&2
+		exit 1
+	fi
 }
 
 # --- workload ------------------------------------------------------------
@@ -191,6 +204,22 @@ run_one() {
 		return 0
 	}
 
+	# The kernel's inode numbers, and the workload as a trace of those numbers.
+	# trace.jsonl labels files 100+index, which is NOT what the kernel uses
+	# (105+index here); a policy that hashes the ino (the W-TinyLFU sketch) sees
+	# different collisions under the two, so its simulator must replay this one
+	# (issue #22: 16 % of accesses differed from the simulator on the labels).
+	sudo sh -c 'stat -c "%n %i" "$0"/hitrate_*.txt' "$MOUNT" >"$OUT/inodes-$pol.txt" 2>/dev/null || true
+	python3 - "$OUT/inodes-$pol.txt" "$OUT/workload.txt" "$OUT/trace-ino-$pol.jsonl" <<'PY' || true
+import re, sys
+ino = {}
+for l in open(sys.argv[1]):
+    name, i = l.rsplit(" ", 1)
+    ino[int(re.search(r"hitrate_(\d+)\.txt", name).group(1))] = int(i)
+with open(sys.argv[3], "w") as out:
+    for n, idx in enumerate(open(sys.argv[2])):
+        out.write('{"ts":%d,"ino":%d,"op":"read"}\n' % (n * 1000000, ino[int(idx)]))
+PY
 	log "$pol: running $N_ACCESS accesses (with in-workload eval every $INTERLEAVE)"
 	local start_ns end_ns i=0 errs=0
 	start_ns=$(date +%s%N)
@@ -202,6 +231,12 @@ run_one() {
 			errs=$((errs + 1))
 		fi
 		i=$((i + 1))
+		[ -n "${ACCESS_SLEEP:-}" ] && sleep "$ACCESS_SLEEP"
+		# PER_ACCESS_LOG=<file>: "idx file miss_total" per access, for
+		# diffing against `dev trace-replay --per-access` (issue #22).
+		if [ -n "${PER_ACCESS_LOG:-}" ]; then
+			echo "$i $idx $(read_counter s3fs_ebpf_read_miss_upcalls_total)" >>"$PER_ACCESS_LOG.$pol"
+		fi
 		# Interleave policy eval rounds so per-hit signal (CMS bump,
 		# visited bit, freq counter) has a chance to influence
 		# eviction decisions. Without this, policies that populate
@@ -228,6 +263,8 @@ run_one() {
 	f_read_iter_hits=$(read_counter s3fs_ebpf_read_iter_hits_total)
 	f_read_iter_pos0_hits=$(read_counter s3fs_ebpf_read_iter_pos0_hits_total)
 	f_read_iter_pos0_hits=${f_read_iter_pos0_hits:-0}
+	# Issue #22: accesses replayed into the policy (0 unless HIT_ACCUM=1).
+	f_replayed=$(read_counter s3fs_ebpf_policy_hits_replayed_total)
 
 	local d_miss d_evict d_folio_hits d_read_iter_hits d_read_iter_pos0_hits d_page_cache_hits total rate_arena hit_rate iter_mult ms_per
 	d_miss=$((f_miss - b_miss))
@@ -267,6 +304,7 @@ run_one() {
 	# iter_mult=iter_hits/pos0_hits (≈2 confirms data+EOF double-fire).
 	printf 'RESULT policy=%-14s  folio=%5d  pc=%5d  miss=%5d  err=%3d  rate_arena=%6s%%  hit_rate=%6s%%  evictions=%5d  adm_mean=%5s  adm_max=%3d  iter_mult=%s  ms/access=%s\n' \
 		"$pol" "$d_folio_hits" "$d_page_cache_hits" "$d_miss" "$errs" "$rate_arena" "$hit_rate" "$d_evict" "$adm_mean" "$adm_max" "$iter_mult" "$ms_per" | tee -a "$OUT/summary.txt"
+	echo "DETAIL policy=$pol hits_replayed=${f_replayed:-0} n_access=$N_ACCESS upcalls=$d_miss" | tee -a "$OUT/summary.txt"
 }
 
 # Reference bounds on the exact trace the live runs used. trace-replay
@@ -278,7 +316,9 @@ reference_bounds() {
 		echo "REFERENCE (dev trace-replay on $OUT/trace.jsonl, softcap=$SOFTCAP, cold start;"
 		echo "           live runs used capacity_bytes=$CAPACITY_BYTES — 0 means legacy mode, not slot-bounded)"
 		echo "           prewarmed live runs: opt bound += at most $SOFTCAP/$N_ACCESS)"
-		"$S3FS_BIN" dev trace-replay --trace="$OUT/trace.jsonl" \
+		local ref="$OUT/trace.jsonl" f
+		for f in "$OUT"/trace-ino-*.jsonl; do [ -s "$f" ] && ref=$f; done   # the kernel's inode numbers
+		"$S3FS_BIN" dev trace-replay --trace="$ref" \
 			--softcap="$SOFTCAP" --policies=lru,sieve,opt,noevict
 	} | tee -a "$OUT/summary.txt"
 }
@@ -290,7 +330,12 @@ seed_bucket
 
 # Materialise the trace once: the live loop and the reference sims read
 # the same file, and it is kept with the results for later replay.
-gen_workload > "$OUT/workload.txt"
+if [ -n "${WORKLOAD_FILE:-}" ]; then
+	cp "$WORKLOAD_FILE" "$OUT/workload.txt"	# debugging: replay a given sequence of file indexes
+	N_ACCESS=$(wc -l <"$OUT/workload.txt")
+else
+	gen_workload > "$OUT/workload.txt"
+fi
 awk '{ printf "{\"ts\":%d,\"ino\":%d,\"op\":\"read\"}\n", (NR-1)*1000000, 100+$1 }' \
 	"$OUT/workload.txt" > "$OUT/trace.jsonl"
 

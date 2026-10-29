@@ -22,7 +22,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
-| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
+| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 
 ---
 
@@ -51,7 +51,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/design.md`](design/design.md) | 統合設計書 (initial pitch, §0 で現状との相違メモ付き) |
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
 | [`design/dev-s3fs-ebpf-protocol.md`](design/dev-s3fs-ebpf-protocol.md) | `/dev/s3fs_ebpf` の miss イベント (`read(2)`) と 16 個の ioctl の構造体・フィールド・戻り値 |
-| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / buf_readers / reset 条件の要約。`vfs_ops.c` を読む前に |
+| [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
 | [`design/pcache-mode.md`](design/pcache-mode.md) | pcache モード (`--arena-metadata-only`) の全体像: arena モードとの違い、chunk の表、read / eviction / write の流れ、性能と残課題 |
 | [`design/pcache-chunk-table.md`](design/pcache-chunk-table.md) | pcache の chunk 表 (`fd->chunks[]`) のレイアウト: 構造体、4 MiB の番地の対応、chunk の状態、admit entry と容量の関係 |
@@ -62,6 +62,8 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/wtinylfu-pick-plan.md`](design/wtinylfu-pick-plan.md) | AC-66: W-TinyLFU を `pick_victim` で動かす計画 (現行とのずれ、BPF 側の設計、kmod に足す `on_size`、手順。未実装) |
 | [`design/ann-workload-measurement-plan.md`](design/ann-workload-measurement-plan.md) | 計画 (未実施): IVF / HNSW 型のアクセスパターンで policy・先読み・chunk 大きさを比べる計測計画。trace へのバイト容量と範囲の拡張、合成 trace の生成、実 trace での妥当性確認、実 kmod での確認 |
 | [`design/olap-oltp-s3-evaluation-plan.md`](design/olap-oltp-s3-evaluation-plan.md) | 計画 (未実施): DuckDB など S3 利用系の OLAP / OLTP に対して、FS 層を挟む価値があるかを確かめる評価計画。仮説 H1〜H6、価値がないと分かった時点で止めるゲート、トレース採取と policy 比較、構成別の end-to-end 比較 |
+| [`design/hit-signal-percpu-accumulation.md`](design/hit-signal-percpu-accumulation.md) | issue #22: hit の信号を `.read_iter` で per-CPU に数え、`admit_replace` の evict の前に policy へ反映する (実装済み、`hit_accum`、既定 on、計測は §18.44〜18.45。再計測の手順と採否の基準つき) |
+| [`design/design-review-checklist.md`](design/design-review-checklist.md) | 設計・実装・測定の検討観点 (issue #22 で見つけた不具合から): 規則の集約、周期処理の副作用、2 つの持ち主の状態、「数える」意味、参照との 1 手ずつの比較、測定の対照、テストが落ちることの確認、ロック、機能の出し方。レビュー用チェックリストつき |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
 | [`design/partial-admit-internals.md`](design/partial-admit-internals.md) | D-01 partial admit / D-02 arena free-list の内部構造 |
 | [`design/kmod-daemon-shared-memory.md`](design/kmod-daemon-shared-memory.md) | kmod と daemon の共有メモリ (miscdev の `.mmap`): 仕組み、arena との違い、この実装で使う場合の候補と注意。未実装・未計測 |
@@ -83,6 +85,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 | doc | 内容 |
 |---|---|
+| [`journal/issue22-hit-accum-investigation.md`](journal/issue22-hit-accum-investigation.md) | issue #22 (`hit_accum`) の調査まとめ: 効果 (read 経路のコスト、hit rate への上乗せは小さい)、途中で見つけた 3 つのずれ (bench の capacity、in-flight の miss の `on_insert`、S3-FIFO の ghost の下限)、見つけ方、間違えたこと (2026-10-27)。再発防止の `make check-invariants` / `make test-policy-conformance` を含む |
 | [`journal/history.md`](journal/history.md) | 開発史: 年表、backlog の系列ごとの課題、トラブル (データ破損 / race / oops / 計測の無効化 / 外れた仮説) と教訓 |
 | [`journal/early-walkthroughs.md`](journal/early-walkthroughs.md) | 以前 README にあった Week 1〜3 の動作確認手順 (test-arena / fastpath / verifier-demo / s3-list) とスプリントのロードマップ |
 | [`journal/week1-build-runtime-notes.md`](journal/week1-build-runtime-notes.md) | Week 1: kernel 6.12 + clang-20 + kmod build 疎通 |
@@ -116,6 +119,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 |---|---|
 | [`dev-notes/lessons-learned.md`](dev-notes/lessons-learned.md) | Week 1-4 横断の実装ハマりポイント (arena / new_inode / invalidate deadlock / rwlock sleep / pending race) |
 | [`dev-notes/build-env-dependencies.md`](dev-notes/build-env-dependencies.md) | ビルド・検証環境の依存箇所 (カーネル版 / ヘッダ / コンパイラ / ツール / テストツール) と解消方法。`make doctor` の ID 対応表 |
+| [`dev-notes/lockdep-kernel.md`](dev-notes/lockdep-kernel.md) | lockdep (`CONFIG_PROVE_LOCKING`) 付きカーネルを build して入れ、`make test-lockdep` で回帰テストを通す手順 (AC-42): config、grub、読み方、戻し方 |
 | [`dev-notes/kunit.md`](dev-notes/kunit.md) | kmod の KUnit テスト (`make test-kunit`): 実行方法、suite の対象、テストで見つけて直したバグ |
 | [`dev-notes/ebpf-ecosystem-gaps.md`](dev-notes/ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠) |
 | [`dev-notes/arena-address-translation.md`](dev-notes/arena-address-translation.md) | arena のポインタがどこで kern_vm の番地になるか (BPF の load、kfunc の `__arena` 引数、x86 / arm64 JIT の命令)。6.12 / 7.2 / 7.3 の違い |
