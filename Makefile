@@ -335,7 +335,7 @@ test-daemon-cov: ## go test with coverage -> coverage/daemon.out
 	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) test -covermode=atomic -coverprofile=$(CURDIR)/coverage/daemon.out ./...
 
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
-check-invariants: ## Static checks on kmod/vfs_ops.c and the bench seeds (no root)
+check-invariants: ## Static checks on kmod/vfs_ops.c (+ kmod/vfs/) and the bench seeds (no root)
 	@$(SCRIPTS_DIR)/check-kmod-invariants.sh
 
 test-policy-conformance: kmod daemon ## Live pick_victim policies vs their simulators, per access (issue #22)

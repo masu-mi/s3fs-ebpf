@@ -1,6 +1,6 @@
-# kmod pcache invariants (kmod/vfs_ops.c)
+# kmod pcache invariants (kmod/vfs_ops.c, kmod/vfs/*.inc.c)
 
-`vfs_ops.c` を読み直さずに済ませるための要約。関数名は `scripts/fn.sh <name>` で引ける。コードを変えてここと食い違ったら、このメモも更新すること。
+`vfs_ops.c` (実装は `kmod/vfs/*.inc.c`) を読み直さずに済ませるための要約。関数名は `scripts/fn.sh <name>` で引ける。コードを変えてここと食い違ったら、このメモも更新すること。
 
 ## ロック順 (外 → 内)
 (lockdep 付きカーネルで確認済み、2026-10-28: `make test-lockdep` が `test-regression` と evict-race で報告 0 件。`docs/dev-notes/lockdep-kernel.md`)

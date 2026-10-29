@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # fn.sh — print a single C function (with line numbers) instead of reading
-# a whole file.  Intended for large files such as kmod/vfs_ops.c.
+# a whole file.  Intended for the kmod VFS code (kmod/vfs_ops.c is split into
+# parts under kmod/vfs/*.inc.c; all of them are searched by default).
 #
 # Usage:
 #   scripts/fn.sh [-f FILE] [-c] <func> [<func>...]   print function body
-#   scripts/fn.sh [-f FILE] -l [PATTERN]              list functions (name start end)
+#   scripts/fn.sh [-f FILE] -l [PATTERN]              list functions (name start end [file])
 #
-#   -f FILE  source file (default: kmod/vfs_ops.c)
+#   -f FILE  source file (default: kmod/vfs_ops.c and kmod/vfs/*.inc.c)
 #   -c       also print the comment block directly above the function
 #   -l       list functions with line ranges, optionally filtered by grep -E PATTERN
 #
@@ -15,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FILE="$ROOT/kmod/vfs_ops.c"
+FILE=""
 WITH_COMMENT=0
 LIST=0
 
@@ -29,10 +30,18 @@ while getopts "f:cl" opt; do
 done
 shift $((OPTIND - 1))
 
-[ -f "$FILE" ] || { echo "fn.sh: no such file: $FILE" >&2; exit 2; }
+if [ -n "$FILE" ]; then
+	FILES=("$FILE")
+else
+	FILES=("$ROOT/kmod/vfs_ops.c" "$ROOT"/kmod/vfs/*.inc.c)
+fi
+for f in "${FILES[@]}"; do
+	[ -f "$f" ] || { echo "fn.sh: no such file: $f" >&2; exit 2; }
+done
 
 # Emit "name start end" for every function definition in $FILE.
-list_funcs() {
+list_funcs_in() {
+	local FILE=$1
 	if ctags --options=NONE --version 2>/dev/null | grep -q 'Universal Ctags'; then
 		ctags --options=NONE --languages=C --kinds-C=f --fields=+ne \
 			-o - "$FILE" 2>/dev/null |
@@ -60,6 +69,14 @@ list_funcs() {
 	fi
 }
 
+# Emit "name start end file" over all of $FILES.
+list_funcs() {
+	local f
+	for f in "${FILES[@]}"; do
+		list_funcs_in "$f" | awk -v f="$f" '{ print $1, $2, $3, f }'
+	done
+}
+
 if [ "$LIST" = 1 ]; then
 	if [ $# -gt 0 ]; then
 		list_funcs | grep -E -- "$1" || true
@@ -74,13 +91,13 @@ fi
 table="$(list_funcs)"
 rc=0
 for fn in "$@"; do
-	range="$(awk -v n="$fn" '$1 == n { print $2, $3; exit }' <<<"$table")"
+	range="$(awk -v n="$fn" '$1 == n { print $2, $3, $4; exit }' <<<"$table")"
 	if [ -z "$range" ]; then
 		echo "fn.sh: function not found: $fn (try: scripts/fn.sh -l '$fn')" >&2
 		rc=1
 		continue
 	fi
-	read -r start end <<<"$range"
+	read -r start end FILE <<<"$range"
 	if [ "$WITH_COMMENT" = 1 ]; then
 		# Walk upward over a contiguous /* ... */ or // block ending at start-1.
 		start="$(awk -v s="$start" '

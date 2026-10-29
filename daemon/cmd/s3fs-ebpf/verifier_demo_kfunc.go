@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
+
+	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 
 	"github.com/cilium/ebpf"
 
@@ -126,4 +129,57 @@ func runKfuncWalkDemo(objPath string, nodes int) (rc int, skipped bool) {
 		return 1, false
 	}
 	return 0, false
+}
+
+// runVerifierDemo tries to load the intentionally-rejected pure-eBPF
+// arena walker and prints the verifier's rejection log. Exit codes:
+//
+//	0 — program was rejected (the expected demo outcome, log printed) and
+//	    the KFunc walk returned the right sum, or was skipped because
+//	    bpf/kfunc_walk.bpf.o / s3fs_kfunc is not available
+//	1 — I/O or setup failure, or the KFunc walk returned a wrong result
+//	2 — program unexpectedly loaded (a future kernel accepted it —
+//	    the demo is obsolete and someone should update the pitch)
+func runVerifierDemo(args []string) int {
+	fs := flag.NewFlagSet("verifier-demo", flag.ExitOnError)
+	kfuncObj := fs.String("kfunc-obj", defaultKfuncWalkObj(),
+		"BPF object holding the KFunc-based walk (bpf/kfunc_walk.bpf.o); \"\" skips that half")
+	nodes := fs.Int("nodes", 100000,
+		"linked-list length for the KFunc walk (the reject half fails at any length)")
+	fs.Parse(args)
+
+	fmt.Println("== verifier-demo ==============================================")
+	fmt.Println("Attempting to load s3fs_deep_walk_reject (pure eBPF arena walk")
+	fmt.Println("with an unbounded pointer chase). The kernel's verifier should")
+	fmt.Println("reject it with a complexity-limit or unbounded-loop diagnostic.")
+	fmt.Println()
+
+	ve, err := fpebpf.LoadRejectDemo()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "verifier-demo: %v\n", err)
+		return 1
+	}
+	if ve == nil {
+		fmt.Fprintln(os.Stderr, "verifier-demo: program loaded unexpectedly — the demo is obsolete")
+		return 2
+	}
+	fmt.Printf("=== verifier log ===\n%+v\n", ve)
+	fmt.Println()
+
+	rc, skipped := 0, true
+	if *kfuncObj != "" {
+		rc, skipped = runKfuncWalkDemo(*kfuncObj, *nodes)
+		fmt.Println()
+	}
+
+	fmt.Println("== outcome ====================================================")
+	fmt.Println("The verifier refused the pure-eBPF walk. The same walk handed to")
+	fmt.Println("s3fs_kfunc_arena_list_walk (kmod/tree_traversal.c, called from")
+	fmt.Println("bpf/kfunc_walk.bpf.c) loads and runs: the loop is ordinary kernel")
+	fmt.Println("C, bounded by max_nodes + signal checks and made memory-safe by")
+	fmt.Println("copy_from_user instead of by the verifier.")
+	if skipped {
+		fmt.Println("(KFunc half skipped — see SKIP above.)")
+	}
+	return rc
 }

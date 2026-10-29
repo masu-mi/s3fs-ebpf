@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # check-kmod-invariants.sh — static checks for rules that live in several
-# places of kmod/vfs_ops.c and were broken by editing only one of them
+# places of kmod/vfs_ops.c (+ kmod/vfs/*.inc.c) and were broken by editing only one of them
 # (issue #22).  No root, no kernel: grep over the sources.  `make check-invariants`.
 #
 #  1. The policy's on_insert / on_size / on_remove are called only from the
@@ -14,7 +14,9 @@
 #     FILE_BYTES=44 for 46-byte files once made the cache one slot short).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SRC=kmod/vfs_ops.c
+# vfs_ops.c is split into parts under kmod/vfs/ (one translation unit); a
+# function never spans two parts, so each part is scanned on its own.
+SRCS=(kmod/vfs_ops.c kmod/vfs/*.inc.c)
 fail=0
 bad() { echo "check-kmod-invariants: $*" >&2; fail=1; }
 
@@ -26,13 +28,15 @@ fn_of() {
 # only_in <regex> <allowed fn>...: every non-declaration match must sit in an allowed function.
 only_in() {
 	local re=$1; shift
-	local ln fn ok a
-	while IFS=: read -r ln _; do
-		fn=$(fn_of "$ln")
-		ok=0
-		for a in "$@"; do [ "$fn" = "$a" ] && ok=1; done
-		[ $ok = 1 ] || bad "$SRC:$ln: '$re' called from ${fn:-?}; allowed only in: $*"
-	done < <(grep -n -E "$re" "$SRC" | grep -v -E '^[0-9]+:(static |int |void |u64 |bool )' | grep -v -E '^[0-9]+:\s*(/\*|\*)')
+	local ln fn ok a SRC
+	for SRC in "${SRCS[@]}"; do
+		while IFS=: read -r ln _; do
+			fn=$(fn_of "$ln")
+			ok=0
+			for a in "$@"; do [ "$fn" = "$a" ] && ok=1; done
+			[ $ok = 1 ] || bad "$SRC:$ln: '$re' called from ${fn:-?}; allowed only in: $*"
+		done < <(grep -n -E "$re" "$SRC" | grep -v -E '^[0-9]+:(static |int |void |u64 |bool )' | grep -v -E '^[0-9]+:\s*(/\*|\*)' || true)
+	done
 }
 
 only_in 's3fs_policy_ops_(insert|size|remove)\(' s3fs_policy_track s3fs_policy_untrack
