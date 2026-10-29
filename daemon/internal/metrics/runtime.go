@@ -89,5 +89,3 @@ func writeSample(w io.Writer, name, help, kind string, v float64) {
 	fmt.Fprintf(w, "# TYPE %s %s\n", name, kind)
 	fmt.Fprintf(w, "%s %s\n", name, formatFloat(v))
 }
-
-
