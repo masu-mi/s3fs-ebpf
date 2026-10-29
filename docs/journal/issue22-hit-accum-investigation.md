@@ -100,10 +100,24 @@ bench の capacity のずれは、1 slot 足りないと simulator との差が�
 | KUnit `s3k_dyn_entries_equal` | 「同じ listing」の判定 (size、名前、親 ino、key の増減) |
 | KUnit `s3k_hit_delta_once` / `s3k_hit_replay_order` | populate までの数 `d_pre` と、populate 後の `d` の replay の順序 |
 
+## 7.1 後から足した回帰テスト (2026-10-29)
+
+| テスト | 防ぐもの | 戻すと |
+|---|---|---|
+| `make test-splice-hits` (`scripts/test-splice-hits.sh`) | `sendfile` / `splice` の読みが hit として数えられること。pcache モード、容量あり、pick_victim の policy。file A を cat で miss させ、`sendfile` を 6 回(毎回 open し直す)、file B の miss で round を走らせて、`policy_hits_replayed_total` の増分が 6 以上 | `.splice_read` を `filemap_splice_read` に戻すと +1 で FAIL(数えると +7) |
+| `make test-boot-kernel` (`scripts/test-boot-kernel.sh`) | `scripts/boot-kernel.sh` が正しい grub entry を選ぶこと。fixture (`scripts/testdata/grub-submenu.cfg`) と `DRY_RUN=1` で、root も grub への書き込みも不要。一覧、`generic`、`lockdep`、`--once` (`grub-reboot`)、部分一致、未知の kernel の拒否、`GRUB_DEFAULT=saved` でないときの拒否 | submenu の id に先頭の引用符が残る不具合、title の先頭 1 文字が欠ける不具合(どちらも最初の版にあった)を戻すと FAIL |
+| KUnit `s3k_vfs_hit_count` | `.read_iter` が open ごとに 1 回数える(`hit_rearm_jiffies=0`)こと、`hit_accum=0` では数えないこと | accum の判定を外すと FAIL |
+| KUnit `s3k_vfs_forget_on_evict` | `admit_evict_ino` が `policy_seen` を落とすこと(丸ごとの evict の唯一の出口)、policy が知っている ino の populate は base を動かさないこと | `s3fs_hit_forget` を外すと FAIL |
+| KUnit `s3k_policy_trackable` | miss が in-flight の ino は policy に入れない(`on_insert` / `on_size` / collect しない)こと、完了後は入れること | pending の判定を外すと FAIL |
+
+KUnit は 45 件 PASS。3 つとも、戻すと 3 件 FAIL(42 件 PASS)になることを確かめた。
+
+**`test-policy-conformance` のリトライが、実は効いていなかった**: `bench-hitrate.sh` は per-access のログに追記するので、2 回目の判定が 1 回目の最初の 2000 行をもう一度読み、毎回同じ結果を返していた。リトライの前にログを消すようにして、上限を 3 回にした。ごく弱い許容(0.05 pt)で 3 回とも別の走行(934、934、944 hit)になることを確認した。s3fifo は run ごとに +0.1〜4.7 pt動く(daemon の 2 秒ごとの eviction drain と stats の tick が access の合間に入るため)ので、1 回目で通らなくても、別の走行でやり直す必要がある。
+
 ## 8. 残っていること
 
 - per-access の食い違いの残り (`SYNC_EVERY=3600s`、決定的な条件): lru 1.8%、sieve **0%**、s3fifo 約 6〜7%、wtinylfu 約 6%。hit 数は simulator と ±0.5 pt (外れ値で ±2 pt)。s3fifo と wtinylfu の残りは simulator がモデル化していない部分: kmod の round (miss した ino は 1 round 遅れて policy に入る)、pending の shed、wtinylfu の limbo / rejected キュー。
-- sync の tick (daemon が `--sync-every` ごとに走らせる `admit_replace`) が access の合間の任意の時刻に入るので、hit 数が run ごとに動く (s3fifo で最大 +5 pt、wtinylfu で +2.5 pt が 10 回に 1 回)。`test-policy-conformance` は `SYNC_EVERY=3600s` にして、外れ値に備えて 1 回だけやり直す。
+- 時刻に依存する round が access の合間に入るので、hit 数が run ごとに動く (s3fifo で最大 +4.7 pt、wtinylfu で +2.5 pt)。sync の tick は `SYNC_EVERY=3600s` で止めているが、daemon の 2 秒ごとの eviction drain (`drainEvictionsLoop`、間隔が固定) と stats の tick は止められない。`test-policy-conformance` は落ちた policy を別の走行で最大 3 回やり直す。
 - 既定を 1 にした (2026-10-28)。残りの課題は、上の simulator のモデル化と、長時間の soak。
 
 調査の続きで確認したこと (`benchmark-results.md` §18.45):

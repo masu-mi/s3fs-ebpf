@@ -132,5 +132,6 @@ scripts/boot-kernel.sh lockdep          # lockdep カーネルを既定にする
 ## 関連
 
 - `scripts/setup-kernel-lockdep.sh`、`scripts/test-lockdep.sh`、`scripts/test-pcache-evict-race.sh` (lockdep の判定をこのテストも持つ)
+- `scripts/boot-kernel.sh` とそのテスト `scripts/test-boot-kernel.sh` (fixture で動く。root 不要)
 - `docs/dev-notes/build-env-dependencies.md` (カーネル入替後の H / C / T の手当て)
 - `docs/dev-notes/kunit.md` (UML での KUnit。KASAN 付きは通常の `make test-kunit`)
