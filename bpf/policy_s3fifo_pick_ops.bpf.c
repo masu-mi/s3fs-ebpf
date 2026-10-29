@@ -79,6 +79,7 @@ struct sf_state {
 	__u32 head[4]; /* NQ used; 4 so an index can be masked with & 3 */
 	__u32 tail[4];
 	__u32 live[4];
+	__u32 peak;    /* most items S+M held at once: the cache size, as far as this policy can tell */
 };
 
 struct {
@@ -267,15 +268,22 @@ static __always_inline void reclaim_ghost(struct sf_state *s)
 		forget(s, (__u32)slot, it);
 }
 
-/* Item (already out of its queue) becomes a ghost; |G| is kept <= 90 % of
- * the live items (what |M| is when S holds its 10 %).  The floor is 1: an
- * earlier floor of 16 let a small cache (the bench's 8 slots) remember twice
- * as many evicted inos as the reference, and promote them straight to M. */
+/* Item (already out of its queue) becomes a ghost; |G| is kept <= 90 % of the
+ * cache size (what |M| is when S holds its 10 %).  The cache size is the peak
+ * of S+M (the victim included): the live count dips by one while a miss is in
+ * flight (not yet inserted), and bounding by it made |G| depend on when a round
+ * ran.  Floor 1; an earlier floor of 16 let a small cache (the 8-slot bench)
+ * remember twice as many evicted inos as the reference and promote them
+ * straight to M. */
 static __always_inline void to_ghost(struct sf_state *s, __u32 slot,
 				     struct sf_item *it)
 {
-	__u32 cap = (s->live[Q_S] + s->live[Q_M]) * 9 / 10;
+	__u32 tot = s->live[Q_S] + s->live[Q_M] + 1;
+	__u32 cap;
 
+	if (tot > s->peak)
+		s->peak = tot;
+	cap = s->peak * 9 / 10;
 	if (cap < 1)
 		cap = 1;
 
