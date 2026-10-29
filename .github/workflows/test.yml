@@ -26,6 +26,7 @@ permissions:
 jobs:
   daemon:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -43,6 +44,10 @@ jobs:
 
   kunit:
     runs-on: ubuntu-24.04
+    # A normal run takes ~10 min.  The UML kernel has been seen to stop
+    # responding after boot, which held the job until the 6 h limit; fail fast
+    # instead (a re-run usually passes).
+    timeout-minutes: 30
     env:
       # The kmod's minimum; any tree >= 6.12 works.
       LINUX_TAG: v6.12
