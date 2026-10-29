@@ -1,5 +1,7 @@
 # Build outputs
 bin/
+# `go build` inside the package directory drops the binary here
+daemon/cmd/s3fs-ebpf/s3fs-ebpf
 **/*.o
 **/*.ko
 # Kbuild scoping (`**/*.mod` would also swallow daemon/go.mod).

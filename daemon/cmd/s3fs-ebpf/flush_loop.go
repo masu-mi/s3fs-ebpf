@@ -296,7 +296,39 @@ func drainFlushQueue(ctx context.Context, devFd int, devPath string,
 	}
 }
 
+// flushKmod is what handleFlush asks of the kernel module for one event, so
+// the flush path can be exercised without a device.
+type flushKmod interface {
+	// SignalFlush wakes the fsync() waiter with the PUT outcome (-ENOENT, no
+	// waiter, is not an error).
+	SignalFlush(ino uint64, errCode int32) error
+	// MarkDirty restores the dirty flag so the next close/fsync retries.
+	MarkDirty(ino uint64) error
+	// ReadDirty copies the inode's dirty bytes into buf.
+	ReadDirty(ino uint64, buf []byte) (int, error)
+	// TryPartial flushes a file that has remote chunks with a multipart copy
+	// (AC-51); handled=false means "use the full put".
+	TryPartial(ctx context.Context, s3c objstore.Backend, key string, ino uint64) (handled bool, sent, size int64, err error)
+}
+
+// devKmod is flushKmod over the /dev/s3fs_ebpf fd.
+type devKmod struct{ fd int }
+
+func (d devKmod) SignalFlush(ino uint64, errCode int32) error { return signalFlush(d.fd, ino, errCode) }
+func (d devKmod) MarkDirty(ino uint64) error                  { return markDirty(d.fd, ino) }
+func (d devKmod) ReadDirty(ino uint64, buf []byte) (int, error) {
+	return readDirty(d.fd, ino, buf)
+}
+func (d devKmod) TryPartial(ctx context.Context, s3c objstore.Backend, key string, ino uint64) (bool, int64, int64, error) {
+	return tryFlushPartial(ctx, d.fd, s3c, key, ino)
+}
+
 func handleFlush(ctx context.Context, devFd int, devPath string,
+	progs *fpebpf.Programs, s3c objstore.Backend, ev *flushEvent) {
+	handleFlushWith(ctx, devKmod{devFd}, devPath, progs, s3c, ev)
+}
+
+func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, ev *flushEvent) {
 	metrics.Global.FlushEvents.Add(1)
 	// Time the full flush service path (readDirty + S3 Put +
@@ -313,7 +345,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	putErr := int32(0)
 	defer func() {
 		metrics.FlushLatency.Observe(time.Since(flush_started))
-		if err := signalFlush(devFd, ev.Ino, putErr); err != nil {
+		if err := k.SignalFlush(ev.Ino, putErr); err != nil {
 			fmt.Fprintf(os.Stderr,
 				"[flush] ino=%d signal_flush: %v\n", ev.Ino, err)
 		}
@@ -334,13 +366,13 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		// AC-65: fill and upload share this deadline (they overlap now); a
 		// large object gets 1 s more per 8 MiB.
 		pctx, pcancel := context.WithTimeout(ctx, 120*time.Second+time.Duration(ev.Size>>23)*time.Second)
-		handled, sent, size, perr := tryFlushPartial(pctx, devFd, s3c, s3key, ev.Ino)
+		handled, sent, size, perr := k.TryPartial(pctx, s3c, s3key, ev.Ino)
 		pcancel()
 		if handled {
 			if perr != nil {
 				fmt.Fprintf(os.Stderr, "[flush] ino=%d s3://%s partial put: %v\n", ev.Ino, s3key, perr)
 				metrics.Global.FlushErrors.Add(1)
-				if mderr := markDirty(devFd, ev.Ino); mderr != nil {
+				if mderr := k.MarkDirty(ev.Ino); mderr != nil {
 					fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n", ev.Ino, mderr)
 				}
 				putErr = -5 /* -EIO */
@@ -360,13 +392,13 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 	// covers the flush (W1/W3).  Skipping it for size 0 left the fd
 	// flushing and pinned, and an fsync waiting for its own PUT timed out.
 	buf := make([]byte, ev.Size)
-	n, err := readDirty(devFd, ev.Ino, buf)
+	n, err := k.ReadDirty(ev.Ino, buf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d read dirty: %v\n",
 			ev.Ino, err)
 		metrics.Global.FlushErrors.Add(1)
 		// Restore dirty flag so the next close/fsync will re-try.
-		if mderr := markDirty(devFd, ev.Ino); mderr != nil {
+		if mderr := k.MarkDirty(ev.Ino); mderr != nil {
 			fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
 				ev.Ino, mderr)
 		}
@@ -380,7 +412,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d s3://%s put: %v\n",
 			ev.Ino, s3key, err)
 		metrics.Global.FlushErrors.Add(1)
-		if mderr := markDirty(devFd, ev.Ino); mderr != nil {
+		if mderr := k.MarkDirty(ev.Ino); mderr != nil {
 			fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
 				ev.Ino, mderr)
 		}

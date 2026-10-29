@@ -108,3 +108,11 @@ func signalAdmitFlags(devPath string, ino uint64, chunkOffset int64, errCode int
 	}
 	return nil
 }
+
+// The upcall handlers reach the kmod through these variables so tests can
+// replace the ioctls; production uses the real ones.
+var (
+	populatePagesFn    = populatePages
+	signalAdmitFn      = signalAdmit
+	signalAdmitFlagsFn = signalAdmitFlags
+)

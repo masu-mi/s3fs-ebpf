@@ -52,9 +52,15 @@ func runDeleteLoop(ctx context.Context, devPath string, s3c objstore.Backend,
 }
 
 func drainDeletes(ctx context.Context, devFd int, s3c objstore.Backend) {
+	drainDeletesWith(ctx, func(ev *deleteEvent) error { return popDelete(devFd, ev) }, s3c)
+}
+
+// drainDeletesWith services delete events from pop until the queue is empty
+// (EAGAIN) or pop fails.
+func drainDeletesWith(ctx context.Context, pop func(*deleteEvent) error, s3c objstore.Backend) {
 	for {
 		var ev deleteEvent
-		if err := popDelete(devFd, &ev); err != nil {
+		if err := pop(&ev); err != nil {
 			if errors.Is(err, unix.EAGAIN) {
 				return
 			}
@@ -120,9 +126,15 @@ func runRenameLoop(ctx context.Context, devPath string, s3c objstore.Backend,
 }
 
 func drainRenames(ctx context.Context, devFd int, s3c objstore.Backend) {
+	drainRenamesWith(ctx, func(ev *renameEvent) error { return popRename(devFd, ev) }, s3c)
+}
+
+// drainRenamesWith services rename events from pop until the queue is empty
+// (EAGAIN) or pop fails.
+func drainRenamesWith(ctx context.Context, pop func(*renameEvent) error, s3c objstore.Backend) {
 	for {
 		var ev renameEvent
-		if err := popRename(devFd, &ev); err != nil {
+		if err := pop(&ev); err != nil {
 			if errors.Is(err, unix.EAGAIN) {
 				return
 			}
