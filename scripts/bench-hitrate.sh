@@ -204,6 +204,22 @@ run_one() {
 		return 0
 	}
 
+	# The kernel's inode numbers, and the workload as a trace of those numbers.
+	# trace.jsonl labels files 100+index, which is NOT what the kernel uses
+	# (105+index here); a policy that hashes the ino (the W-TinyLFU sketch) sees
+	# different collisions under the two, so its simulator must replay this one
+	# (issue #22: 16 % of accesses differed from the simulator on the labels).
+	sudo sh -c 'stat -c "%n %i" "$0"/hitrate_*.txt' "$MOUNT" >"$OUT/inodes-$pol.txt" 2>/dev/null || true
+	python3 - "$OUT/inodes-$pol.txt" "$OUT/workload.txt" "$OUT/trace-ino-$pol.jsonl" <<'PY' || true
+import re, sys
+ino = {}
+for l in open(sys.argv[1]):
+    name, i = l.rsplit(" ", 1)
+    ino[int(re.search(r"hitrate_(\d+)\.txt", name).group(1))] = int(i)
+with open(sys.argv[3], "w") as out:
+    for n, idx in enumerate(open(sys.argv[2])):
+        out.write('{"ts":%d,"ino":%d,"op":"read"}\n' % (n * 1000000, ino[int(idx)]))
+PY
 	log "$pol: running $N_ACCESS accesses (with in-workload eval every $INTERLEAVE)"
 	local start_ns end_ns i=0 errs=0
 	start_ns=$(date +%s%N)
@@ -300,7 +316,9 @@ reference_bounds() {
 		echo "REFERENCE (dev trace-replay on $OUT/trace.jsonl, softcap=$SOFTCAP, cold start;"
 		echo "           live runs used capacity_bytes=$CAPACITY_BYTES — 0 means legacy mode, not slot-bounded)"
 		echo "           prewarmed live runs: opt bound += at most $SOFTCAP/$N_ACCESS)"
-		"$S3FS_BIN" dev trace-replay --trace="$OUT/trace.jsonl" \
+		local ref="$OUT/trace.jsonl" f
+		for f in "$OUT"/trace-ino-*.jsonl; do [ -s "$f" ] && ref=$f; done   # the kernel's inode numbers
+		"$S3FS_BIN" dev trace-replay --trace="$ref" \
 			--softcap="$SOFTCAP" --policies=lru,sieve,opt,noevict
 	} | tee -a "$OUT/summary.txt"
 }

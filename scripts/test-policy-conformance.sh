@@ -16,13 +16,13 @@
 #   scripts/test-policy-conformance.sh                    # all four policies
 #   POLICIES="s3fifo_pick_ops" scripts/test-policy-conformance.sh
 #
-# Thresholds come from the fixed build (seed 42, hit_accum=1): the hit gap was
-# <= 2.2 pt for every policy; the faults above gave 4.2 pt (ghost bound),
-# 5.3 pt (in-flight on_insert) and 6 pt (both).  The differing share is a
-# per-policy ceiling just above what the build shows (lru 2.7 %, s3fifo
-# 9.3 %, wtinylfu 16.5 %, sieve 12.4 % after the hand fix, 20.2 % before).  sieve and wtinylfu differ from their
-# simulators on ~1 access in 5 without losing hit rate: the BPF versions are
-# not step-for-step the simulators (open item, issue #22 notes).
+# Thresholds come from the fixed build (seed 42, hit_accum=1, SYNC_EVERY=3600s,
+# deterministic, with rare outliers): hit gap <= 0.5 pt for every policy (the faults above gave 4.2 pt for
+# the ghost bound, 5.3 pt for the in-flight on_insert, ~6 pt for both).  The differing
+# share is a ceiling just above what the build shows: lru 1.8 %, sieve 0 %,
+# s3fifo 6.4 %, wtinylfu 6.2 %.  The remaining s3fifo / wtinylfu differences are the
+# parts the simulators do not model: the kmod's rounds (a miss is tracked one round
+# later), the pending shed, and wtinylfu's limbo / rejected queues.
 set -euo pipefail
 
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -31,11 +31,16 @@ POLICIES=${POLICIES:-"lru_pick_ops sieve_pick_ops s3fifo_pick_ops wtinylfu_pick_
 SEED=${SEED:-42}
 SOFTCAP=${SOFTCAP:-8}
 N_ACCESS=${N_ACCESS:-2000}
-HIT_TOL_PT=${HIT_TOL_PT:-3.5}
+HIT_TOL_PT=${HIT_TOL_PT:-3.0}
 # The simulators see every access; the old direct on_hit signal drops some
 # (one per jiffy per CPU and ino), so the comparison is meaningful only with
 # hit_accum=1.  CONF_HIT_ACCUM=0 measures the old signal (gaps up to ~3.3 pt).
 CONF_HIT_ACCUM=${CONF_HIT_ACCUM:-1}
+# The daemon re-sends the bucket listing every --sync-every and runs an admit_replace
+# round on each tick; those rounds fall at arbitrary moments between accesses and
+# moved s3fifo's hit count by up to +-5 pt from run to run.  With the tick out of the
+# way the run is deterministic (934 hits in 3 of 3 runs).
+export SYNC_EVERY=${SYNC_EVERY:-3600s}
 OUT=${OUT:-/tmp/test-policy-conformance}
 rm -rf "$OUT"
 mkdir -p "$OUT"
@@ -49,29 +54,36 @@ if [ "${CONFORMANCE_ON_LOCKDEP:-0}" != 1 ] && sudo test -e /proc/lockdep_stats 2
 	exit 0
 fi
 
-echo "==> test-policy-conformance (policies: $POLICIES, HIT_ACCUM=$CONF_HIT_ACCUM)"
-HIT_ACCUM="$CONF_HIT_ACCUM" PER_ACCESS_LOG="$OUT/live" SEED="$SEED" SOFTCAP="$SOFTCAP" N_ACCESS="$N_ACCESS" \
-	POLICIES="$POLICIES" DAEMON_EXTRA_FLAGS="--arena-metadata-only" OUT="$OUT/bench" \
-	"$TOPDIR/scripts/bench-hitrate.sh" >"$OUT/bench.log" 2>&1 || {
-	tail -20 "$OUT/bench.log" >&2
-	echo "RESULT name=test-policy-conformance status=FAIL reason=bench-failed"
-	exit 1
+ATTEMPTS=${ATTEMPTS:-2}
+
+# run_bench <policies>: the live run, per-access log in $OUT/live.<policy>
+run_bench() {
+	HIT_ACCUM="$CONF_HIT_ACCUM" PER_ACCESS_LOG="$OUT/live" SEED="$SEED" SOFTCAP="$SOFTCAP" N_ACCESS="$N_ACCESS" \
+		POLICIES="$1" DAEMON_EXTRA_FLAGS="--arena-metadata-only" OUT="$OUT/bench" \
+		"$TOPDIR/scripts/bench-hitrate.sh" >"$OUT/bench.log" 2>&1 || {
+		tail -20 "$OUT/bench.log" >&2
+		echo "RESULT name=test-policy-conformance status=FAIL reason=bench-failed"
+		exit 1
+	}
 }
 
-status=PASS
-detail=""
-for pol in $POLICIES; do
+# judge <policy>: prints "ok|FAIL live_hits=.. sim_hits=.. gap_pt=.. differ=.. (..%)"
+judge() {
+	local pol=$1 sim dmax trace
 	sim=${pol%_pick_ops}
-	"$TOPDIR/bin/s3fs-ebpf" dev trace-replay --trace="$OUT/bench/trace.jsonl" \
+	# the kernel's own inode numbers (the W-TinyLFU sketch hashes them)
+	trace="$OUT/bench/trace-ino-$pol.jsonl"
+	[ -s "$trace" ] || trace="$OUT/bench/trace.jsonl"
+	"$TOPDIR/bin/s3fs-ebpf" dev trace-replay --trace="$trace" \
 		--softcap="$SOFTCAP" --policies="$sim" --per-access="$OUT/sim" >/dev/null
 	case "$sim" in
-	lru) dmax=${DIFF_MAX_PCT_LRU:-6} ;;
-	s3fifo) dmax=${DIFF_MAX_PCT_S3FIFO:-13} ;;
-	wtinylfu) dmax=${DIFF_MAX_PCT_WTINYLFU:-22} ;;
-	sieve) dmax=${DIFF_MAX_PCT_SIEVE:-15} ;;
+	lru) dmax=${DIFF_MAX_PCT_LRU:-4} ;;
+	s3fifo) dmax=${DIFF_MAX_PCT_S3FIFO:-9} ;;
+	wtinylfu) dmax=${DIFF_MAX_PCT_WTINYLFU:-9} ;;
+	sieve) dmax=${DIFF_MAX_PCT_SIEVE:-2} ;;
 	*) dmax=${DIFF_MAX_PCT:-12} ;;
 	esac
-	res=$(python3 - "$OUT/live.$pol" "$OUT/sim.$sim" "$HIT_TOL_PT" "$dmax" <<'PY'
+	python3 - "$OUT/live.$pol" "$OUT/sim.$sim" "$HIT_TOL_PT" "$dmax" <<'PY'
 import sys
 live_f, sim_f, tol, dmax = sys.argv[1], sys.argv[2], float(sys.argv[3]), float(sys.argv[4])
 sim = [l.split()[2] for l in open(sim_f)]
@@ -88,10 +100,31 @@ dpct = diff * 100.0 / n
 ok = gap <= tol and dpct <= dmax
 print(f"{'ok' if ok else 'FAIL'} live_hits={lh} sim_hits={sh} gap_pt={gap:.1f} differ={diff} ({dpct:.1f}%)")
 PY
-)
-	echo "  $pol: $res"
-	detail="$detail $pol=${res%% *}"
-	case "$res" in FAIL*) status=FAIL ;; esac
+}
+
+echo "==> test-policy-conformance (policies: $POLICIES, HIT_ACCUM=$CONF_HIT_ACCUM, up to $ATTEMPTS attempts)"
+# A real fault (wrong ghost bound, an in-flight miss on_insert'ed) fails every attempt;
+# the rare timing outlier (wtinylfu +2.5 pt once in ~10 runs) does not repeat.
+pending=$POLICIES
+declare -A result
+for attempt in $(seq 1 "$ATTEMPTS"); do
+	run_bench "$pending"
+	still=""
+	for pol in $pending; do
+		res=$(judge "$pol")
+		result[$pol]="$res"
+		echo "  $pol (attempt $attempt): $res"
+		case "$res" in FAIL*) still="$still $pol" ;; esac
+	done
+	pending=${still# }
+	[ -z "$pending" ] && break
+done
+
+status=PASS
+detail=""
+for pol in $POLICIES; do
+	detail="$detail $pol=${result[$pol]%% *}"
+	case "${result[$pol]}" in FAIL*) status=FAIL ;; esac
 done
 echo "RESULT name=test-policy-conformance status=$status$detail"
 [ "$status" = PASS ]
