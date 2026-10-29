@@ -14,9 +14,12 @@
 #   sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub && sudo update-grub
 set -euo pipefail
 
-cfg=/boot/grub/grub.cfg
-[[ -r $cfg ]] || cfg=$(sudo true && echo /boot/grub/grub.cfg)
-grep -q '^GRUB_DEFAULT=saved' /etc/default/grub || {
+# GRUB_CFG / GRUB_DEFAULTS override the files (scripts/test-boot-kernel.sh runs on a fixture).
+cfg=${GRUB_CFG:-/boot/grub/grub.cfg}
+defaults=${GRUB_DEFAULTS:-/etc/default/grub}
+# /boot/grub/grub.cfg is root-only on Ubuntu.
+if [[ -r $cfg ]]; then rd() { "$@"; }; else rd() { sudo "$@"; }; fi
+grep -q '^GRUB_DEFAULT=saved' "$defaults" || {
 	echo "GRUB_DEFAULT is not 'saved' in /etc/default/grub; run once:" >&2
 	echo "  sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub && sudo update-grub" >&2
 	exit 1
@@ -24,7 +27,7 @@ grep -q '^GRUB_DEFAULT=saved' /etc/default/grub || {
 
 # "<menuentry id>  <title>" for the kernels (not recovery) in the Advanced submenu.
 entries() {
-	sudo awk '
+	rd awk '
 	/^submenu / { match($0, /menuentry_id_option .gnulinux-advanced-[^'"'"']+/); sub_id = substr($0, RSTART + 21, RLENGTH - 21); next }
 	/^\tmenuentry / && $0 !~ /recovery mode/ {
 		match($0, /^\tmenuentry .[^'"'"']+/); title = substr($0, RSTART + 12, RLENGTH - 12)
@@ -36,7 +39,9 @@ entries() {
 want=${1:-}
 once=${2:-}
 if [[ -z $want ]]; then
-	echo "saved default: $(sudo grub-editenv list | sed -n 's/^saved_entry=//p')"
+	if [[ -n ${GRUB_CFG:-} ]]; then echo "saved default: (fixture)"; else
+		echo "saved default: $(sudo grub-editenv list | sed -n 's/^saved_entry=//p')"
+	fi
 	echo "running:       $(uname -r)"
 	echo "entries:"
 	entries | sed 's/^[^\t]*\t/  /'
