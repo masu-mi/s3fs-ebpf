@@ -65,7 +65,7 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: setup-kernel-lockdep test-lockdep check-invariants test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
+.PHONY: test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
@@ -341,7 +341,11 @@ check-invariants: ## Static checks on kmod/vfs_ops.c and the bench seeds (no roo
 test-policy-conformance: kmod daemon ## Live pick_victim policies vs their simulators, per access (issue #22)
 	@$(SCRIPTS_DIR)/test-policy-conformance.sh
 
-test-regression: check-invariants test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale test-policy-conformance ## Run all regression tests
+test-sync-keeps-cache: kmod daemon ## An unchanged bucket sync must not drop the cache (issue #22)
+	@echo "==> test-sync-keeps-cache"
+	@$(SCRIPTS_DIR)/test-sync-keeps-cache.sh
+
+test-regression: check-invariants test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"

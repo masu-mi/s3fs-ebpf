@@ -2103,10 +2103,35 @@ static void local_prune_promoted_locked(const struct s3fs_entry_dyn *entries,
 	}
 }
 
+/* Same listing?  A sync that re-sends the bucket unchanged must not cost the
+ * cache: shrink_dcache_sb() drops every unused dentry, so every idle inode is
+ * evicted and its chunks freed (the pcache content, the capacity accounting
+ * and the admit entries' backing data with it).  Order-sensitive: the daemon
+ * sends the list in a stable order, and a different order only means one
+ * unnecessary shrink. */
+static bool dyn_entries_equal(const struct s3fs_entry_dyn *a, u32 na,
+			      const struct s3fs_entry_dyn *b, u32 nb)
+{
+	u32 i;
+
+	if (na != nb)
+		return false;
+	for (i = 0; i < na; i++) {
+		if (a[i].ino != b[i].ino || a[i].parent_ino != b[i].parent_ino ||
+		    a[i].size != b[i].size || a[i].mode != b[i].mode ||
+		    a[i].name_len != b[i].name_len ||
+		    memcmp(a[i].name, b[i].name, a[i].name_len) != 0)
+			return false;
+	}
+	return true;
+}
+
 int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 {
 	struct s3fs_entry_dyn *prev;
 	struct s3fs_dyn_index *ix = NULL, *prev_ix;
+	bool changed = true;
+	u32 prev_nr;
 
 	/* Built before the mutex: it is O(count log count). */
 	if (count && entries) {
@@ -2117,6 +2142,9 @@ int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 	mutex_lock(&s3fs_entries_mtx);
 	prev = s3fs_dyn_entries;
 	prev_ix = s3fs_dyn_idx;
+	prev_nr = s3fs_dyn_nr;
+	if (ix && prev)
+		changed = !dyn_entries_equal(prev, prev_nr, entries, count);
 	if (ix) {
 		s3fs_dyn_entries = entries;
 		s3fs_dyn_nr      = count;
@@ -2133,7 +2161,9 @@ int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 	kvfree(prev);
 	dyn_index_free(prev_ix);
 
-	if (s3fs_active_sb)
+	/* Stale dentries (a changed size, a removed or moved key) are dropped so
+	 * the next lookup sees the new listing; an identical listing keeps them. */
+	if (changed && s3fs_active_sb)
 		shrink_dcache_sb(s3fs_active_sb);
 	return 0;
 }
