@@ -23,6 +23,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -72,64 +73,13 @@ Run "s3fs-ebpf dev <command> --help" for command-specific flags.
 `
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usage)
-		os.Exit(2)
-	}
-	sub := os.Args[1]
-	args := os.Args[2:]
-
-	switch sub {
-	case "mount":
-		os.Exit(runMount(args))
-	case "unmount", "umount":
-		os.Exit(runUnmount(args))
-	case "fastpath":
-		os.Exit(runFastpath(args))
-	case "stats":
-		os.Exit(runStats(args))
-	case "policy":
-		os.Exit(runPolicy(args))
-	case "hash-policy":
-		os.Exit(runHashPolicy(args))
-	case "s3-list":
-		os.Exit(runS3List(args))
-	case "s3-stat":
-		os.Exit(runS3Stat(args))
-	case "dev":
-		os.Exit(runDev(args))
-	case "-h", "--help", "help":
-		fmt.Print(usage)
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n%s", sub, usage)
-		os.Exit(2)
-	}
-}
-
-func runDev(args []string) int {
-	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, devUsage)
-		return 2
-	}
-	sub := args[0]
-	rest := args[1:]
-	switch sub {
-	case "test-arena":
-		return runTestArena(rest)
-	case "verifier-demo":
-		return runVerifierDemo(rest)
-	case "probe-kvbase":
-		return runProbeKvbase(rest)
-	case "microbench":
-		return runMicrobench(rest)
-	case "trace-replay":
-		return runTraceReplay(rest)
-	case "-h", "--help", "help":
-		fmt.Print(devUsage)
-		return 0
-	default:
-		fmt.Fprintf(os.Stderr, "unknown dev command: %s\n\n%s", sub, devUsage)
-		return 2
+	if err := newRootCmd(os.Stdout, os.Stderr).Execute(); err != nil {
+		var ee exitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.code)
+		}
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 }
 
