@@ -46,7 +46,7 @@ func maybePrefetchSiblings(ino uint64) {
 	sibs := nextSiblings(entries, *cur, n)
 	items := make([]pcachePrewarmItem, 0, len(sibs))
 	for _, e := range sibs {
-		items = append(items, pcachePrewarmItem{ino: e.Ino, size: e.Fallback, prefetch: true})
+		items = append(items, pcachePrewarmItem{Ino: e.Ino, Size: e.Fallback, Prefetch: true})
 	}
 	if q := queuePcacheItems(items); q > 0 {
 		fmt.Printf("[prefetch-next] ino=%d %s: queued %d of the next %d siblings\n",

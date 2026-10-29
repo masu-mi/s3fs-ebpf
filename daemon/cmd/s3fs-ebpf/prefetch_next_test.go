@@ -87,7 +87,7 @@ func TestMaybePrefetchSiblings(t *testing.T) {
 	pcacheWorkerUp.Store(true)
 	maybePrefetchSiblings(601)
 	got := takePcachePrewarm()
-	want := []pcachePrewarmItem{{ino: 602, size: 20, prefetch: true}, {ino: 603, size: 30, prefetch: true}}
+	want := []pcachePrewarmItem{{Ino: 602, Size: 20, Prefetch: true}, {Ino: 603, Size: 30, Prefetch: true}}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -102,7 +102,7 @@ func TestMaybePrefetchSiblings(t *testing.T) {
 	// A user read of 603 after the worker finished prefetches 604 only.
 	maybePrefetchSiblings(603)
 	got = takePcachePrewarm()
-	if len(got) != 1 || got[0].ino != 604 {
+	if len(got) != 1 || got[0].Ino != 604 {
 		t.Fatalf("got %v, want [604]", got)
 	}
 	doneWarming(got)
@@ -113,7 +113,7 @@ func TestMaybePrefetchSiblings(t *testing.T) {
 		t.Fatalf("root file prefetched: %v", rest)
 	}
 	select {
-	case <-pcachePrewarmQ.kick:
+	case <-pcacheQ.Kick():
 	default:
 	}
 }
