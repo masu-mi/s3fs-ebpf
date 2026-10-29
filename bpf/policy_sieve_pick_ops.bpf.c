@@ -175,6 +175,12 @@ int BPF_PROG(sp_insert, __u64 ino)
 		}
 		s->tail++;
 	}
+	/* A hand at the newest end (it just evicted the newest item, or moved
+	 * past it) has "fallen off": the next pick starts at the oldest.  Left
+	 * at head it would point at the item inserted next and evict the
+	 * newest item (the reference sets the hand to nil here). */
+	if (s->hand >= s->head)
+		s->hand = s->tail;
 	seq = s->head++;
 	sl = get_slot(seq);
 	if (!sl)

@@ -1882,7 +1882,7 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 | 123 | 30.65% | 30.55% | 35.50% | 39.15 / 46.80 / 65.25% |
 
 - 3 seed とも `sieve_pick_ops` が LRU より +4.3〜4.9 ポイント、旧 sieve_ops より +5.0〜5.7 ポイント高い。順位は一貫している。
-- trace-replay の SIEVE (43.8〜48.0%) には届かない (差 約 8〜11 ポイント)。ライブは eval を 25 access ごとにしか回さず、eviction の粒度が違う。同じ差は LRU にも出ている (live 約 31% / replay 約 40%)。
+- trace-replay の SIEVE (43.8〜48.0%) には届かない (差 約 8〜11 ポイント)。ライブは eval を 25 access ごとにしか回さず、eviction の粒度が違う。同じ差は LRU にも出ている (live 約 31% / replay 約 40%)。**訂正 (2026-10-27、§18.44)**: この差の主因は eval の間隔ではなかった。`bench-hitrate.sh` は `FILE_BYTES=44` から capacity を計算していたが、実際のファイルは 46 B で、capacity 352 B は 8 個ではなく 7 個分だった (simulator は 8)。46 に直すと LRU の差は消える。
 - 各 run は 1 回。seed 間のばらつきは 2 ポイント程度で、policy 間の差 (4〜5 ポイント) より小さいが、n は小さい。
 - **測っていない**: `pick_victim` 1 回の時間、mutex の保持時間、`on_hit` の read 経路へのコスト (hash lookup が 1 回増える)。hit-rate bench は 1 ino = 44 B の小さい file で、read 経路の負担は見えない。次の計測で `bench-ab-pcache` / 64 jobs の退行を確かめる。
 - `make test-regression` 17 件 PASS (既定 policy は `pick_victim` を持たないので、元の score 順の経路)。
@@ -1961,4 +1961,141 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 
 **正しさのテスト**: `make test-regression` 18 件 PASS (multiread、evict-race-short の sha256 を含む)。dmesg に oops / BUG / hung task なし。
 
-**lockdep は未検証**。計測カーネル (6.12.0-061200) は `CONFIG_PROVE_LOCKING` が無効で、インストール済みのどのカーネルも同じ (AC-42)。
+**lockdep は、この時点では未検証**。計測カーネル (6.12.0-061200) は `CONFIG_PROVE_LOCKING` が無効だった (AC-42)。2026-10-28 に lockdep 付きカーネルで `make test-lockdep` を実行し、報告 0 件で通った (`docs/dev-notes/lockdep-kernel.md`)。
+
+### 18.44 issue #22: `hit_accum` (hit を `.read_iter` で per-CPU に数え、`admit_replace` から反映) の A/B (2026-10-27)
+
+設計は `docs/design/hit-signal-percpu-accumulation.md`。KVM ゲスト (6 vCPU、6.12.0-061200、HZ=1000)、ローカル MinIO。`hit_accum` を同じビルドで切り替えた。生の出力は `/tmp/claude-1000/hitsig/` (永続しない)。
+
+**hit rate — 調査で見つけた 3 つのずれと、取り直し** (`bench-hitrate-multi.sh`、pcache モード、`INTERLEAVE`=25、seed 42 / 7 / 123 の中央値 %)。最初の測定では `hit_accum=1` が pick 版を +9〜11 pt 上げたが、原因を調べると、その差の多くは信号の欠落ではなく次の 3 つだった:
+
+1. **bench の capacity が 1 個少なかった**: `FILE_BYTES=44` だが実ファイルは 46 B。capacity 352 B は 7 個分 (simulator は 8)。`FILE_BYTES=46`、`SMALL_FILE_BYTES=60` (mixed) に直した。LRU の live 対 simulator の差 (約 4 pt) はこれで消えた (softcap=7 の simulator は live と一致: 34.9 / 37.5 / 35.0 対 live 34.7〜35.4)。
+2. **in-flight の miss を policy が victim に選んでいた**: kmod は pending の ino を evict できず shed するが、policy はすでに ghost / hand を動かしていた。S3-FIFO では新しい ino が ghost に入り、次の `on_insert` で M に直行して居座った (per-access で simulator と最初に食い違うのは 39 番目)。pending の ino は `on_insert` を次の round に回すようにした。
+3. **S3-FIFO の ghost の下限 16**: |G| ≤ max(|M|, 16)。8 slot の bench では simulator (|G| ≤ 7) の 2 倍以上の ino を覚えていた。(S+M) の 90% (下限 1) にした。
+
+per-access の hit/miss を simulator と突き合わせた (`bench-hitrate.sh` に `PER_ACCESS_LOG`、`dev trace-replay --per-access` を追加): s3fifo_pick_ops (seed 42) の食い違いは 352 件 (hit 816 対 936) から、2 を直して 293 件、3 も直して 159 件 (hit 907 対 936) になった。
+
+| policy | simulator (cap 8) | acc=0 (3 つを修正後) | acc=1 (3 つを修正後) | acc=0 (修正前) | acc=1 (修正前) |
+|---|---|---|---|---|---|
+| wtinylfu_pick_ops | 48.4 | 49.1 | 52.1 | 43.0 | 49.5 |
+| sieve_pick_ops | 46.8 | 48.2 | 48.8 | 39.0 | 48.0 |
+| s3fifo_pick_ops | 47.2 | 49.0 | 48.4 | 40.0 | 43.8 |
+| lru_pick_ops | 39.2 | 38.5 | 38.3 | 38.9 | 39.0 |
+| sieve_ops (旧) | — | 33.2 | 32.4 | 35.0 | 32.3 |
+| time_decay_ops | — | 30.8 | 31.8 | 31.8 | 31.2 |
+| observe | — | 30.9 | 34.4 | 31.8 | 27.9 |
+
+(simulator は seed 3 つの中央値。修正前は `FILE_BYTES=46` にしたが 2・3 は未修正。`observe` が 28〜34 で動くので、ノイズは約 ±3 pt。)
+
+読み方:
+- **修正後は live が simulator と ±3 pt で一致する** (lru 38.5 対 39.2、sieve 48.2 対 46.8、s3fifo 49.0 対 47.2、wtinylfu 49.1 対 48.4)。以前の「simulator との差 8〜11 pt」(§18.41) は、capacity のずれ (1) と pick_victim の不具合 (2、3) が主因だった。
+- **`hit_accum=1` の hit rate への効果は小さい**: 修正後の acc=1 − acc=0 は wtinylfu +3.0、sieve_pick +0.6、s3fifo −0.6、lru −0.2 (ノイズ内が多い)。最初に見えた +9〜11 pt は、2 と 3 が acc=0 の経路でだけ強く効いていたためで、`hit_accum` の効果ではなかった。`hit_accum` の利点は read 経路のコスト (下) と、数える単位が揃うこと。
+- `INTERLEAVE=1` との比較は修正前の値だけ (il=1 でも差は縮まらなかった)。
+
+**数える単位**: 反映した回数は N_ACCESS − upcall に近い (N_FILES=1000: 165 対 166、N_FILES=100: 459 対 486 と 1536 対 1570)。2 倍にはならない。
+
+**read 経路のコスト** (`bench-policy-cost.sh`、fio psync bs=1、3 round の中央値、k IOPS):
+
+| jobs | acc | none | sieve_pick_ops | s3fifo_pick_ops |
+|---|---|---|---|---|
+| 64 | 0 | 4109 | 3866 (−5.9%) | 3809 (−7.3%) |
+| 64 | 1 | 4114 | 4146 (+0.8%) | 4138 (+0.6%) |
+| 16 | 0 | 4126 | 3921 (−5.0%) | 3852 (−6.6%) |
+| 16 | 1 | 4076 | 4109 (+0.8%) | 4104 (+0.7%) |
+
+(旧の policy なし比 −4.6%、§18.42 とほぼ同じ。`hit_accum=1` では policy ありと policy なしが同等。fentry とその KFunc 呼び出しは全 arm に残っている。)
+
+**`bench-ab-pcache.sh` の gate**: (a) PASS、(c) PASS は `hit_accum` 0 / 1 とも。`hook_ratio` は 0.939 (acc=0) と 0.966 (acc=1)。(b) は両方 FAIL (pcache 16.4 ms 対 fuse-cache 15.4 ms、17.2 対 16.6)。`hit_accum` と無関係の既存の揺れ (§18.43 は 14.7 対 17.1 で PASS) で、取り直しが要る。
+
+**Phase 1 の時間** (`bench-hitrate.sh`、`SOFTCAP=N_FILES` で全 ino を admit に残し、bpftrace で `s3fs_ebpf_admit_replace` の平均 µs):
+
+| ino 数 | acc=0 | acc=1 | 増分 |
+|---|---|---|---|
+| 100 | 50 | 58 | +8 µs (+17%) |
+| 1000 | 315 | 335 | +20 µs (+6%) |
+
+(最大は 1000 ino で 2.9 ms 対 1.1 ms。揺れで、acc=1 が長いとは言えない。)
+
+**小さいファイルの create** (10,000 個の create+write+close、`51e9e50` の kmod 対 現ビルド、バケットを毎回初期化して順序を入れ替えて 4 回): 平均 170 µs 対 181 µs。1 回ごとのばらつき (112〜236 µs) が差より大きく、inode ごとの `alloc_percpu` の負担は検出できなかった。
+
+**`hit_rearm_jiffies`** (1 つの fd で 3 秒間 pread し続け、約 600 万回): 0 → 0 回、100 jiffies (100 ms) → 30 回、10 jiffies → 300 回の反映。open ごと / 間隔ごとに 1 回、の仕様どおり。
+
+**大きいファイル** (`bench-hitrate-mixed.sh`、s3fifo_pick_ops / wtinylfu_pick_ops): この bench の hit_rate は pcache では意味を持たない (大きいファイルは chunk ごとに upcall が出て miss が N_ACCESS を超え、−9%〜−18% になる)。miss 数は acc=0 が 541 / 579、acc=1 が 546 / 590 でほぼ同じ。G5 が消えたかは、ino ごとの反映回数を見ないと言えない (未測定)。
+
+**正しさ**: `make test-regression` は `hit_accum` 0 / 1 のどちらも全件 PASS (最終版は design doc §8)。
+
+### 18.45 issue #22 の残りの測定: INTERLEAVE、gate (b)、G5、SIEVE の hand (2026-10-27)
+
+§18.44 の続き。修正 (capacity、in-flight の `on_insert`、S3-FIFO の ghost) 済みの kmod で、3 seed の中央値 (%)。
+
+**`INTERLEAVE` と `hit_accum`** (`bench-hitrate-multi.sh`、後述の SIEVE の hand の修正を含む):
+
+| policy | il=25 acc=0 | il=25 acc=1 | il=1 acc=0 | il=1 acc=1 | simulator |
+|---|---|---|---|---|---|
+| wtinylfu_pick_ops | 48.1 | 52.0 | 46.9 | 49.7 | 48.4 |
+| s3fifo_pick_ops | 48.5 | 49.0 | 46.7 | 46.4 | 47.2 |
+| sieve_pick_ops | 46.4 | 46.4 | 46.0 | 45.4 | 46.8 |
+| lru_pick_ops | 38.2 | 38.4 | 38.1 | 38.2 | 39.2 |
+| sieve_ops (旧) | 32.8 | 32.4 | 31.0 | 30.6 | — |
+| time_decay_ops | 29.9 | 29.2 | 29.1 | 30.2 | — |
+| observe | 30.8 | 29.4 | 28.1 | 28.1 | — |
+
+評価の間隔 (il) を 25 から 1 にしても hit rate は上がらない (むしろ 1〜2 pt 下がる)。simulator との差は live がずっと小さい (±3 pt)。`hit_accum=1` の効果は wtinylfu で +2.8〜3.9 pt、他は ±1 pt (ノイズ内)。
+
+**gate (b)** (`bench-ab-pcache.sh`、10 MiB の cat の中央値、ms): 現在のビルドは `hit_accum` 0 / 1 の 6 回すべて FAIL だが、差は pcache 16.05〜16.41 対 fuse-cache 15.54〜16.21 と、ほぼ同点。ベースライン (`51e9e50` の kmod) は 3 回とも PASS (pcache 15.85〜16.23 対 fuse-cache 16.27〜16.89)。pcache の cat は 16.09 ms (ベースライン) と 16.21 ms (現在) で 0.7% 違うだけで、fuse-cache 側のばらつき (15.5〜16.9 ms) のほうが大きい。**判定が 1 ms 未満の同点で決まる gate であり、`hit_accum` の影響ではない**。`hit_accum` 0 と 1 の差 (16.13 と 16.30) もノイズ内。gate (a) と (c) は 6 回とも PASS、`hook_ratio` は 0.929〜0.976。
+
+**G5 (大きいファイルの頻度の水増し)** (`bench-hitrate-mixed.sh`、`s3fifo_pick_ops`、500 access、large 3 個 (5 MiB) + small 10 個。bpftrace で `s3fs_policy_ops_eval_hit` を ino ごとに数えた):
+
+| ファイル | access | on_hit (`hit_accum=0`) | on_hit (`hit_accum=1`) |
+|---|---|---|---|
+| large 0 | 107 | 8771 | 28 |
+| large 1 | 78 | 6878 | 9 |
+| large 2 | 51 | 4747 | 4 |
+| small 3〜12 (各) | 18〜37 | 47〜99 | 1〜9 |
+| 合計 | 500 | 21120 | 85 |
+
+`hit_accum=0` では large の 1 access が約 82 回の `on_hit` (folio ごと) になり、small の約 2.6 回の 30 倍以上。W-TinyLFU の sketch や S3-FIFO の freq を大きいファイルが飽和させる。`hit_accum=1` では 1 access が高々 1 回で、large と small の比が access の比に近づく (合計 85 は、cache hit になった access の数)。この bench の hit_rate は pcache では意味を持たない (miss が N_ACCESS を超え −9%) ので、ここでは on_hit の回数だけを比べた。
+
+**SIEVE の hand のバグ**: `policy_sieve_pick_ops` は、hand が newest 端 (head) にあるとき、次の `on_insert` の新しい item の上に hand が乗り、次の `pick_victim` が newest の item を evict していた。参照 (simulator) は hand を nil にして次は oldest から始める。`on_insert` で hand が head 以上なら tail に戻すように直した。per-access で simulator と食い違う数は 337 から約 230 に減った (seed 42)。残り (約 9〜12%) は run ごとにばらつく。
+
+**既定の変更 (2026-10-27)**: 以上の結果から、module param `hit_accum` の既定を 1 にした。従来の信号に戻すには `hit_accum=0`。A/B の bench は `HIT_ACCUM=0|1` を明示する。
+
+### 18.46 issue #22: wtinylfu の食い違いの原因と、sync が cache を空にしていた件 (2026-10-29)
+
+§18.45 の続き。wtinylfu の per-access の食い違い (約 14〜16%) を調べて、`hit_accum` と無関係のものを含む 4 つの原因が見つかった。詳細: `docs/journal/issue22-hit-accum-investigation.md` §4 の 5〜8。
+
+| 原因 | 症状 | 効果 |
+|---|---|---|
+| simulator が `100+idx` のラベル、kernel は `105+idx`。sketch は ino を hash する | sim の sketch が live と違う (4096 slot 中 84 が違う。`ino+5` にすると 0) | bench が kernel の ino を記録し、sim が replay する。wtinylfu の食い違い 13.7%→8.6% |
+| `hit_accum` が cache にない ino の access を数えていなかった | W-TinyLFU の admission の duel の頻度が sim と違う | populate までの数を `on_insert` の前に replay (`d_pre`)。11.8%→(上と合わせて) |
+| **`entries_replace` が、listing が同じでも `shrink_dcache_sb` を呼んでいた** | sync の tick ごとに idle な inode が全部 evict され、resident な ino が 0 B と報告される (capacity の計上が狂う) | listing が同じなら呼ばない。`SYNC_EVERY=3600s` なら sieve は simulator と **0 件の食い違い** |
+| S3-FIFO の ghost の上限が、その時点の S+M に依存 | run ごとに hit 数が最大 +5 pt | S+M の最大値の 90% |
+
+**per-access の食い違い** (`test-policy-conformance`、seed 42、`SYNC_EVERY=3600s`、決定的):
+
+| policy | 以前 | 今 | hit 数 (live / sim) |
+|---|---|---|---|
+| lru | 2.4% | 1.8% | 775 / 784 |
+| sieve | 12.4% | **0%** | 876 / 876 |
+| s3fifo | 7.8% | 6.4% | 934 / 936 |
+| wtinylfu | 13.7% | 6.2% | 966 / 969 |
+
+残りは simulator がモデル化していない部分 (kmod の round、pending の shed、wtinylfu の limbo / rejected)。
+
+**hit rate** (`bench-hitrate-multi.sh`、`INTERLEAVE`=25、既定の sync 3 秒、3 seed の中央値 %):
+
+| policy | simulator | `hit_accum=0` | `hit_accum=1` |
+|---|---|---|---|
+| wtinylfu_pick_ops | 48.4 | 50.3 | 54.9 |
+| s3fifo_pick_ops | 47.2 | 49.1 | 51.3 |
+| sieve_pick_ops | 46.8 | 47.9 | 46.8 |
+| lru_pick_ops | 39.2 | 38.8 | 38.8 |
+| sieve_ops (旧) | — | 34.1 | 33.8 |
+| time_decay_ops | — | 45.2 | 44.7 |
+| observe | — | 37.6 | 38.2 |
+
+- sync が cache を空にしなくなったので、`observe` と `time_decay_ops` の hit rate が上がった (31→38、27→45)。sync のたびに cache が空になっていたために、policy の差が隠れていた。
+- `hit_accum=1` の上乗せは、wtinylfu +4.6 pt、s3fifo +2.2 pt、sieve −1.1 pt、lru 0 で、ノイズ (約 ±3 pt) の範囲。これまでの結論 (`hit_accum` の hit rate への効果は小さく、利点は read 経路のコストと単位の統一) は変わらない。
+- 既定の sync の間隔は 30 秒なので、実運用では以前も cache が 30 秒ごとに空になっていた。この修正は hit rate の bench だけでなく、実際の cache の寿命に効く。
+
+**回帰テスト**: `make test-regression` は `hit_accum` 1 / 0 とも 21 件 PASS (新しく `test-sync-keeps-cache` を含む)。`make test-kunit` は 42 件 PASS。

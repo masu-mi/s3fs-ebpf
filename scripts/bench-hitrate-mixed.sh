@@ -33,7 +33,10 @@ BUCKET=${BUCKET:-s3fs-test}
 N_LARGE=${N_LARGE:-3}               # large files (index 0..N_LARGE-1, hottest Zipf ranks)
 N_SMALL=${N_SMALL:-10}              # small files (index N_LARGE..N_TOTAL-1)
 LARGE_FILE_BYTES=${LARGE_FILE_BYTES:-5242880}  # 5 MiB — above 4 MiB partial-admit threshold
-SMALL_FILE_BYTES=44                  # same as bench-hitrate.sh
+# One definition of the small files' content: the size is measured from it
+# (a hand-written constant drifted from the real size once, issue #22).
+small_content() { printf 'hitrate mixed small %03d line1\nhitrate mixed small %03d line2\n' "$1" "$1"; }
+SMALL_FILE_BYTES=$(small_content 0 | wc -c)
 N_TOTAL=$((N_LARGE + N_SMALL))
 
 N_ACCESS=${N_ACCESS:-500}            # shorter than single-type bench; large-file GETs are slow
@@ -94,10 +97,17 @@ seed_bucket() {
 
     # Small files: hitrate_small_%03d.txt, 44B fixed content.
     for i in $(seq 0 $((N_SMALL-1))); do
-        printf 'hitrate mixed small %03d line1\nhitrate mixed small %03d line2\n' "$i" "$i" \
+        small_content "$i" \
             | docker exec -i "$MINIO_CONTAINER" \
                 mc pipe "local/$BUCKET/hitrate_small_$(printf '%03d' "$i").txt" >/dev/null
     done
+    local got
+    got=$(docker exec "$MINIO_CONTAINER" mc stat "local/$BUCKET/hitrate_small_000.txt" 2>/dev/null |
+        awk '/^Size/ { print $3 }')
+    if [ "$got" != "$SMALL_FILE_BYTES" ]; then
+        echo "bench-hitrate-mixed: small file is ${got:-?} B but SMALL_FILE_BYTES=$SMALL_FILE_BYTES" >&2
+        exit 1
+    fi
     log "seeded $N_SMALL small files (${SMALL_FILE_BYTES}B each)"
 }
 

@@ -3,6 +3,7 @@
 `vfs_ops.c` を読み直さずに済ませるための要約。関数名は `scripts/fn.sh <name>` で引ける。コードを変えてここと食い違ったら、このメモも更新すること。
 
 ## ロック順 (外 → 内)
+(lockdep 付きカーネルで確認済み、2026-10-28: `make test-lockdep` が `test-regression` と evict-race で報告 0 件。`docs/dev-notes/lockdep-kernel.md`)
 - `fd->lock` (mutex, per-inode `s3fs_file_data`) → `s3fs_admits_lock` (rwlock)。逆順で取るパスは存在しない (R1 はこれに依存)。
 - `s3fs_pending_lock` / `s3fs_miss_lock` / `s3fs_flush_*_lock` / `s3fs_flush_pins_lock` は spinlock で末端 (`flush_pins_lock` は fd->lock 下で取る)。保持中に `fd->lock` や `s3fs_admits_lock` を取らない。
 - `admit_evict_ino` は `admit_drop_all_ranges` (admits write_lock) を解放した後に `s3fs_evict_page_cache` → `s3fs_file_data_reset` (fd->lock → admits write_lock) を呼ぶ。
@@ -24,7 +25,7 @@
 ## 成功 signal の契約 (AC-45 C2)
 - `S3FS_IOC_SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を付けて `err == 0` で呼ぶと、`s3fs_ebpf_signal_admit` は pending (ino, chunk_offset) を見つけたあと、その chunk が確保済みかつ `populated` であることを `fd->lock` 下で確かめる。なければ **pending を完了させず `-EAGAIN`** を返す。pcache モードの daemon (`handleReadMiss`) だけがこのフラグを付ける (arena の admit は chunk を持たない)。
 - 理由: 同じ ino の miss を複数の handler が同時に処理し、先に終わった handler が pending を完了させたあとで、遅れて動いている handler は pending に守られないまま evict される。その handler が「成功」を signal すると、reader は何もない状態で起こされ、retry (`S3FS_UPCALL_MAX_RETRIES=3`) を古い signal で使い切って gen=0 フォールバック (chunk なし) で EIO になる。C2 で evict が頻繁になって表に出た。
-- 成立条件: reader は **pending を作る前に** `buf_readers++` する (`s3fs_ebpf_read_folio`)。pending があれば reader は登録済みなので、signal の時点で chunk が populated なら、reader が終わるまで reset に解放されない。
+- 成立条件: reader は **pending を作る前に** chunk を pin する (`readers++`、`s3fs_ebpf_read_folio`。chunk の pin の節)。pending があれば reader は登録済みなので、signal の時点で chunk が populated なら、reader が終わるまで reset に解放されない。
 - daemon は `-EAGAIN` なら populate をやり直す (最大 `signalVerifyRetries=3`)。使い切ったら検証なしで signal し、reader 側の retry / フォールバックに任せる。
 
 - chunk load (AC-52 手順 3、daemon の `admit_chunkload.go`): pcache モードで大きいファイルが全体 admit になるとき、daemon は 4 MiB ごとの range GET (4 並列) を、miss した chunk から順に **chunk ごとに populate して、その chunk の pending に signal** する。契約は変わらない: signal は chunk ごとに `S3FS_SIGNAL_VERIFY_POPULATED` 付きで、pending のない chunk は ENOENT (無視)、EAGAIN なら再 populate (最大 `signalVerifyRetries`)。reader は先の chunk で miss して別の handler を立てるので、daemon は ino ごとに進行中の load を登録し、後から来た handler はその chunk の完了を待って signal だけを行う (GET を二重に出さない)。load が失敗したら待っている handler に -EIO を返す。先の chunk は pin されていないので shed されうるが、そのときの reader は通常の miss として次の load をやり直す。
@@ -72,6 +73,17 @@
 - **ETag の pin (daemon、`objETags`):** 変更サイクルの最初の load (なければ flush) で Stat した ETag。kmod の miss event に `S3FS_MISS_FLAG_PINNED` が立つのは、fd が dirty / flushing か remote chunk を持つとき (中身が pin に依存する)。daemon の load (`getPinned`) は 412 (`ErrSourceChanged`) を受けたとき、(a) flush が終わって pin が新しい ETag になっていれば読み直して 1 回やり直す、(b) PINNED でなければ (放棄された cycle の古い pin) pin を捨てて Stat し直す、(c) PINNED なら本物の競合として EIO。flush の成功は `PutWithCopy` が返す新しい ETag を pin に保存する (remote chunk の中身は同じ)。plain put のときは pin を捨てる。daemon は起動のたびに kmod の `partial_modify` に 0 か 1 を明示的に書く (module は daemon より長生きする)。copier のない backend で remote chunk を持つ fd の flush は、全体 PUT を断る (remote を 0 で上書きするため)。
 - フォールバック (412 のあとの全体 PUT) で、現在の object が remote chunk の範囲より短いとき (外部の truncate) は、足りない bytes を 0 で埋めて警告を出す (`getNowClamped` + `fillRange` の非 pinned)。
 - **flush 成功で `populated` にしない chunk:** remote の chunk は buffer (`p`) を持っていても、flush が copy したのは object のバイトで buffer ではない。`signal_flush` は `p` を持つ chunk のうち remote でないものだけを populated にする (途中までしか埋まっていない chunk を clean として返さない)。
+
+## hit の集計 (issue #22、`hit_accum`、既定 on)
+- 設計は `docs/design/hit-signal-percpu-accumulation.md`。`hit_accum=1` (既定) のとき、`.read_iter` は `s3fs_file_data` の per-CPU 値 (`fd->hit`、fd と同じ寿命) を進めるだけで、ロックを取らない。`on_hit` の直接の呼び出し (fentry の KFunc、`.read_folio`、arena 直読み) は何もしない。
+- `fd->hit_flushed` / `fd->policy_seen` は **`s3fs_policy_evict_lock` の下でだけ** 触る。`admit_replace` の Phase 1 が `pv || hit_accum` のときにこの mutex を取り、`ilookup` で fd を引いて差分を集め (`iput` は mutex の中、`s3fs_ino_buf_bytes` と同じ)、Phase 1 のあとで `last_tick` の昇順に `on_hit` を呼び、その後で `on_evict` の票を取る。`on_remove` を呼ぶ所は `s3fs_hit_forget` で `policy_seen` を落とす。
+- 反映の順序: Phase 1 のループの前に全 ino の差分を集める。既知の ino (`policy_seen`) の `d` と、新しい ino の `d_pre` (cache にない間の access と、populate のきっかけの miss の read) を `on_insert` の前に、新しい ino の `d` (populate 後の hit) を `on_insert` のあとに反映する。頻度を数える policy (W-TinyLFU の sketch) は cache にない ino の access も要る。`hit_flushed` は forget で消さない。populate (fd->lock 下) は `hit_base` / `hit_base_set` を書き、`policy_seen` が偽のときの最初の look が読む (READ_ONCE/WRITE_ONCE、lock なし)。`.splice_read` も `s3fs_hit_count` を呼ぶ。
+- **policy への通知は `s3fs_policy_track` / `s3fs_policy_untrack` だけが行う** (`on_insert` / `on_size` / `on_remove` を直接呼ばない)。hit の状態を忘れるのは、この `untrack` と `admit_evict_ino` (丸ごとの evict の唯一の出口) だけ。`scripts/check-kmod-invariants.sh` (`make check-invariants`、`make test-regression` に含む) が、それ以外の呼び出しを見つけたら落ちる。
+- **pending 中の ino は `on_insert` / collect しない** (`s3fs_policy_trackable`、Phase 1、`pick_victim` を持つ policy)。pending は kmod の丸ごとの evict を止める (shed になる) が、policy がその ino を victim に選ぶと ghost / hand が動いて policy と kmod の状態がずれる。次の round (pending が消えてから) に回す。
+- fd->lock は取らない。fd の確保 (`s3fs_file_data_new`) で `alloc_percpu`、解放 (`s3fs_file_data_free`) で `free_percpu`。
+
+## sync (`s3fs_ebpf_entries_replace`)
+- daemon の bucket listing の sync (`--sync-every`、既定 30 秒) ごとに呼ばれる。**listing が前回と同じ (`dyn_entries_equal`: ino、親、size、mode、名前) なら `shrink_dcache_sb` を呼ばない。** 呼ぶと使われていない dentry がすべて落ち、idle な inode が evict されて chunk が free される (pcache の内容、capacity の計上、`s3fs_ino_buf_bytes` が 0 になる)。以前は sync のたびに毎回呼んでいた。listing が変わったとき (key の増減、size の変化) は今までどおり shrink する。`make test-sync-keeps-cache` が守る。
 
 ## flush pin (W1)
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。

@@ -120,6 +120,9 @@ type Counters struct {
 	FdBufWalkBytes   atomic.Uint64 // gauge
 	FdBufPcacheBytes atomic.Uint64 // gauge
 
+	// Issue #22: hit_accum. S3FS_IOC_STATS[14].
+	HitsReplayed atomic.Uint64 // counter
+
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
 	// ReadIterMisses counts reads where the ino was unknown (triggers
@@ -266,6 +269,7 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_fd_buf_bytes", "M1: bytes allocated for kmod per-inode fd->buf. capacity_bytes bounds admit entries only; compare against it to spot buffers outliving their admit.", "gauge", Global.FdBufBytes.Load()},
 		{"s3fs_ebpf_fd_buf_walk_bytes", "M2: sum of fd->cap over live inodes, recomputed per poll. Differs from s3fs_ebpf_fd_buf_bytes at rest only if the gauge drifted.", "gauge", Global.FdBufWalkBytes.Load()},
 		{"s3fs_ebpf_fd_buf_pcache_bytes", "M2: fd->buf bytes the capacity loop charges (sum of fd->cap over distinct pcache inos).", "gauge", Global.FdBufPcacheBytes.Load()},
+		{"s3fs_ebpf_policy_hits_replayed_total", "Issue #22: accesses counted in the kmod .read_iter (hit_accum=1) and replayed into the policy's on_hit from admit_replace, before the hit_replay_max cut. 0 when hit_accum=0.", "counter", Global.HitsReplayed.Load()},
 		{"s3fs_ebpf_reset_skipped_total", "M1: fd->buf frees deferred because buf_readers > 0 (U8/U10).", "counter", Global.ResetSkipped.Load()},
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.

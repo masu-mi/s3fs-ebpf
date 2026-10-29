@@ -194,6 +194,10 @@ __bpf_kfunc u64 s3fs_kfunc_ino_size(u64 ino)
  */
 __bpf_kfunc int s3fs_kfunc_policy_hit(u64 ino)
 {
+	/* Issue #22: with hit_accum the kmod counts hits in .read_iter and
+	 * replays them from admit_replace; this direct call is a no-op. */
+	if (READ_ONCE(s3fs_hit_accum))
+		return 0;
 	return s3fs_policy_ops_eval_hit(ino);
 }
 

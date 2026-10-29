@@ -487,6 +487,8 @@ struct s3fs_file_admit_cache {
 	bool pcache; /* true = PCACHE admit exists for this ino at [off,end) */
 	u64  off;    /* start of the confirmed pcache range */
 	u64  end;    /* off+size of the confirmed pcache range (exclusive) */
+	unsigned long hit_tick; /* hit_accum: jiffies of the last counted access
+				 * through this struct file; 0 = not counted yet */
 };
 
 /* Running size of the admit hash. Updated in lock-step with hash_add
@@ -562,6 +564,30 @@ atomic_long_t s3fs_evictions_total = ATOMIC_LONG_INIT(0);
  * for the true cache hit ratio.
  */
 atomic_long_t s3fs_folio_hits = ATOMIC_LONG_INIT(0);
+
+/*
+ * Issue #22 (docs/design/hit-signal-percpu-accumulation.md).
+ * hit_accum=1 (default): .read_iter counts one access per open file in a per-CPU
+ * slot of the inode's s3fs_file_data; admit_replace Phase 1 replays the
+ * delta into the policy's on_hit under the evict mutex.  The direct
+ * on_hit calls (fentry KFunc, .read_folio, arena read) then do nothing.
+ *   hit_rearm_jiffies  an open file counts again after this many jiffies
+ *                      (0 = once per open)
+ *   hit_replay_max     on_hit calls per ino per Phase 1 (delta is cut)
+ */
+bool s3fs_hit_accum = true;
+module_param_named(hit_accum, s3fs_hit_accum, bool, 0644);
+MODULE_PARM_DESC(hit_accum,
+	"Issue #22: count hits per CPU in .read_iter and replay them to the policy from admit_replace (default on; 0 = the direct on_hit calls)");
+static unsigned int s3fs_hit_rearm_jiffies = HZ / 10;
+module_param_named(hit_rearm_jiffies, s3fs_hit_rearm_jiffies, uint, 0644);
+MODULE_PARM_DESC(hit_rearm_jiffies,
+	"hit_accum: jiffies before an open file counts another access (0 = once per open)");
+static unsigned int s3fs_hit_replay_max = 15;
+module_param_named(hit_replay_max, s3fs_hit_replay_max, uint, 0644);
+MODULE_PARM_DESC(hit_replay_max,
+	"hit_accum: max on_hit calls per ino per admit_replace");
+atomic_long_t s3fs_hits_replayed_total = ATOMIC_LONG_INIT(0);
 
 /*
  * Cumulative page-cache invalidations done by admit_replace for new or
@@ -1045,6 +1071,7 @@ static void s3fs_file_data_reset(u64 ino);
  * check but before admit_drop_all_ranges, causing drop to remove the entry
  * while reset was never called — leaving fd->buf allocated outside the
  * capacity limit. */
+static void s3fs_hit_forget(u64 ino);
 static bool admit_evict_ino(u64 ino, u64 *freed)
 {
 	bool had_pcache = false;
@@ -1055,11 +1082,70 @@ static bool admit_evict_ino(u64 ino, u64 *freed)
 	s3fs_evict_page_cache(ino);
 	if (had_pcache)
 		s3fs_file_data_reset(ino);
+	/* #22: every whole-ino eviction ends here, so this is the one place
+	 * that resets the per-ino hit state (the next populate starts afresh). */
+	s3fs_hit_forget(ino);
 	return true;
 }
 
 /* AC-41: defined after struct s3fs_file_data. */
 static u64 s3fs_ino_buf_bytes(u64 ino);
+
+/* Issue #22: hit accumulation; defined after struct s3fs_file_data. */
+struct s3fs_file_data;
+struct s3fs_hit_rec {
+	u64 ino;
+	u64 d;          /* accesses since the last replay (for a new ino: after its populate) */
+	u64 d_pre;      /* new ino only: accesses before its populate, incl. the one that missed */
+	u64 last_tick;  /* newest jiffies among the CPUs' last accesses */
+	bool first;     /* policy had not seen the ino: d is replayed after on_insert */
+};
+enum { S3FS_HIT_BEFORE_INSERT, S3FS_HIT_AFTER_INSERT };
+static bool s3fs_hit_collect(u64 ino, struct s3fs_hit_rec *rec);
+static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool after_insert,
+			    void (*hit)(u64 ino));
+static void s3fs_hit_forget(u64 ino);
+static void s3fs_hit_signal(u64 ino);
+static void s3fs_hit_set_base(struct s3fs_file_data *fd);
+
+/* Policy bookkeeping.  The only callers of the policy's on_insert / on_size /
+ * on_remove: keep the rules about WHEN here, not at each call site.
+ *  - A miss in flight (pending) is not a candidate yet.  Pending keeps the
+ *    kmod from evicting the ino, but a policy that picked it would already
+ *    have moved it to its ghost / hand.  It is tracked next round.
+ *  - Whatever leaves the policy also forgets its hit state (idempotent with
+ *    admit_evict_ino, which forgets for policies without pick_victim).
+ * scripts/check-kmod-invariants.sh fails if another file position calls the
+ * raw ops. */
+static bool s3fs_policy_trackable(u64 ino)
+{
+	return !pending_exists(ino);
+}
+
+static void s3fs_policy_track(u64 ino, u64 bytes, bool sized)
+{
+	s3fs_policy_ops_insert(ino);
+	if (sized)
+		s3fs_policy_ops_size(ino, bytes);
+}
+
+static void s3fs_policy_untrack(u64 ino)
+{
+	s3fs_policy_ops_remove(ino);
+	s3fs_hit_forget(ino);
+}
+
+/* Bytes the arena entries from index @from on charge to @ino. */
+static u64 s3fs_arena_ino_bytes(const struct s3fs_admit_entry *entries,
+				u32 count, u32 from, u64 ino)
+{
+	u64 b = 0;
+
+	for (; from < count; from++)
+		if (entries[from].ino == ino)
+			b += entries[from].size;
+	return b;
+}
 
 struct s3fs_victim {
 	int score;     /* policy on_evict return value, clamped >= 0 */
@@ -1110,7 +1196,7 @@ static void s3fs_capacity_evict_one(u64 ino, u64 *live_bytes, u32 *evicted,
 		return;
 	(*evicted)++;
 	if (pv)
-		s3fs_policy_ops_remove(ino);
+		s3fs_policy_untrack(ino);
 	/* AC-41: arena bytes from the dropped entries plus what reset actually
 	 * released (0 on skip_reset, so the loop keeps evicting while still
 	 * over capacity). */
@@ -1356,6 +1442,10 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		int *eval_scores = NULL;
 		u32 eval_count = 0;
 		bool pv = s3fs_policy_has_pick_victim(); /* AC-58 */
+		/* Issue #22: replay accumulated hits for every ino. */
+		bool ha = READ_ONCE(s3fs_hit_accum);
+		struct s3fs_hit_rec *hrec = NULL;
+		u32 nhrec = 0;
 		int pi;
 
 		if (cap_bytes) {
@@ -1392,8 +1482,25 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 
 		/* AC-58: on_insert / pick_victim / on_remove mutate policy state
 		 * without a BPF-side lock, so one round holds the evict mutex. */
-		if (pv)
+		if (ha)
+			hrec = kcalloc(total_count, sizeof(*hrec), GFP_KERNEL);
+		if (pv || ha)
 			s3fs_policy_evict_lock();
+
+		/* Issue #22: hits on inos the policy already knows are older
+		 * than anything this round inserts, so they go in first; hits
+		 * on new inos follow their on_insert (after the loops). */
+		if (hrec) {
+			for (i = 0; i < count; i++)
+				if (s3fs_policy_trackable(entries[i].ino) &&
+				    s3fs_hit_collect(entries[i].ino, &hrec[nhrec]))
+					nhrec++;
+			for (pi = 0; pi < pcache_remaining; pi++)
+				if (s3fs_policy_trackable(pcache_inos[pi]) &&
+				    s3fs_hit_collect(pcache_inos[pi], &hrec[nhrec]))
+					nhrec++;
+			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_BEFORE_INSERT, s3fs_hit_signal);
+		}
 
 		/* Phase 1: collect unique inos and call on_evict once each.
 		 * First arena entries, then pcache entries (P3). */
@@ -1409,27 +1516,21 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				continue;
 
 			{
-				int fr_vote = s3fs_policy_on_evict(ino);
-				int so_vote = s3fs_policy_ops_eval_evict(ino);
+				/* Issue #22: with hit_accum the votes wait for
+				 * the replay below. */
+				int fr_vote = hrec ? 0 : s3fs_policy_on_evict(ino);
+				int so_vote = hrec ? 0 : s3fs_policy_ops_eval_evict(ino);
 				int score   = max3(fr_vote, so_vote, 0);
 
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				if (pv) {
-					s3fs_policy_ops_insert(ino);
-					/* AC-66: the bytes this ino adds to
-					 * live_bytes (all of its ranges). */
-					if (cap_bytes) {
-						u64 b = 0;
-						u32 k;
-
-						for (k = i; k < count; k++)
-							if (entries[k].ino == ino)
-								b += entries[k].size;
-						s3fs_policy_ops_size(ino, b);
-					}
-				}
+				/* AC-66: the bytes this ino adds to live_bytes
+				 * (all of its ranges). */
+				if (pv && s3fs_policy_trackable(ino))
+					s3fs_policy_track(ino,
+						cap_bytes ? s3fs_arena_ino_bytes(entries, count, i, ino) : 0,
+						cap_bytes);
 
 				if (fr_vote != 0)
 					fmodret_votes++;
@@ -1450,26 +1551,45 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				continue;
 
 			{
-				int fr_vote = s3fs_policy_on_evict(ino);
-				int so_vote = s3fs_policy_ops_eval_evict(ino);
+				/* Issue #22: with hit_accum the votes wait for
+				 * the replay below. */
+				int fr_vote = hrec ? 0 : s3fs_policy_on_evict(ino);
+				int so_vote = hrec ? 0 : s3fs_policy_ops_eval_evict(ino);
 				int score   = max3(fr_vote, so_vote, 0);
 
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
 				eval_count++;
-				if (pv) {
-					s3fs_policy_ops_insert(ino);
-					/* AC-66: charged by fd->cap, as live_bytes. */
-					if (cap_bytes)
-						s3fs_policy_ops_size(ino,
-							s3fs_ino_buf_bytes(ino));
-				}
+				/* AC-66: charged by fd->cap, as live_bytes. */
+				if (pv && s3fs_policy_trackable(ino))
+					s3fs_policy_track(ino,
+						cap_bytes ? s3fs_ino_buf_bytes(ino) : 0,
+						cap_bytes);
 
 				if (fr_vote != 0)
 					fmodret_votes++;
 				if (so_vote != 0)
 					structops_votes++;
 			}
+		}
+
+		/* Issue #22: replay the accumulated hits, then take the votes,
+		 * so every decision below sees them. */
+		if (hrec) {
+			u32 e;
+
+			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_AFTER_INSERT, s3fs_hit_signal);
+			for (e = 0; e < eval_count; e++) {
+				int fr_vote = s3fs_policy_on_evict(eval_inos[e]);
+				int so_vote = s3fs_policy_ops_eval_evict(eval_inos[e]);
+
+				eval_scores[e] = max3(fr_vote, so_vote, 0);
+				if (fr_vote != 0)
+					fmodret_votes++;
+				if (so_vote != 0)
+					structops_votes++;
+			}
+			kfree(hrec);
 		}
 
 		/* Phase 2: build cand[] / drive legacy eviction.  In capacity
@@ -1583,7 +1703,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 					/* Not a candidate any more (evicted by
 					 * another route): let the policy forget
 					 * it and ask again. */
-					s3fs_policy_ops_remove(v);
+					s3fs_policy_untrack(v);
 					continue;
 				}
 				if (cand[j].tried)
@@ -1602,7 +1722,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				pr_info_ratelimited("s3fs_ebpf: admit set %llu B still over capacity %llu B (in-flight misses)\n",
 						    live_bytes, cap_bytes);
 		}
-		if (pv)
+		if (pv || ha)
 			s3fs_policy_evict_unlock();
 		if (fmodret_votes)
 			pr_info("s3fs_ebpf: fmod_ret voted evict on %u/%u entries\n",
@@ -1984,10 +2104,35 @@ static void local_prune_promoted_locked(const struct s3fs_entry_dyn *entries,
 	}
 }
 
+/* Same listing?  A sync that re-sends the bucket unchanged must not cost the
+ * cache: shrink_dcache_sb() drops every unused dentry, so every idle inode is
+ * evicted and its chunks freed (the pcache content, the capacity accounting
+ * and the admit entries' backing data with it).  Order-sensitive: the daemon
+ * sends the list in a stable order, and a different order only means one
+ * unnecessary shrink. */
+static bool dyn_entries_equal(const struct s3fs_entry_dyn *a, u32 na,
+			      const struct s3fs_entry_dyn *b, u32 nb)
+{
+	u32 i;
+
+	if (na != nb)
+		return false;
+	for (i = 0; i < na; i++) {
+		if (a[i].ino != b[i].ino || a[i].parent_ino != b[i].parent_ino ||
+		    a[i].size != b[i].size || a[i].mode != b[i].mode ||
+		    a[i].name_len != b[i].name_len ||
+		    memcmp(a[i].name, b[i].name, a[i].name_len) != 0)
+			return false;
+	}
+	return true;
+}
+
 int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 {
 	struct s3fs_entry_dyn *prev;
 	struct s3fs_dyn_index *ix = NULL, *prev_ix;
+	bool changed = true;
+	u32 prev_nr;
 
 	/* Built before the mutex: it is O(count log count). */
 	if (count && entries) {
@@ -1998,6 +2143,9 @@ int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 	mutex_lock(&s3fs_entries_mtx);
 	prev = s3fs_dyn_entries;
 	prev_ix = s3fs_dyn_idx;
+	prev_nr = s3fs_dyn_nr;
+	if (ix && prev)
+		changed = !dyn_entries_equal(prev, prev_nr, entries, count);
 	if (ix) {
 		s3fs_dyn_entries = entries;
 		s3fs_dyn_nr      = count;
@@ -2014,7 +2162,9 @@ int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 	kvfree(prev);
 	dyn_index_free(prev_ix);
 
-	if (s3fs_active_sb)
+	/* Stale dentries (a changed size, a removed or moved key) are dropped so
+	 * the next lookup sees the new listing; an identical listing keeps them. */
+	if (changed && s3fs_active_sb)
 		shrink_dcache_sb(s3fs_active_sb);
 	return 0;
 }
@@ -2194,6 +2344,11 @@ struct s3fs_chunk {
 	u32   readers;
 };
 
+struct s3fs_hit_acc {
+	u64 count;     /* accesses counted on this CPU (monotonic) */
+	u64 last_tick; /* jiffies of the last one */
+};
+
 struct s3fs_file_data {
 	struct mutex lock;
 	struct s3fs_chunk *chunks;
@@ -2203,6 +2358,13 @@ struct s3fs_file_data {
 	bool  dirty;    /* set by .write, cleared after successful daemon flush */
 	bool  flushing; /* flush enqueued; cleared by signal_flush on PUT ACK */
 	u32   nr_remote; /* AC-51: chunks with .remote set */
+	/* Issue #22 (hit_accum).  hit is allocated with the fd; hit_flushed
+	 * and policy_seen are only touched under s3fs_policy_evict_lock. */
+	struct s3fs_hit_acc __percpu *hit;
+	u64   hit_base;    /* sum of counts when populate admitted the ino */
+	bool  hit_base_set;
+	u64   hit_flushed; /* sum of counts already replayed to the policy */
+	bool  policy_seen; /* policy has on_insert-ed this ino */
 	/* U8 is per chunk now (struct s3fs_chunk.readers). */
 	/* W1: unflushed-data pin.  maybe_enqueue_flush takes one inode ref
 	 * (ihold) per fd while a flush is outstanding so evict_inode cannot
@@ -2599,6 +2761,177 @@ static u64 s3fs_ino_buf_bytes(u64 ino)
 		cap = READ_ONCE(fd->cap);
 	iput(inode);
 	return cap;
+}
+
+/* -- Issue #22: hit accumulation ------------------------------------------ */
+
+/* .read_iter: count one access for this open file.  The only shared-looking
+ * state touched is the struct file's own hit_tick and a per-CPU slot. */
+static void s3fs_hit_count(struct file *file, struct inode *inode)
+{
+	struct s3fs_file_admit_cache *fc = file->private_data;
+	struct s3fs_file_data *fd = inode->i_private;
+	struct s3fs_hit_acc *acc;
+	unsigned long now = jiffies ?: 1, last;
+	unsigned int rearm;
+
+	if (!fc || !fd || !fd->hit)
+		return;
+	last = READ_ONCE(fc->hit_tick);
+	rearm = READ_ONCE(s3fs_hit_rearm_jiffies);
+	if (last && (!rearm || now - last < rearm))
+		return;
+	WRITE_ONCE(fc->hit_tick, now);
+	preempt_disable();
+	acc = this_cpu_ptr(fd->hit);
+	acc->count++;
+	acc->last_tick = now;
+	preempt_enable();
+}
+
+static void s3fs_hit_signal(u64 ino)
+{
+	s3fs_policy_on_hit(ino);
+	(void)s3fs_policy_ops_eval_hit(ino);
+}
+
+/* The direct (pre-#22) on_hit signal. */
+static void s3fs_hit_signal_direct(u64 ino)
+{
+	if (READ_ONCE(s3fs_hit_accum))
+		return;
+	s3fs_hit_signal(ino);
+}
+
+/* fd-level core of s3fs_hit_collect.  Caller holds s3fs_policy_evict_lock
+ * (hit_flushed / policy_seen).  Returns true when rec has accesses to replay.
+ *
+ * For an ino the policy knows: d = accesses since the last replay.
+ * For one it does not (first look; never seen, or evicted and forgotten):
+ *   d_pre = accesses up to its populate, including the read that missed;
+ *           replayed BEFORE on_insert.  Frequency policies (the W-TinyLFU
+ *           sketch) must see requests for inos that are not resident: that is
+ *           what the admission duel compares.  The others ignore on_hit for
+ *           an unknown ino.
+ *   d     = accesses after the populate: hits, replayed after on_insert.
+ * hit_flushed survives a forget, so accesses made while the ino was out of
+ * the cache are counted at its next admission. */
+static bool s3fs_hit_collect_fd(struct s3fs_file_data *fd, u64 ino,
+				struct s3fs_hit_rec *rec)
+{
+	u64 sum = 0, tick = 0, base;
+	int cpu;
+
+	if (!fd || !fd->hit)
+		return false;
+	for_each_possible_cpu(cpu) {
+		struct s3fs_hit_acc *acc = per_cpu_ptr(fd->hit, cpu);
+
+		sum += READ_ONCE(acc->count);
+		tick = max(tick, READ_ONCE(acc->last_tick));
+	}
+	rec->first = !fd->policy_seen;
+	rec->d_pre = 0;
+	if (rec->first) {
+		/* No populate base (arena mode): everything so far is "before". */
+		base = READ_ONCE(fd->hit_base_set) ? READ_ONCE(fd->hit_base) : sum;
+		base = clamp(base, fd->hit_flushed, sum);
+		rec->d_pre = base - fd->hit_flushed;
+		fd->hit_flushed = base;
+		fd->hit_base_set = false;
+		fd->policy_seen = true;
+	}
+	if (sum <= fd->hit_flushed && !rec->d_pre)
+		return false;
+	rec->ino = ino;
+	rec->d = sum - fd->hit_flushed;
+	rec->last_tick = tick;
+	fd->hit_flushed = sum;
+	return true;
+}
+
+static bool s3fs_hit_collect(u64 ino, struct s3fs_hit_rec *rec)
+{
+	struct inode *inode;
+	bool ret;
+
+	if (!s3fs_active_sb)
+		return false;
+	inode = ilookup(s3fs_active_sb, (unsigned long)ino);
+	if (!inode)
+		return false;
+	ret = s3fs_hit_collect_fd(inode->i_private, ino, rec);
+	iput(inode);
+	return ret;
+}
+
+/* populate (fd->lock held): remember the count so far as the point from which
+ * the policy's hits are counted.  Only before the policy has seen the ino. */
+static void s3fs_hit_set_base(struct s3fs_file_data *fd)
+{
+	u64 sum = 0;
+	int cpu;
+
+	if (!fd->hit || READ_ONCE(fd->policy_seen))
+		return;
+	for_each_possible_cpu(cpu)
+		sum += READ_ONCE(per_cpu_ptr(fd->hit, cpu)->count);
+	WRITE_ONCE(fd->hit_base, sum);
+	WRITE_ONCE(fd->hit_base_set, true);
+}
+
+/* After on_remove / a whole-ino evict: the next collect is a first look. */
+static void s3fs_hit_forget(u64 ino)
+{
+	struct inode *inode;
+	struct s3fs_file_data *fd;
+
+	if (!s3fs_active_sb)
+		return;
+	inode = ilookup(s3fs_active_sb, (unsigned long)ino);
+	if (!inode)
+		return;
+	fd = inode->i_private;
+	if (fd)
+		fd->policy_seen = false;
+	iput(inode);
+}
+
+static int s3fs_hit_rec_cmp(const void *a, const void *b)
+{
+	const struct s3fs_hit_rec *x = a, *y = b;
+
+	if (x->last_tick != y->last_tick)
+		return x->last_tick < y->last_tick ? -1 : 1;
+	if (x->ino != y->ino)
+		return x->ino < y->ino ? -1 : 1;
+	return 0;
+}
+
+/* Replay into the policy, oldest last_tick first (ties by ino), at most
+ * hit_replay_max on_hit calls per ino and pass.  Before on_insert
+ * (@after_insert false): d for a known ino, d_pre for a new one.  After it: d
+ * for the new inos.  Caller holds s3fs_policy_evict_lock. */
+static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool after_insert,
+			    void (*hit)(u64 ino))
+{
+	const u64 max_calls = READ_ONCE(s3fs_hit_replay_max);
+	u32 i;
+
+	sort(recs, n, sizeof(*recs), s3fs_hit_rec_cmp, NULL);
+	for (i = 0; i < n; i++) {
+		u64 k, d, calls;
+
+		if (after_insert && !recs[i].first)
+			continue;
+		d = (!after_insert && recs[i].first) ? recs[i].d_pre : recs[i].d;
+		if (!d)
+			continue;
+		calls = min(d, max_calls);
+		atomic_long_add((long)d, &s3fs_hits_replayed_total);
+		for (k = 0; k < calls; k++)
+			hit(recs[i].ino);
+	}
 }
 
 static int s3fs_u64_cmp(const void *a, const void *b)
@@ -3491,6 +3824,11 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 		return NULL;
 	mutex_init(&fd->lock);
 	INIT_LIST_HEAD(&fd->pin_link);
+	fd->hit = alloc_percpu(struct s3fs_hit_acc);
+	if (!fd->hit) {
+		kfree(fd);
+		return NULL;
+	}
 	if (initial_size) {
 		u32 ci;
 
@@ -3499,6 +3837,7 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 		if (s3fs_fd_store(fd, 0, initial, NULL, initial_size,
 				  initial_size)) {
 			s3fs_fd_free_all(fd);
+			free_percpu(fd->hit);
 			kfree(fd);
 			return NULL;
 		}
@@ -3514,6 +3853,7 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
 	if (!fd)
 		return;
 	s3fs_fd_free_all(fd);
+	free_percpu(fd->hit);
 	kfree(fd);
 }
 
@@ -3658,8 +3998,11 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 	 * eviction can free fd->buf between the copy above and the insert
 	 * below.  kzalloc inside admit_insert_pcache runs before write_lock,
 	 * so sleeping with fd->lock (mutex) held is safe. */
-	if (!owned)	/* a dirty fd is not capacity-managed */
+	if (!owned) {	/* a dirty fd is not capacity-managed */
 		err = admit_insert_pcache(ino, offset, size);
+		if (!err)
+			s3fs_hit_set_base(fd);
+	}
 out_unlock:
 	mutex_unlock(&fd->lock);
 out_iput:
@@ -4526,8 +4869,7 @@ retry:
 						 inode->i_ino, pcache_gen,
 						 false)) {
 			atomic_long_inc(&s3fs_folio_hits);
-			s3fs_policy_on_hit(inode->i_ino);
-			(void)s3fs_policy_ops_eval_hit(inode->i_ino);
+			s3fs_hit_signal_direct(inode->i_ino);
 			filled = true;
 			goto done;
 		}
@@ -4549,8 +4891,7 @@ retry:
 	    admit_snapshot(inode->i_ino, (u64)pos, &uaddr, &asize, &mm) && mm) {
 		if (s3fs_folio_fill_from_arena(folio, fs_size, 0, mm, uaddr, asize)) {
 			atomic_long_inc(&s3fs_folio_hits);
-			s3fs_policy_on_hit(inode->i_ino);
-			(void)s3fs_policy_ops_eval_hit(inode->i_ino);
+			s3fs_hit_signal_direct(inode->i_ino);
 			filled = true;
 			goto done;
 		}
@@ -4696,6 +5037,16 @@ done:
 	return filled ? 0 : -EIO;
 }
 
+/* splice / sendfile reach the page cache without .read_iter. */
+static ssize_t s3fs_ebpf_splice_read(struct file *in, loff_t *ppos,
+				     struct pipe_inode_info *pipe, size_t len,
+				     unsigned int flags)
+{
+	if (READ_ONCE(s3fs_hit_accum))
+		s3fs_hit_count(in, file_inode(in));
+	return filemap_splice_read(in, ppos, pipe, len, flags);
+}
+
 /* AA-03 / AB-04: .read_iter fast path.
  *
  * Priority order:
@@ -4715,6 +5066,9 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	u64 uaddr = 0, avail = 0;
 	struct mm_struct *mm = NULL;
 
+	if (READ_ONCE(s3fs_hit_accum))
+		s3fs_hit_count(file, inode);
+
 	/* AB-04 / AB-10: page-cache mode — data in fd->buf / page cache.
 	 * fc_pcache_check avoids the rwlock on the hot path once the cache
 	 * entry is confirmed for this file descriptor. */
@@ -4731,8 +5085,7 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 							  to, copy_len);
 		if (copied > 0) {
 			atomic_long_inc(&s3fs_folio_hits);
-			s3fs_policy_on_hit(inode->i_ino);
-			(void)s3fs_policy_ops_eval_hit(inode->i_ino);
+			s3fs_hit_signal_direct(inode->i_ino);
 			iocb->ki_pos += copied;
 			return copied;
 		}
@@ -4956,7 +5309,7 @@ static const struct file_operations s3fs_ebpf_file_fops = {
 	.read_iter	= s3fs_ebpf_read_iter,   /* AA-03 */
 	.write		= s3fs_ebpf_file_write,
 	.mmap		= generic_file_mmap,
-	.splice_read	= filemap_splice_read,
+	.splice_read	= s3fs_ebpf_splice_read,
 	.release	= s3fs_ebpf_file_release,
 	.fsync		= s3fs_ebpf_file_fsync,
 };
