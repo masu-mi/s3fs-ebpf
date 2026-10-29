@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/admit"
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 )
@@ -13,6 +14,16 @@ import (
 // updateArenaHighWater advances the ArenaUsedBytes gauge when `off+size`
 // exceeds the current high-water mark. Called after every AdmitContent so
 // /metrics reflects the furthest byte written into the arena.
+// The planners are pure and live in internal/admit; these keep the local names.
+type arenaChunkPair = admit.ChunkPair
+
+var (
+	planReplaceAdmit      = admit.PlanReplace
+	planReplaceAdmitRange = admit.PlanReplaceRange
+	planPruneAdmits       = admit.PlanPrune
+	rangesOverlap         = admit.RangesOverlap
+)
+
 func updateArenaHighWater(off uint64, size int) {
 	if hi := off + uint64(size); hi > metrics.Global.ArenaUsedBytes.Load() {
 		metrics.Global.ArenaUsedBytes.Store(hi)
@@ -143,46 +154,10 @@ func replaceAdmit(devPath string, entry admitEntry, progs *fpebpf.Programs) erro
 	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
 	if progs != nil {
 		for _, r := range freed {
-			progs.FreeArenaChunk(r.offset, r.size)
+			progs.FreeArenaChunk(r.Offset, r.Size)
 		}
 	}
 	return admitArena(devPath, admits)
-}
-
-// planReplaceAdmit is the pure-function core of replaceAdmit: it
-// filters any prior entry sharing entry.Ino out of `admits`, appends
-// the fresh entry, and reports all evicted entries' arena ranges so
-// the caller can return them to the free-list. Split out so the dedup
-// invariant can be unit-tested without an eBPF loader or the
-// /dev/s3fs_ebpf ioctl.
-//
-// T-04: returns freed []arenaChunkPair (all matches) rather than a
-// single oldChunk. With D-01 range-list, the same ino can have
-// multiple entries in admits; the prior single-value return discarded
-// all but the last match's chunk, leaking arena bytes.
-//
-// arenaBase==0 or e.Uaddr < arenaBase suppresses the chunk report —
-// used in offline mode and as a defensive guard against garbage
-// uaddrs. The returned slice shares backing storage with `admits`
-// (in-place filter), matching the previous implementation.
-func planReplaceAdmit(admits []admitEntry, entry admitEntry, arenaBase uint64) (
-	next []admitEntry, freed []arenaChunkPair,
-) {
-	filtered := admits[:0]
-	for _, e := range admits {
-		if e.Ino == entry.Ino {
-			if arenaBase != 0 && e.Uaddr >= arenaBase {
-				freed = append(freed, arenaChunkPair{
-					offset: e.Uaddr - arenaBase,
-					size:   e.Size,
-				})
-			}
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	next = append(filtered, entry)
-	return next, freed
 }
 
 // replaceAdmitRange is replaceAdmit for a range of an ino (AC-49): it drops
@@ -204,41 +179,10 @@ func replaceAdmitRange(devPath string, entry admitEntry, progs *fpebpf.Programs)
 	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
 	if progs != nil {
 		for _, r := range freed {
-			progs.FreeArenaChunk(r.offset, r.size)
+			progs.FreeArenaChunk(r.Offset, r.Size)
 		}
 	}
 	return admitArena(devPath, admits)
-}
-
-// planReplaceAdmitRange is the pure core of replaceAdmitRange: entries of
-// entry.Ino whose file range [Offset, Offset+Size) overlaps the new one are
-// removed (and reported in freed, like planReplaceAdmit), everything else is
-// kept, and entry is appended.  A whole-object entry overlaps every range of
-// its ino, so it behaves exactly like planReplaceAdmit.
-func planReplaceAdmitRange(admits []admitEntry, entry admitEntry, arenaBase uint64) (
-	next []admitEntry, freed []arenaChunkPair,
-) {
-	filtered := admits[:0]
-	for _, e := range admits {
-		if e.Ino == entry.Ino && rangesOverlap(e.Offset, e.Size, entry.Offset, entry.Size) {
-			if arenaBase != 0 && e.Uaddr >= arenaBase {
-				freed = append(freed, arenaChunkPair{
-					offset: e.Uaddr - arenaBase,
-					size:   e.Size,
-				})
-			}
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	next = append(filtered, entry)
-	return next, freed
-}
-
-// rangesOverlap reports whether [aOff, aOff+aSize) and [bOff, bOff+bSize)
-// share a byte.  A zero-length range overlaps nothing.
-func rangesOverlap(aOff, aSize, bOff, bSize uint64) bool {
-	return aSize > 0 && bSize > 0 && aOff < bOff+bSize && bOff < aOff+aSize
 }
 
 // refreshAdmits re-pushes the current snapshot to kmod without any
@@ -373,8 +317,8 @@ func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 			dropped++
 			if progs != nil && arenaBase != 0 && e.Uaddr >= arenaBase {
 				freedRanges = append(freedRanges, arenaChunkPair{
-					offset: e.Uaddr - arenaBase,
-					size:   e.Size,
+					Offset: e.Uaddr - arenaBase,
+					Size:   e.Size,
 				})
 			}
 			continue
@@ -385,47 +329,10 @@ func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
 	metrics.Global.AdmitsCurrent.Store(uint64(len(filtered)))
 	if progs != nil {
 		for _, r := range freedRanges {
-			progs.FreeArenaChunk(r.offset, r.size)
+			progs.FreeArenaChunk(r.Offset, r.Size)
 		}
 	}
 	return dropped
-}
-
-// arenaChunkPair is dropAdmits's per-eviction bookkeeping — a
-// tiny value type so the "compute-then-free" split doesn't need to
-// hold admitMu while calling into progs.FreeArenaChunk.
-// T-05: uint64 so offsets > 4 GiB are handled correctly if the arena
-// is ever extended; current arena is 128 MiB so this is defensive.
-type arenaChunkPair struct {
-	offset uint64
-	size   uint64
-}
-
-// planPruneAdmits is the pure-function core of pruneAdmitsTo: given the
-// current snapshot, it returns the filtered slice (keeping only inos in
-// keepInos) and the arena ranges of the dropped entries so the caller can
-// return them to the D-02 free-list. arenaBase==0 suppresses chunk
-// reporting (offline mode). Split out so the arena-free invariant can be
-// unit-tested without an eBPF loader.
-func planPruneAdmits(
-	snapshot []admitEntry,
-	keepInos map[uint64]struct{},
-	arenaBase uint64,
-) (pruned []admitEntry, freed []arenaChunkPair) {
-	pruned = snapshot[:0]
-	for _, e := range snapshot {
-		if _, ok := keepInos[e.Ino]; ok {
-			pruned = append(pruned, e)
-			continue
-		}
-		if arenaBase != 0 && e.Uaddr >= arenaBase {
-			freed = append(freed, arenaChunkPair{
-				offset: e.Uaddr - arenaBase,
-				size:   e.Size,
-			})
-		}
-	}
-	return pruned, freed
 }
 
 // pruneAdmitsTo drops any admit whose ino is not in `keepInos`. Called
@@ -453,7 +360,7 @@ func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
 	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
 	if admitProgs != nil {
 		for _, r := range freed {
-			admitProgs.FreeArenaChunk(r.offset, r.size)
+			admitProgs.FreeArenaChunk(r.Offset, r.Size)
 		}
 	}
 	if dropped == 0 {
