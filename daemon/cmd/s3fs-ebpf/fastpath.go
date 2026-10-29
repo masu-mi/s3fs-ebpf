@@ -135,44 +135,23 @@ func runFastpath(args []string) int {
 		}
 	}
 
-	// Z-03: scale S3-FIFO ghost map proportionally to admit capacity.
-	// Ghost entries = ~4× the expected number of admitted files so
-	// promotion fires even after large working-set eviction cycles.
-	// Formula: max(8192, softcap*1024), capped at 65536 (≈1 MB map).
-	// softcap=-1 means "leave kmod default (8)" → ghost_cap = 8192.
-	const (
-		s3fifoGhostMap    = "s3fifo3_state"
-		s3fifoGhostMinCap = uint32(8192)
-		s3fifoGhostMaxCap = uint32(65536)
-	)
-	s3fifoGhostCap := s3fifoGhostMinCap
-	if *softcapFlag > 0 {
-		if est := uint32(*softcapFlag) * 1024; est > s3fifoGhostCap {
-			s3fifoGhostCap = est
-		}
-	}
-	if s3fifoGhostCap > s3fifoGhostMaxCap {
-		s3fifoGhostCap = s3fifoGhostMaxCap
-	}
+	// Z-03: the S3-FIFO ghost map scales with the admit capacity.
+	s3fifoGhostCap := s3fifoGhostCapFor(*softcapFlag)
 	policyLoadOpts := policyprog.LoadOpts{
 		MapMaxEntries: map[string]uint32{s3fifoGhostMap: s3fifoGhostCap},
 	}
 
-	if *patternAdmit && *noReadIterHook {
-		fmt.Fprintln(os.Stderr, "--pattern-aware-admit requires the read-iter hook; cannot combine with --no-read-iter-hook")
-		return 1
-	}
-	if *prefetchSeq && *noReadIterHook {
-		fmt.Fprintln(os.Stderr, "--prefetch-seq-admit requires the read-iter hook; cannot combine with --no-read-iter-hook")
+	if err := (fastpathModes{
+		patternAdmit: *patternAdmit, noReadIterHook: *noReadIterHook,
+		prefetchSeq: *prefetchSeq, arenaMetadataOnly: *arenaMetadataOnly,
+		pcachePrewarm: *pcachePrewarm,
+	}).validate(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	patternAwareAdmitEnabled = *patternAdmit
 	prefetchSeqEnabled = *prefetchSeq
 	arenaMetadataOnlyEnabled = *arenaMetadataOnly
-	if *pcachePrewarm && !*arenaMetadataOnly {
-		fmt.Fprintln(os.Stderr, "--pcache-prewarm requires --arena-metadata-only (arena mode already prewarms content)")
-		return 1
-	}
 	pcachePrewarmEnabled = *pcachePrewarm
 	pcachePrewarmMount = *pcachePrewarmMnt
 
