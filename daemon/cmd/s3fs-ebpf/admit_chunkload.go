@@ -236,10 +236,10 @@ func serveChunkLoad(ctx context.Context, devPath string, s3c objstore.Backend,
 			return s3c.GetRange(ctx, key, off, n)
 		},
 		populate: func(off int64, data []byte) error {
-			return populatePages(devPath, ev.Ino, off, data)
+			return populatePagesFn(devPath, ev.Ino, off, data)
 		},
 		signal: func(off int64, errCode int32, flags uint32) error {
-			return signalAdmitFlags(devPath, ev.Ino, off, errCode, flags)
+			return signalAdmitFlagsFn(devPath, ev.Ino, off, errCode, flags)
 		},
 		enforce: func() { enforceCapacityAfterPopulate(devPath) },
 	}
