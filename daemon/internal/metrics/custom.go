@@ -68,7 +68,7 @@ func writeCustom(w io.Writer) {
 	fmt.Fprintln(w, "# HELP s3fs_ebpf_policy_metric Custom gauge emitted by CEL policy metric(name, value) calls.")
 	fmt.Fprintln(w, "# TYPE s3fs_ebpf_policy_metric gauge")
 	for _, n := range names {
-		fmt.Fprintf(w, "s3fs_ebpf_policy_metric{name=%q} %s\n",
+		fmt.Fprintf(w, "s3fs_ebpf_policy_metric{name=\"%s\"} %s\n",
 			escapeLabel(n), formatFloat(values[n]))
 	}
 }

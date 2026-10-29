@@ -8,32 +8,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// admitEntry mirrors `struct s3fs_admit_entry` in
-// include/s3fs_ebpf_uapi.h. `Uaddr` is the daemon-side user_vm
-// address of the range's bytes. `Offset` is the file offset where
-// the range starts (D-01); Offset=0 & Size=full_file is the
-// whole-file admit (backward-compat default).
-type admitEntry struct {
-	Ino    uint64
-	Uaddr  uint64
-	Size   uint64
-	Offset uint64
-}
-
-// AB-04: populatePagesArg mirrors `struct s3fs_populate_pages`.
-// The daemon hands S3 data to kmod via this ioctl so kmod can store it
-// in fd->buf (kernel memory) and insert a PCACHE-mode admit entry.
-// Reads then use s3fs_folio_fill_from_kmalloc (no GUP).
-type populatePagesArg struct {
-	Ino     uint64
-	Offset  uint64
-	Size    uint64
-	DataPtr uint64 // user pointer to data bytes (unsafe.Pointer value)
-}
-
 // s3fsIocPopulatePages = _IOW(0xE3, 0x0E, struct s3fs_populate_pages)
 // _IOW = (1<<30) | (size<<16) | (magic<<8) | nr
-const s3fsIocPopulatePages = (1 << 30) | (uint32(unsafe.Sizeof(populatePagesArg{})) << 16) | (0xE3 << 8) | 0x0E
 
 // populatePages sends S3 data to kmod via S3FS_IOC_POPULATE_PAGES.
 // kmod copies the bytes into the inode's fd->buf and inserts a PCACHE admit.
@@ -68,16 +44,8 @@ func populatePagesOn(devFd int, ino uint64, offset int64, data []byte) error {
 	return nil
 }
 
-// admitArenaArg mirrors `struct s3fs_admit_arena`.
-type admitArenaArg struct {
-	Count   uint32
-	_pad    uint32
-	Entries uint64
-}
-
 // s3fsIocAdmitArena encodes _IOW(0xE3, 0x02, struct s3fs_admit_arena).
 // _IOW direction = 1; size = sizeof(admitArenaArg) = 16 bytes.
-const s3fsIocAdmitArena = (1 << 30) | (uint32(unsafe.Sizeof(admitArenaArg{})) << 16) | (0xE3 << 8) | 0x02
 
 // admitArena is a package var (rather than a plain func) so the
 // concurrent-push stress test can swap in a snapshot-capturing fake
@@ -117,19 +85,9 @@ func admitArenaOn(f *os.File, entries []admitEntry) error {
 
 // -- C: read-miss upcall reader + handler ---------------------------------
 
-// signalAdmitArg mirrors `struct s3fs_signal_admit` (U13: added ChunkOffset).
-type signalAdmitArg struct {
-	Ino         uint64
-	ChunkOffset uint64
-	Err         int32
-	Flags       uint32
-}
-
 // s3fsSignalVerifyPopulated mirrors S3FS_SIGNAL_VERIFY_POPULATED: kmod only
 // wakes the waiter if the chunk is cached, else returns EAGAIN (AC-45).
 const s3fsSignalVerifyPopulated = 0x1
-
-const s3fsIocSignalAdmit = (1 << 30) | (uint32(unsafe.Sizeof(signalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
 
 func signalAdmit(devPath string, ino uint64, chunkOffset int64, errCode int32) error {
 	return signalAdmitFlags(devPath, ino, chunkOffset, errCode, 0)

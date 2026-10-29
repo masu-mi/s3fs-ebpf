@@ -18,27 +18,7 @@ import (
 // the remote runs are copied server-side (UploadPartCopy, pinned by ETag) and
 // only the other chunks travel.  See docs/design/ac51-partial-modify.md §7-8.
 
-type dirtyLayoutArg struct {
-	Ino         uint64
-	StatesUaddr uint64
-	Cap         uint32
-	NrChunks    uint32
-	Size        uint64
-	ChunkSize   uint64
-}
-
-type readDirtyRangeArg struct {
-	Ino      uint64
-	Uaddr    uint64
-	Offset   uint64
-	Size     uint64
-	OutBytes uint64
-}
-
-const (
-	s3fsIocDirtyLayout    = (3 << 30) | (uint32(unsafe.Sizeof(dirtyLayoutArg{})) << 16) | (0xE3 << 8) | 0x0F
-	s3fsIocReadDirtyRange = (3 << 30) | (uint32(unsafe.Sizeof(readDirtyRangeArg{})) << 16) | (0xE3 << 8) | 0x10
-)
+const ()
 
 // dirtyLayout asks kmod for the chunk states of ino.
 func dirtyLayout(devFd int, ino uint64) (kinds []objstore.ChunkKind, size, chunk int64, err error) {
