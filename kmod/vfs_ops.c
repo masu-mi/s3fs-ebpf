@@ -1095,13 +1095,14 @@ static u64 s3fs_ino_buf_bytes(u64 ino);
 struct s3fs_file_data;
 struct s3fs_hit_rec {
 	u64 ino;
-	u64 d;          /* accesses since the last replay */
+	u64 d;          /* accesses since the last replay (for a new ino: after its populate) */
+	u64 d_pre;      /* new ino only: accesses before its populate, incl. the one that missed */
 	u64 last_tick;  /* newest jiffies among the CPUs' last accesses */
-	bool first;     /* policy had not seen the ino: replay after on_insert */
+	bool first;     /* policy had not seen the ino: d is replayed after on_insert */
 };
-enum { S3FS_HIT_SEEN, S3FS_HIT_NEW };
+enum { S3FS_HIT_BEFORE_INSERT, S3FS_HIT_AFTER_INSERT };
 static bool s3fs_hit_collect(u64 ino, struct s3fs_hit_rec *rec);
-static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool first,
+static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool after_insert,
 			    void (*hit)(u64 ino));
 static void s3fs_hit_forget(u64 ino);
 static void s3fs_hit_signal(u64 ino);
@@ -1498,7 +1499,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				if (s3fs_policy_trackable(pcache_inos[pi]) &&
 				    s3fs_hit_collect(pcache_inos[pi], &hrec[nhrec]))
 					nhrec++;
-			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_SEEN, s3fs_hit_signal);
+			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_BEFORE_INSERT, s3fs_hit_signal);
 		}
 
 		/* Phase 1: collect unique inos and call on_evict once each.
@@ -1577,7 +1578,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		if (hrec) {
 			u32 e;
 
-			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_NEW, s3fs_hit_signal);
+			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_AFTER_INSERT, s3fs_hit_signal);
 			for (e = 0; e < eval_count; e++) {
 				int fr_vote = s3fs_policy_on_evict(eval_inos[e]);
 				int so_vote = s3fs_policy_ops_eval_evict(eval_inos[e]);
@@ -2803,13 +2804,22 @@ static void s3fs_hit_signal_direct(u64 ino)
 }
 
 /* fd-level core of s3fs_hit_collect.  Caller holds s3fs_policy_evict_lock
- * (hit_flushed / policy_seen).  Returns true when rec has accesses to
- * replay.  The first look at an ino discards its count: the read that
- * populated it from S3 is not a hit. */
+ * (hit_flushed / policy_seen).  Returns true when rec has accesses to replay.
+ *
+ * For an ino the policy knows: d = accesses since the last replay.
+ * For one it does not (first look; never seen, or evicted and forgotten):
+ *   d_pre = accesses up to its populate, including the read that missed;
+ *           replayed BEFORE on_insert.  Frequency policies (the W-TinyLFU
+ *           sketch) must see requests for inos that are not resident: that is
+ *           what the admission duel compares.  The others ignore on_hit for
+ *           an unknown ino.
+ *   d     = accesses after the populate: hits, replayed after on_insert.
+ * hit_flushed survives a forget, so accesses made while the ino was out of
+ * the cache are counted at its next admission. */
 static bool s3fs_hit_collect_fd(struct s3fs_file_data *fd, u64 ino,
 				struct s3fs_hit_rec *rec)
 {
-	u64 sum = 0, tick = 0;
+	u64 sum = 0, tick = 0, base;
 	int cpu;
 
 	if (!fd || !fd->hit)
@@ -2821,17 +2831,17 @@ static bool s3fs_hit_collect_fd(struct s3fs_file_data *fd, u64 ino,
 		tick = max(tick, READ_ONCE(acc->last_tick));
 	}
 	rec->first = !fd->policy_seen;
-	if (!fd->policy_seen) {
-		/* The read that populated the ino is not a hit, but reads
-		 * between the populate and this first look are: start from
-		 * the sum taken at populate (arena mode has none: the first
-		 * look's sum). */
-		fd->hit_flushed = READ_ONCE(fd->hit_base_set) ?
-				  READ_ONCE(fd->hit_base) : sum;
+	rec->d_pre = 0;
+	if (rec->first) {
+		/* No populate base (arena mode): everything so far is "before". */
+		base = READ_ONCE(fd->hit_base_set) ? READ_ONCE(fd->hit_base) : sum;
+		base = clamp(base, fd->hit_flushed, sum);
+		rec->d_pre = base - fd->hit_flushed;
+		fd->hit_flushed = base;
 		fd->hit_base_set = false;
 		fd->policy_seen = true;
 	}
-	if (sum <= fd->hit_flushed)
+	if (sum <= fd->hit_flushed && !rec->d_pre)
 		return false;
 	rec->ino = ino;
 	rec->d = sum - fd->hit_flushed;
@@ -2898,10 +2908,11 @@ static int s3fs_hit_rec_cmp(const void *a, const void *b)
 	return 0;
 }
 
-/* Replay the recs whose `first` flag equals `first` into the policy, oldest
- * last_tick first (ties by ino), each ino min(d, hit_replay_max) times.
- * Caller holds s3fs_policy_evict_lock. */
-static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool first,
+/* Replay into the policy, oldest last_tick first (ties by ino), at most
+ * hit_replay_max on_hit calls per ino and pass.  Before on_insert
+ * (@after_insert false): d for a known ino, d_pre for a new one.  After it: d
+ * for the new inos.  Caller holds s3fs_policy_evict_lock. */
+static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool after_insert,
 			    void (*hit)(u64 ino))
 {
 	const u64 max_calls = READ_ONCE(s3fs_hit_replay_max);
@@ -2909,11 +2920,15 @@ static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool first,
 
 	sort(recs, n, sizeof(*recs), s3fs_hit_rec_cmp, NULL);
 	for (i = 0; i < n; i++) {
-		u64 k, calls = min(recs[i].d, max_calls);
+		u64 k, d, calls;
 
-		if (recs[i].first != first)
+		if (after_insert && !recs[i].first)
 			continue;
-		atomic_long_add((long)recs[i].d, &s3fs_hits_replayed_total);
+		d = (!after_insert && recs[i].first) ? recs[i].d_pre : recs[i].d;
+		if (!d)
+			continue;
+		calls = min(d, max_calls);
+		atomic_long_add((long)d, &s3fs_hits_replayed_total);
 		for (k = 0; k < calls; k++)
 			hit(recs[i].ino);
 	}
