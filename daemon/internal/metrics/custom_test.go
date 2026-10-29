@@ -78,3 +78,16 @@ func TestFormatFloat(t *testing.T) {
 		}
 	}
 }
+
+// The label value is escaped once (escapeLabel); a second pass through %q
+// would turn a quote into \\\" and break the exposition format.
+func TestWriteCustomEscapesLabelOnce(t *testing.T) {
+	resetCustom(t)
+	RecordCustom(`say "hi"`+"\n"+`back\slash`, 1)
+	var b bytes.Buffer
+	writeCustom(&b)
+	want := `s3fs_ebpf_policy_metric{name="say \"hi\"\nback\\slash"} 1` + "\n"
+	if !strings.Contains(b.String(), want) {
+		t.Errorf("output lacks %q:\n%s", want, b.String())
+	}
+}
