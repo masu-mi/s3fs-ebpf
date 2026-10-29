@@ -20,7 +20,7 @@ hit の信号は miss の経路では置き換えられない。evict は ino �
 
 - **数える** (`s3fs_hit_count`、`s3fs_ebpf_read_iter` の先頭): 開いたファイル (`struct file`) ごとに 1 回。`file->private_data` の `struct s3fs_file_admit_cache` に `hit_tick` を足し、0 か `hit_rearm_jiffies` 以上経っていれば、inode の `s3fs_file_data` の per-CPU 値 (`struct s3fs_hit_acc`: `count`、`last_tick`) を進める。`hit_rearm_jiffies=0` は open ごとに 1 回。read のたびの仕事は `struct file` の値の比較だけで、共有の cacheline には書かない。
 - **反映する** (`admit_replace` の Phase 1、`s3fs_policy_evict_lock` の下): Phase 1 のループの前に、全 ino について `s3fs_hit_collect` で全 CPU の `count` を足し、`hit_flushed` との差 d を得る。policy が既に知っている ino (`policy_seen`) の分は、ループの前に `last_tick` の昇順 (同じなら ino の順) に並べて `min(d, hit_replay_max)` 回ずつ `on_hit` を呼ぶ (`s3fs_hit_replay`)。この round で `on_insert` する新しい ino の分は、ループ (`on_insert`) のあとで同じ順に呼ぶ。miss が in-flight (`pending_exists`) の ino は、`on_insert` も collect も次の round に回す。既知の ino の hit は、この round で入る ino より古いので先に反映する (LRU の stamp の順を保つため)。**その後で** `on_evict` の票を取り、Phase 2 (`pick_victim` / score 順) に進む。票を後ろに回したのは、legacy の policy (`sieve_ops` など) が `on_evict` を判断点にしているため。
-- **最初の look の基準**: populate (`s3fs_ebpf_populate_pages`、fd->lock 下) が、その時点の合計を `hit_base` に記録する。`policy_seen` が偽の ino は、最初の look で `hit_flushed = hit_base` にして `policy_seen` を立てる。S3 から取った最初の read は数えず、populate から最初の Phase 1 までの再アクセスは数える。populate がない (arena モード) ときは最初の look の合計を基準にし、その分は捨てる。`on_remove` の経路 (`s3fs_capacity_evict_one` の丸ごとの evict と、`cand[]` にない ino の聞き直し) で `s3fs_hit_forget` が `policy_seen` を落とす。
+- **最初の look (policy がまだ知らない ino)**: populate (`s3fs_ebpf_populate_pages`、fd->lock 下) が、その時点の合計を `hit_base` に記録する。`policy_seen` が偽の ino は、最初の look で accesses を 2 つに分ける。**`d_pre`** = `hit_flushed` から `hit_base` まで (cache にない間の access と、populate のきっかけになった miss の read)。`on_insert` の **前** に replay する。**`d`** = `hit_base` 以降 (populate 後の hit)。`on_insert` の **後** に replay する。`d_pre` を捨てないのは、W-TinyLFU の sketch が、cache にない ino の access も数えるため (admission の duel は、候補の頻度と victim の頻度を比べる)。ほかの policy は、知らない ino への `on_hit` を無視する。`hit_flushed` は `s3fs_hit_forget` で消えないので、evict されている間の access も次の admission で数える。populate がない (arena モード) ときは、最初の look までを `d_pre` にする。`s3fs_hit_forget` が `policy_seen` を落とす経路: `s3fs_policy_untrack` と `admit_evict_ino`。
 - **直接の経路を止める**: `s3fs_kfunc_policy_hit` (tree_traversal.c) と、`.read_folio` / arena 直読みの `on_hit` (`s3fs_hit_signal_direct`) は何もしない。kmod 側で止めるので BPF の作り直しは要らず、fentry のアクセスパターン判定 (R-01) は残る。
 - Phase 1 で evict の mutex を取る条件は `pick_victim` を持つ policy に加えて `hit_accum` のとき (`hit_flushed` / `policy_seen` を直列に保つため)。vtable は変えていない。
 
@@ -32,7 +32,7 @@ module param (`/sys/module/s3fs_kfunc/parameters/`):
 | `hit_rearm_jiffies` | HZ/10 | 開いたままのファイルがもう 1 回数えるまでの jiffies。0 = open ごとに 1 回。既定は §5.3 の計測で決める (bench は毎回 open し直すので差は出ないはず) |
 | `hit_replay_max` | 15 | 1 回の Phase 1 で 1 ino に呼ぶ `on_hit` の上限 (S3-FIFO / freq2bit は 3、W-TinyLFU の sketch は 15 で飽和) |
 
-カウンタ `s3fs_ebpf_policy_hits_replayed_total` (`S3FS_IOC_STATS` slot 14) は、`hit_replay_max` で切る前の d の合計。
+カウンタ `s3fs_ebpf_policy_hits_replayed_total` (`S3FS_IOC_STATS` slot 14) は、`hit_replay_max` で切る前の `d_pre` + `d` の合計 (cache にない間の access と miss の read を含むので、N_ACCESS にほぼ等しい。以前の「N_ACCESS − upcall」ではない)。
 
 ## 3. 実装で決めたこと・残っている穴
 
@@ -112,7 +112,7 @@ module param (`/sys/module/s3fs_kfunc/parameters/`):
 - **大きいファイル (§5.4)**: `bench-hitrate-mixed.sh` の hit_rate は pcache では意味を持たない (chunk ごとの upcall で miss が N_ACCESS を超える)。miss 数は acc=0 / 1 でほぼ同じ (541/579 対 546/590)。G5 が消えたかは ino ごとの反映回数を見ないと言えず、未測定。
 ## 9. 残っていること
 
-- sieve (約 9〜12%)、wtinylfu (約 16%)、s3fifo (約 8%) の per-access の食い違い。hit 率は ±2 pt で合っている。SIEVE は hand の端のバグを 1 つ直した (§18.45)。wtinylfu は未調査。run ごとにばらつくので、タイミング由来の揺れもある。
+- per-access の食い違いの残り (`SYNC_EVERY=3600s`): lru 1.8%、sieve 0%、s3fifo 約 6〜7%、wtinylfu 約 6%。simulator がモデル化していない部分 (kmod の round、pending の shed、wtinylfu の limbo / rejected)。
 - `fentry` の KFunc 呼び出しを BPF 側で飛ばす案: read のコストは policy なしと同等まで下がっているので、効果が測れるまで入れない。
 - 
 

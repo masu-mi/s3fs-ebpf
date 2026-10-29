@@ -77,10 +77,13 @@
 ## hit の集計 (issue #22、`hit_accum`、既定 on)
 - 設計は `docs/design/hit-signal-percpu-accumulation.md`。`hit_accum=1` (既定) のとき、`.read_iter` は `s3fs_file_data` の per-CPU 値 (`fd->hit`、fd と同じ寿命) を進めるだけで、ロックを取らない。`on_hit` の直接の呼び出し (fentry の KFunc、`.read_folio`、arena 直読み) は何もしない。
 - `fd->hit_flushed` / `fd->policy_seen` は **`s3fs_policy_evict_lock` の下でだけ** 触る。`admit_replace` の Phase 1 が `pv || hit_accum` のときにこの mutex を取り、`ilookup` で fd を引いて差分を集め (`iput` は mutex の中、`s3fs_ino_buf_bytes` と同じ)、Phase 1 のあとで `last_tick` の昇順に `on_hit` を呼び、その後で `on_evict` の票を取る。`on_remove` を呼ぶ所は `s3fs_hit_forget` で `policy_seen` を落とす。
-- 反映の順序: Phase 1 のループの前に全 ino の差分を集め、既知の ino (`policy_seen`) の hit を先に、新しい ino の hit を `on_insert` のあとに反映する。populate (fd->lock 下) は `hit_base` / `hit_base_set` を書き、`policy_seen` が偽のときの最初の look が読む (READ_ONCE/WRITE_ONCE、lock なし)。`.splice_read` も `s3fs_hit_count` を呼ぶ。
+- 反映の順序: Phase 1 のループの前に全 ino の差分を集める。既知の ino (`policy_seen`) の `d` と、新しい ino の `d_pre` (cache にない間の access と、populate のきっかけの miss の read) を `on_insert` の前に、新しい ino の `d` (populate 後の hit) を `on_insert` のあとに反映する。頻度を数える policy (W-TinyLFU の sketch) は cache にない ino の access も要る。`hit_flushed` は forget で消さない。populate (fd->lock 下) は `hit_base` / `hit_base_set` を書き、`policy_seen` が偽のときの最初の look が読む (READ_ONCE/WRITE_ONCE、lock なし)。`.splice_read` も `s3fs_hit_count` を呼ぶ。
 - **policy への通知は `s3fs_policy_track` / `s3fs_policy_untrack` だけが行う** (`on_insert` / `on_size` / `on_remove` を直接呼ばない)。hit の状態を忘れるのは、この `untrack` と `admit_evict_ino` (丸ごとの evict の唯一の出口) だけ。`scripts/check-kmod-invariants.sh` (`make check-invariants`、`make test-regression` に含む) が、それ以外の呼び出しを見つけたら落ちる。
 - **pending 中の ino は `on_insert` / collect しない** (`s3fs_policy_trackable`、Phase 1、`pick_victim` を持つ policy)。pending は kmod の丸ごとの evict を止める (shed になる) が、policy がその ino を victim に選ぶと ghost / hand が動いて policy と kmod の状態がずれる。次の round (pending が消えてから) に回す。
 - fd->lock は取らない。fd の確保 (`s3fs_file_data_new`) で `alloc_percpu`、解放 (`s3fs_file_data_free`) で `free_percpu`。
+
+## sync (`s3fs_ebpf_entries_replace`)
+- daemon の bucket listing の sync (`--sync-every`、既定 30 秒) ごとに呼ばれる。**listing が前回と同じ (`dyn_entries_equal`: ino、親、size、mode、名前) なら `shrink_dcache_sb` を呼ばない。** 呼ぶと使われていない dentry がすべて落ち、idle な inode が evict されて chunk が free される (pcache の内容、capacity の計上、`s3fs_ino_buf_bytes` が 0 になる)。以前は sync のたびに毎回呼んでいた。listing が変わったとき (key の増減、size の変化) は今までどおり shrink する。`make test-sync-keeps-cache` が守る。
 
 ## flush pin (W1)
 - close/fsync の `s3fs_maybe_enqueue_flush` が `flush_seq++` し、`s3fs_flush_pin` で inode を `ihold` する (fd ごとに最大 1 本、`pin_link` が `s3fs_flush_pins` に載っていれば pin 中)。これがないと drop_caches / reclaim で `evict_inode` が PUT 前の `fd->buf` を捨てる。

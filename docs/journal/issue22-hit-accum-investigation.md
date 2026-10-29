@@ -41,8 +41,12 @@ KVM ゲスト (6 vCPU、HZ=1000)、ローカル MinIO、pcache モード。
 | 2 | **kmod が in-flight の miss の ino を `on_insert` していた**。pending は kmod の丸ごとの evict を止める (shed になる) が、policy がその ino を victim に選ぶと ghost / hand が動く | S3-FIFO で新しい ino が ghost に入り、次の `on_insert` で M に直行して居座る。simulator との最初の食い違いは 39 番目の access | pending の ino は `on_insert` / `on_size` / collect を次の round に回す (`e710994`、`efd7a65`) |
 | 3 | **S3-FIFO の ghost の下限 16**。|G| ≤ max(|M|, 16) | 8 slot の bench で simulator (|G| ≤ 7) の 2 倍以上の ino を覚え、M に直行させる | |G| ≤ (S+M) の 90% (下限 1) (`71a76fd`) |
 | 4 | **legacy の evict 経路 (softcap の vote) が `policy_seen` を落とさない** (`hit_accum` の実装の穴) | 再 admit 後、evict 中の miss read まで hit として数える (過大計上) | `s3fs_hit_forget` を両方の `admit_evict_ino` に追加 (`efd7a65`) |
+| 5 | **simulator との比較が kernel の ino と違うラベルで行われていた**。`trace.jsonl` は `100+idx`、kernel の ino は `105+idx`。W-TinyLFU の sketch は ino を hash するので、同じ access の列でも衝突の仕方が違う (sim では 1 回しか読まれていない ino の推定値が 6) | W-TinyLFU の per-access の食い違いが約 16%。sketch の中身を bpftool で dump して sim と突き合わせると、`ino+5` で全 4096 slot が一致 | bench が kernel の ino を記録し (`inodes-<policy>.txt`、`trace-ino-<policy>.jsonl`)、simulator はそれを replay する (`fix(scripts)`) |
+| 6 | **`hit_accum` が、まだ cache にない ino への access を policy に伝えていなかった**。最初の look で、populate までの数を捨てていた | W-TinyLFU の sketch (admission の duel が比べる頻度) が、cache にない ino の access を数えない。simulator は miss でも数える | populate までの数 `d_pre` を `on_insert` の前に replay、populate 後の hit `d` を後に replay (`feat(kmod): hit_accum` の続きの修正) |
+| 7 | **`s3fs_ebpf_entries_replace` が、listing が変わらなくても `shrink_dcache_sb` を呼んでいた**。bench は 3 秒ごと、既定は 30 秒ごとの sync で、使われていない dentry をすべて落とし、idle な inode が evict され、chunk が free される | resident な ino が `s3fs_ino_buf_bytes` で 0 B になる。capacity の計上が狂い、cache にあるはずの file が miss する。sieve と simulator の食い違いの大半 (337 件の最後の約 230 件) | listing が前回と同じなら shrink しない (`dyn_entries_equal`)。`SYNC_EVERY=3600s` で測ると sieve は simulator と **0 件の食い違い** |
+| 8 | **S3-FIFO の ghost の上限が、その時点の S+M の数に依存していた**。miss が in-flight の間は 1 つ少ない | run ごとに hit 数が最大 +5 pt 動く | S+M の最大値 (`peak`) の 90% にした |
 
-(1) は測定の不具合、(2)(3) は policy 側の不具合。(1) があるので simulator との比較が全て 1 slot ずれていて、(2)(3) は同じ 7 slot の世界でだけ目立った。
+(1)(5) は測定の不具合、(2)(3)(8) は policy 側の不具合、(6) は `hit_accum` の設計の不足、(7) は `hit_accum` と無関係の kmod の不具合 (cache を定期的に空にしていた)。(1) があるので simulator との比較が全て 1 slot ずれていて、(2)(3) は同じ 7 slot の世界でだけ目立った。
 
 ## 5. どう見つけたか (再現できる手順)
 
@@ -70,7 +74,7 @@ KVM ゲスト (6 vCPU、HZ=1000)、ローカル MinIO、pcache モード。
 | bench の seed (集約) | `hitrate_content()` / `small_content()` が内容の唯一の定義。`FILE_BYTES` / `SMALL_FILE_BYTES` はそこから測る。seed 後に `mc stat` で保存されたサイズを確かめ、違えば止まる |
 | kmod の policy 通知 (集約) | `on_insert` / `on_size` / `on_remove` は `s3fs_policy_track` / `s3fs_policy_untrack` だけが呼ぶ。pending の規則は `s3fs_policy_trackable` の 1 箇所。2 つの Phase 1 ループの重複していた処理も同じ関数になった。hit の状態を忘れるのは `untrack` と `admit_evict_ino` だけ |
 | 静的検査 `make check-invariants` | `scripts/check-kmod-invariants.sh`。上の呼び出し制限と、bench の file size が書き込みでないことを grep で見る。root も kernel も要らない。`make test-regression` の先頭に入れた。わざと生の呼び出しを足す、`FILE_BYTES=44` に戻す、のどちらでも落ちることを確かめた |
-| 回帰テスト `make test-policy-conformance` | `scripts/test-policy-conformance.sh`。4 つの pick_victim policy を live で動かし (`hit_accum=1`、capacity = 8 ファイル)、同じ trace を simulator に通して per-access で比べる。条件は hit 数の差 ≤ 3.5 pt と、食い違う access の割合が policy ごとの上限以下 (lru 6%、s3fifo 13%、wtinylfu 22%、sieve 26%)。`make test-regression` に入れた |
+| 回帰テスト `make test-policy-conformance` | `scripts/test-policy-conformance.sh`。4 つの pick_victim policy を live で動かし (`hit_accum=1`、capacity = 8 ファイル)、同じ trace を simulator に通して per-access で比べる。条件は hit 数の差 ≤ 3.0 pt と、食い違う access の割合が policy ごとの上限以下 (lru 4%、sieve 2%、s3fifo 9%、wtinylfu 9%)。`SYNC_EVERY=3600s` で回し (sync の tick が入ると hit 数が動く)、落ちた policy だけ 1 回やり直す。simulator には kernel の ino を replay させる。`make test-regression` に入れた |
 
 回帰テストが過去の不具合を捕まえるか、元に戻して確かめた (seed 42、s3fifo_pick_ops):
 
@@ -85,22 +89,29 @@ bench の capacity のずれは、1 slot 足りないと simulator との差が�
 
 テストの限界:
 - `hit_accum=0` (旧の信号) では、旧信号が一部の hit を落とす (jiffy に 1 回の間引き) ので、hit 数の差が 3.3 pt まで出てテストが揺れた。テストは既定で `hit_accum=1` で測る (`CONF_HIT_ACCUM=0` で旧信号を測れる)。
-- sieve と wtinylfu は、hit 率が合っていても 16〜19% の access で simulator と食い違う。BPF 版が simulator と一手ずつ同じではない (下の未調査)。上限はその値のすぐ上に置いてあり、これを超える悪化は捕まえるが、現状の差の原因は説明できていない。
+- s3fifo と wtinylfu は、hit 率が合っていても 6〜7% の access で simulator と食い違う。simulator がモデル化していない部分 (kmod の round、pending の shed、wtinylfu の limbo / rejected) による。上限はその値のすぐ上に置いてあり、これを超える悪化は捕まえる。sieve は 0%、lru は 1.8%。
 - kmod 側の pending の規則を単体で試す KUnit は書いていない (Phase 1 は mount と daemon を要する)。live のテストで捕まえる。
+
+追加した回帰テスト (2026-10-28):
+
+| テスト | 防ぐもの |
+|---|---|
+| `make test-sync-keeps-cache` (`scripts/test-sync-keeps-cache.sh`) | listing が変わらない sync が cache を空にすること (上の 7)。`--sync-every=2s` で file を読み、sync の tick を 3 回待って読み直しても upcall が増えない。object を足すと次の tick で見える。`changed` を常に真に戻すと `cache-dropped-by-sync(upcalls 1->2)` で FAIL する。`make test-regression` に入れた |
+| KUnit `s3k_dyn_entries_equal` | 「同じ listing」の判定 (size、名前、親 ino、key の増減) |
+| KUnit `s3k_hit_delta_once` / `s3k_hit_replay_order` | populate までの数 `d_pre` と、populate 後の `d` の replay の順序 |
 
 ## 8. 残っていること
 
-- per-access の食い違い: s3fifo 約 8%、sieve 約 9〜12%、wtinylfu 約 16% (hit 率は ±2 pt で合っている)。SIEVE は hand の端のバグを 1 つ直した (食い違い 337→約 230)。wtinylfu は未調査で、run ごとのばらつきもある。
-- 既定を 1 にするかの判断 (理由は read 経路のコスト、単位の統一、G5 の解消)。
-
-- wtinylfu の per-access の食い違い (約 16%) の原因。
+- per-access の食い違いの残り (`SYNC_EVERY=3600s`、決定的な条件): lru 1.8%、sieve **0%**、s3fifo 約 6〜7%、wtinylfu 約 6%。hit 数は simulator と ±0.5 pt (外れ値で ±2 pt)。s3fifo と wtinylfu の残りは simulator がモデル化していない部分: kmod の round (miss した ino は 1 round 遅れて policy に入る)、pending の shed、wtinylfu の limbo / rejected キュー。
+- sync の tick (daemon が `--sync-every` ごとに走らせる `admit_replace`) が access の合間の任意の時刻に入るので、hit 数が run ごとに動く (s3fifo で最大 +5 pt、wtinylfu で +2.5 pt が 10 回に 1 回)。`test-policy-conformance` は `SYNC_EVERY=3600s` にして、外れ値に備えて 1 回だけやり直す。
+- 既定を 1 にした (2026-10-28)。残りの課題は、上の simulator のモデル化と、長時間の soak。
 
 調査の続きで確認したこと (`benchmark-results.md` §18.45):
 - **lockdep (AC-42)**: lockdep 付きカーネル (6.12.0-s3fs-lockdep) で `make test-lockdep` が PASS (2026-10-28)。`hit_accum` 1 / 0 の `test-regression` と 120 秒の evict-race で lockdep / sleeping-in-atomic / RCU の報告が 0 件。evict の mutex の中の `ilookup` / `iput` を含む。手順と踏んだこと: `docs/dev-notes/lockdep-kernel.md`。
 - `INTERLEAVE=1` にしても hit rate は上がらない。評価の間隔は simulator との差の原因ではなかった。
 - gate (b) は 10 MiB の cat が 16 ms 前後の同点で、ベースライン (`51e9e50`) は PASS、現在は `hit_accum` 0 / 1 とも FAIL だが差は 0.7% でノイズ内。`hit_accum` の影響ではない。
 - G5: large の 1 access が `on_hit` 約 82 回 (folio ごと) だったのが、`hit_accum=1` で高々 1 回になった。
-- `make test-kunit` (UML、41 件) PASS。
+- `make test-kunit` (UML) PASS (最後は 42 件)。
 
 ## 9. 関連
 

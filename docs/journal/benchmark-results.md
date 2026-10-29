@@ -2059,3 +2059,43 @@ per-access の hit/miss を simulator と突き合わせた (`bench-hitrate.sh` 
 **SIEVE の hand のバグ**: `policy_sieve_pick_ops` は、hand が newest 端 (head) にあるとき、次の `on_insert` の新しい item の上に hand が乗り、次の `pick_victim` が newest の item を evict していた。参照 (simulator) は hand を nil にして次は oldest から始める。`on_insert` で hand が head 以上なら tail に戻すように直した。per-access で simulator と食い違う数は 337 から約 230 に減った (seed 42)。残り (約 9〜12%) は run ごとにばらつく。
 
 **既定の変更 (2026-10-27)**: 以上の結果から、module param `hit_accum` の既定を 1 にした。従来の信号に戻すには `hit_accum=0`。A/B の bench は `HIT_ACCUM=0|1` を明示する。
+
+### 18.46 issue #22: wtinylfu の食い違いの原因と、sync が cache を空にしていた件 (2026-10-29)
+
+§18.45 の続き。wtinylfu の per-access の食い違い (約 14〜16%) を調べて、`hit_accum` と無関係のものを含む 4 つの原因が見つかった。詳細: `docs/journal/issue22-hit-accum-investigation.md` §4 の 5〜8。
+
+| 原因 | 症状 | 効果 |
+|---|---|---|
+| simulator が `100+idx` のラベル、kernel は `105+idx`。sketch は ino を hash する | sim の sketch が live と違う (4096 slot 中 84 が違う。`ino+5` にすると 0) | bench が kernel の ino を記録し、sim が replay する。wtinylfu の食い違い 13.7%→8.6% |
+| `hit_accum` が cache にない ino の access を数えていなかった | W-TinyLFU の admission の duel の頻度が sim と違う | populate までの数を `on_insert` の前に replay (`d_pre`)。11.8%→(上と合わせて) |
+| **`entries_replace` が、listing が同じでも `shrink_dcache_sb` を呼んでいた** | sync の tick ごとに idle な inode が全部 evict され、resident な ino が 0 B と報告される (capacity の計上が狂う) | listing が同じなら呼ばない。`SYNC_EVERY=3600s` なら sieve は simulator と **0 件の食い違い** |
+| S3-FIFO の ghost の上限が、その時点の S+M に依存 | run ごとに hit 数が最大 +5 pt | S+M の最大値の 90% |
+
+**per-access の食い違い** (`test-policy-conformance`、seed 42、`SYNC_EVERY=3600s`、決定的):
+
+| policy | 以前 | 今 | hit 数 (live / sim) |
+|---|---|---|---|
+| lru | 2.4% | 1.8% | 775 / 784 |
+| sieve | 12.4% | **0%** | 876 / 876 |
+| s3fifo | 7.8% | 6.4% | 934 / 936 |
+| wtinylfu | 13.7% | 6.2% | 966 / 969 |
+
+残りは simulator がモデル化していない部分 (kmod の round、pending の shed、wtinylfu の limbo / rejected)。
+
+**hit rate** (`bench-hitrate-multi.sh`、`INTERLEAVE`=25、既定の sync 3 秒、3 seed の中央値 %):
+
+| policy | simulator | `hit_accum=0` | `hit_accum=1` |
+|---|---|---|---|
+| wtinylfu_pick_ops | 48.4 | 50.3 | 54.9 |
+| s3fifo_pick_ops | 47.2 | 49.1 | 51.3 |
+| sieve_pick_ops | 46.8 | 47.9 | 46.8 |
+| lru_pick_ops | 39.2 | 38.8 | 38.8 |
+| sieve_ops (旧) | — | 34.1 | 33.8 |
+| time_decay_ops | — | 45.2 | 44.7 |
+| observe | — | 37.6 | 38.2 |
+
+- sync が cache を空にしなくなったので、`observe` と `time_decay_ops` の hit rate が上がった (31→38、27→45)。sync のたびに cache が空になっていたために、policy の差が隠れていた。
+- `hit_accum=1` の上乗せは、wtinylfu +4.6 pt、s3fifo +2.2 pt、sieve −1.1 pt、lru 0 で、ノイズ (約 ±3 pt) の範囲。これまでの結論 (`hit_accum` の hit rate への効果は小さく、利点は read 経路のコストと単位の統一) は変わらない。
+- 既定の sync の間隔は 30 秒なので、実運用では以前も cache が 30 秒ごとに空になっていた。この修正は hit rate の bench だけでなく、実際の cache の寿命に効く。
+
+**回帰テスト**: `make test-regression` は `hit_accum` 1 / 0 とも 21 件 PASS (新しく `test-sync-keeps-cache` を含む)。`make test-kunit` は 42 件 PASS。
