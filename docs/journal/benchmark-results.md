@@ -2099,3 +2099,46 @@ per-access の hit/miss を simulator と突き合わせた (`bench-hitrate.sh` 
 - 既定の sync の間隔は 30 秒なので、実運用では以前も cache が 30 秒ごとに空になっていた。この修正は hit rate の bench だけでなく、実際の cache の寿命に効く。
 
 **回帰テスト**: `make test-regression` は `hit_accum` 1 / 0 とも 21 件 PASS (新しく `test-sync-keeps-cache` を含む)。`make test-kunit` は 42 件 PASS。
+
+### 18.47 `bench-pcache-remeasure.sh` の測り直し (A〜E) と cold read の n=10 (2026-10-29)
+
+`claude/relaxed-shannon-u83o9n` (kmod/vfs/*.inc.c への分割と daemon のファイル分割を含む。issue #22 の修正は入っている)、6.12.0-061200-generic、ローカル MinIO、`hit_accum` は既定。`STEPS="A B C D E"`、sha256 の verify は全 PASS。§18.27〜18.31 との比較 (中央値):
+
+| 項目 | 既存 | 今回 |
+|---|---:|---:|
+| A: open+read+close p50 fuse-raw / fuse-cache / mount-s3 | 1.707 ms / 524.6 µs / 103.8 µs | 1.794 ms / 536.8 µs / 111.1 µs |
+| A: ebpf-pcache / ebpf-nocache p50 | 3.05 µs / 523.7 µs | 3.07 µs / 550.0 µs |
+| B: durable write 1 / 10 / 100 MiB (ebpf) | 15.0 / 54.6 / 262.4 ms | 14.2 / 54.8 / 269.2 ms |
+| C: 途中 4 KiB write 1 / 10 / 100 MiB (ebpf) | 17.6 / 70.6 / 389.3 ms | 17.3 / 63.0 / 303.4 ms |
+| C: 同 (fuse-raw) | 20.6 / 44.9 / 158.5 ms | 20.2 / 44.9 / 160.6 ms |
+| E: `ls -l` cold / warm (ebpf) | 275 / 64 ms | 40.8 / 25.5 ms |
+| E: cat 全部 cold / warm (ebpf) | 6,884 / 197 ms | 6,685 / 164 ms |
+
+- A、B は変わらない。C は ebpf が少し速くなったが、10 / 100 MiB は今回も fuse-raw に負ける (0.71× / 0.53×)。E の `ls -l` は ebpf が速くなった。
+
+#### cold read (D) は run によって結果が変わる
+
+| run | n | 300 MiB fuse-raw | 300 MiB ebpf | ebpf / fuse-raw |
+|---|---:|---:|---:|---:|
+| §18.30 (旧) | 3 | 298.4 ms | 870.2 ms | 0.34× |
+| A〜E の run の D | 3 | 307.5 ms | 303.2 ms | 1.01× |
+| `STEPS=D RUNS_COLD=10` | 10 | 312.5 ms | 360.2 ms | 0.87× |
+| 同、`D_DROP_EACH=0` | 10 | 283.7 ms | 243.4 ms | 1.17× |
+| 同、`D_DROP_EACH=1` | 10 | 287.6 ms | 236.3 ms | 1.22× |
+
+- 10 / 100 MiB は ebpf が fuse-raw と同等かやや速い (10 MiB: 19.1 対 20.2 ms、100 MiB: 97〜101 対 102〜110 ms)。
+- 300 MiB は、同じ n=10 でも run によって 243 ms と 360 ms の幅があった。1 run の中央値では ebpf と fuse-raw の優劣は言えない。旧表の 0.34× からは大きく改善している。
+- `/proc/vmstat` (メモリ回収) の増分:
+
+| run | kswapd のスキャン | direct reclaim のスキャン | allocstall |
+|---|---:|---:|---:|
+| `D_DROP_EACH=0` | 82,240 ページ | 128 | 2 |
+| `D_DROP_EACH=1` | 24,896 ページ | 64 | 1 |
+
+  §18.39 では遅い read のたびに kswapd が約 23 万ページを回収していたが、今回の 2 run では回収はほとんど起きていない。ebpf の 300 MiB は通常 run でも 243 ms で、drop_caches の効果は見えなかった。
+- 360 ms が出た run は `/proc/vmstat` を取っていないので、メモリ回収が原因だったかは確認できていない。§18.39 の説明と矛盾はしないが、今回は裏付けられていない。ホストは 8 GB で、run の直前の page cache の溜まり具合が違った可能性がある。
+- mount-s3 の 300 MiB は A〜E の run (n=3) で中央値 8,573 ms、最小 288.6 ms の外れ値が出た。n=10 の 3 run では 397.5 / 303.9 / 311.0 ms。
+
+未了: 通常設定で n=10 を複数回繰り返して run 間のばらつきを見ること、各 run で `/proc/vmstat` を取ること、先に別の大きなファイルを読んで回収を意図的に起こすこと。
+
+**同じブランチのテスト**: `make test-regression` 全 PASS (23 件)、`make test-policy-conformance` PASS、`make test-kunit` 45 件 PASS。
