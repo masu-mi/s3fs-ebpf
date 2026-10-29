@@ -17,27 +17,8 @@ import (
 )
 
 // syncNameMax mirrors S3FS_SYNC_NAME_MAX in include/s3fs_ebpf_uapi.h.
-const syncNameMax = 255
-
-// syncEntry mirrors `struct s3fs_sync_entry` (G-01 layout: parent_ino added).
-type syncEntry struct {
-	Ino       uint64
-	ParentIno uint64 // G-01: 0 == root == S3FS_ROOT_INO
-	Size      uint64
-	Mode      uint32
-	NameLen   uint32
-	Name      [syncNameMax + 1]byte
-}
-
-// syncEntriesArg mirrors `struct s3fs_sync_entries`.
-type syncEntriesArg struct {
-	Count   uint32
-	_pad    uint32
-	Entries uint64
-}
 
 // s3fsIocSyncEntries encodes _IOW(0xE3, 0x04, struct s3fs_sync_entries).
-const s3fsIocSyncEntries = (1 << 30) | (uint32(unsafe.Sizeof(syncEntriesArg{})) << 16) | (0xE3 << 8) | 0x04
 
 // syncEntriesIoctl pushes `entries` to kmod via S3FS_IOC_SYNC_ENTRIES.
 // Passing an empty slice tells kmod to restore its bootstrap table.

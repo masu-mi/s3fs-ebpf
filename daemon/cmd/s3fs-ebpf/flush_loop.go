@@ -14,62 +14,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// flushEvent mirrors `struct s3fs_flush_event` (G-01 layout).
-// Flags carry S3FS_FLUSH_FLAG_* — currently only FLUSH_WAIT (fsync
-// path) which tells the coalescer to skip debounce.
-type flushEvent struct {
-	Ino       uint64
-	ParentIno uint64 // G-01: dir the file lives under, for full-key reconstruction
-	Size      uint64
-	NameLen   uint32
-	Flags     uint32
-	Name      [syncNameMax + 1]byte
-}
-
 // flushFlagWait matches S3FS_FLUSH_FLAG_WAIT in the UAPI header.
 const flushFlagWait uint32 = 0x1
-
-// readDirtyArg mirrors `struct s3fs_read_dirty`.
-type readDirtyArg struct {
-	Ino      uint64
-	Uaddr    uint64
-	Size     uint64
-	OutBytes uint64
-}
-
-// markDirtyArg mirrors `struct s3fs_mark_dirty`.
-type markDirtyArg struct {
-	Ino uint64
-}
-
-// statsArg mirrors `struct s3fs_stats`.
-const statsMax = 16
-type statsArg struct {
-	Count  uint32
-	Filled uint32
-	Values [statsMax]uint64
-}
-
-// drainEvictionsArg mirrors `struct s3fs_drain_evictions`.
-const evictLogMax = 256
-type drainEvictionsArg struct {
-	Cap      uint32
-	Filled   uint32
-	Overflow uint32
-	_pad     uint32
-	Inos     [evictLogMax]uint64
-}
-
-const (
-	s3fsIocPopFlush        = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x05
-	s3fsIocReadDirty       = (3 << 30) | (uint32(unsafe.Sizeof(readDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
-	s3fsIocMarkDirty       = (1 << 30) | (uint32(unsafe.Sizeof(markDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
-	s3fsIocStats           = (3 << 30) | (uint32(unsafe.Sizeof(statsArg{})) << 16) | (0xE3 << 8) | 0x08
-	s3fsIocDrainEvictions  = (3 << 30) | (uint32(unsafe.Sizeof(drainEvictionsArg{})) << 16) | (0xE3 << 8) | 0x09
-	s3fsIocSignalFlush     = (1 << 30) | (uint32(unsafe.Sizeof(signalAdmitArg{})) << 16) | (0xE3 << 8) | 0x0A
-	// S-08: blocking variant for WAIT-flagged (fsync) flush events.
-	s3fsIocPopFlushWait = (2 << 30) | (uint32(unsafe.Sizeof(flushEvent{})) << 16) | (0xE3 << 8) | 0x0D
-)
 
 // signalFlush notifies kmod that a flush PUT completed with `err`.
 // -ENOENT (no waiter) is a normal outcome for the .release path; we

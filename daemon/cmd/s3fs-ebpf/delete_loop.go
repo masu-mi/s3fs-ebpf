@@ -12,18 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// deleteEvent mirrors `struct s3fs_delete_event` (G-01 layout).
-// Kept as a separate type from flushEvent so the ioctl size encoding
-// matches kmod's expected sizeof exactly.
-type deleteEvent struct {
-	Ino       uint64
-	ParentIno uint64 // G-01
-	NameLen   uint32
-	_pad      uint32
-	Name      [syncNameMax + 1]byte
-}
-
-const s3fsIocPopDelete = (2 << 30) | (uint32(unsafe.Sizeof(deleteEvent{})) << 16) | (0xE3 << 8) | 0x0B
 
 func popDelete(devFd int, out *deleteEvent) error {
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
@@ -96,20 +84,6 @@ func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	fmt.Printf("[delete] ino=%d s3://%s deleted\n", ev.Ino, s3key)
 }
 
-// renameEvent mirrors `struct s3fs_rename_event` (G-01 layout).
-// Carries both names + their parent inos in one payload so daemon
-// resolves full S3 keys for a cross-dir CopyObject + Delete.
-type renameEvent struct {
-	Ino           uint64
-	OldParentIno  uint64 // G-01
-	NewParentIno  uint64 // G-01
-	OldNameLen    uint32
-	NewNameLen    uint32
-	OldName       [syncNameMax + 1]byte
-	NewName       [syncNameMax + 1]byte
-}
-
-const s3fsIocPopRename = (2 << 30) | (uint32(unsafe.Sizeof(renameEvent{})) << 16) | (0xE3 << 8) | 0x0C
 
 func popRename(devFd int, out *renameEvent) error {
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL,

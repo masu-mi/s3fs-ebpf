@@ -10,18 +10,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// probeKvbaseArg mirrors `struct s3fs_probe_kvbase` in
-// include/s3fs_ebpf_uapi.h. Layout is fixed by the kmod's ioctl handler.
-type probeKvbaseArg struct {
-	ArenaFD   uint32
-	_pad      uint32
-	OutKvbase uint64
-	OutSize   uint64
-}
-
 // s3fsIocProbeKvbase encodes _IOWR(0xE3, 0x01, struct s3fs_probe_kvbase).
 // _IOWR direction is 3; size = sizeof(probeKvbaseArg) = 24 bytes.
-const s3fsIocProbeKvbase = (3 << 30) | (uint32(unsafe.Sizeof(probeKvbaseArg{})) << 16) | (0xE3 << 8) | 0x01
 
 // runProbeKvbase is the Week 4 (a) spike: it verifies that the
 // container_of-based extraction of struct bpf_arena.kern_vm->addr
