@@ -292,7 +292,7 @@ func drainFlushQueue(ctx context.Context, devFd int, devPath string,
 			handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
 			continue
 		}
-		coal.submit(ctx, &ev)
+		coal.Submit(ctx, &ev)
 	}
 }
 
