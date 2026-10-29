@@ -18,8 +18,7 @@ import (
 // the remote runs are copied server-side (UploadPartCopy, pinned by ETag) and
 // only the other chunks travel.  See docs/design/ac51-partial-modify.md §7-8.
 
-const (
-)
+const ()
 
 // dirtyLayout asks kmod for the chunk states of ino.
 func dirtyLayout(devFd int, ino uint64) (kinds []objstore.ChunkKind, size, chunk int64, err error) {

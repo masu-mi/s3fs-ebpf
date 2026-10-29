@@ -115,7 +115,7 @@ func buildEntriesFromS3(ctx context.Context, s3c objstore.Backend) ([]fpebpf.Ent
 						Ino:       dino,
 						ParentIno: parent,
 						Name:      comp,
-						S3Key:     "", // synthetic — no backing object
+						S3Key:     "",       // synthetic — no backing object
 						Mode:      0o040755, // S_IFDIR | 0755
 						Fallback:  0,
 						Prewarm:   false, // dirs have no content to admit

@@ -40,9 +40,9 @@ type chunkLoad struct {
 	n    int
 	done []chan struct{} // closed once chunk i is populated or the load failed
 
-	mu   sync.Mutex
-	ok   []bool   // chunk i was populated
-	err  error
+	mu  sync.Mutex
+	ok  []bool // chunk i was populated
+	err error
 }
 
 // chunkLoadOps are the effects of a load, so tests can replace them.

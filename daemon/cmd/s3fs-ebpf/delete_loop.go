@@ -12,7 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-
 func popDelete(devFd int, out *deleteEvent) error {
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
 		uintptr(devFd), uintptr(s3fsIocPopDelete),
@@ -83,7 +82,6 @@ func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	}
 	fmt.Printf("[delete] ino=%d s3://%s deleted\n", ev.Ino, s3key)
 }
-
 
 func popRename(devFd int, out *renameEvent) error {
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL,

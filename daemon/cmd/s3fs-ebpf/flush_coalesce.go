@@ -22,11 +22,11 @@ import (
 // Ordering guarantee: the latest event's byte range wins. Users who
 // need per-close durability should use fsync().
 type coalescer struct {
-	devFd    int
-	devPath  string
-	progs    *fpebpf.Programs
-	s3c      objstore.Backend
-	window   time.Duration
+	devFd   int
+	devPath string
+	progs   *fpebpf.Programs
+	s3c     objstore.Backend
+	window  time.Duration
 
 	mu      sync.Mutex
 	pending map[uint64]*pendingCoalesce

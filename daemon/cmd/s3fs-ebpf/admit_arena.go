@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"sort"
 	"sync"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/admit"
@@ -30,39 +29,53 @@ func updateArenaHighWater(off uint64, size int) {
 	}
 }
 
-// admitTable is the daemon-side source of truth for what kmod
-// currently has admitted. The kmod ioctl semantics are "replace the
-// whole table"; every mutation therefore has to send the full
-// snapshot. Guarded by admitMu.
-//
-// H-04 invariant: admitMu is held from the moment the slice is
-// mutated through the ioctl call. Two concurrent mutators used to
-// race by taking snapshots under the lock, releasing, then issuing
-// ioctls in an arbitrary order — kmod would end up with whichever
-// snapshot won the syscall race, silently losing the loser's
-// mutation. Holding the lock across the ioctl serializes the
-// push order and guarantees kmod's admit table always reflects the
-// latest committed daemon-side state.
-var (
-	admitMu sync.Mutex
-	admits  []admitEntry
+// programsArena adapts the eBPF loader to admit.Arena.
+type programsArena struct{ p *fpebpf.Programs }
+
+func (a programsArena) BaseAddr() uint64              { return a.p.Arena().BaseAddr() }
+func (a programsArena) FreeArenaChunk(off, sz uint64) { a.p.FreeArenaChunk(off, sz) }
+
+// arenaOf returns progs as an admit.Arena, or a nil interface for a nil
+// loader (offline mode / tests).
+func arenaOf(progs *fpebpf.Programs) admit.Arena {
+	if progs == nil {
+		return nil
+	}
+	return programsArena{progs}
+}
+
+// table is the process-wide admit table (see internal/admit).  The push and
+// the evict-log drain go through admitArena / drainEvictionsFn so tests can
+// swap them.
+var table = admit.NewTable(
+	func(dev string, es []admitEntry) error { return admitArena(dev, es) },
+	func(dev string) ([]uint64, uint32, error) { return drainEvictionsFn(dev) },
 )
 
-// drainEvictionsFn is drainEvictions behind a var so tests can feed a
-// fake kmod evict log.
+// drainEvictionsFn is drainEvictions behind a var so tests can feed a fake
+// kmod evict log.
 var drainEvictionsFn = drainEvictions
 
-// admitProgs is the loader that owns the arena, so reconcile can return
-// evicted ranges to the free-list from any push path. Set once by
-// setAdmitProgs after fpebpf.Load; nil in offline mode / tests.
-// Guarded by admitMu.
-var admitProgs *fpebpf.Programs
-
-func setAdmitProgs(p *fpebpf.Programs) {
-	admitMu.Lock()
-	admitProgs = p
-	admitMu.Unlock()
+// The admit-table operations keep their old names; the logic is in
+// internal/admit.
+func setAdmitProgs(p *fpebpf.Programs)                 { table.SetArena(arenaOf(p)) }
+func setAdmits(dev string, initial []admitEntry) error { return table.Set(dev, initial) }
+func replaceAdmit(dev string, e admitEntry, progs *fpebpf.Programs) error {
+	return table.Replace(dev, e, arenaOf(progs))
 }
+func replaceAdmitRange(dev string, e admitEntry, progs *fpebpf.Programs) error {
+	return table.ReplaceRange(dev, e, arenaOf(progs))
+}
+func addAdmitRange(dev string, e admitEntry, _ *fpebpf.Programs) error { return table.AddRange(dev, e) }
+func refreshAdmits(dev string) (int, error)                            { return table.Refresh(dev) }
+func clearAdmits(dev string) error                                     { return table.Clear(dev) }
+func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
+	return table.Drop(evicted, arenaOf(progs))
+}
+func dropAdmitIno(dev string, ino uint64, progs *fpebpf.Programs) {
+	table.DropIno(dev, ino, arenaOf(progs))
+}
+func pruneAdmitsTo(dev string, keep map[uint64]struct{}) error { return table.Prune(dev, keep) }
 
 // sharedDevFile holds the single /dev/s3fs_ebpf fd opened by openSharedDev.
 // All admit/signal ioctls reuse this fd instead of opening per-call (V-01).
@@ -93,111 +106,6 @@ func devFileOrOpen(devPath string) (f *os.File, close func(), err error) {
 		return nil, nil, fmt.Errorf("open %s: %w", devPath, err)
 	}
 	return f, func() { f.Close() }, nil
-}
-
-// reconcileEvictionsLocked pulls kmod's evict log and drops those inos
-// from the daemon-side snapshot before the caller pushes it (S-04).
-// kmod only evicts inside an admit_replace that the daemon itself
-// issued under admitMu, so draining right before every push closes
-// the window in which drainEvictionsLoop (2 s tick) had not run yet
-// and the next push re-sent — and so resurrected — evicted inos.
-// Errors are ignored: the periodic loop is still the fallback.
-// Caller holds admitMu.
-func reconcileEvictionsLocked(devPath string) {
-	evicted, _, err := drainEvictionsFn(devPath)
-	if err != nil || len(evicted) == 0 {
-		return
-	}
-	dropAdmitsLocked(evicted, admitProgs)
-}
-
-// setAdmits stores the initial (prewarm) admit list and pushes it to
-// kmod. Any prior state is dropped.
-//
-// X-04: sort by Ino ascending before storing so kmod receives entries
-// in assignment order (lower ino ≈ earlier assigned ≈ oldest). kmod's
-// s3fs_victim_cmp breaks score ties by idx (smallest = oldest); without
-// this sort the prewarm list arrives in Go map iteration order (random)
-// making eviction non-deterministic across runs.
-func setAdmits(devPath string, initial []admitEntry) error {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	sort.Slice(initial, func(i, j int) bool { return initial[i].Ino < initial[j].Ino })
-	admits = append(admits[:0], initial...)
-	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
-	return admitArena(devPath, admits)
-}
-
-// replaceAdmit inserts `entry` and pushes the whole snapshot to
-// kmod, dropping any prior admit for the same ino and returning that
-// prior admit's arena bytes to the D-02 free-list. Serves both the
-// first-admission path (no prior entry) and the refresh path (flush
-// / re-admit after eviction) with the same code path.
-//
-// Without dedup, a flush after prewarm would push [old, new] for the
-// same ino: kmod's hash accepts both, the older one becomes dead
-// weight in the bucket, and its arena bytes leak because no
-// eviction feedback removes them. `progs` may be nil in offline mode
-// (no arena wired) — the free-list update is then skipped.
-func replaceAdmit(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	// Before planReplaceAdmit: if entry.Ino itself was evicted, its old
-	// range is freed here and the fresh entry is then simply appended.
-	reconcileEvictionsLocked(devPath)
-	var arenaBase uint64
-	if progs != nil {
-		arenaBase = progs.Arena().BaseAddr()
-	}
-	next, freed := planReplaceAdmit(admits, entry, arenaBase)
-	admits = next
-	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
-	if progs != nil {
-		for _, r := range freed {
-			progs.FreeArenaChunk(r.Offset, r.Size)
-		}
-	}
-	return admitArena(devPath, admits)
-}
-
-// replaceAdmitRange is replaceAdmit for a range of an ino (AC-49): it drops
-// only the ino's entries that OVERLAP entry and frees their arena bytes, and
-// keeps its other ranges.  replaceAdmit drops every entry of the ino, which
-// is right when the new entry is the whole object (prewarm, flush) but made
-// a chunk admit (D-01) evict the ino's other chunks: reading chunk 0 threw
-// away chunk 1, and the next read fetched chunk 1 from S3 again.
-func replaceAdmitRange(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	reconcileEvictionsLocked(devPath)
-	var arenaBase uint64
-	if progs != nil {
-		arenaBase = progs.Arena().BaseAddr()
-	}
-	next, freed := planReplaceAdmitRange(admits, entry, arenaBase)
-	admits = next
-	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
-	if progs != nil {
-		for _, r := range freed {
-			progs.FreeArenaChunk(r.Offset, r.Size)
-		}
-	}
-	return admitArena(devPath, admits)
-}
-
-// refreshAdmits re-pushes the current snapshot to kmod without any
-// mutation. Used by POST /policy/eval to force a policy round when
-// steady state (no admissions, no evictions) would otherwise leave
-// the vtable idle. Bench harnesses rely on this to observe more than
-// the single prewarm-time eviction round.
-func refreshAdmits(devPath string) (int, error) {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	reconcileEvictionsLocked(devPath)
-	if err := admitArena(devPath, admits); err != nil {
-		return 0, err
-	}
-	return len(admits), nil
 }
 
 // AC-45 C2: capacity enforcement after a pcache populate.
@@ -254,137 +162,4 @@ func enforceCapacityAfterPopulate(devPath string) {
 		capEnforceAgain = false
 		capEnforceMu.Unlock()
 	}
-}
-
-// clearAdmits empties the daemon-side snapshot and tells kmod to
-// drop the admit table. Called on daemon shutdown.
-func clearAdmits(devPath string) error {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	admits = admits[:0]
-	metrics.Global.AdmitsCurrent.Store(0)
-	return admitArena(devPath, nil)
-}
-
-// dropAdmits removes the listed inos from the daemon-side admit
-// snapshot without pushing to kmod (kmod already dropped them via
-// policy vote — pushing would re-add them). Called by the eviction
-// feedback goroutine after S3FS_IOC_DRAIN_EVICTIONS.
-//
-// D-02: also returns each dropped entry's arena range to the
-// free-list so a subsequent AdmitContent can reuse the bytes. This
-// keeps the arena from growing monotonically under sustained
-// churn. `progs` may be nil when the loader isn't wired (offline
-// mode); free-list update is skipped in that case.
-func dropAdmits(evicted []uint64, progs *fpebpf.Programs) int {
-	if len(evicted) == 0 {
-		return 0
-	}
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	return dropAdmitsLocked(evicted, progs)
-}
-
-// dropAdmitIno removes every admit of ino and pushes the table to kmod.
-func dropAdmitIno(devPath string, ino uint64, progs *fpebpf.Programs) {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	if dropAdmitsLocked([]uint64{ino}, progs) > 0 {
-		_ = admitArena(devPath, admits)
-	}
-}
-
-// dropAdmitsLocked is dropAdmits with admitMu already held.
-// Returns the number of admit entries actually removed (not the count of
-// freed arena chunks, which may be smaller when progs==nil or Uaddr is
-// outside the arena). T-02: prior code returned len(freedRanges) causing
-// the "[evict-drain] dropped N admits" log to under-report when running
-// without a wired arena.
-func dropAdmitsLocked(evicted []uint64, progs *fpebpf.Programs) int {
-	skip := make(map[uint64]struct{}, len(evicted))
-	for _, ino := range evicted {
-		skip[ino] = struct{}{}
-	}
-	filtered := admits[:0]
-	var freedRanges []arenaChunkPair
-	arenaBase := uint64(0)
-	if progs != nil {
-		arenaBase = progs.Arena().BaseAddr()
-	}
-	dropped := 0
-	for _, e := range admits {
-		if _, ok := skip[e.Ino]; ok {
-			dropped++
-			if progs != nil && arenaBase != 0 && e.Uaddr >= arenaBase {
-				freedRanges = append(freedRanges, arenaChunkPair{
-					Offset: e.Uaddr - arenaBase,
-					Size:   e.Size,
-				})
-			}
-			continue
-		}
-		filtered = append(filtered, e)
-	}
-	admits = filtered
-	metrics.Global.AdmitsCurrent.Store(uint64(len(filtered)))
-	if progs != nil {
-		for _, r := range freedRanges {
-			progs.FreeArenaChunk(r.Offset, r.Size)
-		}
-	}
-	return dropped
-}
-
-// pruneAdmitsTo drops any admit whose ino is not in `keepInos`. Called
-// after a bucket sync when a key disappeared from S3: kmod's dyn entry
-// is already gone (shrink_dcache flushed the dentry), but the admit
-// hash keeps the orphan ino. Without this, long-running daemons leak
-// arena buffer + admit entries. See docs/journal/week4b-implementation-notes.md
-// §4-2.
-//
-// T-01: also returns each dropped entry's arena range to the free-list
-// (via admitProgs.FreeArenaChunk) so a prune round reclaims arena bytes
-// the same way eviction feedback does. Prior code only incremented a
-// counter, leaking arena memory on S3 object deletion.
-func pruneAdmitsTo(devPath string, keepInos map[uint64]struct{}) error {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	reconcileEvictionsLocked(devPath)
-	arenaBase := uint64(0)
-	if admitProgs != nil {
-		arenaBase = admitProgs.Arena().BaseAddr()
-	}
-	pruned, freed := planPruneAdmits(admits, keepInos, arenaBase)
-	dropped := len(admits) - len(pruned)
-	admits = pruned
-	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
-	if admitProgs != nil {
-		for _, r := range freed {
-			admitProgs.FreeArenaChunk(r.Offset, r.Size)
-		}
-	}
-	if dropped == 0 {
-		return nil // no delta, skip the ioctl
-	}
-	return admitArena(devPath, admits)
-}
-
-// addAdmitRange appends entry to the admit table and pushes the full
-// snapshot to kmod WITHOUT evicting existing entries for the same ino.
-// Used by the sequential prefetch path to stage the next chunk alongside
-// the current one (replaceAdmit would evict the current chunk first).
-// Idempotent: returns nil without ioctl if the exact (ino, offset) pair
-// is already admitted.
-func addAdmitRange(devPath string, entry admitEntry, progs *fpebpf.Programs) error {
-	admitMu.Lock()
-	defer admitMu.Unlock()
-	reconcileEvictionsLocked(devPath)
-	for _, e := range admits {
-		if e.Ino == entry.Ino && e.Offset == entry.Offset {
-			return nil // already present, skip ioctl
-		}
-	}
-	admits = append(admits, entry)
-	metrics.Global.AdmitsCurrent.Store(uint64(len(admits)))
-	return admitArena(devPath, admits)
 }

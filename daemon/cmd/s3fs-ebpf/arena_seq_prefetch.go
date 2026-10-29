@@ -80,10 +80,8 @@ func runSeqPrefetchLoop(ctx context.Context, devPath string,
 		case <-ticker.C:
 		}
 
-		// Snapshot admits under the lock to avoid holding it during S3 calls.
-		admitMu.Lock()
-		snapshot := append([]admitEntry(nil), admits...)
-		admitMu.Unlock()
+		// A copy, so the table's lock is not held during S3 calls.
+		snapshot := table.Snapshot()
 
 		// Group entries by ino.
 		byIno := make(map[uint64][]admitEntry, len(snapshot))
