@@ -1466,6 +1466,26 @@ static void s3k_dyn_entries_equal(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, dyn_entries_equal(a, 2, b, 2));
 }
 
+/* -- policy bookkeeping: a miss in flight is not tracked yet ---------------- */
+
+static void s3k_policy_trackable(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 33;
+	struct s3fs_pending *p;
+
+	KUNIT_EXPECT_TRUE(test, s3fs_policy_trackable(ino));
+	p = pending_get_or_create(ino, 0);
+	KUNIT_ASSERT_NOT_NULL(test, p);
+	/* A pending miss keeps the kmod from evicting the ino; a policy that picked it
+	 * would already have moved it to its ghost / hand.  Phase 1 skips on_insert,
+	 * on_size and the hit collect for it until the miss completes. */
+	KUNIT_EXPECT_FALSE(test, s3fs_policy_trackable(ino));
+	KUNIT_EXPECT_TRUE(test, s3fs_policy_trackable(ino + 1));	/* other inos unaffected */
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_admit(ino, 0, 0, 0), 0);
+	KUNIT_EXPECT_TRUE(test, s3fs_policy_trackable(ino));
+	pending_put(p);
+}
+
 static struct kunit_case s3k_data_cases[] = {
 	KUNIT_CASE(s3k_populate_fills_chunk),
 	KUNIT_CASE(s3k_chunk_populate_sizes),
@@ -1480,6 +1500,7 @@ static struct kunit_case s3k_data_cases[] = {
 	KUNIT_CASE(s3k_mpin_balanced),
 	KUNIT_CASE(s3k_modify_ready_and_remote),
 	KUNIT_CASE(s3k_dyn_entries_equal),
+	KUNIT_CASE(s3k_policy_trackable),
 	KUNIT_CASE(s3k_hit_delta_once),
 	KUNIT_CASE(s3k_hit_replay_order),
 	{}
@@ -1510,11 +1531,100 @@ static struct kunit_suite s3k_table_suite = {
 	.test_cases = s3k_table_cases,
 };
 
+/* sum of the per-CPU access counts of an fd */
+static u64 s3k_hit_sum(struct s3fs_file_data *fd)
+{
+	u64 sum = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		sum += per_cpu_ptr(fd->hit, cpu)->count;
+	return sum;
+}
+
+/* .read_iter counts one access per open file (hit_rearm_jiffies = 0), and only
+ * while hit_accum is on. */
+static void s3k_vfs_hit_count(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 31;
+	const bool old_accum = s3fs_hit_accum;
+	const unsigned int old_rearm = s3fs_hit_rearm_jiffies;
+	struct file *f, *g, *h;
+	struct s3fs_file_data *fd;
+	char buf[8];
+	loff_t pos;
+
+	s3k_one_entry(test, ino, "hc", 64);
+	f = s3k_open(test, "hc", O_RDONLY);
+	fd = s3k_fd_of(f);
+	s3fs_hit_accum = true;
+	s3fs_hit_rearm_jiffies = 0;
+
+	/* read at EOF: no upcall, but .read_iter still counts */
+	pos = 64;
+	kernel_read(f, buf, sizeof(buf), &pos);
+	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 1ull);
+	pos = 64;
+	kernel_read(f, buf, sizeof(buf), &pos);	/* the same open file: once */
+	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 1ull);
+
+	g = s3k_open(test, "hc", O_RDONLY);	/* a new open: another access */
+	pos = 64;
+	kernel_read(g, buf, sizeof(buf), &pos);
+	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 2ull);
+
+	s3fs_hit_accum = false;			/* hit_accum=0: nothing counted */
+	h = s3k_open(test, "hc", O_RDONLY);
+	pos = 64;
+	kernel_read(h, buf, sizeof(buf), &pos);
+	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 2ull);
+
+	s3fs_hit_accum = old_accum;
+	s3fs_hit_rearm_jiffies = old_rearm;
+	s3k_close(h);
+	s3k_close(g);
+	s3k_close(f);
+}
+
+/* Every whole-ino eviction goes through admit_evict_ino, which resets the
+ * per-ino hit state (policy_seen) - the policy forgets the ino, so its next
+ * populate is a first look again.  A populate while the policy still knows the
+ * ino must not move the base. */
+static void s3k_vfs_forget_on_evict(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 32;
+	struct s3fs_file_data *fd;
+	struct file *f;
+
+	s3k_one_entry(test, ino, "fe", 64);
+	f = s3k_open(test, "fe", O_RDONLY);
+	fd = s3k_fd_of(f);
+
+	/* first look not yet taken: the populate records its base */
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, ino, 0, 'a', 64), 0);
+	KUNIT_EXPECT_TRUE(test, fd->hit_base_set);
+
+	/* the policy knows the ino: a further populate leaves the base alone */
+	fd->hit_base_set = false;
+	fd->policy_seen = true;
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, ino, 0, 'b', 64), 0);
+	KUNIT_EXPECT_FALSE(test, fd->hit_base_set);
+
+	/* evicted whole: forgotten */
+	KUNIT_EXPECT_TRUE(test, admit_evict_ino(ino, NULL));
+	KUNIT_EXPECT_FALSE(test, fd->policy_seen);
+
+	s3k_close(f);
+	admit_drop_all_ranges(ino, NULL, NULL);
+}
+
 static struct kunit_case s3k_vfs_cases[] = {
 	KUNIT_CASE(s3k_vfs_read_bootstrap),
 	KUNIT_CASE(s3k_vfs_maxbytes),
 	KUNIT_CASE(s3k_vfs_read_past_2g),
 	KUNIT_CASE(s3k_vfs_populate_mid_chunk),
+	KUNIT_CASE(s3k_vfs_hit_count),
+	KUNIT_CASE(s3k_vfs_forget_on_evict),
 	KUNIT_CASE(s3k_vfs_write_read_back),
 	KUNIT_CASE(s3k_vfs_truncate),
 	KUNIT_CASE(s3k_vfs_close_flush),
