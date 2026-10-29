@@ -22,6 +22,9 @@
 # that is logged and does not affect the suites, which test the data
 # structures directly and set up the state they need.
 #
+# KUNIT_TIMEOUT=<seconds> (default 1500, 0 = none) bounds the whole run; the
+# script then exits 124.
+#
 # Without a tree at hand, `make -C kmod KDIR=... KUNIT=1` builds the module
 # with the suites against a kernel that has CONFIG_KUNIT; loading that
 # module runs them (results in dmesg / debugfs kunit/).
@@ -104,7 +107,13 @@ grep -qx 'obj-y += s3fs_ebpf_kunit/' "$KSRC/fs/Makefile" ||
 	echo 'obj-y += s3fs_ebpf_kunit/' >> "$KSRC/fs/Makefile"
 
 cd "$KSRC"
-exec python3 tools/testing/kunit/kunit.py run \
+# kunit.py's own --timeout (300 s for the test run) ends in SIGTERM, which a UML
+# kernel that has stopped responding does not act on, so its wait never returns
+# (seen on GitHub runners: the job ran until the 6 h limit).  Bound the whole
+# run, build included, and SIGKILL the process group after a grace period.
+# KUNIT_TIMEOUT is in seconds; 0 means no limit.
+KUNIT_TIMEOUT="${KUNIT_TIMEOUT:-1500}"
+exec timeout --kill-after=15 "$KUNIT_TIMEOUT" python3 tools/testing/kunit/kunit.py run \
 	--build_dir="$BUILD_DIR" \
 	"${CONFIGS[@]}" \
 	${MAKE_OPTS[@]+"${MAKE_OPTS[@]}"} \
