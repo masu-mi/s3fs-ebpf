@@ -54,10 +54,14 @@ if [ "${CONFORMANCE_ON_LOCKDEP:-0}" != 1 ] && sudo test -e /proc/lockdep_stats 2
 	exit 0
 fi
 
-ATTEMPTS=${ATTEMPTS:-2}
+ATTEMPTS=${ATTEMPTS:-3}
 
 # run_bench <policies>: the live run, per-access log in $OUT/live.<policy>
 run_bench() {
+	# bench-hitrate.sh APPENDS to the per-access log: without this a retry would judge
+	# the first attempt's first 2000 lines again and always repeat its verdict.
+	local p
+	for p in $1; do rm -f "$OUT/live.$p"; done
 	HIT_ACCUM="$CONF_HIT_ACCUM" PER_ACCESS_LOG="$OUT/live" SEED="$SEED" SOFTCAP="$SOFTCAP" N_ACCESS="$N_ACCESS" \
 		POLICIES="$1" DAEMON_EXTRA_FLAGS="--arena-metadata-only" OUT="$OUT/bench" \
 		"$TOPDIR/scripts/bench-hitrate.sh" >"$OUT/bench.log" 2>&1 || {
@@ -104,7 +108,8 @@ PY
 
 echo "==> test-policy-conformance (policies: $POLICIES, HIT_ACCUM=$CONF_HIT_ACCUM, up to $ATTEMPTS attempts)"
 # A real fault (wrong ghost bound, an in-flight miss on_insert'ed) fails every attempt;
-# the rare timing outlier (wtinylfu +2.5 pt once in ~10 runs) does not repeat.
+# a timing outlier (s3fifo up to +4.7 pt, wtinylfu +2.5 pt, a few runs in ten: the daemon's
+# 2 s eviction-drain / stats ticks fall between accesses) does not repeat.
 pending=$POLICIES
 declare -A result
 for attempt in $(seq 1 "$ATTEMPTS"); do
