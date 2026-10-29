@@ -60,6 +60,8 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計 (実装済み、`--partial-modify`、既定 off) |
 | [`design/ac58-pick-victim.md`](design/ac58-pick-victim.md) | AC-58: policy の vtable に `on_insert` / `on_remove` / `pick_victim` を足し、victim の選択を BPF に渡す設計 (実装済み、SIEVE / LRU / S3-FIFO の `*_pick_ops`) |
 | [`design/wtinylfu-pick-plan.md`](design/wtinylfu-pick-plan.md) | AC-66: W-TinyLFU を `pick_victim` で動かす計画 (現行とのずれ、BPF 側の設計、kmod に足す `on_size`、手順。未実装) |
+| [`design/ann-workload-measurement-plan.md`](design/ann-workload-measurement-plan.md) | 計画 (未実施): IVF / HNSW 型のアクセスパターンで policy・先読み・chunk 大きさを比べる計測計画。trace へのバイト容量と範囲の拡張、合成 trace の生成、実 trace での妥当性確認、実 kmod での確認 |
+| [`design/olap-oltp-s3-evaluation-plan.md`](design/olap-oltp-s3-evaluation-plan.md) | 計画 (未実施): DuckDB など S3 利用系の OLAP / OLTP に対して、FS 層を挟む価値があるかを確かめる評価計画。仮説 H1〜H6、価値がないと分かった時点で止めるゲート、トレース採取と policy 比較、構成別の end-to-end 比較 |
 | [`design/hit-signal-percpu-accumulation.md`](design/hit-signal-percpu-accumulation.md) | issue #22: hit の信号を `.read_iter` で per-CPU に数え、`admit_replace` の evict の前に policy へ反映する (実装済み、`hit_accum`、既定 on、計測は §18.44〜18.45。再計測の手順と採否の基準つき) |
 | [`design/design-review-checklist.md`](design/design-review-checklist.md) | 設計・実装・測定の検討観点 (issue #22 で見つけた不具合から): 規則の集約、周期処理の副作用、2 つの持ち主の状態、「数える」意味、参照との 1 手ずつの比較、測定の対照、テストが落ちることの確認、ロック、機能の出し方。レビュー用チェックリストつき |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
