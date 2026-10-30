@@ -113,6 +113,9 @@ cd "$KSRC"
 # run, build included, and SIGKILL the process group after a grace period.
 # KUNIT_TIMEOUT is in seconds; 0 means no limit.
 KUNIT_TIMEOUT="${KUNIT_TIMEOUT:-1500}"
+# Unbuffered, so that when the run is killed the log still shows how far the
+# suites got (stdout is a pipe on CI and Python would hold the lines back).
+export PYTHONUNBUFFERED=1
 exec timeout --kill-after=15 "$KUNIT_TIMEOUT" python3 tools/testing/kunit/kunit.py run \
 	--build_dir="$BUILD_DIR" \
 	"${CONFIGS[@]}" \
