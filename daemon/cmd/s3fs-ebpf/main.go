@@ -68,6 +68,8 @@ Dev / probe / demo commands:
   trace-replay  Offline policy simulator (P-04). Feeds a workload trace or a
                 synthetic Zipf sequence through Go-side LRU/SIEVE sims and
                 reports per-policy hit rates.
+  ann-sim       Synthetic ANN (IVF / HNSW / mixed) chunk-granular policy
+                comparison over capacity x policy x seed (ann-workload plan P2).
 
 Run "s3fs-ebpf dev <command> --help" for command-specific flags.
 `

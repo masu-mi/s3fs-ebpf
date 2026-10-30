@@ -21,6 +21,18 @@
 //	op    "read" (miss on empty cache), "write" (invalidates the
 //	      entry). Extend with "delete" later if needed.
 //
+// Optional range fields (docs/design/ann-workload-measurement-plan.md
+// P0). Absent (len == 0) means the legacy whole-file event, and the
+// event serialises exactly as before:
+//
+//	off, len  byte range read inside ino. ChunkReplay maps it to
+//	          (ino, off/chunk) cache keys.
+//	qid       query id (>0) for per-query metrics; 0 = not a query.
+//	step      dependency step inside a query. Reads of one (qid, step)
+//	          are issued in parallel; steps are serial.
+//	tag       free-form read class ("centroid", "cluster", ...) for
+//	          per-class hit rates.
+
 // The recorder is intentionally not implemented yet — kmod-side
 // ring buffer + drain ioctl is P-04 followup. For now the replay
 // harness drives synthetic Zipf traces so we can compare policies
@@ -51,6 +63,12 @@ type Event struct {
 	Ts  uint64 `json:"ts"`
 	Ino uint64 `json:"ino"`
 	Op  Op     `json:"op"`
+
+	Off  uint64 `json:"off,omitempty"`
+	Len  uint64 `json:"len,omitempty"`
+	Qid  uint64 `json:"qid,omitempty"`
+	Step uint32 `json:"step,omitempty"`
+	Tag  string `json:"tag,omitempty"`
 }
 
 // Read parses trace events from r. Returns the events in order.
