@@ -124,3 +124,6 @@ FIFO を 3 本使う。新しいものはまず小さい queue に入り、そ�
 - S3-FIFO: [ACM SOSP '23 (DOI 10.1145/3600006.3613147)](https://doi.org/10.1145/3600006.3613147)
 - W-TinyLFU: [arXiv:1512.00727](https://arxiv.org/abs/1512.00727) (ACM TOS 13(4), 2017)
 - OPT: Belady, IBM Systems Journal 5(2), 1966
+- LRB (学習で OPT を近似): [USENIX NSDI '20](https://www.usenix.org/conference/nsdi20/presentation/song)
+- page cache 本体の policy を eBPF で差し替える: [cache_ext](https://par.nsf.gov/biblio/10647289-cache_ext-customizing-page-cache-ebpf)
+- 本 PoC での policy 差し替えの価値の評価は `docs/design/where-fs-layer-can-win.md` §5

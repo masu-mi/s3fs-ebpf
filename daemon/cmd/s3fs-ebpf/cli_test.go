@@ -67,7 +67,7 @@ func TestCommandsRegistered(t *testing.T) {
 			t.Errorf("command %q is not registered (err=%v)", name, err)
 		}
 	}
-	for _, name := range []string{"test-arena", "verifier-demo", "probe-kvbase", "microbench", "trace-replay"} {
+	for _, name := range []string{"test-arena", "verifier-demo", "probe-kvbase", "microbench", "trace-replay", "ann-sim"} {
 		if c, _, err := root.Find([]string{"dev", name}); err != nil || c.Name() != name {
 			t.Errorf("dev command %q is not registered (err=%v)", name, err)
 		}

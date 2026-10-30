@@ -87,6 +87,7 @@ func newRootCmd(out, errOut io.Writer) *cobra.Command {
 		passthrough("probe-kvbase", "arena ioctl kvbase probe", runProbeKvbase),
 		passthrough("microbench", "tight-loop stat/read latency bench", runMicrobench),
 		passthrough("trace-replay", "offline policy hit-rate simulator", runTraceReplay),
+		passthrough("ann-sim", "synthetic ANN (IVF/HNSW) chunk-cache policy comparison", runAnnSim),
 	)
 
 	root.AddCommand(

@@ -233,3 +233,4 @@ backlog の ID 系列ごとの内容と件数です。件数は backlog のチ�
 - 倍率は比べる相手とキャッシュの条件をそろえて書く。875 倍や write 17 倍は条件の違いが大半で、fuse-cache や ebpf-nocache を対照群にして初めて構造の差が見えました (`br §0.1`)。
 - bench の環境はホストの状態 (page cache、メモリ回収、MinIO の同居) に左右される。cold read の遅さはホストのメモリ回収でした (`br §18.39`)。
 - 道具は堅牢なものを使う。bash の `wait` で hang した並列 cat は fio に替え (`ll §1.8`)、大きな kmod ファイルは `scripts/fn.sh` で関数単位に読むようにしました。
+- warm の定常状態では page cache のヒットで終わり、fuse-cache と差がつかない (2026-10-30)。優位は毎回 upcall が走る経路と cold の取り込みに限られた。層ごとの知見は `docs/design/lessons-cache-fs-layer.md`。
