@@ -104,6 +104,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 |---|---|
 | [`journal/benchmark-results.md`](journal/benchmark-results.md) | Meetup 用の headline 数値 + 3-way fair bench (ebpf vs fuse-raw vs fuse-cache) |
 | [`journal/ann-workload-results.md`](journal/ann-workload-results.md) | ANN simulator (P0〜P2) の結果、実機での OLTP / ベクトル検索 (kmod 対 s3fs-fuse) の計測、cold の調査、warm の分析 (2026-10-30) |
+| [`journal/fuse-baseline-raw-data.md`](journal/fuse-baseline-raw-data.md) | s3fs-fuse (raw / use_cache) の基準データ (2026-10-30): 小ファイル 10,000 cat、新規ファイル + fsync、64 jobs 並列 read。生データは `journal/data/` |
 | [`journal/hit-rate-bench.md`](journal/hit-rate-bench.md) | Zipf workload の policy hit-rate 実測 (2026-09-28 の数値は容量が効いておらず無効。2026-10-05 以降の capacity mode が正。`pick_victim` 版の比較は `journal/benchmark-results.md` §18.41〜18.43) |
 | [`journal/bench-env-notes.md`](journal/bench-env-notes.md) | bench 環境 caveats、Grafana metric surface、`make bench*` の修正記録 |
 

@@ -1,0 +1,8 @@
+date_utc: 2026-10-30T15:59:46Z
+git: 93d912adeeb2d3a1c8dcc5370cb73512e1245d6e
+kernel: Linux 6.12.0-061200-generic #202411220723 SMP PREEMPT_DYNAMIC Tue Nov 26 13:49:49 UTC 2024
+cpus: 6
+s3fs: Amazon Simple Storage Service File System V1.93 (commit:unknown) with GnuTLS(gcrypt)
+fio: fio-3.36
+jobs=64 runtime=5s reps=5 file=hello.txt (psync, bs=1, size=1, --thread)
+ebpf-pcache: --arena-metadata-only; nohook adds --no-read-iter-hook --pattern-aware-admit=false; arena = neither

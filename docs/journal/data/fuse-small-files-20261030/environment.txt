@@ -1,0 +1,9 @@
+date_utc: 2026-10-30T15:56:55Z
+git: 93d912adeeb2d3a1c8dcc5370cb73512e1245d6e
+kernel: Linux 6.12.0-061200-generic #202411220723 SMP PREEMPT_DYNAMIC Tue Nov 26 13:49:49 UTC 2024
+cpus: 6
+s3fs: Amazon Simple Storage Service File System V1.93 (commit:unknown) with GnuTLS(gcrypt)
+minio_image: docker.io/pgsty/silo:latest
+n_read: 10000  n_create: 1000  size: 4096
+fuse_raw_opts: url=http://127.0.0.1:9000 use_path_request_style allow_other umask=0022 (lib/bench.sh fuse_mount)
+fuse_cache_opts: + use_cache=/tmp/s3fs-fuse-cache-sf kernel_cache max_stat_cache_size=100000
