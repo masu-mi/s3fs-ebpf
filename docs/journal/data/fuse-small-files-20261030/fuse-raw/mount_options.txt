@@ -1,0 +1,1 @@
+s3fs /mnt/s3fuse fuse.s3fs rw,nosuid,nodev,relatime,user_id=0,group_id=0,allow_other 0 0
