@@ -24,6 +24,8 @@
 #
 # KUNIT_TIMEOUT=<seconds> (default 1500, 0 = none) bounds the whole run; the
 # script then exits 124.
+# KUNIT_EXIT_GRACE=<seconds> (default 120, 0 = none): how long the kernel may take to
+# exit after "Testing complete"; see the end of this file.
 #
 # Without a tree at hand, `make -C kmod KDIR=... KUNIT=1` builds the module
 # with the suites against a kernel that has CONFIG_KUNIT; loading that
@@ -116,9 +118,52 @@ KUNIT_TIMEOUT="${KUNIT_TIMEOUT:-1500}"
 # Unbuffered, so that when the run is killed the log still shows how far the
 # suites got (stdout is a pipe on CI and Python would hold the lines back).
 export PYTHONUNBUFFERED=1
-exec timeout --kill-after=15 "$KUNIT_TIMEOUT" python3 tools/testing/kunit/kunit.py run \
+#
+# The UML kernel also stops after the suites have finished: every test passed and
+# "Testing complete" was printed, but the process never exited (seen with
+# COVERAGE=1, where exit writes the clang profile) until KUNIT_TIMEOUT.  Once
+# that line is out, give the exit KUNIT_EXIT_GRACE seconds (default 120, 0 =
+# wait for ever), then SIGKILL the group; if every test passed the run counts as
+# a success (a missing profile is caught by kunit-cov.sh), and the state of the
+# stuck processes is printed so the next hang can be diagnosed.
+KUNIT_EXIT_GRACE="${KUNIT_EXIT_GRACE:-120}"
+LOG="$(mktemp)"
+trap 'rm -f "$LOG"' EXIT
+setsid timeout --kill-after=15 "$KUNIT_TIMEOUT" python3 tools/testing/kunit/kunit.py run \
 	--build_dir="$BUILD_DIR" \
 	"${CONFIGS[@]}" \
 	${MAKE_OPTS[@]+"${MAKE_OPTS[@]}"} \
 	--jobs="$JOBS" \
-	"$@"
+	"$@" > >(tee "$LOG") 2>&1 &
+PID=$!
+done_at=
+hung=0
+while kill -0 "$PID" 2>/dev/null; do
+	sleep 2
+	if [[ -z "$done_at" ]] && grep -q 'Testing complete' "$LOG"; then
+		done_at=$SECONDS
+	fi
+	if [[ -n "$done_at" ]] && ((KUNIT_EXIT_GRACE > 0 && SECONDS - done_at > KUNIT_EXIT_GRACE)); then
+		hung=1
+		echo "kunit.sh: the suites finished but the kernel did not exit within ${KUNIT_EXIT_GRACE}s; process state:" >&2
+		ps -o pid,ppid,stat,wchan:32,etime,args -g "$PID" >&2 || true
+		for p in $(pgrep -g "$PID" -x linux 2>/dev/null); do
+			echo "--- /proc/$p/stack, status" >&2
+			cat "/proc/$p/stack" "/proc/$p/status" 2>&1 | head -n 40 >&2 || true
+		done
+		kill -KILL -- "-$PID" 2>/dev/null || true
+		break
+	fi
+done
+rc=0
+wait "$PID" || rc=$?
+sleep 1	# let tee drain
+if ((hung)); then
+	# "Ran N tests: passed: N" with nothing failed, crashed or skipped-as-error
+	if grep -qE 'Testing complete\. Ran [0-9]+ tests: passed: [0-9]+$' "$LOG"; then
+		echo "kunit.sh: all tests passed; treating the hang at exit as success" >&2
+		exit 0
+	fi
+	exit 1
+fi
+exit "$rc"
