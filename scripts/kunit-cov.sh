@@ -32,11 +32,21 @@ srcs=()
 for f in "$DIR"/*.c; do
 	case "$f" in *_kunit.c | *.mod.c) ;; *) srcs+=("$f") ;; esac
 done
+# vfs_ops.c #includes the parts in kmod/vfs/*.inc.c, so the compiler records
+# their code under the real path of the repo, not under $DIR: list them too, or
+# the report loses most of the kmod.
+REAL_ROOT="$(cd "$ROOT" && pwd -P)"
+for f in "$REAL_ROOT"/kmod/vfs/*.inc.c; do
+	[[ -e "$f" ]] && srcs+=("$f")
+done
 mkdir -p "$(dirname "$OUT")"
 # The sources are symlinks into kmod/; report them under the repo path.
+# (llvm-cov report prints the paths without the leading slash once the files
+# no longer share a directory.)
+relpaths() { sed -e "s#${DIR#/}/#kmod/#" -e "s#${REAL_ROOT#/}/##"; }
 "$LLVM_COV" export -format=lcov -instr-profile="$BUILD_DIR/kunit.profdata" \
 	"$BUILD_DIR/linux" -sources "${srcs[@]}" |
-	sed "s#^SF:$DIR/#SF:kmod/#" >"$OUT"
+	sed -e "s#^SF:$DIR/#SF:kmod/#" -e "s#^SF:$REAL_ROOT/#SF:#" >"$OUT"
 "$LLVM_COV" report -instr-profile="$BUILD_DIR/kunit.profdata" \
-	"$BUILD_DIR/linux" -sources "${srcs[@]}" | sed "s#$DIR/#kmod/#"
+	"$BUILD_DIR/linux" -sources "${srcs[@]}" | relpaths
 echo "kunit-cov.sh: wrote $OUT"
