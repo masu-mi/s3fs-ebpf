@@ -105,11 +105,11 @@
 ### 4.2 BPF (policy・hook)
 
 **普遍**
-- policy が見る信号は、miss と一部のヒットだけ。信号を増やす (`hit_accum`) と、read 経路にコストが乗る。効果とコストを A/B で測ってから採用する。
+- policy が見る信号は、miss と一部のヒットだけ。信号を増やす方法しだいで read 経路のコストが変わる。fentry で毎回 `on_hit` を呼ぶ方式 (`hit_accum=0`) は policy なし比で −5〜7% の IOPS、`.read_iter` で per-CPU に数えて evict の前にまとめて反映する方式 (`hit_accum=1`) は +0.6〜0.8% で policy なしと同等だった (`benchmark-results.md` §18.44)。効果とコストを A/B で測ってから採用する。
 - BPF 版の policy は、Go の simulator と 1 手ずつ比べる (`design-review-checklist.md` §5)。simulator は ms 単位で回るので、アルゴリズムの比較は simulator で行い、実機は少数点の確認に使う。
 
 **現状の課題**
-- C5 (信号の少なさ)。BPF 版は 25 アクセスごとの評価など、simulator とずれる箇所がある (`trace-harness.md`)。
+- C5 (信号の少なさ)。`hit_accum` の hit rate への上乗せは小さい (+0.6〜+3.0 pt、負になる policy もあり、ノイズは約 ±3 pt)。live と simulator の差 (8〜11 pt) は、25 アクセスごとの評価の粒度ではなく、bench の capacity のずれ (7 個分と 8 個分) と `pick_victim` まわりの不具合 2 件 (in-flight の miss の `on_insert`、S3-FIFO の ghost の下限) が主因だった。修正後は ±3 pt で一致する (`benchmark-results.md` §18.44)。
 
 ### 4.3 daemon (upcall・admit・disk cache)
 
