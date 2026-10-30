@@ -56,11 +56,22 @@
 - ベクトル DB のキャッシュがホスト内の別プロセスと共有できるかは、検索では確認できなかった (各 DB のドキュメントで要確認)。
 - 小さいファイル多数の読みは、実運用のアプリが避ける形 (まとめる・ハンドルを保持する) で、優位性を出しても実用に結びつかない可能性が高い。
 
-## 5. 次に確かめること (優先順)
+## 5. pcache のアルゴリズム差し替えに未来はあるか
+
+結論: **evict アルゴリズムの差し替えそのものの価値は小さい。価値が残るのは admit・prefetch の差し替えと、page cache 本体を対象にする方向。** 根拠は simulator の結果 (`docs/journal/ann-workload-results.md`、合成 trace、5 seed) と cold 調査。
+
+- evict の差は小さい: 人気が一様なら policy 間は 1 ポイント未満。Zipf 1.1・容量 5% で s3fifo / wtinylfu が lru を 2〜6 ポイント上回る程度。HNSW ではレイアウト (bfs / insertion) の差 (GET が約 5 倍) が policy の差より桁で大きい。
+- 上界との差は、アルゴリズムでは埋まらない: 容量 25% でも OPT (Belady [10]) との差は 20 ポイント以上。OPT は未来を知っているので、差の大部分は「予測できない部分」。予測を使う研究 (LRB [11]) もあるが、kmod の内部で動かす費用に見合うかは別問題。
+- 構造上、信号が少ない: pcache の policy が決めるのは kmod の chunk の保持で、page cache のヒットは policy に届かない (`hit_accum` で一部を再送する設計。issue #22 の調査で効果は小さかった)。
+- admit・prefetch のほうが効く: cold 調査では、全体 admit か chunk ごとの fill かの判定が、s3 cold では 20% 勝ち、local cold では 1.7 倍負けを分けた (D4・D5)。汎用の readahead は逆効果 (GET が増え、ヒット率は改善せず、精度 3〜13%) だったが、IVF のクラスタ表や HNSW のレイアウトのように **アプリの構造を知った** prefetch は未検証で、policy をエンジンの外から差し替える価値 (計画書 H4) はここにある。
+- 隣接する先行研究: cache_ext [12] は eBPF で Linux の **page cache 本体** の eviction policy を差し替える枠組みで、8 つの policy を実装し、最大 70% のスループット向上と 58% の tail latency 低下を報告している (アプリごとに tune した場合。論文の掲載先のメタデータは情報源ごとに食い違うため、詳細は原典で確認すること)。本 PoC の pcache は page cache とは別に kmod に複本を持つので (D6)、policy を差し替える対象としては、page cache 本体を使う cache_ext のほうが素直。本 PoC が差別化できるのは、S3 という遅い下層を持つ点 (miss が高い: chunk 1 件 6〜7 ms) と、admit・prefetch の判断を daemon (S3 の知識を持つ側) と連携させられる点。
+- 注意: 合成 trace・単一ホスト・容量圧力のない実機計測のみ。実データ (計画 P3) と、容量を絞った実 kmod での確認 (P4) は未実施。
+
+## 6. 次に確かめること (優先順)
 
 1. **N プロセスが同じ 64〜256 MiB のファイルを cold から同時に読む** 計測 (fuse-cache・fuse-raw、入れられれば Mountpoint と比較)。完了時間、MinIO への重複 GET 数と取得バイト数、N への伸び方。
-2. cgroup のメモリ制約下での二重保持 (D6) の影響。
-3. cold の改善案: full admit の判定、chunk 大きさ (再ビルドして 2〜3 値)、upcall 1 件の内訳。
+2. admit の判定 (seq_ratio のしきい値、ランダム検出後の chunk 径) を A/B で比べる cold 計測。
+3. cgroup のメモリ制約下での二重保持 (D6) の影響。
 4. 大きいファイル (arena 128 MiB の制約を超える) の扱い。pcache の `--cache-capacity` との関係を確認する。
 
 ## 出典
@@ -76,3 +87,10 @@
 9. [Zilliz のブログ (競合の比較、割り引いて読む)](https://zilliz.com/blog/the-cost-of-consequence-what-no-one-tells-you-about-serverless-vector-databases)
 
 出典のうち、ベンダーのブログ・事例 ([3][8][9]) は参考値。
+10. Belady, "A study of replacement algorithms for a virtual-storage computer", IBM Systems Journal 5(2), 1966 (OPT。`cache-algorithms.md` §6 に既出)
+11. [Song et al., "Learning Relaxed Belady for Content Distribution Network Caching", NSDI '20](https://www.usenix.org/conference/nsdi20/presentation/song)
+12. [cache_ext: Customizing the Page Cache with eBPF (Zarkadas et al.)](https://par.nsf.gov/biblio/10647289-cache_ext-customizing-page-cache-ebpf) — 掲載先のメタデータは情報源で食い違う。[LPC 2025 の発表ページ](https://lpc.events/event/19/contributions/2165/) もある
+13. [Bijlani & Ramachandran, "Extension Framework for File Systems in User space (ExtFUSE)", USENIX ATC '19](https://www.usenix.org/conference/atc19/presentation/bijlani)
+14. [Vangoor, Tarasov, Zadok, "To FUSE or Not to FUSE: Performance of User-Space File Systems", FAST '17](https://usenix.org/conference/fast17/technical-sessions/presentation/vangoor)
+15. [Durner, Leis, Neumann, "Exploiting Cloud Object Storage for High-Performance Analytics", PVLDB 16(11), 2023 (AnyBlob)](https://vldb.org/pvldb/vol16/p2769-durner.pdf)
+16. [Chen et al., "SPANN: Highly-efficient Billion-scale Approximate Nearest Neighbor Search", NeurIPS 2021](https://arxiv.org/abs/2111.08566)

@@ -7,6 +7,8 @@
 
 ## 1. 優位性の整理
 
+> **注記 (2026-10-30)**: 1-1・1-2 の優位は、毎回 upcall が走る経路 (open・getattr) と、page cache を持たない構成 (fuse-raw) に対するものが中心で、page cache のヒットで終わる warm の定常状態では fuse-cache と差がなかった。`docs/design/where-fs-layer-can-win.md` を参照。
+
 「daemon がすべてを担う」構成にしても、以下 3 点は構造上 FUSE 側に持っていけない。
 
 ### 1-1. キャッシュヒット時のゼロコンテキストスイッチ
