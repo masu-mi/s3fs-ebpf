@@ -62,6 +62,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/wtinylfu-pick-plan.md`](design/wtinylfu-pick-plan.md) | AC-66: W-TinyLFU を `pick_victim` で動かす計画 (現行とのずれ、BPF 側の設計、kmod に足す `on_size`、手順。未実装) |
 | [`design/ann-workload-measurement-plan.md`](design/ann-workload-measurement-plan.md) | 計画 (未実施): IVF / HNSW 型のアクセスパターンで policy・先読み・chunk 大きさを比べる計測計画。trace へのバイト容量と範囲の拡張、合成 trace の生成、実 trace での妥当性確認、実 kmod での確認 |
 | [`design/olap-oltp-s3-evaluation-plan.md`](design/olap-oltp-s3-evaluation-plan.md) | 計画 (未実施): DuckDB など S3 利用系の OLAP / OLTP に対して、FS 層を挟む価値があるかを確かめる評価計画。仮説 H1〜H6、価値がないと分かった時点で止めるゲート、トレース採取と policy 比較、構成別の end-to-end 比較 |
+| [`design/where-fs-layer-can-win.md`](design/where-fs-layer-can-win.md) | 整理 (2026-10-30): s3fs-fuse の use_cache + kernel_cache に勝つのが難しい理由 (D1〜D9) と、残る可能性 (cold の取り込み・同一ホストの複数プロセスでの共有) のユースケース収集、次に確かめること |
 | [`design/hit-signal-percpu-accumulation.md`](design/hit-signal-percpu-accumulation.md) | issue #22: hit の信号を `.read_iter` で per-CPU に数え、`admit_replace` の evict の前に policy へ反映する (実装済み、`hit_accum`、既定 on、計測は §18.44〜18.45。再計測の手順と採否の基準つき) |
 | [`design/design-review-checklist.md`](design/design-review-checklist.md) | 設計・実装・測定の検討観点 (issue #22 で見つけた不具合から): 規則の集約、周期処理の副作用、2 つの持ち主の状態、「数える」意味、参照との 1 手ずつの比較、測定の対照、テストが落ちることの確認、ロック、機能の出し方。レビュー用チェックリストつき |
 | [`design/hook-timings-diagrams.md`](design/hook-timings-diagrams.md) | 8 タイミング × 3 path のオブジェクト図 |
@@ -101,6 +102,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | doc | 内容 |
 |---|---|
 | [`journal/benchmark-results.md`](journal/benchmark-results.md) | Meetup 用の headline 数値 + 3-way fair bench (ebpf vs fuse-raw vs fuse-cache) |
+| [`journal/ann-workload-results.md`](journal/ann-workload-results.md) | ANN simulator (P0〜P2) の結果、実機での OLTP / ベクトル検索 (kmod 対 s3fs-fuse) の計測、cold の調査、warm の分析 (2026-10-30) |
 | [`journal/hit-rate-bench.md`](journal/hit-rate-bench.md) | Zipf workload の policy hit-rate 実測 (2026-09-28 の数値は容量が効いておらず無効。2026-10-05 以降の capacity mode が正。`pick_victim` 版の比較は `journal/benchmark-results.md` §18.41〜18.43) |
 | [`journal/bench-env-notes.md`](journal/bench-env-notes.md) | bench 環境 caveats、Grafana metric surface、`make bench*` の修正記録 |
 
