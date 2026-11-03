@@ -10,15 +10,15 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/`](design/) | 設計を読む dev | アーキテクチャ・コンポーネント間通信・各 subsystem の design |
 | [`journal/`](journal/) | 時系列を追う dev | 週次 implementation note / session note / bench 結果 / backlog |
 | [`dev-notes/`](dev-notes/) | 実装者 | 横断的な tips (ハマりポイント / upstream 未提供改善案) |
-| [`misc/`](misc/) | 必要な時 | 第三者 patch など |
 
 ---
 
-## 起点 (まずこの 3 本 + kmod 作業時 1 本)
+## 起点 (まずこの 3 本 + 学習ガイド + kmod 作業時 1 本)
 
 | doc | 対象読者 | いつ読むか |
 |---|---|---|
 | [`../README.md`](../README.md) | 新入 dev | PoC の概要 / アーキテクチャ / Quick start / 性能の要約 |
+| [`user/learning-guide.md`](user/learning-guide.md) | 新入 dev | 技術要素 (bpf_arena / struct_ops / KFunc / KUnit / lockdep / kCFI / 閉じた MinIO など) を、入門記事 (日本語を優先) と一次資料から順に学ぶ。土壌づくりはここから |
 | [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
@@ -38,8 +38,8 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/posix-and-practical-notes.md`](user/posix-and-practical-notes.md) | FS 拡張の POSIX 準拠スコアカード (E-01/02/03, D-01/02) |
 | [`user/gcs-backend.md`](user/gcs-backend.md) | GCS backend 対応の使い方と `--backend s3\|gcs` 切替 |
 | [`user/related-works.md`](user/related-works.md) | ExtFUSE / RFUSE / Mountpoint との位置付け |
-| [`user/meetup-ebpf-outline.md`](user/meetup-ebpf-outline.md) | eBPFミートアップ発表アウトライン 20min (KFunc / struct_ops / Layer 0 KFuncs 中心) |
 | [`user/retrospective-and-reuse.md`](user/retrospective-and-reuse.md) | 振り返り: 失敗だったか (うまくいったこと / いかなかったこと)、再利用できる資産、Rust での再実装 / FUSE・fuse-bpf への貢献 / upstream 貢献の現実性と優先順位 (2026-10-22) |
+| [`user/learning-guide.md`](user/learning-guide.md) | 学習ガイド: 技術要素 (eBPF の基本 / VFS / FUSE / bpf_arena / KFunc / struct_ops / Go + cilium/ebpf / キャッシュ / KUnit / lockdep / kCFI / 閉じた MinIO) ごとに、この repo の該当 doc・入門記事 (日本語を優先)・一次資料を並べた。読む順つき (2026-11-03) |
 | [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 58 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表 |
 
 ---
@@ -48,6 +48,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 | doc | 内容 |
 |---|---|
+| [`design/ebpf-features-guide.md`](design/ebpf-features-guide.md) | 採用した eBPF 機能 (fentry / arena / ringbuf / per-CPU / LRU hash / struct_ops / KFunc / fmod_ret / CO-RE / `bpf_loop` / `__arena`) ごとの用途・有用性・制限・落とし穴、カーネル版・ディストリ別の制約表 (2026-10-11 作成。cilium/ebpf の課題は `dev-notes/cilium-ebpf-arena-and-struct-ops.md` が新しい) |
 | [`design/design.md`](design/design.md) | 統合設計書 (initial pitch, §0 で現状との相違メモ付き) |
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
 | [`design/dev-s3fs-ebpf-protocol.md`](design/dev-s3fs-ebpf-protocol.md) | `/dev/s3fs_ebpf` の miss イベント (`read(2)`) と 16 個の ioctl の構造体・フィールド・戻り値 |
@@ -127,10 +128,11 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`dev-notes/build-env-dependencies.md`](dev-notes/build-env-dependencies.md) | ビルド・検証環境の依存箇所 (カーネル版 / ヘッダ / コンパイラ / ツール / テストツール) と解消方法。`make doctor` の ID 対応表 |
 | [`dev-notes/lockdep-kernel.md`](dev-notes/lockdep-kernel.md) | lockdep (`CONFIG_PROVE_LOCKING`) 付きカーネルを build して入れ、`make test-lockdep` で回帰テストを通す手順 (AC-42): config、grub、読み方、戻し方 |
 | [`dev-notes/kunit.md`](dev-notes/kunit.md) | kmod の KUnit テスト (`make test-kunit`): 実行方法、suite の対象、テストで見つけて直したバグ |
-| [`dev-notes/ebpf-ecosystem-gaps.md`](dev-notes/ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠) |
+| [`dev-notes/ebpf-ecosystem-gaps.md`](dev-notes/ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠)。Week 4 時点の素材で、cilium/ebpf 側の最新は `dev-notes/cilium-ebpf-arena-and-struct-ops.md` |
 | [`dev-notes/arena-address-translation.md`](dev-notes/arena-address-translation.md) | arena のポインタがどこで kern_vm の番地になるか (BPF の load、kfunc の `__arena` 引数、x86 / arm64 JIT の命令)。6.12 / 7.2 / 7.3 の違い |
 | [`dev-notes/arena-access-paths.md`](dev-notes/arena-access-paths.md) | arena の 1 ページを daemon / BPF / KFunc / kmod がそれぞれどう読むか (GUP、ページのコピー回数) を図で比較。6.12 と 7.2〜7.3 の差分 |
 | [`dev-notes/struct-ops-kmod-glue.md`](dev-notes/struct-ops-kmod-glue.md) | struct_ops を kmod から提供するときの glue (cfi_stubs / verifier_ops / init / reg / unreg / update / 呼び出し側) が何のために要るか。fmod_ret との行数の差の理由 |
+| [`dev-notes/struct-ops-data-members.md`](dev-notes/struct-ops-data-members.md) | struct_ops に関数ポインタ以外のメンバ (フラグ、名前、数値) を載せる方法と制約、6.12 → 7.3 の変化、このリポジトリでの使い方 |
 | [`dev-notes/kcfi-basics.md`](dev-notes/kcfi-basics.md) | kCFI の基本動作 (x86 の命令列、FineIBT) と、BPF prog / struct_ops の trampoline にハッシュを付ける仕組み。cfi_stubs が要る理由 |
 | [`dev-notes/cilium-ebpf-arena-and-struct-ops.md`](dev-notes/cilium-ebpf-arena-and-struct-ops.md) | cilium/ebpf から bpf_arena を使うときの課題 (C1〜C9) と回避策、struct_ops の使い方 (kmod / BPF / daemon)、Linux と cilium/ebpf への要望の表 (2026-10-24 時点の最新版) |
 | [`dev-notes/go-and-bpf-arena.md`](dev-notes/go-and-bpf-arena.md) | Go と bpf_arena の相性 (GC と衝突する場面、Go 側で arena を扱うコツ、この PoC の Go 側 allocator の大きさ、C / Rust との比較、未確認の点) (2026-11-03) |
@@ -139,13 +141,6 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 
 ---
 
-## misc/ — その他
-
-| doc | 内容 |
-|---|---|
-| [`misc/cilium-ebpf-addr-space-cast-marshal.patch`](misc/cilium-ebpf-addr-space-cast-marshal.patch) | cilium/ebpf に投げる予定の marshal 修正 patch。vendor 済み詳細は `daemon/third_party/ebpf/README-s3fs-patch.md` |
-
----
 
 ## 更新運用
 

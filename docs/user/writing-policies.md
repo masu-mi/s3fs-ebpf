@@ -457,6 +457,35 @@ struct s3fs_policy_ops mypolicy_ops = {
 char _license[] SEC("license") = "GPL";
 ```
 
+### vtable のデータメンバ (`name` / `flags`) と `validate` の規則
+
+vtable は hook の後ろにデータメンバを持つ (`kmod/policy_struct_ops.h`)。どちらも省略でき、上の 4 メンバだけの宣言でも load できる。設定するなら、**その前のメンバまで kmod と同じ並びで宣言**して、初期化子に定数を書く (`bpf/policy_observe_ops.bpf.c` が実例):
+
+```c
+#define S3FS_POLICY_NAME_MAX 16
+struct s3fs_policy_ops {
+    int (*on_admit)(__u64 count, __u64 arena_used_hint);
+    int (*on_evict)(__u64 ino);
+    int (*on_pressure)(__u64 count, __u64 threshold);
+    int (*on_hit)(__u64 ino);
+    int (*on_insert)(__u64 ino);
+    int (*on_remove)(__u64 ino);
+    __u64 (*pick_victim)(void);
+    int (*on_size)(__u64 ino, __u64 bytes);
+    __u32 flags;                       /* S3FS_POLICY_F_* (今は NO_ON_HIT = 1 << 0) */
+    char name[S3FS_POLICY_NAME_MAX];   /* [A-Za-z0-9_.]、15 文字まで */
+};
+
+struct s3fs_policy_ops mypolicy_ops = {
+    /* …hook… */
+    .name = "mypolicy",                /* kmod の dmesg に出る */
+};
+```
+
+- `name` は `policy struct_ops registered (… name=mypolicy flags=0x0)` と `updated (hot swap) name=…` に出る。reload で入れ替えると hook と同時に切り替わる。
+- 次は kernel が load を断る (reload は HTTP 500 `update: invalid argument`、起動時は load 失敗): 未知の `flags` の bit、`name` に `[A-Za-z0-9_.]` 以外の文字がある / NUL で終わらない、`pick_victim` があるのに `on_insert` か `on_remove` がない、`NO_ON_HIT` を立てたのに `on_hit` もある。
+- 関数ポインタ以外のメンバは、kmod が受け取るもの (`flags` と `name`) 以外を 0 以外にすると load が断られる。詳細は [`../dev-notes/struct-ops-data-members.md`](../dev-notes/struct-ops-data-members.md)。
+
 ### ビルド
 
 repo 内なら Makefile に足すのが早い:
@@ -667,6 +696,7 @@ kmod / mount 起動なしに、workload trace を Go 側 policy simulator
 sudo dmesg -T | grep -E "s3fs_ebpf|verifier|struct_ops" | tail
 ```
 
+- reload が `update: invalid argument` → `flags` / `name` の値か、hook の組み合わせ (`pick_victim` なら `on_insert` / `on_remove` も) を確認 (上の「vtable のデータメンバ」)
 - BTF relocation エラー → `struct s3fs_policy_ops` の layout が
   `kmod/policy_struct_ops.h` と一致しているか確認
 - verifier reject → `bpftool prog dump xlated` で命令数、`bpftool

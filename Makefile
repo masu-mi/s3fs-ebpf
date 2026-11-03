@@ -72,7 +72,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
         lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
-        test-write-existing-nopm test-fsync-large-new-file test-pcache-drop test-policy-reload test-regression test-write-readback test-large-file-read \
+        test-write-existing-nopm test-fsync-large-new-file test-pcache-drop test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
         test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
         clean
@@ -352,7 +352,7 @@ test-splice-hits: kmod daemon ## sendfile / splice reads are counted as hits (hi
 	@echo "==> test-splice-hits"
 	@$(SCRIPTS_DIR)/test-splice-hits.sh
 
-test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-policy-reload test-policy-conformance ## Run all regression tests
+test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -417,6 +417,10 @@ test-policy-reload: kmod bpf daemon ## issue #35: reload = one BPF_LINK_UPDATE; 
 test-fsync-large-new-file: kmod daemon ## issue #35: fsync of a new 100 MiB file returns only after the PUT landed; no late 0-byte PUT empties it
 	@echo "==> test-fsync-large-new-file"
 	@sudo $(SCRIPTS_DIR)/test-fsync-large-new-file.sh
+
+test-policy-data-members: kmod bpf daemon ## struct_ops data members (flags / name) + validate: accepted, refused (EINVAL), carried by a hot swap
+	@echo "==> test-policy-data-members"
+	@sudo $(SCRIPTS_DIR)/test-policy-data-members.sh
 
 test-pcache-drop: kmod daemon ## pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
 	@echo "==> test-pcache-drop"

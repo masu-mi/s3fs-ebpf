@@ -1,6 +1,6 @@
 # meetup の想定問答 (2026-10-13〜10-21)
 
-meetup 発表 (`docs/user/meetup-ebpf-outline.md`) の質疑応答に備えた問答集。準備中に実際に出た質問と、聴衆 (eBPF に関心があり、カーネルモジュール・FS・性能試験に詳しい人) から出そうな質問をまとめた。回答のあとで分かったことがある項目には「その後」を付けた。根拠は benchmark-results の § 番号 (§18.27 など)、backlog の ID (AC-58 など)、コードの位置で示す。試していないこと、知識からの説明にとどまることは、その旨を書いた。
+meetup 発表 (アウトライン `docs/user/meetup-ebpf-outline.md` は削除済みで git の履歴に残る) の質疑応答に備えた問答集。準備中に実際に出た質問と、聴衆 (eBPF に関心があり、カーネルモジュール・FS・性能試験に詳しい人) から出そうな質問をまとめた。回答のあとで分かったことがある項目には「その後」を付けた。根拠は benchmark-results の § 番号 (§18.27 など)、backlog の ID (AC-58 など)、コードの位置で示す。試していないこと、知識からの説明にとどまることは、その旨を書いた。
 
 ---
 
@@ -318,7 +318,7 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 
 ### Q12. GUP を read のたびにせず、admit のときに 1 回 pin して `struct page` を持っておけば、arena モードでも速かったのでは
 
-**毎回の GUP は消えるはず。ただし試していない。** 発表準備の時点で案として挙げた (`docs/user/meetup-ebpf-outline.md` §7 の 4) が、pcache モードに移ったので実装しなかった。
+**毎回の GUP は消えるはず。ただし試していない。** 発表準備の時点で案として挙げた (発表アウトライン §7 の 4、削除済み) が、pcache モードに移ったので実装しなかった。
 
 この案で残る問題 (コードとカーネルの仕組みからの推測):
 - **解放との整合:** arena のページは BPF 側の `bpf_arena_free_pages` やユーザー空間からも解放できる。kmod が pin していると物理ページは残るが、arena の同じ番地には別のページが入りうるので、kmod は古い中身を読み続ける。evict と arena の解放のたびに kmod に unpin を知らせる仕組みが要る。
@@ -340,7 +340,7 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 **上限があるのは、verifier が load の時点で「必ず終わる」ことを示す必要があるから。** KFunc が長く回せるのは sleepable だからだけではない。終わる保証を verifier ではなく kmod が引き受けているから。
 
 - 上限がかかっているのは helper ではなく、BPF のコード (ループの本体) の方。BPF は softirq や tracepoint の中など、sleep できず CPU を譲れない文脈でも動く。止まらないループは CPU を握ったままになり、RCU stall や watchdog を起こす。
-- そのため上限はどれにもある。`bpf_loop` は 2^23 回 (約 840 万回)。`bpf_for` も同じ。`can_loop` (may_goto) は 6.14 までが約 840 万回、6.15 以降の x86-64 (arm64 は 6.18 以降) は 250 ms (`docs/user/meetup-ebpf-outline.md` の追加調査、6.18 で確認)。
+- そのため上限はどれにもある。`bpf_loop` は 2^23 回 (約 840 万回)。`bpf_for` も同じ。`can_loop` (may_goto) は 6.14 までが約 840 万回、6.15 以降の x86-64 (arm64 は 6.18 以降) は 250 ms (発表アウトライン `docs/user/meetup-ebpf-outline.md` の追加調査、6.18 で確認。アウトラインは削除済みで git の履歴に残る)。
 - **sleepable は必要条件だが、十分条件ではない。** sleepable な BPF プログラムは標準にもある (`SEC("syscall")`、`fentry.s`、`lsm.s`)。その中で `bpf_loop` などを使っても、予算は同じで伸びない。ループの途中で CPU を譲って回り続ける標準の helper や kfunc は、知る限りない (知識からの説明。6.12 のソースでは確かめていない)。
 - この PoC の walk (`s3fs_kfunc_arena_list_walk`) が長く回せるのは、次の 2 つが揃っているから。
   1. 本体が C で、終わる保証を自分で作っている。`max_nodes` (最大 2^24) を超えたら `-ELOOP`、kill されたら `-EINTR`。
@@ -498,7 +498,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 
 **この vtable ではできない。kmod が `rcu_read_lock()` の中から呼ぶため。**
 
-- 最初の版は全部の policy が `SEC("struct_ops.s/...")` (sleepable) になっていて、`CONFIG_DEBUG_ATOMIC_SLEEP` のカーネルで splat が出た。`SEC("struct_ops/...")` に直した (`docs/user/meetup-ebpf-outline.md` の 2026-10-05 のレビュー)。
+- 最初の版は全部の policy が `SEC("struct_ops.s/...")` (sleepable) になっていて、`CONFIG_DEBUG_ATOMIC_SLEEP` のカーネルで splat が出た。`SEC("struct_ops/...")` に直した (発表アウトラインの 2026-10-05 のレビュー。削除済みで git の履歴に残る)。
 - 6.9 以降は sleepable な struct_ops の member を作れるが、vtable の定義と kmod の呼び出し側 (RCU の外で呼ぶ) の両方を変える必要がある (`docs/dev-notes/ebpf-ecosystem-gaps.md` §3)。
 - sleep する KFunc (`KF_SLEEPABLE`) は、呼ぶ側のプログラムも sleepable でなければならない。この PoC の arena walk の KFunc は `SEC("syscall")` から呼んでいる。
 - S3 のような blocking I/O はポリシーに入れず、miss のときの upcall (kmod → `/dev/s3fs_ebpf` → daemon → ioctl で起こす) に任せた。ポリシーは eviction の lock の下で呼ばれるので、そこで待つのは筋が悪い。
@@ -878,7 +878,7 @@ prewarm:
 **struct_ops まわりの API の不足と、arena 用の命令の marshal のバグ。**
 
 1. **struct_ops の link の Update が未対応:** cilium/ebpf の `structOpsLink.Update` は upstream main でも `ErrNotSupported`。hot swap は `BPF_LINK_UPDATE` を raw syscall で呼んでいる (`daemon/internal/policyprog/loader.go` の `SwapFrom`)。
-2. **`addr_space_cast` の marshal バグ:** plain な `Mov` 命令の `Offset` が `Instruction.Marshal` で 0 に上書きされ、arena のポインタ変換 (`addr_space_cast`) が `BPF_MOV uses reserved fields` で verifier に拒否される。vendor したコードにパッチを当てた (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`)。その後、自分で upstream に出し、cilium/ebpf の main に `cc4947e` として取り込まれた (リリースはまだ)。今 `go.mod` が指す commit (2026-10-08) はこれを含むので、vendor は外した。arena と struct_ops を cilium/ebpf から使うときの課題と要望の一覧は `docs/dev-notes/cilium-ebpf-arena-and-struct-ops.md`。
+2. **`addr_space_cast` の marshal バグ:** plain な `Mov` 命令の `Offset` が `Instruction.Marshal` で 0 に上書きされ、arena のポインタ変換 (`addr_space_cast`) が `BPF_MOV uses reserved fields` で verifier に拒否される。vendor したコードにパッチを当てた (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`。取り込み後に削除済みで git の履歴に残る)。その後、自分で upstream に出し、cilium/ebpf の main に `cc4947e` として取り込まれた (リリースはまだ)。今 `go.mod` が指す commit (2026-10-08) はこれを含むので、vendor は外した。arena と struct_ops を cilium/ebpf から使うときの課題と要望の一覧は `docs/dev-notes/cilium-ebpf-arena-and-struct-ops.md`。
 3. **verifier のエラーが切り詰められる:** 長いログの肝心な行が見えないことがある (`docs/dev-notes/ebpf-ecosystem-gaps.md` §4.2)。
 4. **bpf2go の `.o` が toolchain で変わる:** ソースを変えなくても作り直すとバイナリが少し変わる。A/B の基準はコミット済みの `.o` ではなく、作り直したもの (B0) にした (`docs/design/read-iter-hook-overhead.md` §3)。
 

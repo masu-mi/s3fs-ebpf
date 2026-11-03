@@ -141,6 +141,7 @@ make test-fsync-large-new-file  # 新規 100 MiB を fsync した直後に S3 �
 make test-pcache-drop           # pcache_drop=1: open で page cache だけ捨て、chunk 表に hit すれば upcall なし
 make test-policy-reload         # reload 中に read を流し続けてもエラーなし。struct_ops でない .bpf.o は 400
 make test-write-existing-nopm   # --partial-modify=false の経路 (AC-50)
+make test-policy-data-members   # struct_ops のデータメンバ (flags / name) と validate: 受理、拒否 (EINVAL)、hot swap で切り替わる
 ```
 
 - `test-policy-conformance` は、実機の policy と simulator の hit を access ごとに比べるタイミングに敏感な試験。MinIO が遅い (たとえば `mc admin trace` が残っている) と落ちる。

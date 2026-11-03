@@ -34,6 +34,7 @@ Linux 6.12 LTS の eBPF 機能 (**`bpf_arena`**、**KFunc**、**struct_ops**) �
 既存の大きいオブジェクトの途中への書き込みは、既定で変更に触れる chunk だけを読み、残りを multipart の `UploadPartCopy` で運びます (`--partial-modify`、既定で有効、S3 のみ。16 MiB 未満は全体を読み書き)。`--partial-modify=false` で全体 GET + PUT (AC-50) に戻せます。
 
 詳しくは:
+- 技術要素 (bpf_arena / struct_ops / KFunc / KUnit / lockdep / kCFI / 閉じた MinIO など) を入門記事と一次資料から学ぶ: [`docs/user/learning-guide.md`](docs/user/learning-guide.md)。doc 全体の地図は [`docs/INDEX.md`](docs/INDEX.md)
 - 全体の通信路 (VFS / kmod / BPF / daemon / backend): [`docs/design/component-communication.md`](docs/design/component-communication.md)
 - policy engine: [`docs/design/policy-engine-design.md`](docs/design/policy-engine-design.md)
 - pcache モード (`--arena-metadata-only`): [`docs/design/pcache-mode.md`](docs/design/pcache-mode.md)
