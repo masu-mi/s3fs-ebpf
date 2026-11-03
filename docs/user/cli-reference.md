@@ -129,6 +129,7 @@ Targets:
     test-pcache-capacity-seq      AC-45: a file larger than capacity_bytes read front to back stays within capacity (40 MiB vs 12 MiB)
     test-policy-reload            issue #35: reload = one BPF_LINK_UPDATE; reads never fail; non-struct_ops refused (400)
     test-fsync-large-new-file     issue #35: fsync of a new 100 MiB file returns only after the PUT landed; no late 0-byte PUT empties it
+    test-policy-data-members      struct_ops data members (flags / name) + validate: accepted, refused (EINVAL), carried by a hot swap
     test-pcache-drop              pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
     test-write-existing-nopm      AC-50: same as test-write-existing with --partial-modify=false (whole-object GET + PUT path)
     test-write-existing           AC-50: write/truncate/append on an unread existing object keeps the rest (pcache + arena)
