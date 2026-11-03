@@ -357,17 +357,26 @@ static long s3fs_dev_pop_rename(void __user *uarg)
  * `ino` into its own buffer. Returns 0 on success and writes
  * `out_bytes` back; returns -EAGAIN when the ino is unknown (raced
  * with an evict) so the daemon can drop the flush event silently.
+ * -ENOSPC (AC-71): the buffer is smaller than the content; nothing was
+ * copied or claimed, and `out_bytes` is the size to ask for.
  */
 static long s3fs_dev_read_dirty(void __user *uarg)
 {
 	struct s3fs_read_dirty req;
+	u64 size = 0;
 	long copied;
 
 	if (copy_from_user(&req, uarg, sizeof(req)))
 		return -EFAULT;
 	copied = s3fs_ebpf_read_dirty(req.ino,
 				      (void __user *)(uintptr_t)req.uaddr,
-				      req.size);
+				      req.size, &size);
+	if (copied == -ENOSPC) {
+		req.out_bytes = size;
+		if (copy_to_user(uarg, &req, sizeof(req)))
+			return -EFAULT;
+		return -ENOSPC;
+	}
 	if (copied < 0)
 		return copied;
 	req.out_bytes = (u64)copied;

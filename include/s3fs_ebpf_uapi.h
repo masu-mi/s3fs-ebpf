@@ -237,10 +237,12 @@ struct s3fs_flush_event {
  * S3FS_IOC_READ_DIRTY — pull `size` bytes from kmod's per-inode
  * scratch buffer into the daemon's `uaddr` for PUT to S3.
  *
- * `size` is capped by the kmod's current `fd->size`; a shorter file
- * returns min(cap, request). The kmod validates `uaddr` via
- * copy_to_user; caller must have the buffer allocated in its own mm.
- * Returns 0 on success and sets `out_bytes` to the actual copy size.
+ * The buffer must hold the whole content: a shorter file copies fd->size
+ * bytes, a larger one is refused with -ENOSPC (AC-71) -- nothing is copied,
+ * the flush is not claimed (W1) and `out_bytes` is the size to ask for. The
+ * kmod validates `uaddr` via copy_to_user; caller must have the buffer
+ * allocated in its own mm. Returns 0 on success and sets `out_bytes` to the
+ * actual copy size.
  */
 struct s3fs_read_dirty {
 	__u64 ino;

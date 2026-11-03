@@ -17,6 +17,9 @@ type fakeFlushKmod struct {
 	signalled  []int32
 	markedDirt []uint64
 	readCalls  int
+	// growEachRead makes the content one byte larger than the buffer on every
+	// read, like a file that is written faster than the daemon reads it.
+	growEachRead bool
 }
 
 func (f *fakeFlushKmod) SignalFlush(_ uint64, errCode int32) error {
@@ -31,6 +34,12 @@ func (f *fakeFlushKmod) ReadDirty(_ uint64, buf []byte) (int, error) {
 	f.readCalls++
 	if f.readErr != nil {
 		return 0, f.readErr
+	}
+	if f.growEachRead {
+		return 0, &dirtyTooSmallError{Need: uint64(len(buf)) + 1}
+	}
+	if len(buf) < len(f.dirty) { // the kmod refuses a buffer that cannot hold the content (AC-71)
+		return 0, &dirtyTooSmallError{Need: uint64(len(f.dirty))}
 	}
 	return copy(buf, f.dirty), nil
 }
@@ -153,5 +162,46 @@ func TestHandleFlushPartialPath(t *testing.T) {
 	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9007, "big2.bin", 1<<20))
 	if len(k.markedDirt) != 1 || len(k.signalled) != 1 || k.signalled[0] != -5 {
 		t.Errorf("partial failure: marked=%v signalled=%v, want one markDirty and -5", k.markedDirt, k.signalled)
+	}
+}
+
+// AC-71: the event carries the size when it was queued. A stale one (the 0-byte
+// placeholder .create queues) used to read a file that had grown with a buffer
+// that was too small, PUT 0 bytes and claim the flush. The kmod now refuses; the
+// flush asks again with the size it reports and PUTs the whole content.
+func TestHandleFlushStaleSizeReadsTheWholeContent(t *testing.T) {
+	k := &fakeFlushKmod{dirty: []byte("the full 100 MiB, in spirit")}
+	b := &putRecorder{}
+	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9006, "grown.bin", 0))
+	if string(b.data) != "the full 100 MiB, in spirit" {
+		t.Errorf("Put(%q), want the whole content", b.data)
+	}
+	if k.readCalls != 2 {
+		t.Errorf("readCalls=%d, want 2 (the refused read, then the full one)", k.readCalls)
+	}
+	if len(k.signalled) != 1 || k.signalled[0] != 0 {
+		t.Errorf("signalled %v, want one success", k.signalled)
+	}
+}
+
+// A file that keeps growing is not chased forever: after dirtyReadRetries the
+// flush fails, restores the dirty flag (the next close / fsync retries) and
+// PUTs nothing -- never a short object.
+func TestHandleFlushGivesUpWhenTheFileKeepsGrowing(t *testing.T) {
+	k := &fakeFlushKmod{}
+	k.growEachRead = true
+	b := &putRecorder{}
+	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9007, "g.bin", 1))
+	if b.key != "" {
+		t.Errorf("put %q after a refused read", b.key)
+	}
+	if len(k.markedDirt) != 1 || k.markedDirt[0] != 9007 {
+		t.Errorf("marked dirty %v, want [9007]", k.markedDirt)
+	}
+	if len(k.signalled) != 1 || k.signalled[0] != -5 {
+		t.Errorf("signalled %v, want -EIO (-5)", k.signalled)
+	}
+	if k.readCalls != dirtyReadRetries+1 {
+		t.Errorf("readCalls=%d, want %d", k.readCalls, dirtyReadRetries+1)
 	}
 }

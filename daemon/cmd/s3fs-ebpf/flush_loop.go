@@ -166,8 +166,40 @@ func runFlushWaitLoop(ctx context.Context, devPath string,
 	}
 }
 
-// readDirty copies up to len(buf) bytes for `ino` into buf and
-// returns the actual byte count.
+// dirtyTooSmallError is the kmod refusing READ_DIRTY with -ENOSPC (AC-71): buf is
+// smaller than the inode's content, so nothing was copied and the flush was not
+// claimed. Need is the size to ask for.
+type dirtyTooSmallError struct{ Need uint64 }
+
+func (e *dirtyTooSmallError) Error() string {
+	return fmt.Sprintf("read dirty: buffer smaller than the content (%d bytes needed)", e.Need)
+}
+
+// dirtyReadRetries bounds how often a flush re-reads with a larger buffer
+// because the file grew between the size it was queued with and the read.
+const dirtyReadRetries = 3
+
+// readDirtyAll reads the whole content of `ino`. It starts from the size the event
+// carried (the size when it was queued, possibly stale) and asks again with the
+// size the kmod reports until the buffer holds everything.
+func readDirtyAll(k flushKmod, ino, size uint64) ([]byte, error) {
+	for try := 0; ; try++ {
+		buf := make([]byte, size)
+		n, err := k.ReadDirty(ino, buf)
+		var small *dirtyTooSmallError
+		if errors.As(err, &small) && try < dirtyReadRetries {
+			size = small.Need
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return buf[:n], nil
+	}
+}
+
+// readDirty copies the content of `ino` into buf and returns the actual byte
+// count. A buf smaller than the content is a *dirtyTooSmallError.
 func readDirty(devFd int, ino uint64, buf []byte) (int, error) {
 	arg := readDirtyArg{
 		Ino:  ino,
@@ -179,6 +211,9 @@ func readDirty(devFd int, ino uint64, buf []byte) (int, error) {
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
 		uintptr(devFd), uintptr(s3fsIocReadDirty),
 		uintptr(unsafe.Pointer(&arg))); errno != 0 {
+		if errno == unix.ENOSPC {
+			return 0, &dirtyTooSmallError{Need: arg.OutBytes}
+		}
 		return 0, errno
 	}
 	return int(arg.OutBytes), nil
@@ -403,8 +438,7 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	// READ_DIRTY runs for an empty file too: it is what tells kmod this PUT
 	// covers the flush (W1/W3).  Skipping it for size 0 left the fd
 	// flushing and pinned, and an fsync waiting for its own PUT timed out.
-	buf := make([]byte, ev.Size)
-	n, err := k.ReadDirty(ev.Ino, buf)
+	buf, err := readDirtyAll(k, ev.Ino, ev.Size)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d read dirty: %v\n",
 			ev.Ino, err)
@@ -417,7 +451,6 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 		putErr = -5 /* -EIO — kmod-side buffer copy failed */
 		return
 	}
-	buf = buf[:n]
 	putCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := s3c.Put(putCtx, s3key, buf); err != nil {
