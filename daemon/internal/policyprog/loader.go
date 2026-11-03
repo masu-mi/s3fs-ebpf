@@ -1,12 +1,12 @@
-// Package policyprog is the Layer 2 / Layer 3 eBPF program loader
-// for Week 4 (d). Layer 2 = engine-shipped .bpf.o under bpf/, Layer 3
-// = user-supplied .bpf.o loaded via `--policy-bpf file:<path>`.
+// Package policyprog is the Layer 2 / Layer 3 eBPF policy loader.
+// Layer 2 = engine-shipped .bpf.o under bpf/, Layer 3 = user-supplied
+// .bpf.o loaded via `--policy-bpf file:<path>`.
 //
-// Both paths converge on the same shape: a collection with a
-// SEC("fentry/s3fs_policy_on_admit") program and a
+// A policy is a struct_ops program: one vtable map (struct
+// s3fs_policy_ops) attached through one link. Optionally it carries a
 // BPF_MAP_TYPE_ARRAY named policy_stats indexed by
-// PSTAT_INVOCATIONS/LAST_COUNT/LAST_HINT. Users writing Layer 3
-// programs replicate this shape.
+// PSTAT_INVOCATIONS/LAST_COUNT/LAST_HINT. fentry / fmod_ret policies
+// are not supported: they cannot be swapped as one unit.
 package policyprog
 
 import (
@@ -23,7 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Slot indices — must match bpf/policy_observe.bpf.c PSTAT_*.
+// Slot indices — must match bpf/policy_observe_ops.bpf.c PSTAT_*.
 // pressure_ops-specific slots (Z-04) are only meaningful when that
 // policy is loaded; other policies have PSTAT_MAX≤5 so reads of
 // slots 5/6 return an out-of-range error and are silently skipped.
@@ -35,28 +35,18 @@ const (
 	StatPressureLenientTotal = 6 // Z-04: pressure_ops lenient-branch (visited=1, normal → keep) fires
 )
 
-// Program bundles a loaded policy program set. Two shapes are
-// supported and auto-detected from the .bpf.o:
-//
-//   - fentry / fmod_ret programs: individual attach per hook,
-//     N Link objects. Tracing links do not implement BPF_LINK_UPDATE
-//     (cilium/ebpf returns ErrNotSupported), so hot swap = attach the
-//     N new links, then close the N old ones; in between both policies
-//     are attached and run.
-//   - struct_ops program: single vtable map, 1 Link object,
-//     hot swap = 1 BPF_LINK_UPDATE that retargets the existing link at
-//     the new vtable map (kmod .update callback = 1 RCU pointer swap).
-//     See SwapFrom.
-//
-// See docs/design/policy-engine-design.md §4.5 for the trade-off analysis.
+// Program bundles a loaded struct_ops policy: single vtable map, one
+// Link object. Hot swap = 1 BPF_LINK_UPDATE that retargets the existing
+// link at the new vtable map (kmod .update callback = 1 RCU pointer
+// swap). See SwapFrom and docs/design/policy-engine-design.md §4.5.
 type Program struct {
 	Coll     *ebpf.Collection
-	Progs    map[string]*ebpf.Program // ebpf-section-name → program
+	Progs    map[string]*ebpf.Program // section name → struct_ops program
 	Stats    *ebpf.Map                // shared policy_stats map (may be nil)
-	Links    []link.Link              // one per attached hook or 1 for struct_ops
+	Links    []link.Link              // the single struct_ops link once attached
 	Path     string                   // source path for logs
-	IsStruct bool                     // true when a struct_ops map was found
-	VTable   *ebpf.Map                // the attached struct_ops map (struct_ops only)
+	IsStruct bool                     // always true for a loaded Program (kept for logs)
+	VTable   *ebpf.Map                // the attached struct_ops map
 }
 
 // LoadOpts carries optional per-load tuning knobs. Zero value is valid
@@ -71,16 +61,30 @@ type LoadOpts struct {
 	MapMaxEntries map[string]uint32
 }
 
-// Load reads a .bpf.o and returns a ready-to-attach Program. The
-// object may declare 1..N fentry programs (all attached on Attach())
-// and should expose a "policy_stats" ARRAY map for daemon-side
-// metric mirroring (optional but conventional).
-//
-// Missing map is a warning; missing programs is an error.
+// ErrNotStructOps is returned for a .bpf.o that is not a struct_ops
+// policy (e.g. an fentry / fmod_ret program).
+var ErrNotStructOps = errors.New("policyprog: not a struct_ops policy")
+
+// Load reads a .bpf.o and returns a ready-to-attach Program. The object
+// must contain a struct_ops vtable map and should expose a
+// "policy_stats" ARRAY map for daemon-side metric mirroring (optional
+// but conventional). Any other program shape is rejected with
+// ErrNotStructOps.
 func Load(path string, opts ...LoadOpts) (*Program, error) {
 	spec, err := ebpf.LoadCollectionSpec(path)
 	if err != nil {
 		return nil, fmt.Errorf("policyprog: parse %s: %w", path, err)
+	}
+	// Reject anything that is not a struct_ops policy before loading it:
+	// an fentry / fmod_ret object may not even load on its own.
+	hasVTable := false
+	for _, ms := range spec.Maps {
+		if ms.Type == ebpf.StructOpsMap {
+			hasVTable = true
+		}
+	}
+	if !hasVTable {
+		return nil, fmt.Errorf("%w: %s has no struct_ops vtable", ErrNotStructOps, path)
 	}
 	if len(opts) > 0 {
 		for mapName, maxEntries := range opts[0].MapMaxEntries {
@@ -94,50 +98,23 @@ func Load(path string, opts ...LoadOpts) (*Program, error) {
 		return nil, fmt.Errorf("policyprog: load %s: %w", path, err)
 	}
 	progs := make(map[string]*ebpf.Program)
-	isStruct := false
 	for name, p := range coll.Programs {
-		switch p.Type() {
-		case ebpf.Tracing:
+		if p.Type() == ebpf.StructOps {
 			progs[name] = p
-		case ebpf.StructOps:
-			progs[name] = p
-			isStruct = true
 		}
 	}
-	if len(progs) == 0 {
+	if len(progs) == 0 || structOpsVTableOf(coll) == nil {
 		coll.Close()
-		return nil, fmt.Errorf("policyprog: %s has no fentry or struct_ops programs", path)
+		return nil, fmt.Errorf("%w: %s has no struct_ops vtable", ErrNotStructOps, path)
 	}
 	stats := coll.Maps["policy_stats"] // may be nil (Layer 3 programs may skip)
-	return &Program{Coll: coll, Progs: progs, Stats: stats, Path: path, IsStruct: isStruct}, nil
+	return &Program{Coll: coll, Progs: progs, Stats: stats, Path: path, IsStruct: true}, nil
 }
 
-// Attach binds the program(s) to their kmod-side targets. For
-// fentry/fmod_ret each program attaches independently; for struct_ops
-// the single vtable map attaches once via bpf(BPF_LINK_CREATE) with
-// attach_type BPF_STRUCT_OPS. cilium/ebpf abstracts both under
-// link.AttachStructOps / link.AttachTracing but you have to pick.
+// Attach binds the vtable to the kmod via bpf(BPF_LINK_CREATE) with
+// attach_type BPF_STRUCT_OPS.
 func (p *Program) Attach() error {
-	if p.IsStruct {
-		return p.attachStructOps()
-	}
-	return p.attachTracing()
-}
-
-func (p *Program) attachTracing() error {
-	for name, prog := range p.Progs {
-		l, err := link.AttachTracing(link.TracingOptions{Program: prog})
-		if err != nil {
-			for _, done := range p.Links {
-				_ = done.Close()
-			}
-			p.Links = nil
-			return fmt.Errorf("policyprog: attach %s program %s: %w",
-				p.Path, name, err)
-		}
-		p.Links = append(p.Links, l)
-	}
-	return nil
+	return p.attachStructOps()
 }
 
 func (p *Program) attachStructOps() error {
@@ -160,9 +137,9 @@ func (p *Program) attachStructOps() error {
 	return fmt.Errorf("policyprog: no struct_ops map in %s", p.Path)
 }
 
-// structOpsVTable returns the first struct_ops map in the collection.
-func (p *Program) structOpsVTable() *ebpf.Map {
-	for _, m := range p.Coll.Maps {
+// structOpsVTableOf returns the first struct_ops map in coll.
+func structOpsVTableOf(coll *ebpf.Collection) *ebpf.Map {
+	for _, m := range coll.Maps {
 		if m.Type() == ebpf.StructOpsMap {
 			return m
 		}
@@ -172,45 +149,34 @@ func (p *Program) structOpsVTable() *ebpf.Map {
 
 // SwapFrom makes p the active policy in place of old, which must be
 // attached. p must be loaded but not yet attached. On success p owns
-// the live link(s) and old has none left, so old.Close() only frees
-// its collection.
+// the live link and old has none left, so old.Close() only frees its
+// collection.
 //
-// struct_ops → struct_ops: one BPF_LINK_UPDATE on old's link with
-// p's vtable map (flags=BPF_F_REPLACE, old map as the expected
-// current value). The kernel calls the kmod's .update callback, which
-// swaps the RCU pointer once — readers see either the whole old vtable
-// or the whole new one. Requires both objects to use
-// SEC(".struct_ops.link") (BPF_F_LINK) and kernel 6.4+.
+// One BPF_LINK_UPDATE on old's link with p's vtable map
+// (flags=BPF_F_REPLACE, old map as the expected current value). The
+// kernel calls the kmod's .update callback, which swaps the RCU pointer
+// once — readers see either the whole old vtable or the whole new one.
+// Requires both objects to use SEC(".struct_ops.link") (BPF_F_LINK) and
+// kernel 6.4+.
 //
-// Any other combination (fentry/fmod_ret on either side), or a kernel
-// that refuses the update, falls back to attach-new-then-close-old:
-// the kmod reg callback publishes the new vtable and the old link's
-// unreg sees it was superseded. Returns updated=true when the atomic
-// link update path was used.
-func (p *Program) SwapFrom(old *Program) (updated bool, err error) {
-	if p.IsStruct && old != nil && old.IsStruct && old.VTable != nil && len(old.Links) == 1 {
-		if nm := p.structOpsVTable(); nm != nil {
-			uerr := updateStructOpsLink(old.Links[0], nm, old.VTable)
-			if uerr == nil {
-				p.Links, old.Links = old.Links, nil
-				p.VTable, old.VTable = nm, nil
-				return true, nil
-			}
-			fmt.Fprintf(os.Stderr,
-				"policyprog: BPF_LINK_UPDATE %s → %s failed (%v); falling back to attach + detach\n",
-				old.Path, p.Path, uerr)
-		}
+// There is no fallback. If the update fails, old stays attached and
+// active and the error is returned. An old that is missing or has no
+// single live link yields ErrNotStructOps.
+func (p *Program) SwapFrom(old *Program) error {
+	if old == nil || old.VTable == nil || len(old.Links) != 1 {
+		return fmt.Errorf("%w: current policy has no live struct_ops link", ErrNotStructOps)
 	}
-	if err := p.Attach(); err != nil {
-		return false, err
+	nm := structOpsVTableOf(p.Coll)
+	if nm == nil {
+		return fmt.Errorf("%w: %s has no struct_ops vtable", ErrNotStructOps, p.Path)
 	}
-	if old != nil {
-		for _, l := range old.Links {
-			_ = l.Close()
-		}
-		old.Links = nil
+	if err := updateStructOpsLink(old.Links[0], nm, old.VTable); err != nil {
+		return fmt.Errorf("policyprog: BPF_LINK_UPDATE %s → %s: %w (previous policy kept)",
+			old.Path, p.Path, err)
 	}
-	return false, nil
+	p.Links, old.Links = old.Links, nil
+	p.VTable, old.VTable = nm, nil
+	return nil
 }
 
 // updateStructOpsLink issues BPF_LINK_UPDATE for a struct_ops link.
@@ -286,8 +252,7 @@ func (p *Program) SetConfigU64(mapName string, slot uint32, val uint64) error {
 	return m.Update(slot, val, 0 /* BPF_ANY */)
 }
 
-// AttachedCount returns how many links are live (useful for
-// smoke-verifying multi-hook programs like the freq2bit fmod_ret set).
+// AttachedCount returns how many links are live (0 or 1).
 func (p *Program) AttachedCount() int { return len(p.Links) }
 
 // Resolve turns a --policy-bpf argument into a concrete .bpf.o path.

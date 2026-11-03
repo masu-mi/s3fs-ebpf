@@ -2,21 +2,10 @@
 /*
  * policy_struct_ops.c — Layer 2 struct_ops implementation.
  *
- * Alternative to the fmod_ret path in tree_traversal.c / vfs_ops.c.
- * Instead of registering hooks with register_btf_fmodret_id_set() and
- * calling `s3fs_policy_on_*()` directly, we expose `struct
- * s3fs_policy_ops` as a BPF struct_ops type. BPF programs implement
- * this vtable as a single atomic unit; the whole policy hot-swaps by
- * one BPF map update.
- *
- * Compared with fmod_ret:
- *   fmod_ret: per-hook attach; tracing links have no BPF_LINK_UPDATE,
- *             so a swap is N attaches + N detaches (both policies run
- *             in between)
- *   struct_ops: 1 vtable, 1 BPF_LINK_UPDATE -> .update below swaps the
- *             RCU pointer once (atomic policy swap)
- *   fmod_ret: fentry-style, retval override
- *   struct_ops: function-pointer dispatch, retval is natural
+ * The policy is exposed as `struct s3fs_policy_ops`, a BPF struct_ops
+ * type. A BPF policy implements the whole vtable as one unit; reload is
+ * one BPF_LINK_UPDATE, whose .update below swaps the RCU pointer once,
+ * so readers see either the whole old vtable or the whole new one.
  *
  * See docs/design/policy-engine-design.md §4.5 for the design context.
  */
@@ -221,10 +210,8 @@ static int s3fs_policy_init_member(const struct btf_type *t,
 	return 0;
 }
 
-/* reg: publish the vtable to the RCU pointer. Callable while another
- * vtable is already active — hot reload flow attaches the new one
- * before closing the old, so reg replaces the active pointer and the
- * subsequent unreg on the old vtable must NOT clear the new one. */
+/* reg: publish the vtable to the RCU pointer. Reload does not come
+ * through here: it is a BPF_LINK_UPDATE handled by .update. */
 static int s3fs_policy_reg(void *kdata, struct bpf_link *link)
 {
 	struct s3fs_policy_ops *ops = kdata;
@@ -235,10 +222,8 @@ static int s3fs_policy_reg(void *kdata, struct bpf_link *link)
 }
 
 /* unreg: clear the vtable only if the pointer still points at THIS
- * kdata. During hot reload the new reg has already overwritten
- * s3fs_policy_active before the old link's unreg fires; clearing
- * unconditionally would strand kmod without an active policy while
- * the new vtable is still attached. */
+ * kdata. There is a single link, so this is always true; the check is
+ * kept as a cheap guard. */
 static void s3fs_policy_unreg(void *kdata, struct bpf_link *link)
 {
 	struct s3fs_policy_ops *ops = kdata;

@@ -64,6 +64,16 @@ minio_require() {
 		|| { echo "$MINIO_CONTAINER container missing — run 'make compose-up'" >&2; exit 1; }
 	docker exec "$MINIO_CONTAINER" mc alias set local http://localhost:9000 \
 		minioadmin minioadmin >/dev/null 2>&1
+	# A leftover `mc admin trace` (killing the `docker exec` client does not stop it inside the
+	# container) keeps MinIO publishing every request to a trace subscriber: every S3 path got
+	# 25-75 % slower and timing-sensitive tests (test-policy-conformance) failed (issue #35).
+	local stray
+	stray=$(docker top "$MINIO_CONTAINER" -o pid,args 2>/dev/null | grep -c 'mc admin trace' || true)
+	[ "${stray:-0}" -eq 0 ] || {
+		echo "$stray 'mc admin trace' process(es) run inside $MINIO_CONTAINER and slow every S3 request;" \
+			"stop them (docker top $MINIO_CONTAINER; sudo kill <pid>)" >&2
+		exit 1
+	}
 	local obj
 	for obj in "$@"; do
 		docker exec "$MINIO_CONTAINER" mc stat "local/$S3_BUCKET/$obj" >/dev/null 2>&1 \
@@ -151,6 +161,14 @@ ebpf_nocache() {
 	echo "$1" | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/nocache" >/dev/null
 }
 
+# ebpf_pcache_drop <0|1> — toggle the kmod's pcache_drop mode (drop only the
+# page cache on every open; admit + chunk table stay; see
+# kmod/vfs/aops_read.inc.c s3fs_ebpf_file_open). nocache wins when both are
+# set. Resets on rmmod.
+ebpf_pcache_drop() {
+	echo "$1" | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/pcache_drop" >/dev/null
+}
+
 # fd_buf_audit — print one `DETAIL fd_buf_audit ...` line comparing the M1
 # gauge (incremental) with M2's walk over live inodes and the pcache share
 # the AC-41 capacity loop charges. Call before ebpf_stop, with I/O idle.
@@ -208,8 +226,91 @@ fuse_mount_raw() {
 fuse_mount_cache() {
 	local mp=$1 dir=$2
 	umount_hard "$mp"
-	rm -rf "$dir" && mkdir -p "$dir"
+	sudo rm -rf "$dir" && mkdir -p "$dir"
 	fuse_mount "$mp" -o use_cache="$dir" -o kernel_cache -o max_stat_cache_size=100000
+}
+
+# fuse_mount_diskcache <mp> <cache-dir> — fresh use_cache mount WITHOUT
+# kernel_cache (fuse-diskcache, issue #35): the page cache is dropped on every
+# open and the disk cache serves the read. The counterpart of ebpf-pcachedrop.
+fuse_mount_diskcache() {
+	local mp=$1 dir=$2
+	umount_hard "$mp"
+	sudo rm -rf "$dir" && mkdir -p "$dir"
+	fuse_mount "$mp" -o use_cache="$dir" -o max_stat_cache_size=100000
+}
+
+# --- the six configurations of issue #35 ---------------------------------------
+#   fuse-raw         s3fs-fuse, no use_cache, no kernel_cache
+#   fuse-diskcache   s3fs-fuse, use_cache, no kernel_cache
+#   fuse-cache       s3fs-fuse, use_cache + kernel_cache + max_stat_cache_size
+#   ebpf-nocache     kmod nocache=1, daemon without --cache-dir
+#   ebpf-pcachedrop  kmod pcache_drop=1, daemon with --cache-dir (chunk table + policy kept)
+#   ebpf-pcache      defaults (page cache on), daemon with --cache-dir
+#   (layer-latency only) ebpf-nocache-diskcache: nocache=1 + daemon --cache-dir, i.e. every
+#                    open upcalls and the daemon answers from its disk cache, not from S3
+BENCH_BACKENDS_ALL="fuse-raw fuse-diskcache fuse-cache ebpf-nocache ebpf-pcachedrop ebpf-pcache"
+BENCH_MP_EBPF=${BENCH_MP_EBPF:-/mnt/s3demo}
+BENCH_MP_FUSE=${BENCH_MP_FUSE:-/mnt/s3fuse-bench}
+BENCH_FUSE_CACHE_DIR=${BENCH_FUSE_CACHE_DIR:-/tmp/s3fs-fuse-cache-bench}
+BENCH_EBPF_CACHE_DIR=${BENCH_EBPF_CACHE_DIR:-/tmp/s3fs-ebpf-cache-bench}
+BENCH_MP=""        # mount point of the backend last brought up
+BENCH_KIND=""      # fuse | ebpf
+
+# bench_down — stop whatever bench_up started (every mount point of the six).
+bench_down() {
+	ebpf_nocache 0 2>/dev/null || true
+	ebpf_pcache_drop 0 2>/dev/null || true
+	echo 0 | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/partial_modify" >/dev/null 2>&1 || true
+	ebpf_stop "$BENCH_MP_EBPF" >/dev/null 2>&1 || true
+	umount_hard "$BENCH_MP_FUSE"
+	BENCH_MP=""
+}
+
+# bench_up <backend> <daemon-log> [daemon flags...] — fresh mount (and daemon) of one
+# configuration with EMPTY caches (disk cache dir wiped, daemon restarted). Sets
+# BENCH_MP / BENCH_KIND. S3_BUCKET must be set (s3fs-fuse and the daemon use it).
+bench_up() {
+	local be=$1 logf=$2; shift 2
+	bench_down
+	case $be in
+	fuse-raw)
+		fuse_mount_raw "$BENCH_MP_FUSE"; BENCH_KIND=fuse; BENCH_MP=$BENCH_MP_FUSE ;;
+	fuse-diskcache)
+		fuse_mount_diskcache "$BENCH_MP_FUSE" "$BENCH_FUSE_CACHE_DIR"; BENCH_KIND=fuse; BENCH_MP=$BENCH_MP_FUSE ;;
+	fuse-cache)
+		fuse_mount_cache "$BENCH_MP_FUSE" "$BENCH_FUSE_CACHE_DIR"; BENCH_KIND=fuse; BENCH_MP=$BENCH_MP_FUSE ;;
+	ebpf-nocache|ebpf-nocache-diskcache|ebpf-pcachedrop|ebpf-pcache)
+		ebpf_mount "$BENCH_MP_EBPF"
+		local cd=()
+		if [ "$be" != ebpf-nocache ]; then
+			sudo rm -rf "$BENCH_EBPF_CACHE_DIR"; mkdir -p "$BENCH_EBPF_CACHE_DIR"
+			cd=(--cache-dir="$BENCH_EBPF_CACHE_DIR")
+		fi
+		ebpf_start_daemon "$logf" --bucket="$S3_BUCKET" --arena-metadata-only "${cd[@]}" \
+			--policy-bpf=builtin:policy_observe_ops --metrics-addr=:9600 "$@"
+		case $be in
+			ebpf-nocache|ebpf-nocache-diskcache) ebpf_nocache 1 ;;
+			ebpf-pcachedrop) ebpf_pcache_drop 1 ;;
+		esac
+		BENCH_KIND=ebpf; BENCH_MP=$BENCH_MP_EBPF ;;
+	*) echo "bench_up: unknown backend $be" >&2; return 1 ;;
+	esac
+}
+
+# bench_env_report — conditions for the record (date, kernel, commit, options).
+bench_env_report() {
+	echo "date_utc: $(date -u +%FT%TZ)"
+	echo "uname: $(uname -srv)"
+	echo "git: $(git -C "$TOPDIR" rev-parse HEAD)"
+	echo "cpus: $(nproc)  mem: $(free -m | awk '/Mem:/{print $2}') MiB"
+	echo "s3fs: $(s3fs --version 2>&1 | head -1)"
+	echo "fuse-raw:       s3fs <bucket> (no use_cache, no kernel_cache)"
+	echo "fuse-diskcache: s3fs -o use_cache=<dir> -o max_stat_cache_size=100000 (no kernel_cache)"
+	echo "fuse-cache:     s3fs -o use_cache=<dir> -o kernel_cache -o max_stat_cache_size=100000"
+	echo "ebpf-*:         fastpath --arena-metadata-only --policy-bpf=builtin:policy_observe_ops (+ --cache-dir except nocache)"
+	echo "ebpf-nocache:   kmod nocache=1;  ebpf-pcachedrop: kmod pcache_drop=1;  ebpf-pcache: defaults"
+	echo "partial_modify: daemon default (on); partial_modify_min default"
 }
 
 # --- Mountpoint for Amazon S3 (I-01) -----------------------------------------

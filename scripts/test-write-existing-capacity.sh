@@ -93,7 +93,8 @@ for round in $(seq 1 "$ROUNDS"); do
     ebpf_mount "$MOUNT"
     ebpf_start_daemon "$OUT/daemon-$round.log" \
         --bucket="$S3_BUCKET" --arena-metadata-only \
-        --policy-bpf="builtin:policy_observe" \
+        --policy-bpf="builtin:policy_observe_ops" \
+        --partial-modify=false \
         --softcap=64 --cache-capacity="$CAPACITY" \
         --metrics-addr=:9600 --sample-every=100ms --sync-every=0
     sleep "$SETTLE"

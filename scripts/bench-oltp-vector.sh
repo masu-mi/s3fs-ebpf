@@ -90,7 +90,7 @@ seed
 log "== s3fs-ebpf (pcache)"
 ebpf_mount "$MOUNT"
 ebpf_start_daemon "$OUT/daemon.log" --cache-dir="$EBPF_CACHE_DIR" \
-	--policy-bpf="builtin:policy_observe" --arena-metadata-only \
+	--policy-bpf="builtin:policy_observe_ops" --arena-metadata-only \
 	--metrics-addr=:9600 --sample-every=2s --sync-every=60s --softcap=8 --cache-capacity=0
 sleep "$SETTLE"
 run_all ebpf-pcache "$MOUNT"

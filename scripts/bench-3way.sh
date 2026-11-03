@@ -20,6 +20,11 @@
 #   2. microbench read syscall-level
 #   3. perf stat CPU
 #   4. ebpf-nocache (NOCACHE=0 で skip)
+#   5. fuse-diskcache vs ebpf-pcachedrop (PCACHEDROP=0 で skip)
+#
+#   s3fs-ebpf (pcachedrop): kmod pcache_drop=1。open ごとに page cache だけ捨て、
+#                       chunk 表と policy は残す。fuse-diskcache (use_cache、
+#                       kernel_cache 無し) と対にして独自キャッシュの効果だけを見る。
 #
 # 結果は $OUT_DIR/3way-*.md に出力。docs/journal/benchmark-results.md §7 で解釈。
 
@@ -32,7 +37,9 @@ OUT_DIR=${OUT_DIR:-/tmp/bench-3way}
 MP_EBPF=/mnt/s3demo
 MP_FUSE_RAW=/mnt/s3fuse            # raw、キャッシュ無効
 MP_FUSE_CACHE=/mnt/s3fuse-cache    # cache 有効
+MP_FUSE_DISKCACHE=/mnt/s3fuse-diskcache  # use_cache, no kernel_cache (issue #35)
 MP_MOUNT_S3=/mnt/s3-mountpoint     # I-01
+FUSE_DISKCACHE_DIR=/tmp/s3fs-fuse-diskcache
 FUSE_CACHE_DIR=/tmp/s3fs-fuse-cache
 EBPF_CACHE_DIR=/tmp/s3fs-ebpf-cache
 MOUNT_S3_CACHE_DIR=${MOUNT_S3_CACHE_DIR:-/tmp/mount-s3-cache}  # I-01
@@ -43,6 +50,7 @@ RUNS=${RUNS:-200}
 MICRO_ITERS=${MICRO_ITERS:-20000}
 PERF_ITERS=${PERF_ITERS:-200}
 NOCACHE=${NOCACHE:-1}
+PCACHEDROP=${PCACHEDROP:-1}   # 0 to skip the fuse-diskcache vs ebpf-pcachedrop arm
 
 mkdir -p "$OUT_DIR" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR"
 sudo chown "$(id -un):$(id -gn)" "$FUSE_CACHE_DIR" "$EBPF_CACHE_DIR" 2>/dev/null || true
@@ -268,6 +276,42 @@ run_nocache() {
 	cat "$OUT_DIR/3way-nocache.md" >&2
 }
 
+# --- 6. fuse-diskcache vs ebpf-pcachedrop (issue #35) --------------
+# fuse-diskcache: s3fs-fuse use_cache, no kernel_cache (page cache dropped per
+# open, disk cache serves the read). ebpf-pcachedrop: kmod pcache_drop=1 with
+# the daemon's --cache-dir, so the chunk table and policy stay. The pair
+# isolates the effect of the own cache. Run after run_nocache (shared mount).
+run_pcachedrop() {
+	log "fuse-diskcache vs ebpf-pcachedrop"
+	fuse_mount_diskcache "$MP_FUSE_DISKCACHE" "$FUSE_DISKCACHE_DIR"
+	cat "$MP_FUSE_DISKCACHE/$FILE" "$MP_FUSE_DISKCACHE/$BIG_FILE" >/dev/null 2>&1 || true  # fill the disk cache
+	ebpf_start_daemon "$OUT_DIR/fastpath-pcachedrop.log" \
+		--cache-dir="$EBPF_CACHE_DIR" --sample-every=60s
+	cat "$MP_EBPF/$FILE" "$MP_EBPF/$BIG_FILE" >/dev/null 2>&1 || true    # fill the chunk table
+	ebpf_pcache_drop 1
+	{
+		echo '## fuse-diskcache vs ebpf-pcachedrop (kmod pcache_drop=1, daemon with --cache-dir)'
+		echo
+	} > "$OUT_DIR/3way-pcachedrop.md"
+	hyperfine --warmup "$WARMUP" --min-runs "$RUNS" --shell=none \
+		--export-markdown "$OUT_DIR/3way-pcachedrop-cat.md" \
+		--command-name 'fuse-diskcache'   "cat $MP_FUSE_DISKCACHE/$FILE" \
+		--command-name 'ebpf-pcachedrop'  "cat $MP_EBPF/$FILE" >&2
+	hyperfine --warmup 2 --min-runs 20 --shell=none \
+		--export-markdown "$OUT_DIR/3way-pcachedrop-big.md" \
+		--command-name 'fuse-diskcache'   "cat $MP_FUSE_DISKCACHE/$BIG_FILE" \
+		--command-name 'ebpf-pcachedrop'  "cat $MP_EBPF/$BIG_FILE" >&2
+	cat "$OUT_DIR/3way-pcachedrop-cat.md" "$OUT_DIR/3way-pcachedrop-big.md" >> "$OUT_DIR/3way-pcachedrop.md"
+	{
+		echo
+		echo "read_miss_upcalls_total after run: $(curl -s localhost:9600/metrics | awk '$1=="s3fs_ebpf_read_miss_upcalls_total"{print $2}')"
+		echo "folio_hits_total after run: $(curl -s localhost:9600/metrics | awk '$1=="s3fs_ebpf_folio_hits_total"{print $2}')"
+	} >> "$OUT_DIR/3way-pcachedrop.md"
+	ebpf_pcache_drop 0
+	umount_hard "$MP_FUSE_DISKCACHE"
+	cat "$OUT_DIR/3way-pcachedrop.md" >&2
+}
+
 # --- execute -------------------------------------------------------
 check_prereq
 start_fuse_raw
@@ -283,6 +327,9 @@ run_micro
 run_perf
 if [ "$NOCACHE" = 1 ]; then
 	run_nocache
+fi
+if [ "$PCACHEDROP" = 1 ]; then
+	run_pcachedrop
 fi
 
 log "done. results in $OUT_DIR/"

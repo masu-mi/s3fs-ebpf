@@ -83,7 +83,7 @@ start_stack() {
     cleanup
     ebpf_mount "$MOUNT"
     ebpf_start_daemon "$OUT/daemon.log" \
-        --policy-bpf="builtin:policy_observe" \
+        --policy-bpf="builtin:policy_observe_ops" \
         --metrics-addr=:9600 \
         --sample-every=2s --sync-every=3s \
         --softcap=8 --cache-capacity=0

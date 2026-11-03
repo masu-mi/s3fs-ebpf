@@ -1,0 +1,18 @@
+C mid-write   1 MiB ebpf-pcachedrop fsync: n=20 median=19.6 q1=19.0 q3=20.1 min=17.8 max=109.0
+C mid-write   1 MiB ebpf-pcachedrop object-replaced: n=20 median=34.7 q1=33.8 q3=35.3 min=32.5 max=123.8  fsync-returned-early=0/20
+C mid-write   1 MiB ebpf-pcache     fsync: n=20 median=20.2 q1=18.4 q3=23.5 min=17.9 max=35.3
+C mid-write   1 MiB ebpf-pcache     object-replaced: n=20 median=35.9 q1=34.2 q3=39.1 min=33.0 max=50.9  fsync-returned-early=0/20
+C mid-write   1 MiB ebpf-nocache    fsync: n=20 median=18.7 q1=18.4 q3=19.3 min=17.9 max=23.9
+C mid-write   1 MiB ebpf-nocache    object-replaced: n=20 median=34.3 q1=33.7 q3=35.1 min=33.0 max=39.2  fsync-returned-early=0/20
+C mid-write  10 MiB ebpf-pcachedrop fsync: n=20 median=70.8 q1=67.9 q3=72.8 min=65.4 max=87.1
+C mid-write  10 MiB ebpf-pcachedrop object-replaced: n=20 median=85.5 q1=82.6 q3=87.6 min=80.1 max=101.7  fsync-returned-early=0/20
+C mid-write  10 MiB ebpf-pcache     fsync: n=20 median=68.1 q1=64.7 q3=73.5 min=63.6 max=115.2
+C mid-write  10 MiB ebpf-pcache     object-replaced: n=20 median=83.8 q1=80.3 q3=89.6 min=79.5 max=130.2  fsync-returned-early=0/20
+C mid-write  10 MiB ebpf-nocache    fsync: n=20 median=68.1 q1=65.1 q3=70.2 min=62.5 max=135.1
+C mid-write  10 MiB ebpf-nocache    object-replaced: n=20 median=83.6 q1=81.7 q3=86.1 min=78.1 max=150.5  fsync-returned-early=0/20
+C mid-write 100 MiB ebpf-pcachedrop fsync: n=20 median=176.8 q1=168.0 q3=185.7 min=163.6 max=204.6
+C mid-write 100 MiB ebpf-pcachedrop object-replaced: n=20 median=192.3 q1=182.7 q3=200.1 min=179.4 max=219.1  fsync-returned-early=0/20
+C mid-write 100 MiB ebpf-pcache     fsync: n=20 median=168.4 q1=160.9 q3=188.3 min=158.3 max=211.9
+C mid-write 100 MiB ebpf-pcache     object-replaced: n=20 median=183.8 q1=176.2 q3=203.9 min=173.9 max=226.7  fsync-returned-early=0/20
+C mid-write 100 MiB ebpf-nocache    fsync: n=20 median=170.9 q1=167.4 q3=182.6 min=165.4 max=276.1
+C mid-write 100 MiB ebpf-nocache    object-replaced: n=20 median=186.0 q1=183.8 q3=197.8 min=181.1 max=291.2  fsync-returned-early=0/20

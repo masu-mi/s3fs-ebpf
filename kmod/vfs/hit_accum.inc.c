@@ -30,7 +30,6 @@ static void s3fs_hit_count(struct file *file, struct inode *inode)
 
 static void s3fs_hit_signal(u64 ino)
 {
-	s3fs_policy_on_hit(ino);
 	(void)s3fs_policy_ops_eval_hit(ino);
 }
 

@@ -1,0 +1,3 @@
+ebpf-nocache kmod before={"upcalls":0,"folio_hits":0} after={"upcalls":196,"folio_hits":63721}
+ebpf-pcachedrop kmod before={"upcalls":0,"folio_hits":0} after={"upcalls":9,"folio_hits":77606}
+ebpf-pcache kmod before={"upcalls":0,"folio_hits":0} after={"upcalls":9,"folio_hits":16239}

@@ -594,14 +594,10 @@ RCU で vtable を 1 ポインタ swap — 既存 vtable で走行中の call �
 s3fs_ebpf: policy struct_ops updated (hot swap)
 ```
 
-fmod_ret (tracing link は `BPF_LINK_UPDATE` 非対応) との相互切替や、
-link update を拒否する kernel (< 6.4) では「新を attach → 旧を close」に
-fallback し、dmesg は次のようになる:
-
-```
-s3fs_ebpf: policy struct_ops registered (ops=<new_addr>)
-s3fs_ebpf: policy struct_ops unregistered (superseded, keeping <new_addr>)
-```
+reload は `BPF_LINK_UPDATE` の 1 経路だけ。fmod_ret / fentry の policy や、
+link update を拒否する kernel (< 6.4) では fallback せず、reload は
+エラー (struct_ops でない `.bpf.o` は HTTP 400) を返して古い policy が
+残る。
 
 > **sleepable にしない**: kmod は `rcu_read_lock()` の中から vtable を
 > 呼ぶ (`kmod/policy_struct_ops.c`)。`SEC("struct_ops.s/...")` にすると

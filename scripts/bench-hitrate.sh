@@ -57,7 +57,8 @@ SETTLE=${SETTLE:-15}            # seconds between prewarm and workload
 SYNC_EVERY=${SYNC_EVERY:-3s}    # daemon --sync-every value
 POST=${POST:-8}                 # counter mirror lag after workload
 INTERLEAVE=${INTERLEAVE:-25}    # POST /policy/eval every N accesses (0 disables)
-POLICIES=${POLICIES:-observe freq2bit_ops lru_ops sieve_ops s3fifo_ops wtinylfu_ops wtinylfu_full_ops pressure_ops time_decay_ops size_aware_ops}
+POLICIES=${POLICIES:-observe_ops freq2bit_ops lru_ops sieve_ops s3fifo_ops wtinylfu_ops wtinylfu_full_ops pressure_ops time_decay_ops size_aware_ops}
+PCACHE_DROP=${PCACHE_DROP:-0}   # 1: kmod pcache_drop (page cache dropped per open; chunk table + policy stay)
 DAEMON_EXTRA_FLAGS=${DAEMON_EXTRA_FLAGS:-}  # e.g. --arena-metadata-only for AB-08
 OUT=${OUT:-/tmp/bench-hitrate}
 
@@ -150,6 +151,7 @@ start_stack() {
 		--sample-every=2s --sync-every="$SYNC_EVERY" \
 		--softcap="$SOFTCAP" --cache-capacity="$CAPACITY_BYTES" \
 		$DAEMON_EXTRA_FLAGS
+	[ "$PCACHE_DROP" = 1 ] && ebpf_pcache_drop 1
 	log "$pol: prewarm done, forcing 4 policy eval rounds to converge below softcap"
 	# SIEVE needs 3 rounds (grace → clear → evict); LRU / freq2bit
 	# / S3-FIFO converge faster but do no harm here. Sleep between so the
@@ -340,7 +342,7 @@ awk '{ printf "{\"ts\":%d,\"ino\":%d,\"op\":\"read\"}\n", (NR-1)*1000000, 100+$1
 	"$OUT/workload.txt" > "$OUT/trace.jsonl"
 
 echo "=================================================================="
-echo "hit-rate bench — $N_FILES files, Zipf α=$ZIPF_ALPHA, $N_ACCESS accesses, softcap=$SOFTCAP capacity_bytes=$CAPACITY_BYTES seed=$SEED"
+echo "hit-rate bench [pcache_drop=$PCACHE_DROP] — $N_FILES files, Zipf α=$ZIPF_ALPHA, $N_ACCESS accesses, softcap=$SOFTCAP capacity_bytes=$CAPACITY_BYTES seed=$SEED"
 echo "=================================================================="
 for pol in $POLICIES; do
 	run_one "$pol"

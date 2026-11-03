@@ -3,7 +3,7 @@
 # 40 MiB existing object loads only the chunks it touches and the flush
 # copies the rest server-side (multipart + UploadPartCopy).  Scenarios and
 # checks are in test-write-partial.py; this script runs them with the daemon
-# started with --partial-modify and checks that the copy path was used.
+# started with the default --partial-modify (on) and checks that the copy path was used.
 #
 # Usage: sudo ./scripts/test-write-partial.sh
 # Exit: 0 = PASS, 1 = FAIL, 2 = prereq missing.
@@ -44,14 +44,21 @@ trap 'cleanup; rm -rf "$SEED"' EXIT
 python3 -I "$TOPDIR/scripts/test-write-partial.py" "$MOUNT" "$S3_BUCKET" "$MINIO_CONTAINER" seed "$SEED"
 
 ebpf_mount "$MOUNT"
+# AC-61: a value left by an earlier run must not survive the daemon start.
+echo 0 > /sys/module/s3fs_kfunc/parameters/partial_modify
 ebpf_start_daemon "$OUT/daemon.log" \
     --bucket="$S3_BUCKET" --arena-metadata-only \
-    --policy-bpf="builtin:policy_observe" \
-    --softcap=64 --cache-capacity=0 --partial-modify \
+    --policy-bpf="builtin:policy_observe_ops" \
+    --softcap=64 --cache-capacity=0 \
     --metrics-addr=:9600 --sample-every=100ms --sync-every=0
 sleep "$SETTLE"
 
 overall=PASS
+pm=$(cat /sys/module/s3fs_kfunc/parameters/partial_modify)
+if [ "$pm" != Y ]; then
+    log "partial_modify=$pm after a default start (want Y)"
+    overall=FAIL
+fi
 python3 -I "$TOPDIR/scripts/test-write-partial.py" "$MOUNT" "$S3_BUCKET" "$MINIO_CONTAINER" run "$SEED" || overall=FAIL
 copied=$(grep -c 'rest copied' "$OUT/daemon.log" || true)
 log "flushes that copied server-side: $copied"

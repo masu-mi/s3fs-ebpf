@@ -57,7 +57,7 @@ SETTLE=${SETTLE:-15}
 SYNC_EVERY=${SYNC_EVERY:-3s}
 POST=${POST:-8}
 INTERLEAVE=${INTERLEAVE:-25}
-POLICIES=${POLICIES:-observe lru_ops sieve_ops s3fifo_ops wtinylfu_ops pressure_ops time_decay_ops}
+POLICIES=${POLICIES:-observe_ops lru_ops sieve_ops s3fifo_ops wtinylfu_ops pressure_ops time_decay_ops}
 OUT=${OUT:-/tmp/bench-hitrate-mixed}
 
 mkdir -p "$OUT"

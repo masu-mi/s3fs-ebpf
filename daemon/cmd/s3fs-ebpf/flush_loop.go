@@ -155,7 +155,14 @@ func runFlushWaitLoop(ctx context.Context, devPath string,
 			fmt.Fprintf(os.Stderr, "[flush-wait] pop_wait: %v\n", err)
 			return
 		}
-		handleFlush(ctx, int(f.Fd()), devPath, progs, s3c, &ev)
+		// Whatever is parked in the coalescer for this ino was popped
+		// before this event and is covered by its PUT: drop it, and make
+		// one already firing stand aside (flush_order.go).
+		flushOrd.noteWait(ev.Ino)
+		cancelParked(ev.Ino)
+		flushOrd.runWait(ev.Ino, func() {
+			handleFlush(ctx, int(f.Fd()), devPath, progs, s3c, &ev)
+		})
 	}
 }
 
@@ -204,7 +211,8 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 
 	coal := newCoalescer(int(f.Fd()), devPath, progs, s3c,
 		200*time.Millisecond)
-	defer coal.Shutdown()
+	setFlushCoalescer(coal)
+	defer func() { setFlushCoalescer(nil); coal.Shutdown() }()
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -287,11 +295,15 @@ func drainFlushQueue(ctx context.Context, devFd int, devPath string,
 			// stale close-event's PUT can't fire after ours and
 			// overwrite the fresh bytes.
 			if coal != nil {
+				flushOrd.noteWait(ev.Ino)
 				coal.CancelIno(ev.Ino)
 			}
-			handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
+			flushOrd.runWait(ev.Ino, func() {
+				handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
+			})
 			continue
 		}
+		flushOrd.noteParked(ev.Ino)
 		coal.Submit(ctx, &ev)
 	}
 }

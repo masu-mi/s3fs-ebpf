@@ -169,16 +169,4 @@ u64 s3fs_admit_size(u64 ino);
  * dropped entries (since last drain) into *overflow. */
 void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow);
 
-/*
- * Policy hooks (Layer 2/3 fentry attach anchors). See
- * docs/design/policy-engine-design.md §4.5. Bodies are no-ops — BPF programs
- * supply the real behavior via fentry attach. Return values are
- * consumed by callers (kmod side) as advisory when the hook is
- * BPF-overridden.
- */
-int s3fs_policy_on_admit(u64 count, u64 arena_used_hint);
-int s3fs_policy_on_evict(u64 ino);
-int s3fs_policy_on_pressure(u64 count, u64 threshold);
-int s3fs_policy_on_hit(u64 ino);
-
 #endif /* _S3FS_EBPF_VFS_OPS_H */

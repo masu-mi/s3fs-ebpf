@@ -2142,3 +2142,286 @@ per-access の hit/miss を simulator と突き合わせた (`bench-hitrate.sh` 
 未了: 通常設定で n=10 を複数回繰り返して run 間のばらつきを見ること、各 run で `/proc/vmstat` を取ること、先に別の大きなファイルを読んで回収を意図的に起こすこと。
 
 **同じブランチのテスト**: `make test-regression` 全 PASS (23 件)、`make test-policy-conformance` PASS、`make test-kunit` 45 件 PASS。
+
+### 18.48 6 構成 × A〜G、2 構成 × H の測り直しと、計測中に見つけた fsync の不具合 (2026-11-03、issue #35)
+
+issue #35 (policy の差し替えを `BPF_LINK_UPDATE` だけにする、`--partial-modify` の既定化、`pcache_drop` の追加) を入れた状態での測り直し。生データと集計の出力は `docs/journal/data/s18-48-20261103/` (`report.md` がこの節の表の元)。試験の概要と測っている側面は `docs/dev-notes/bench-suite-overview.md`、手順は `.claude/skills/perf-bench-verify/SKILL.md`。
+
+#### 最初の run は無効だった (MinIO に `mc admin trace` が残っていた)
+
+2026-11-02 21:57 UTC から 11-03 06:17 UTC までに取った値は**すべて無効**で、この節の値は 06:17〜07:48 に取り直したもの。原因は、MinIO の API trace を確かめたとき (`mc admin trace local --call s3`) に、`docker exec` のクライアントだけを kill してコンテナ内の `mc` を 3 本残したこと。MinIO が全 request を trace の購読者に流し続けた。
+
+| 同じ A (microbench、18 B) | trace が残っている間 | 止めたあと | 変化 |
+|---|---:|---:|---:|
+| fuse-raw p50 | 2.257 ms | 1.700 ms | −25% |
+| fuse-cache p50 | 754.0 µs | 528.2 µs | −30% |
+| ebpf-nocache p50 | 746.3 µs | 531.5 µs | −29% |
+| ebpf-pcache p50 (page cache だけで終わる対照) | 3.189 µs | 3.154 µs | −1% |
+
+- S3 を伴う項目だけが 25〜30% 遅くなり、page cache だけで終わる対照は動かなかった。`make test-policy-conformance` は、trace が残っている間は s3fifo / wtinylfu が live hits で simulator より 3.5〜12 pt 多く 3 回とも FAIL (変更前の master でも同じ)、止めたあとは 4 policy とも 1 回目で PASS (gap 0.0〜1.4 pt)。
+- 無効な run で「ホストが以前より 25〜75% 遅い (原因は未切り分け)」「ebpf-pcache では policy の順位が崩れる」と書いたものは、すべてこの影響だった (下の H)。
+- 再発防止: `scripts/lib/bench.sh` の `minio_require` が、MinIO のコンテナ内に `mc admin trace` があると止まる。測定前の確認項目を skill に書いた (backlog AC-72)。
+- 測り直しの途中で、MinIO のディスクの空きが少なくなり `Storage backend has reached its minimum free drive threshold` で D の seed が失敗した。B / C / D のあとに scratch の bucket を消す手順を skill に書いた。
+
+#### 条件
+
+- 実施日 2026-11-03 (06:17〜07:48 UTC)、`uname -r` = 6.12.0-061200-generic、6 CPU / 8 GB、ローカル MinIO (docker)、s3fs-fuse は `s3fs --version` のもの。測定中に動いていた他のものは docker の grafana / prometheus / node-exporter / minio だけ (loadavg 0.1 前後)。
+- commit: `67e97b1` + issue #35 の作業ツリー (測定時は未 commit)。`policy_observe_ops` (struct_ops)、`--partial-modify` は既定 (有効、kmod の `partial_modify`=Y)。B と C は **fsync の修正後のビルド** (下の「見つけた不具合」)。
+- 構成と起動オプション (`scripts/lib/bench.sh` の `bench_up`):
+
+| 名前 | 内容 |
+|---|---|
+| fuse-raw | `s3fs <bucket> <mp>` (`use_cache` なし、`kernel_cache` なし) |
+| fuse-diskcache | `-o use_cache=<dir> -o max_stat_cache_size=100000` (`kernel_cache` なし) |
+| fuse-cache | `-o use_cache=<dir> -o kernel_cache -o max_stat_cache_size=100000` |
+| ebpf-nocache | `fastpath --s3 --bucket=… --arena-metadata-only --policy-bpf=builtin:policy_observe_ops --metrics-addr=:9600 --sample-every=60s --sync-every=0` (`--cache-dir` なし)、kmod `nocache=1` |
+| ebpf-pcachedrop | 同上 + `--cache-dir=<dir>`、kmod `pcache_drop=1` |
+| ebpf-pcache | 同上 + `--cache-dir=<dir>`、module param は既定 |
+
+- 各測定の前に構成ごとに mount と daemon を作り直し、s3fs-fuse の disk cache と daemon の `--cache-dir` を空にした。cold (D、E) は `echo 3 > /proc/sys/vm/drop_caches` も行った。
+- sha256: D は全 30 object × 6 構成、B は全 object、E は cat の出力全体。不一致は 0。
+- 値は **中央値 (四分位範囲; 最小–最大)**。n は A 5000 iters、B と C と D が 10、E が 5、F が 5 (5 s ずつ)、G が 5、H が 5 seed。
+- 比は「s3fs-fuse の時間 ÷ s3fs-ebpf の時間」(1 より大きいほど s3fs-ebpf が速い)。組は raw/nocache (構造の差)、diskcache/pcachedrop (独自キャッシュの差)、cache/pcache (全体)。F と G の ops/s、IOPS は逆数 (s3fs-ebpf ÷ s3fs-fuse) にして時間の比にそろえた。
+- H の条件: `N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8` (capacity mode、`CAPACITY_BYTES = SOFTCAP × 46 B`)、seed 42 / 1337 / 7 / 11 / 23、`--arena-metadata-only`。§18.41 の条件 (2000 access、α=0.7) にそろえた。
+
+#### 計測中に見つけた不具合: 新規の大きいファイルの fsync が早く返り、遅れた 0 byte の PUT でオブジェクトが空になる
+
+最初の run の B の verify で ebpf の 10 / 100 MiB が FAIL した (件数は `data/.../B-C-before-fix/`。時間の値は trace の影響を受けているが、件数は同じ原因)。切り分け (`67e97b1` の master でも同じ):
+
+- `.create` が 0 byte のプレースホルダの flush event を積む。ticker がそれを kmod の queue から取り出して coalescer に 200 ms 預ける。`dd conv=fsync` の fsync (WAIT event) は別の `runFlushWaitLoop` が処理するが、こちらは coalescer の預かり分を取り消さなかった (取り消しは `drainFlushQueue` の WAIT 分岐だけ)。kmod の F1 が捨てられるのは kmod の queue に残っている item だけ。
+- 預かり分が fsync の PUT の最中か後に発火し、(1) `ev.Size`(0) 分の PUT でオブジェクトを空にした (daemon のログで `put 104857600 bytes` の後に `put 0 bytes`)、(2) その `READ_DIRTY` が flush_seq を覆ったことにして、fsync の waiter を PUT の完了前に起こした。
+- 修正前の頻度: 100 MiB の新規ファイルを `dd conv=fsync` した直後の HEAD で `Content-Length` が 0 (fsync が早く返った) になったのは master で 12 回中 9 回。B の run では 100 MiB の fsync が早く返ったのが ebpf-nocache 6/10、ebpf-pcachedrop 5/10、ebpf-pcache 3/10 (うち 1 回は 120 秒待っても 0 B のまま)。fuse の 3 構成は 0。
+- 修正 (`daemon/cmd/s3fs-ebpf/flush_order.go`): WAIT event を pop したら、その ino の預かり分を取り消し、取り消し後に発火した分は「WAIT より前に pop された非 WAIT event」として捨てる (WAIT の PUT が buffer を実行時に読むので覆われる)。同じ ino の `handleFlush` は直列にする。残る窓は `docs/kmod-pcache-invariants.md` の F1 (daemon 側) と backlog AC-71。
+- 回帰テスト: `make test-fsync-large-new-file` (100 MiB の新規ファイルを fsync した直後の Content-Length と、settle 後の sha256)。修正前 (master) は 12 回中 9 回 FAIL、修正後は 12 回 × 2 run と 40 回 × 1 run がすべて PASS。単体テストは `flush_order_test.go` (`-race` で PASS)。backlog AC-70。
+- 修正後の B (この節の表) は 6 構成とも fsync が早く返った回数 0、verify 全 PASS。**修正前に見えていた「100 MiB の新規 write は ebpf が fuse-raw より 1.37 倍速い」は、fsync が PUT の完了前に返っていた分を含んでいた。** 修正後の 100 MiB は ebpf-pcachedrop 1.20×、ebpf-pcache 1.04×、ebpf-nocache 0.97× で、fuse との差は run 間の揺れの範囲に近い。1 / 10 MiB の差 (1.3〜1.5×) は変わらない。
+
+#### A: open+read+close (microbench 5000 iters、hello.txt 18 B)
+
+| 構成 | p50 | p99 |
+|---|---:|---:|
+| fuse-raw | 1675.3 µs | 2509.8 µs |
+| fuse-diskcache | 537.0 µs | 748.8 µs |
+| fuse-cache | 520.1 µs | 611.8 µs |
+| ebpf-nocache | 528.2 µs | 824.4 µs |
+| ebpf-pcachedrop | 3.8 µs | 6.6 µs |
+| ebpf-pcache | 2.9 µs | 5.7 µs |
+
+比 (s3fs-fuse ÷ s3fs-ebpf、p50): fuse-raw 対 ebpf-nocache = 3.17× / fuse-diskcache 対 ebpf-pcachedrop = 140.42× / fuse-cache 対 ebpf-pcache = 179.97×
+
+#### B: durable write、新規ファイル (n=10、ms)
+
+fsync が返るまでの時間。括弧内は四分位範囲; 最小–最大。
+
+| サイズ | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 MiB | 21.1 (21.0–21.2; 20.7–23.0) | 21.4 (21.0–22.1; 20.8–23.9) | 21.6 (21.3–21.7; 21.0–22.3) | 14.6 (14.2–14.7; 14.0–15.4) | 15.4 (15.0–15.8; 14.3–17.1) | 14.8 (14.2–15.1; 14.1–15.6) |
+| 10 MiB | 72.1 (71.7–72.6; 71.1–73.8) | 73.0 (72.6–73.2; 72.1–74.8) | 74.2 (73.2–75.3; 73.0–76.1) | 56.5 (55.7–57.7; 53.6–61.8) | 58.4 (57.2–60.4; 56.7–76.4) | 56.7 (54.3–57.1; 53.3–57.9) |
+| 100 MiB | 346.0 (341.4–359.4; 336.0–365.7) | 352.8 (343.2–353.2; 335.3–376.7) | 348.9 (342.3–355.1; 334.2–365.3) | 357.1 (305.1–371.9; 255.2–431.5) | 293.8 (274.5–296.3; 242.0–504.8) | 337.0 (269.4–363.0; 243.8–416.7) |
+
+fsync が PUT の完了より先に返った回数 / 完了した回数 (オブジェクトが完成するまでを別に計った):
+
+| サイズ | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 MiB | 0/10 | 0/10 | 0/10 | 0/10 | 0/10 | 0/10 |
+| 10 MiB | 0/10 | 0/10 | 0/10 | 0/10 | 0/10 | 0/10 |
+| 100 MiB | 0/10 | 0/10 | 0/10 | 0/10 | 0/10 | 0/10 |
+
+遅れて来た 0 byte の PUT でオブジェクトが空になり、120 秒待っても完成しなかった回数 (計測から除外): 
+
+fsync が早く返った回は、オブジェクトが完成するまでの時間を durable とみなした値 (HEAD の polling 込みで 10 ms 前後の誤差):
+
+| サイズ | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache | 比 raw/nocache | 比 diskcache/pcachedrop | 比 cache/pcache |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 MiB | 21.1 (21.0–21.2; 20.7–23.0) | 21.4 (21.0–22.1; 20.8–23.9) | 21.6 (21.3–21.7; 21.0–22.3) | 14.6 (14.2–14.7; 14.0–15.4) | 15.4 (15.0–15.8; 14.3–17.1) | 14.8 (14.2–15.1; 14.1–15.6) | 1.45 | 1.39 | 1.46 |
+| 10 MiB | 72.1 (71.7–72.6; 71.1–73.8) | 73.0 (72.6–73.2; 72.1–74.8) | 74.2 (73.2–75.3; 73.0–76.1) | 56.5 (55.7–57.7; 53.6–61.8) | 58.4 (57.2–60.4; 56.7–76.4) | 56.7 (54.3–57.1; 53.3–57.9) | 1.28 | 1.25 | 1.31 |
+| 100 MiB | 346.0 (341.4–359.4; 336.0–365.7) | 352.8 (343.2–353.2; 335.3–376.7) | 348.9 (342.3–355.1; 334.2–365.3) | 357.1 (305.1–371.9; 255.2–431.5) | 293.8 (274.5–296.3; 242.0–504.8) | 337.0 (269.4–363.0; 243.8–416.7) | 0.97 | 1.20 | 1.04 |
+
+#### C: 既存オブジェクトの途中への 4 KiB write + fsync (n=10、ms)
+
+| サイズ | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache | 比 raw/nocache | 比 diskcache/pcachedrop | 比 cache/pcache |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 MiB | 22.4 (22.1–22.6; 21.8–28.9) | 21.8 (21.5–22.0; 21.3–23.2) | 21.8 (21.7–21.8; 21.2–23.1) | 19.4 (19.3–19.7; 19.0–27.3) | 34.0 (26.9–34.8; 26.6–40.9) | 18.9 (18.5–18.9; 18.2–21.3) | 1.15 | 0.64 | 1.15 |
+| 10 MiB | 47.9 (47.2–48.3; 46.2–48.9) | 48.5 (48.1–48.9; 46.6–68.4) | 47.7 (47.1–48.3; 46.4–51.5) | 72.8 (70.6–74.6; 69.7–156.9) | 196.6 (191.8–211.7; 70.8–309.1) | 70.2 (68.2–70.7; 67.5–76.0) | 0.66 | 0.25 | 0.68 |
+| 100 MiB | 171.0 (164.1–172.3; 156.0–188.7) | 157.6 (157.0–163.4; 155.8–176.2) | 163.9 (160.7–173.2; 157.5–186.1) | 268.3 (171.2–1258.3; 168.5–1418.8) | 172.4 (169.0–173.6; 165.9–199.2) | 170.5 (167.0–178.4; 163.7–198.8) | 0.64 | 0.91 | 0.96 |
+
+dd が失敗した回: 0 / 180、fsync が早く返った回: 0
+
+#### D: cold read (n=10、ms)
+
+| サイズ | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache | 比 raw/nocache | 比 diskcache/pcachedrop | 比 cache/pcache |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 MiB | 21.5 (20.9–22.6; 19.2–30.1) | 21.6 (21.1–23.2; 19.8–31.1) | 20.8 (20.2–21.0; 19.7–30.2) | 20.9 (20.4–21.6; 19.9–25.6) | 21.1 (19.8–22.1; 18.6–25.3) | 20.9 (20.2–21.4; 18.5–25.7) | 1.03 | 1.03 | 1.00 |
+| 100 MiB | 99.0 (98.0–99.6; 95.4–103.5) | 98.3 (92.2–125.0; 90.1–251.8) | 100.3 (93.1–114.4; 89.4–209.3) | 127.6 (123.5–129.3; 99.3–152.1) | 83.9 (81.4–86.0; 80.8–90.2) | 87.0 (84.8–88.1; 84.7–88.8) | 0.78 | 1.17 | 1.15 |
+| 300 MiB | 314.1 (306.9–316.0; 265.8–338.5) | 470.8 (411.8–480.2; 359.0–3641.2) | 465.9 (419.1–489.3; 358.9–4200.8) | 426.4 (364.6–439.7; 323.5–508.4) | 327.6 (292.4–336.7; 239.3–375.6) | 367.3 (314.7–401.7; 306.3–483.7) | 0.74 | 1.44 | 1.27 |
+
+sha256 (全 30 object、構成ごと): fuse-raw objects=30 bad=0 PASS; fuse-diskcache objects=30 bad=0 PASS; fuse-cache objects=30 bad=0 PASS; ebpf-nocache objects=30 bad=0 PASS; ebpf-pcachedrop objects=30 bad=0 PASS; ebpf-pcache objects=30 bad=0 PASS
+
+#### E: 小さいファイル 10,000 個 (4 KiB、n=5、ms)
+
+| 操作 | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache | 比 raw/nocache | 比 diskcache/pcachedrop | 比 cache/pcache |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ls-cold | 3399 (3395–3435; 3332–3554) | 3388 (3384–3416; 3313–3465) | 3391 (3295–3404; 3074–5982) | 70 (69–75; 65–76) | 72 (70–72; 68–73) | 68 (68–68; 66–70) | 48.90 | 47.31 | 49.58 |
+| cat-cold | 19023 (18615–19046; 17942–20338) | 20869 (20590–21215; 20290–22007) | 21189 (20711–21225; 20072–24387) | 6498 (6350–6628; 6349–6714) | 6959 (6704–6982; 6703–7008) | 6958 (6880–6973; 6693–6986) | 2.93 | 3.00 | 3.05 |
+| ls-warm | 1448 (1429–1479; 1400–1493) | 1462 (1420–1475; 1394–2847) | 1484 (1449–1494; 1391–2776) | 27 (25–28; 25–28) | 32 (32–33; 26–35) | 32 (26–34; 25–36) | 52.84 | 45.69 | 45.66 |
+| cat-warm | 18780 (18410–19072; 18161–19302) | 6950 (6844–7156; 6733–8509) | 6424 (6423–6447; 6187–7750) | 6560 (6299–6606; 6296–6677) | 205 (191–210; 177–211) | 164 (151–175; 144–188) | 2.86 | 33.93 | 39.22 |
+
+cat の sha256 不一致: 0 回
+
+#### F: 64 jobs の並列 read (hello.txt、psync、bs=1、5 s × 5 回)
+
+| 構成 | IOPS 中央値 | 最小 | 最大 | clat p99 |
+|---|---:|---:|---:|---:|
+| fuse-raw | 6201881 | 6160361 | 6264321 | 0.9 µs |
+| fuse-diskcache | 6118883 | 5596071 | 6234640 | 0.9 µs |
+| fuse-cache | 5708387 | 5683307 | 5849623 | 1.0 µs |
+| ebpf-nocache | 5811793 | 5715035 | 5840272 | 1.0 µs |
+| ebpf-pcachedrop | 5880625 | 5827285 | 5948863 | 1.0 µs |
+| ebpf-pcache | 5839539 | 5813822 | 5908873 | 1.0 µs |
+
+比 (s3fs-ebpf の IOPS ÷ s3fs-fuse の IOPS = 時間の比 fuse÷ebpf): fuse-raw 対 ebpf-nocache = 0.94× / fuse-diskcache 対 ebpf-pcachedrop = 0.96× / fuse-cache 対 ebpf-pcache = 1.02×
+
+#### G: SQLite とベクトル検索
+
+warm (20,000 ops / 3,000 ops、5 pass、p50 は 1 op の µs)。ops/s の中央値:
+
+| 負荷 | α | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache | 比 raw/nocache | 比 diskcache/pcachedrop | 比 cache/pcache |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| oltp | 0 | 100380 (98727–100474; 98535–101083) | 96342 (96271–97679; 96201–98134) | 276693 (274179–279433; 272364–280151) | 189477 (188720–190606; 182552–193732) | 244234 (244038–244626; 243606–245592) | 267932 (266489–268070; 264694–269411) | 1.89 | 2.54 | 0.97 |
+| oltp | 1.1 | 126334 (126277–126436; 125601–128446) | 122230 (121768–122491; 121329–122986) | 304512 (285770–309308; 280354–318355) | 213994 (212623–214704; 212458–214759) | 289592 (288187–292259; 287278–292806) | 303321 (302959–309315; 301411–309385) | 1.69 | 2.37 | 1.00 |
+| vec | 0 | 36148 (36121–36284; 36012–36934) | 52347 (52103–52672; 51628–53203) | 74888 (73526–75091; 73153–75514) | 34272 (34172–34520; 33999–34964) | 52049 (52044–52480; 51639–52598) | 75526 (75205–76383; 74611–76397) | 0.95 | 0.99 | 1.01 |
+| vec | 1.1 | 40832 (40532–40873; 40362–41644) | 55956 (55600–56952; 55269–57136) | 86015 (84773–86673; 84313–88056) | 36510 (35932–36513; 35643–36743) | 56513 (56375–56927; 55602–57159) | 85696 (85689–86140; 85400–87051) | 0.89 | 1.01 | 1.00 |
+
+(ops/s なので比は s3fs-ebpf の ops/s ÷ s3fs-fuse の ops/s)
+
+cold (open + 全 op の wall time、ms。s3 = backend の cache を空にして起動し直す、local = backend の cache は warm で page cache のみ drop):
+
+| 負荷 | 場面 | fuse-raw | fuse-diskcache | fuse-cache | ebpf-nocache | ebpf-pcachedrop | ebpf-pcache | 比 raw/nocache | 比 diskcache/pcachedrop | 比 cache/pcache |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| oltp | s3 | 159 (158–171; 157–179) | 171 (161–172; 159–181) | 171 (162–175; 161–179) | 163 (162–168; 154–172) | 160 (160–163; 159–175) | 164 (158–167; 155–169) | 0.98 | 1.07 | 1.04 |
+| oltp | local | 156 (156–157; 156–159) | 156 (155–156; 153–158) | 154 (153–154; 152–157) | 195 (194–196; 191–199) | 195 (192–196; 190–197) | 194 (192–196; 190–199) | 0.80 | 0.80 | 0.79 |
+| vec | s3 | 74 (72–74; 72–76) | 73 (72–73; 72–74) | 72 (72–74; 71–78) | 86 (84–86; 82–87) | 87 (86–88; 83–88) | 84 (83–86; 83–97) | 0.86 | 0.84 | 0.86 |
+| vec | local | 72 (72–73; 72–73) | 97 (96–97; 96–98) | 96 (96–98; 95–101) | 90 (89–92; 89–99) | 89 (87–90; 87–90) | 87 (87–88; 87–89) | 0.80 | 1.09 | 1.10 |
+
+#### H: policy ごとの hit rate (N_FILES=30、N_ACCESS=2000、Zipf α=0.7、SOFTCAP=8、capacity mode、seed 42/1337/7/11/23)
+
+| 構成 | observe_ops | lru_pick_ops | sieve_pick_ops | s3fifo_pick_ops | wtinylfu_pick_ops | 最良 − observe (pp) |
+|---|---:|---:|---:|---:|---:|---:|
+| ebpf-pcachedrop | 27.8 (27.4–28.1; 27.2–28.6) n=5 | 39.2 (38.9–39.7; 38.8–41.2) n=5 | 47.5 (46.0–47.8; 43.8–48.0) n=5 | 49.0 (47.7–49.2; 46.7–49.4) n=5 | 50.9 (50.2–51.5; 48.3–51.9) n=5 | 23.1 |
+| ebpf-pcache | 38.6 (38.5–44.8; 29.9–47.5) n=5 | 39.2 (38.9–39.7; 38.8–41.2) n=5 | 48.4 (47.5–49.9; 46.0–54.5) n=5 | 49.8 (49.6–51.0; 49.0–52.5) n=5 | 57.1 (56.0–59.0; 54.9–59.4) n=5 | 18.5 |
+
+#### 読み方
+
+- **fuse-raw 対 ebpf-nocache (キャッシュを除いた構造の差)**: open+read+close は 3.17× (upcall が共有メモリ経由で `/dev/fuse` の往復がないため)。新規 write は 1 / 10 MiB で 1.45× / 1.28×、100 MiB は 0.97× (差なし)。小さいファイル 10,000 個は `ls -l` が 49〜53×、cat (cold) が 2.93× (`ls -l` は kmod の表を読むだけで S3 を叩かない)。cold read は 300 MiB が 0.74×、100 MiB が 0.78× で**遅い** (10 MiB は同等)。既存オブジェクトの途中への write は 10 MiB が 0.66× (負け)、1 MiB は 1.15×、100 MiB は 0.64× (初回 run の揺れ。再測定は 0.99×、下の比較表)。
+- **fuse-diskcache 対 ebpf-pcachedrop (open のたびに page cache を捨てたうえでの、独自キャッシュ=chunk 表と policy の差)**: open+read+close は 140× (fuse-diskcache は open ごとに FUSE の往復と disk cache の read、ebpf-pcachedrop は chunk 表に hit して upcall なし)。小さいファイルの cat (warm) は 33.9×、`ls -l` は 46〜47×。cold read は 300 MiB が 1.44×、100 MiB が 1.17×。G の warm は OLTP が 2.4〜2.5×、ベクトルは 0.99〜1.01× (同等)。F (64 jobs) は 0.96×。**この組での policy の差**は H にある。
+- **fuse-cache 対 ebpf-pcache (全体)**: open+read+close は 180×、小さいファイルの cat (warm) は 39×。warm の OLTP / ベクトル検索は ±3% で差がつかない (D1: page cache のヒットで終わる)。cold read は 300 MiB が 1.27×、100 MiB が 1.15×、10 MiB が 1.00×。新規 write は 1.04〜1.46×、既存の途中への write は 10 MiB が 0.68× (負け)。
+- **H: policy の差は、page cache があってもなくても hit rate に出る**。
+  - ebpf-pcachedrop: observe_ops 27.8% に対して lru_pick 39.2%、sieve_pick 47.5%、s3fifo_pick 49.0%、wtinylfu_pick 50.9% (5 seed すべてで順位が同じ。最良と observe の差 23.1 pp)。open のたびに read が `.read_folio` に入るので、`on_hit` と `pick_victim` の効果がそのまま upcall の数に出る。この値は無効な最初の run とまったく同じで、再現性がある (policy 側が決定的)。
+  - ebpf-pcache: observe_ops 38.6% (四分位 38.5〜44.8、最小〜最大 29.9〜47.5 で seed 間のばらつきが大きい)、lru_pick 39.2%、sieve_pick 48.4%、s3fifo_pick 49.8%、wtinylfu_pick 57.1%。**4 つの policy の順位は pcachedrop と同じ**で、最良の W-TinyLFU は observe より 18.5 pp 高い (LRU は +0.6 pp で observe と差がない)。page cache のヒットも hit に数えるので、pcachedrop の値と絶対値は比べられない (S3-FIFO と SIEVE は +0.8〜0.9 pp、W-TinyLFU は +6.2 pp 高い)。observe_ops のばらつきの原因は未切り分け (backlog AC-74)。
+  - 最初の run (trace が残っていた) では ebpf-pcache の順位が崩れて observe が 76.7% の最良になっていたが、これは遅い MinIO が作った見かけだった。**「page cache があると policy の差は FS 全体に出ない」は取り下げる。**
+
+#### 以前の値との比較 (±20% 以上の項目と、念のため確認した項目)
+
+| 項目 | 以前 (出典) | 今回 | 理由 |
+|---|---|---|---|
+| A: fuse-raw / fuse-cache / ebpf-nocache / ebpf-pcache p50 | 1.794 ms / 536.8 µs / 550.0 µs / 3.07 µs (§18.47) | 1.675 ms / 520.1 µs / 528.2 µs / 2.9 µs (−3〜−7%) | 範囲内 |
+| B: ebpf 100 MiB (pcache) | 269.2 ms (§18.47) | 337.0 ms (+25%) | fsync の修正で、早く返っていた分が消えた (上の不具合)。nocache は 357.1 ms (+33%)、pcachedrop は 293.8 ms (+9%) |
+| B: ebpf 1 / 10 MiB、fuse-raw 1 / 10 / 100 MiB | 14.2 / 54.8 ms、20.6 / 73.6 / 359.8 ms (§18.47、§18.28) | 14.8 / 56.7 ms、21.1 / 72.1 / 346.0 ms | 範囲内 (±4%) |
+| C: ebpf 100 MiB (pcache) | 303.4 ms (§18.47) | 170.5 ms (−44%) | `--partial-modify` が既定で有効になった (§18.36 の 175.4 ms と一致。MinIO の API trace で 100 MiB の途中への 4 KiB write が `CopyObjectPart` を含む multipart になることを確認: GET 2 回 + `NewMultipartUpload` + `PutObjectPart` + `CompleteMultipartUpload`、`--partial-modify=false` では GET 25 回 + `PutObjectPart` 7 回、8 MiB は単発の `PutObject`) |
+| C: ebpf 1 / 10 MiB (pcache)、fuse-raw 1 / 10 / 100 MiB | 17.3 / 63.0 ms、20.2 / 44.9 / 160.6 ms (§18.47) | 18.9 / 70.2 ms (+9% / +11%)、22.4 / 47.9 / 171.0 ms (+11% / +7% / +6%) | 範囲内 |
+| C: ebpf-pcachedrop 1 / 10 MiB、ebpf-nocache 100 MiB (この run) | — | 34.0 / 196.6 ms、268.3 ms (四分位 171〜1258) | **一時的な揺れ**。同じ C を 3 回流し直すと、pcachedrop は 1 MiB が 22.9 / 25.0 / 19.6 ms、10 MiB が 68.0 ms、nocache は 100 MiB が 171.3 ms で、他の ebpf 構成と同じ範囲に戻った。1 MiB は run ごとにどの構成も 18〜25 ms の間で動く (`data/.../C-rerun/`)。直前に大きい bucket と cache dir を消した直後の I/O の可能性があるが未確認 (未切り分け) |
+| D: ebpf 10 / 100 / 300 MiB (pcache) | 19.1 / 97〜101 / 243〜360 ms (§18.47) | 20.9 / 87.0 / 367.3 ms (+9% / −10% / 範囲の上端) | 範囲内。fuse-raw の 300 MiB は 314.1 ms (§18.47: 283.7〜312.5 ms) |
+| E: fuse-raw / fuse-cache の `ls -l` cold・warm、cat cold・warm | §18.31 の 3,108 / 1,407 / 18,354 / 18,280 ms (fuse-raw)、3,357 / 1,418 / 20,266 / 6,373 ms (fuse-cache) | 3,399 / 1,448 / 19,023 / 18,780 ms (fuse-raw、+3〜+9%)、3,391 / 1,484 / 21,189 / 6,424 ms (fuse-cache、+1〜+5%) | 範囲内 |
+| E: ebpf `ls -l` cold (pcache) | 40.8 ms (§18.47) | 68 ms (+67%) | **一部だけ切り分けた**。今回の E は daemon 起動のあとにも `drop_caches` するので、dentry / inode の再 lookup が cold に入る。起動前だけの順序 (§18.47 と同じ) で測ると 39〜45 ms で §18.47 と一致、起動後にも drop すると 46〜51 ms (+8〜10 ms)。残りの約 20 ms は未切り分け |
+| E: ebpf `ls -l` warm | 25.5 ms (§18.47) | 32 ms (+25%) | 未切り分け (cat の cold / warm は 6,685 → 6,958 ms、164 → 164 ms で範囲内) |
+| F: 64 jobs の ebpf / fuse | 約 0.94〜0.97× (§18.16 / §18.24) | 0.94× / 0.96× / 1.02× | 範囲内 |
+| G: warm の OLTP / ベクトル (fuse-cache 対 ebpf-pcache) | OLTP 275k 対 278k、ベクトル 76k 対 73k ops/s (`where-fs-layer-can-win.md` D1) | OLTP 277k 対 268k (0.97×)、ベクトル 75k 対 76k (1.01×) | 範囲内 |
+| G: local cold の OLTP | ebpf 73 ms 対 fuse 43 ms (`where-fs-layer-can-win.md` D4) | wall 194 ms 対 154 ms (0.79×) | 測り方が違う (今回は open と全 op の wall time、COLD_OPS=500。D4 は op のループ)。向き (ebpf が遅い) は同じ |
+| H: sieve_pick_ops の hit rate | 35.0〜37.1% (§18.41、arena モード、seed 42 / 7 / 123 各 1 回) | 47.5% (pcachedrop、+32%)、48.4% (pcache、+35%) | 構成が違う (arena モードではなく `--arena-metadata-only`、pcache_drop で hit の信号が毎 open 届く)。arena モードでの再測定はしていないので、構成の差かほかの要因かは未切り分け |
+| H: s3fifo_pick_ops の hit rate | 36.7〜40.0% (§18.42) | 49.0% (pcachedrop、+29%)、49.8% (pcache、+31%) | 同上 (lru_pick_ops は 34.9〜37.5% → 39.2% で +9%、閾値内) |
+
+#### 限界
+
+- D の 300 MiB は run 間の揺れが大きい (fuse-diskcache の最大 3,641 ms、fuse-cache の最大 4,201 ms は外れ値で、中央値には影響しない)。ホストのメモリ回収 (§18.39) の影響は `/proc/vmstat` を取っていないので確認していない。
+- C の 1 MiB は run ごとに 18〜25 ms の間で揺れる (上の表)。n=10 の中央値は 1 run の揺れに左右される。
+- B の「完成するまで」の時間は HEAD の polling (curl) を使うので、10 ms 前後の誤差がある。fsync が早く返らなかった回 (修正後は全部) には使っていない。
+- F は 18 B の 1 ファイルを `bs=1` で読む最悪ケース (読みの大半が page cache のヒット)。G の warm は open が 1 回で、`pcache_drop` の効果はほぼ見えない。
+- 全部ローカル MinIO。実際の S3 (遠い、数十 ms) では A / D / E の差が縮むはず (未計測)。mount-s3 は 6 構成に含めていない。
+- H の ebpf-pcache の observe_ops のばらつき (29.9〜47.5%) は原因を切り分けていない。
+
+#### 同じ作業ツリーでの確認
+
+- `make test-regression`: 全 PASS (28 件、exit=0。新規の `test-fsync-large-new-file`、`test-pcache-drop`、`test-policy-reload`、`test-write-existing-nopm` を含む)。`test-policy-conformance` も 4 policy とも PASS。
+- `make test-kunit`: UML は 4 suite 45 件すべて PASS (`s3fs_ebpf_chunks` 16、`tables` 11、`vfs` 14、`policy_ops` 4)。qemu (`--arch=x86_64 --qemu_args='-smp 4'`、4 CPU) も 45 件すべて PASS。`KSRC` は Linux 6.12 の tree。
+- `make test-policy-reload`: reload 41 回 × 4 reader で read のエラー 0、dmesg は `policy struct_ops updated (hot swap)` が 41 行で `registered` / `superseded` が 0、struct_ops でない `.bpf.o` は HTTP 400。
+
+### 18.49 折り返す層ごとのレイテンシ (page cache / kmod の chunk 表 / daemon の disk cache / S3、2026-11-03、issue #35)
+
+同じオブジェクトを読むとき、構成によって「どの層で折り返すか」が変わる。open + 全体を read + close の 1 回あたりの時間を、折り返す層ごとに測った (`scripts/bench-layer-latency.sh`、`dev microbench --op=read`、1 層あたり約 12 秒、`SIZES="18B 4MiB 64MiB"`、ローカル MinIO、条件は §18.48 と同じで、trace が残っていない状態)。1 run で、p50 / p95 / p99 はその分布。
+
+| 層 | 構成 | 折り返す所 |
+|---|---|---|
+| 1 page cache | ebpf-pcache | カーネルが page cache から返す (`.open` だけが s3fs-ebpf) |
+| 2 kmod の chunk 表 | ebpf-pcachedrop | open で page cache だけを捨て、`.read_folio` が chunk 表から copy する (upcall なし) |
+| 3 daemon の disk cache | ebpf-nocache + daemon `--cache-dir` | open のたびに upcall し、daemon が disk cache から返す (S3 は叩かない) |
+| 4 daemon → S3 | ebpf-nocache (cache-dir なし) | upcall し、daemon が S3 (MinIO) を GET する |
+| 参考 | fuse-cache / fuse-diskcache / fuse-raw | s3fs-fuse: `kernel_cache` / disk cache のみ / 毎回 S3 |
+
+層 3 は `bench_up` に `ebpf-nocache-diskcache` を足して作った (kmod `nocache=1` + `--cache-dir`)。各行の「upcall」「S3 GET」は、その run での daemon の read-miss upcall 数と MinIO の `GetObject` 数の増分で、**層の判定の裏付け**になる (MinIO の cluster metrics は数秒キャッシュされるので、snapshot の前後に 12 秒待つ)。kmod の folio hit は daemon の sample 間隔 (60 s) に遅れるので使わない。
+
+**18 B (4 KiB の folio 1 つ)**
+
+| 折り返す層 | p50 | p95 | p99 | 最大 | upcall | S3 GET | daemon の処理時間 (平均) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 page cache (ebpf-pcache) | 2.8 µs | 4.1 µs | 5.3 µs | 278.0 µs | 0 | 0 | - |
+| 2 kmod chunk 表 (ebpf-pcachedrop) | 3.8 µs | 4.4 µs | 7.1 µs | 334.1 µs | 0 | 0 | - |
+| 3 daemon の disk cache (ebpf-nocache + `--cache-dir`) | 62.4 µs | 78.9 µs | 108.3 µs | 4.91 ms | 194210 | 0 | 32.3 µs |
+| 4 daemon → S3 (ebpf-nocache) | 543.3 µs | 643.1 µs | 891.5 µs | 6.63 ms | 22622 | 22622 | 511.9 µs |
+| FUSE kernel_cache (fuse-cache) | 527.7 µs | 604.5 µs | 691.1 µs | 4.82 ms | 0 | 0 | - |
+| FUSE disk cache (fuse-diskcache) | 541.1 µs | 615.9 µs | 706.8 µs | 4.91 ms | 0 | 0 | - |
+| FUSE → S3 (fuse-raw) | 1.69 ms | 2.37 ms | 2.56 ms | 20.67 ms | 0 | 6944 | - |
+
+**4 MiB (chunk 1 つ)**
+
+| 折り返す層 | p50 | p95 | p99 | 最大 | upcall | S3 GET | daemon の処理時間 (平均) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 page cache (ebpf-pcache) | 320.7 µs | 360.9 µs | 396.1 µs | 2.33 ms | 0 | 0 | - |
+| 2 kmod chunk 表 (ebpf-pcachedrop) | 1.08 ms | 1.21 ms | 1.32 ms | 9.79 ms | 0 | 0 | - |
+| 3 daemon の disk cache (ebpf-nocache + `--cache-dir`) | 2.83 ms | 3.50 ms | 4.07 ms | 6.98 ms | 4402 | 0 | 1.45 ms |
+| 4 daemon → S3 (ebpf-nocache) | 6.72 ms | 8.51 ms | 11.34 ms | 12.74 ms | 2133 | 2133 | 6.27 ms |
+| FUSE kernel_cache (fuse-cache) | 1.15 ms | 1.24 ms | 1.39 ms | 4.81 ms | 0 | 0 | - |
+| FUSE disk cache (fuse-diskcache) | 2.44 ms | 2.58 ms | 2.80 ms | 16.43 ms | 0 | 0 | - |
+| FUSE → S3 (fuse-raw) | 6.60 ms | 7.30 ms | 7.75 ms | 26.87 ms | 0 | 1784 | - |
+
+**64 MiB (chunk 16 個)**
+
+| 折り返す層 | p50 | p95 | p99 | 最大 | upcall | S3 GET | daemon の処理時間 (平均) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 page cache (ebpf-pcache) | 7.44 ms | 7.79 ms | 8.24 ms | 9.77 ms | 0 | 0 | - |
+| 2 kmod chunk 表 (ebpf-pcachedrop) | 20.83 ms | 22.07 ms | 23.65 ms | 27.60 ms | 0 | 0 | - |
+| 3 daemon の disk cache (ebpf-nocache + `--cache-dir`) | 45.55 ms | 47.91 ms | 51.08 ms | 53.34 ms | 288 | 1136 | 24.01 ms |
+| 4 daemon → S3 (ebpf-nocache) | 45.47 ms | 47.93 ms | 49.50 ms | 56.65 ms | 274 | 1088 | 24.02 ms |
+| FUSE kernel_cache (fuse-cache) | 9.66 ms | 10.11 ms | 10.68 ms | 21.48 ms | 0 | 0 | - |
+| FUSE disk cache (fuse-diskcache) | 26.25 ms | 27.29 ms | 28.81 ms | 29.75 ms | 0 | 0 | - |
+| FUSE → S3 (fuse-raw) | 70.06 ms | 73.47 ms | 75.80 ms | 77.58 ms | 0 | 1316 | - |
+
+**層の判定の確認で見つけたこと: daemon の disk cache は 4 MiB を超えるオブジェクトでは使われない。** 層 3 の行の S3 GET は、18 B と 4 MiB で 0 回 (disk cache から返っている) だが、**64 MiB は 288 upcall に対して 1136 回** (1 回あたり約 4 回の range GET)。daemon は 4 MiB 以下 (`partialAdmitThreshold`) の object だけ `Get` (disk cache を読み、書く) で取り、それより大きい object は chunk ごとの `GetRange` (`serveChunkLoad`) で取る。`GetRange` は disk cache を読みも書きもしない (`daemon/internal/s3/client.go` のコメント: cache は object 全体がキー)。つまり **大きい object は kmod の chunk 表から落ちると、`--cache-dir` があっても毎回 S3 に戻る** (層 3 は 64 MiB では実質層 4)。64 MiB で層 3 と層 4 の時間が同じ (45.5 ms 対 45.5 ms、daemon の処理時間も 24.0 ms 対 24.0 ms) なのは、このため。s3fs-fuse の disk cache は 64 MiB でも効く (GET 0 回、26.2 ms) ので、64 MiB の「disk cache からの再読み」は s3fs-ebpf (45.5 ms) が s3fs-fuse (26.2 ms) の 0.58× になる (backlog AC-75)。
+
+**層を 1 つ下げるごとの増分 (p50、18 B)**: page cache 2.83 µs → kmod の chunk 表 3.84 µs (+1.0 µs) → daemon の disk cache 62.4 µs (+58.6 µs) → S3 543 µs (+481 µs)。
+
+- **upcall 1 回の固定費は約 59 µs**。そのうち daemon の処理 (event を受けてから `signalAdmit` まで) の平均が 32.3 µs で、残り約 26 µs が kernel ↔ daemon の往復 (起床・切り替え)。chunk 表に当たれば upcall がなくなり、この 59 µs が 1.0 µs になる。
+- **S3 (ローカル MinIO) の GET は daemon の処理 512 µs が大半** (p50 543 µs のうち約 94%)。
+- FUSE との比較 (18 B): s3fs-fuse は S3 を叩かない構成 (kernel_cache、disk cache) でも 528 / 541 µs で、これは **open の FUSE 往復だけで upcall 付きの層 3 (62.4 µs) の約 8.5〜8.7 倍**。毎回 S3 に行く fuse-raw は 1.69 ms で、層 4 (543 µs) の 3.1 倍。
+- 4 MiB では層 3 が 2.83 ms、層 4 が 6.72 ms (2.4 倍) で、disk cache が効く (GET 0 回)。daemon の処理時間は 1.45 ms 対 6.27 ms。
+- **kmod の chunk 表は page cache より遅い**: 4 MiB で 1.08 ms 対 0.32 ms (3.4 倍)、64 MiB で 20.8 ms 対 7.4 ms (2.8 倍)。chunk 表から folio ごとに copy する分で、スループットにすると約 3.2 GB/s 対 9.0 GB/s。大きいファイルでは「page cache を捨てて chunk 表から返す」より、page cache のまま返すほうが速い。層 2 が効くのは、upcall を避ける (59 µs → 1 µs) 小さい読みが繰り返されるとき (backlog AC-76)。
+- FUSE の kernel_cache は 4 MiB で 1.15 ms、64 MiB で 9.7 ms (s3fs-ebpf の層 1 は 0.32 ms / 7.4 ms)。4 MiB では s3fs-ebpf の page cache が 3.6 倍速い (open の FUSE 往復が 1 ms 弱を占める)。64 MiB では 1.30 倍まで縮み、read の copy が支配する大きい読みの warm では差が小さい (§18.48 の OLTP / ベクトルが ±3% なのと同じ向き)。
+
+**Grafana**: ダッシュボード "S3FS-eBPF Layer latency" (`http://localhost:3000/d/s3fs-ebpf-layer-latency`)。棒グラフ (サイズごとの p50 / p95 / p99、対数軸) と表は測定値を埋め込み、時系列は Prometheus (daemon の read-miss の p50 / p99 と平均、kmod の upcall / folio hit のレート、MinIO の GetObject のレート)。bench が各 run を annotation (`layer-latency` タグ) で投稿するので、時系列にどの層の run かが帯で出る。生成と取り込みは `scripts/grafana-layer-latency.sh <layer-latency.csv>` (TestData の datasource `testdata-layer` がなければ作る)。スクリーンショットと生データは `docs/journal/data/s18-48-20261103/layer-latency/`。
+
+**daemon の histogram の変更**: `s3fs_ebpf_read_miss_latency_seconds` (と `flush_latency`) の bucket の最小が 1 ms で、ローカル MinIO の upcall がすべて最初の bucket に入っていた。50 µs / 100 µs / 250 µs / 500 µs の bucket を足した (既存の bucket は変えていない)。
+
+**限界**:
+- 各 (層, サイズ) は 1 run (約 12 秒) で、run 間のばらつきは見ていない。最大値は外れ値を含む。
+- 層 3 は `nocache=1` を使うので、open のたびに admit を捨てて evict log にも積む。disk cache の hit を直接数える metric はなく、S3 GET 数が 0 であることで確認した。
+- MinIO の TTFB の histogram は最小の bucket が 50 ms で、ローカルの GET (約 0.5 ms) は分解できない。Grafana には載せていない。
+- 実際の S3 (遠い、数十 ms) での層 4 は未計測。層 4 の値は「MinIO がローカルで速いときの daemon 側の固定費」を見るものとして読む。
+- Grafana のスクリーンショットでは、棒グラフの右端の目盛りが一部切れている (表示だけの問題)。

@@ -72,7 +72,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
         lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
-        test-regression test-write-readback test-large-file-read \
+        test-write-existing-nopm test-fsync-large-new-file test-pcache-drop test-policy-reload test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
         test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
         clean
@@ -352,7 +352,7 @@ test-splice-hits: kmod daemon ## sendfile / splice reads are counted as hits (hi
 	@echo "==> test-splice-hits"
 	@$(SCRIPTS_DIR)/test-splice-hits.sh
 
-test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-capacity test-write-partial test-fsync-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-policy-conformance ## Run all regression tests
+test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-policy-reload test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -409,6 +409,22 @@ test-pcache-capacity-noeval: kmod daemon ## AC-45: capacity_bytes bounds fd->buf
 test-pcache-capacity-seq: kmod daemon ## AC-45: a file larger than capacity_bytes read front to back stays within capacity (40 MiB vs 12 MiB)
 	@echo "==> test-pcache-capacity-seq (AC-45)"
 	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-seq.sh
+
+test-policy-reload: kmod bpf daemon ## issue #35: reload = one BPF_LINK_UPDATE; reads never fail; non-struct_ops refused (400)
+	@echo "==> test-policy-reload"
+	@sudo $(SCRIPTS_DIR)/test-policy-reload.sh
+
+test-fsync-large-new-file: kmod daemon ## issue #35: fsync of a new 100 MiB file returns only after the PUT landed; no late 0-byte PUT empties it
+	@echo "==> test-fsync-large-new-file"
+	@sudo $(SCRIPTS_DIR)/test-fsync-large-new-file.sh
+
+test-pcache-drop: kmod daemon ## pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
+	@echo "==> test-pcache-drop"
+	@sudo $(SCRIPTS_DIR)/test-pcache-drop.sh
+
+test-write-existing-nopm: kmod daemon ## AC-50: same as test-write-existing with --partial-modify=false (whole-object GET + PUT path)
+	@echo "==> test-write-existing-nopm (AC-50, --partial-modify=false)"
+	@sudo PARTIAL_MODIFY=false TEST_NAME=test-write-existing-nopm OUT=/tmp/test-write-existing-nopm $(SCRIPTS_DIR)/test-write-existing.sh
 
 test-write-existing: kmod daemon ## AC-50: write/truncate/append on an unread existing object keeps the rest (pcache + arena)
 	@echo "==> test-write-existing (AC-50)"

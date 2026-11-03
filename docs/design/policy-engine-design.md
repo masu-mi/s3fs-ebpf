@@ -244,6 +244,8 @@ Layer 0 (cross-cut): KFunc            ← 統計素性 + 汎用 primitive
                                           LRU list ops / ghost FIFO / count-min sketch
 ```
 
+> **実装の更新 (issue #35)**: Layer 2/3 の policy は struct_ops 1 経路だけ。fentry / fmod_ret の policy は読み込めず、`POST /policy/reload` は `BPF_LINK_UPDATE` 1 回 (kmod `update()` が RCU ポインタを 1 本替える) で一式を不可分に替える。失敗したときは古い policy が残る。詳細は `policy-attach-comparison.md` の冒頭。以下の「fentry attach」の記述は設計時のもので、read の観測に使う `generic_file_read_iter` の fentry だけが残っている。
+
 ### 4.5.1 各 Layer の責務
 
 **Layer 1 (DSL: CEL)**  

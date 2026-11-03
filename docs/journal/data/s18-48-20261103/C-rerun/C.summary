@@ -1,0 +1,36 @@
+C mid-write   1 MiB fuse-raw        fsync: n=10 median=20.2 q1=20.0 q3=20.3 min=19.8 max=25.4
+C mid-write   1 MiB fuse-raw        object-replaced: n=10 median=35.0 q1=34.9 q3=35.3 min=34.6 max=41.9  fsync-returned-early=0/10
+C mid-write   1 MiB fuse-diskcache  fsync: n=10 median=20.5 q1=20.3 q3=20.8 min=20.0 max=23.0
+C mid-write   1 MiB fuse-diskcache  object-replaced: n=10 median=35.7 q1=35.1 q3=35.7 min=34.4 max=37.5  fsync-returned-early=0/10
+C mid-write   1 MiB fuse-cache      fsync: n=10 median=20.6 q1=20.0 q3=20.9 min=19.7 max=23.1
+C mid-write   1 MiB fuse-cache      object-replaced: n=10 median=35.5 q1=35.4 q3=36.0 min=34.2 max=39.5  fsync-returned-early=0/10
+C mid-write   1 MiB ebpf-nocache    fsync: n=10 median=19.0 q1=17.7 q3=20.1 min=17.5 max=26.3
+C mid-write   1 MiB ebpf-nocache    object-replaced: n=10 median=34.1 q1=32.7 q3=35.7 min=32.4 max=42.5  fsync-returned-early=0/10
+C mid-write   1 MiB ebpf-pcachedrop fsync: n=10 median=22.9 q1=22.1 q3=23.8 min=17.4 max=28.1
+C mid-write   1 MiB ebpf-pcachedrop object-replaced: n=10 median=38.2 q1=37.6 q3=39.0 min=32.5 max=45.1  fsync-returned-early=0/10
+C mid-write   1 MiB ebpf-pcache     fsync: n=10 median=17.8 q1=17.6 q3=17.9 min=17.0 max=18.7
+C mid-write   1 MiB ebpf-pcache     object-replaced: n=10 median=33.2 q1=32.9 q3=33.3 min=32.7 max=34.1  fsync-returned-early=0/10
+C mid-write  10 MiB fuse-raw        fsync: n=10 median=43.8 q1=43.3 q3=44.2 min=42.9 max=47.4
+C mid-write  10 MiB fuse-raw        object-replaced: n=10 median=58.8 q1=57.9 q3=59.0 min=57.5 max=62.1  fsync-returned-early=0/10
+C mid-write  10 MiB fuse-diskcache  fsync: n=10 median=44.5 q1=43.8 q3=44.7 min=43.3 max=45.4
+C mid-write  10 MiB fuse-diskcache  object-replaced: n=10 median=59.5 q1=58.8 q3=59.9 min=58.3 max=60.4  fsync-returned-early=0/10
+C mid-write  10 MiB fuse-cache      fsync: n=10 median=44.1 q1=43.8 q3=44.4 min=42.6 max=45.3
+C mid-write  10 MiB fuse-cache      object-replaced: n=10 median=59.0 q1=58.4 q3=59.0 min=57.7 max=60.5  fsync-returned-early=0/10
+C mid-write  10 MiB ebpf-nocache    fsync: n=10 median=69.9 q1=65.6 q3=85.0 min=64.5 max=129.3
+C mid-write  10 MiB ebpf-nocache    object-replaced: n=10 median=88.6 q1=80.2 q3=100.2 min=78.8 max=145.4  fsync-returned-early=0/10
+C mid-write  10 MiB ebpf-pcachedrop fsync: n=10 median=68.0 q1=64.2 q3=68.8 min=62.6 max=89.4
+C mid-write  10 MiB ebpf-pcachedrop object-replaced: n=10 median=83.3 q1=79.5 q3=84.3 min=77.9 max=104.6  fsync-returned-early=0/10
+C mid-write  10 MiB ebpf-pcache     fsync: n=10 median=65.3 q1=63.6 q3=65.6 min=61.7 max=148.1
+C mid-write  10 MiB ebpf-pcache     object-replaced: n=10 median=80.7 q1=79.6 q3=81.2 min=77.0 max=163.6  fsync-returned-early=0/10
+C mid-write 100 MiB fuse-raw        fsync: n=10 median=169.6 q1=164.0 q3=171.0 min=157.3 max=195.8
+C mid-write 100 MiB fuse-raw        object-replaced: n=10 median=184.5 q1=179.3 q3=186.0 min=172.6 max=210.7  fsync-returned-early=0/10
+C mid-write 100 MiB fuse-diskcache  fsync: n=10 median=164.4 q1=157.3 q3=167.6 min=156.0 max=180.9
+C mid-write 100 MiB fuse-diskcache  object-replaced: n=10 median=179.3 q1=172.2 q3=182.6 min=171.4 max=195.2  fsync-returned-early=0/10
+C mid-write 100 MiB fuse-cache      fsync: n=10 median=170.2 q1=169.3 q3=172.7 min=168.9 max=238.0
+C mid-write 100 MiB fuse-cache      object-replaced: n=10 median=185.2 q1=184.2 q3=187.5 min=183.9 max=253.5  fsync-returned-early=0/10
+C mid-write 100 MiB ebpf-nocache    fsync: n=10 median=171.3 q1=168.9 q3=172.8 min=167.2 max=248.1
+C mid-write 100 MiB ebpf-nocache    object-replaced: n=10 median=186.2 q1=183.8 q3=187.5 min=181.3 max=263.0  fsync-returned-early=0/10
+C mid-write 100 MiB ebpf-pcachedrop fsync: n=10 median=169.8 q1=167.5 q3=170.7 min=166.3 max=237.6
+C mid-write 100 MiB ebpf-pcachedrop object-replaced: n=10 median=184.9 q1=183.2 q3=186.7 min=181.6 max=252.9  fsync-returned-early=0/10
+C mid-write 100 MiB ebpf-pcache     fsync: n=10 median=169.3 q1=166.8 q3=170.9 min=164.9 max=207.2
+C mid-write 100 MiB ebpf-pcache     object-replaced: n=10 median=184.6 q1=182.0 q3=186.5 min=180.2 max=222.7  fsync-returned-early=0/10

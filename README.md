@@ -29,7 +29,9 @@ Linux 6.12 LTS の eBPF 機能 (**`bpf_arena`**、**KFunc**、**struct_ops**) �
 | Layer 2 | built-in eBPF policy (LRU / SIEVE / S3-FIFO / W-TinyLFU など) | `bpf/policy_*_ops.bpf.c` |
 | Layer 3 | user eBPF policy (SHA256 allowlist で gate) | `--policy-bpf=file:<path>` |
 
-`POST /policy/reload` で走行中に policy を差し替えられます (in-flight の IO は古い vtable で完走)。
+`POST /policy/reload` で走行中に policy を差し替えられます。差し替えは struct_ops の `BPF_LINK_UPDATE` 1 回 (kmod の `update()` が RCU のポインタを 1 本替える) だけで、読み手は旧か新の一式だけを見ます (in-flight の IO は古い vtable で完走)。struct_ops でない `.bpf.o` (fentry / fmod_ret) は reload も起動時の読み込みも拒否され (reload は HTTP 400)、`BPF_LINK_UPDATE` が失敗したときは古い policy が残ったままエラーを返します。
+
+既存の大きいオブジェクトの途中への書き込みは、既定で変更に触れる chunk だけを読み、残りを multipart の `UploadPartCopy` で運びます (`--partial-modify`、既定で有効、S3 のみ。16 MiB 未満は全体を読み書き)。`--partial-modify=false` で全体 GET + PUT (AC-50) に戻せます。
 
 詳しくは:
 - 全体の通信路 (VFS / kmod / BPF / daemon / backend): [`docs/design/component-communication.md`](docs/design/component-communication.md)

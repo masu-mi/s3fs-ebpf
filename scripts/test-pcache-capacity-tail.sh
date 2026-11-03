@@ -108,7 +108,7 @@ ebpf_start_daemon "$OUT/daemon.log" \
     --bucket="$S3_BUCKET" \
     --arena-metadata-only \
     --pattern-aware-admit=false \
-    --policy-bpf="builtin:policy_observe" \
+    --policy-bpf="builtin:policy_observe_ops" \
     --softcap=64 \
     --cache-capacity="${CAPACITY}" \
     --metrics-addr=:9600 \

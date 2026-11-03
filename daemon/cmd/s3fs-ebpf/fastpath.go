@@ -56,8 +56,10 @@ func runFastpath(args []string) int {
 			"When set, `file:` / bare-path policy loads and /policy/reload "+
 			"requests must hash to an allowlisted entry. builtin: bypasses. "+
 			"Empty disables verification (dev/demo default).")
-	partialModify := fs.Bool("partial-modify", false,
-		"AC-51: a write into a large existing object loads only the chunks it touches and flushes the rest with a server-side copy (S3 only; sets the kmod partial_modify parameter)")
+	partialModify := fs.Bool("partial-modify", true,
+		"AC-51: a write into a large existing object loads only the chunks it touches and flushes the rest with a server-side copy "+
+			"(enabled by default, S3 only — ignored with a log line on backends without server-side copy; "+
+			"--partial-modify=false takes the AC-50 whole-object GET + PUT path; written to the kmod partial_modify parameter on every start)")
 	noReadIterHook := fs.Bool("no-read-iter-hook", false,
 		"[R-01] disable fentry/generic_file_read_iter hook. "+
 			"Use for overhead measurement only; disables read pattern tracking and "+
@@ -279,8 +281,8 @@ func runFastpath(args []string) int {
 			polProg.Close()
 			polMu.Unlock()
 		}()
-		fmt.Printf("[policy-bpf] loaded %s (%d links attached, struct_ops=%v)\n",
-			bpfPath, polProg.AttachedCount(), polProg.IsStruct)
+		fmt.Printf("[policy-bpf] loaded %s (%d link attached, struct_ops)\n",
+			bpfPath, polProg.AttachedCount())
 		// Z-01: write the configured age interval into wtinylfu_config[0].
 		// No-op for policies that don't declare the map.
 		if *wtinylFUAgeInterval != 512 {
@@ -313,13 +315,10 @@ func runFastpath(args []string) int {
 			}
 		}
 
-		// Wire up POST /policy/reload for hot swap. struct_ops →
-		// struct_ops retargets the live link with one BPF_LINK_UPDATE
-		// (kmod .update = single RCU pointer swap). Otherwise the new
-		// program is attached BEFORE the old one is closed so the kmod
-		// side sees "new reg → old unreg (superseded)" and never goes
-		// without an active vtable (guarded by kmod-side
-		// s3fs_policy_unreg check). See policyprog.SwapFrom.
+		// Wire up POST /policy/reload for hot swap: one BPF_LINK_UPDATE
+		// retargets the live struct_ops link (kmod .update = single RCU
+		// pointer swap). Non-struct_ops programs are refused with 400;
+		// a failed update keeps the old policy. See policyprog.SwapFrom.
 		metrics.ReloadHandler = func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -348,26 +347,29 @@ func runFastpath(args []string) int {
 			}
 			newProg, err := policyprog.Load(newPath, policyLoadOpts)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				code := http.StatusInternalServerError
+				if errors.Is(err, policyprog.ErrNotStructOps) {
+					code = http.StatusBadRequest
+				}
+				http.Error(w, err.Error(), code)
 				return
 			}
 			polMu.Lock()
 			defer polMu.Unlock()
 			old := polProg
-			updated, err := newProg.SwapFrom(old)
-			if err != nil {
+			if err := newProg.SwapFrom(old); err != nil {
 				newProg.Close()
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				code := http.StatusInternalServerError
+				if errors.Is(err, policyprog.ErrNotStructOps) {
+					code = http.StatusBadRequest
+				}
+				http.Error(w, err.Error(), code)
 				return
 			}
 			polProg = newProg
 			old.Close()
-			how := "attach+detach"
-			if updated {
-				how = "BPF_LINK_UPDATE"
-			}
-			fmt.Printf("[policy-bpf] hot-reloaded %s → %s (%s)\n", old.Path, newPath, how)
-			fmt.Fprintf(w, "reloaded to %s (%s)\n", newPath, how)
+			fmt.Printf("[policy-bpf] hot-reloaded %s → %s (BPF_LINK_UPDATE)\n", old.Path, newPath)
+			fmt.Fprintf(w, "reloaded to %s (BPF_LINK_UPDATE)\n", newPath)
 		}
 		// POST /policy/eval: force an admit_replace with the current
 		// snapshot so the policy program's on_admit / on_evict fires
@@ -490,6 +492,8 @@ func runFastpath(args []string) int {
 		}
 		if err := setKmodParam("partial_modify", pm); err != nil {
 			fmt.Fprintf(os.Stderr, "[kmod] %v\n", err)
+		} else {
+			fmt.Printf("[kmod] partial_modify=%s\n", pm)
 		}
 	} else {
 		if err := setKmodParam("partial_modify", "0"); err != nil {
