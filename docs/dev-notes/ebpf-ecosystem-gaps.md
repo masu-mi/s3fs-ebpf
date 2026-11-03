@@ -1,12 +1,14 @@
 # eBPF 開発環境の足りないもの — s3fs-ebpf を作って踏んだ地雷
 
+> **状態 (2026-11-03):** Week 4 時点の 1 次素材。その後の変化 (cilium/ebpf の marshal 修正の取り込み、struct_ops link の update、pcache モード) を反映した最新版は [`cilium-ebpf-arena-and-struct-ops.md`](cilium-ebpf-arena-and-struct-ops.md)。K-01 / K-02 の根拠としてはこの doc が今も正本。
+
 Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel の未提供・未整備」を、**具体的な症状と修正提案** として整理する。`docs/dev-notes/lessons-learned.md` が「同じ地雷を次のプロジェクトで避ける」チェックリストなのに対し、この doc は **upstream に投げるならこの形** の 1 次素材。
 
 範囲: BPF_ARENA / BPF_STRUCT_OPS / KF_SLEEPABLE の 3 機能を中心に、横断的な tooling gap も末尾で扱う。
 
 > 2026-10-24: cilium/ebpf から arena と struct_ops を使うときの課題と要望は、その後の変化を反映して [`cilium-ebpf-arena-and-struct-ops.md`](cilium-ebpf-arena-and-struct-ops.md) にまとめ直した。
 
-出典表記: `w4a` = `docs/journal/week4a-implementation-notes.md`、`ll` = `docs/dev-notes/lessons-learned.md`、`pc` = `docs/design/policy-attach-comparison.md`、`ci-patch` = `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`。関連する backlog 項目は `../journal/backlog.md §K` (upstream 貢献) と対応。
+出典表記: `w4a` = `docs/journal/week4a-implementation-notes.md`、`ll` = `docs/dev-notes/lessons-learned.md`、`pc` = `docs/design/policy-attach-comparison.md`、`ci-patch` = `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` (削除済み。cilium/ebpf の main に取り込まれたので不要になった。git の履歴に残る)。関連する backlog 項目は `../journal/backlog.md §K` (upstream 貢献) と対応。
 
 ---
 
@@ -106,7 +108,7 @@ Week 1〜4 (e) の PoC 実装で当たった「upstream / cilium/ebpf / kernel �
 
 ### 4.1 cilium/ebpf の marshal bug (upstream の main に取り込み済み、`cc4947e`)
 
-`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` 参照。
+`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` (削除済み。cilium/ebpf の main に取り込まれたので不要になった。git の履歴に残る) 参照。
 
 - **症状**: plain `Mov` instruction の `Offset` が `Instruction.Marshal` 段階で unconditionally 0 に上書きされ、`bpf_addr_space_cast` (opcode `0xbf|ALU64|X` + `Offset=1` + `imm=1`) が verifier reject される (`BPF_MOV uses reserved fields`)
 - **影響**: **addr_space_cast を使う人は誰でも踏む** (LLVM 19+ + `-mattr=+addr_space_cast` の組合せ)

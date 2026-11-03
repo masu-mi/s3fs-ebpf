@@ -355,7 +355,7 @@ daemon 再起動 → S3Key ↔ ino の mapping がリセット。umount + remoun
 
 - **6.12 の細かい API 変更** (`no_llseek` → `noop_llseek`、`bpf_map_get` の namespace 化 etc.) — `docs/journal/week4a-implementation-notes.md §2`
 - **BPF verifier の pointer type check の性質** — `docs/journal/week2-implementation-notes.md` および verifier-demo
-- **cilium/ebpf の addr_space_cast marshal パッチ** — `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`
+- **cilium/ebpf の addr_space_cast marshal パッチ** — `docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` (削除済み。cilium/ebpf の main に取り込まれたので不要になった。git の履歴に残る)
 - **各 bench の数字と解釈** — `docs/journal/benchmark-results.md`
 - **clang 20 / kernel 6.12 の toolchain build** — `docs/journal/week1-build-runtime-notes.md`
 

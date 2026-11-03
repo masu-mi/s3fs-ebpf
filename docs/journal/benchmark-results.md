@@ -41,7 +41,7 @@ Week 4 (e) の初回計測記録。Meetup スライドの原資料として、�
 
 ### 0.1 数字の根拠レビュー (2026-10-05) — 引用前に確認
 
-meetup outline (`docs/user/meetup-ebpf-outline.md`) の性能表を再確認した結果:
+meetup outline (`docs/user/meetup-ebpf-outline.md`、現在は削除済みで git の履歴に残る) の性能表を再確認した結果:
 
 - **read 875×**: `5.20 μs` (§3.2 の今回 run の p50) と `4.55 ms` (「前回 100k iter 実測」の p50、別 run) の比。今回 run の fuse 側は `p50=~4.5ms` (概算値) なので、同一 run 内で比べると ~865×。§3.3 は「886×」と書いており一致しない。**「約 870×、同一 run の p50 比」** と丸めて出すのが安全。測っているのは read 単体ではなく **open+read+close / 16 B / warm** の 1 iter (`microbench`)。fuse-raw 側は毎回 MinIO への HTTP GET を含む。
 - **~870× は「キャッシュ有り ebpf」対「キャッシュ無し fuse」**: ebpf 側は arena prewarm 済み + page cache、fuse-raw は毎回 FUSE upcall + MinIO GET。この倍率の大半は caching の差で、fast path 構造の差ではない。構造の差を取り出すための対照群として `ebpf-nocache` を追加した。kmod `nocache=1` は open ごとに page cache と arena admit を捨て、daemon は `--cache-dir` 無しで起動する → open+read のたびに upcall + S3 GET になり、FUSE (kernel_cache 無し) と同じ形になる。`scripts/bench-3way.sh` の最後に `3way-nocache*.md` として出力する。未計測。fuse-raw と比べたときに残る差は transport (miss queue + arena vs /dev/fuse) と、metadata の getattr/open upcall の有無になる。

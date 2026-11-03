@@ -1,6 +1,6 @@
 # G-01 subdir 対応 + F-02 basename 衝突: 実装計画
 
-**Status**: 設計のみ。実装は次スプリント。
+**Status**: 実装済み (G-01 / F-02。`journal/backlog-archive.md` を参照)。この doc は実装前の計画で、§1 の「現状」は 2026-09-29 時点の書いた当時のまま残している。
 **依存関係**: F-02 (basename 衝突) は G-01 が landed 済であることを前提にする。同じ commit で 2 個一緒に解決するのが自然。
 **背景**: `docs/journal/backlog-archive.md` の G-01 / F-02、および `docs/journal/week4b-implementation-notes.md §4-4`。
 
