@@ -10,7 +10,7 @@
 | Kernel | **Linux 6.12 LTS 以上**（`bpf_arena` 必須。`kmod/s3fs_ebpf_dev.c` が 6.12 未満を `#error`、arena レイアウトは 6.12 系で検証） |
 | Kernel headers | `/lib/modules/$(uname -r)/build` + その直下の `vmlinux`（module BTF 生成に必要） |
 | Compiler | **clang 19+ (推奨 20)** — `__BPF_FEATURE_ADDR_SPACE_CAST` (`-mcpu=v3`)。clang-18 だと arena パスが黙って別実装になるので `bpf/Makefile` が拒否します。kmod 用 gcc はカーネルをビルドした版（最低 14）、pahole はカーネルの `CONFIG_PAHOLE_VERSION` 以上 |
-| Go | `daemon/go.mod` の `go` 行 (1.25+) |
+| Go | `daemon/go.mod` の `go` 行 (1.26+) |
 | Tools | `bpftool`, `docker compose` v2, `gettext-base` (envsubst)。bench は `hyperfine`, `fio`, `s3fs` |
 
 依存箇所（カーネル版 / ヘッダ / コンパイラ / ツール / テストツール）ごとの症状と解消方法は
@@ -67,6 +67,7 @@ make daemon-gen # cilium/ebpf を fetch して bpf2go 実行 → build（Week 1+
 |---|---|
 | カーネルモジュール | `kmod/s3fs_kfunc.ko` |
 | eBPF オブジェクト | `bpf/s3fs_fastpath.bpf.o` |
+| policy (struct_ops、Layer 2) | `bpf/policy_*_ops.bpf.o` (`--policy-bpf=builtin:<名前>` で指定。例 `builtin:policy_sieve_pick_ops`) |
 | Go デーモン | `bin/s3fs-ebpf` |
 
 > **6.12 未満でのビルド**: kmod は `kmod/s3fs_ebpf_dev.c` の `#error` で止まります。6.8 などのコンテナでビルド検証だけ回す場合は `make bpf daemon` に限定してください (`make doctor-build` で事前確認できます)。
@@ -106,6 +107,10 @@ make unmount
 (`--arena-metadata-only` / `--cache-capacity` / `--policy-bpf` など) は
 `sudo -E ./bin/s3fs-ebpf fastpath --help` を見る。
 
+- **policy を差し替える**: daemon を `--policy-bpf=builtin:policy_sieve_pick_ops` などで起動し、走行中に `curl -X POST localhost:9600/policy/reload -d builtin:policy_lru_pick_ops` で替える (`--metrics-token` を付けた場合は `-H "Authorization: Bearer $S3FS_METRICS_TOKEN"`)。差し替えは struct_ops の `BPF_LINK_UPDATE` 1 回だけで、dmesg に `policy struct_ops updated (hot swap)` が出る。struct_ops でない `.bpf.o` (fentry / fmod_ret) は拒否され (HTTP 400)、`BPF_LINK_UPDATE` が失敗したときは古い policy が残る。
+- **既存の大きいオブジェクトの途中書き換え**: `--partial-modify` は既定で有効 (S3 のみ。server-side copy のない backend では無視してログを出す)。`--partial-modify=false` で全体 GET + PUT (AC-50) に戻る。16 MiB (`partial_modify_min`) 未満は全体を読み書きする。
+- **ベンチ用の kmod の module param** (`/sys/module/s3fs_kfunc/parameters/`): `nocache=1` は open のたびに page cache と admit を捨てる (FUSE の `kernel_cache` なしに近い)、`pcache_drop=1` は page cache だけ捨てて chunk 表と policy を残す。どちらも測定用で、rmmod で戻る (`nocache` が優先)。
+
 > `./s3fs-ebpf.sh mount` と `s3fs-ebpf mount` / `unmount` サブコマンドは初期の骨組みのままで、
 > マウントもデーモンの起動もしない。
 
@@ -117,11 +122,29 @@ daemon と root なしで回せるテスト。kmod は KUnit (UML、lockdep と 
 
 ```bash
 make test-daemon
-make test-kunit KSRC=/path/to/linux-6.12+   # カーネルのソースツリーが要る
+make test-kunit KSRC=/path/to/linux-6.12+   # カーネルのソースツリーが要る (UML)
+make test-kunit KSRC=... KUNIT_ARGS="--arch=x86_64 --qemu_args='-smp 4'"   # qemu で 4 CPU (並行テストが本当に並列になる)
 make test-daemon-cov test-kunit-cov KSRC=...  # カバレッジ (coverage/)。CI は public のとき Codecov に送る
 ```
 
 KUnit の準備、suite の中身、見つかったバグは [`docs/dev-notes/kunit.md`](../dev-notes/kunit.md)。
+
+---
+
+## 実機の回帰テスト (`test-regression`)
+
+kmod を insmod して daemon と MinIO を動かす実機のテスト (root が要る。`make compose-up` と `make all` が前提)。1 件ずつ回すこともできる:
+
+```bash
+make test-regression            # 全件 (約 15〜25 分)。各件は RESULT name=… status=PASS|FAIL を出す
+make test-fsync-large-new-file  # 新規 100 MiB を fsync した直後に S3 に全部あること (fsync が PUT の完了前に返らない)
+make test-pcache-drop           # pcache_drop=1: open で page cache だけ捨て、chunk 表に hit すれば upcall なし
+make test-policy-reload         # reload 中に read を流し続けてもエラーなし。struct_ops でない .bpf.o は 400
+make test-write-existing-nopm   # --partial-modify=false の経路 (AC-50)
+```
+
+- `test-policy-conformance` は、実機の policy と simulator の hit を access ごとに比べるタイミングに敏感な試験。MinIO が遅い (たとえば `mc admin trace` が残っている) と落ちる。
+- 一覧は [`cli-reference.md`](cli-reference.md) の Make ターゲット、各試験の意図は `scripts/test-*.sh` の先頭のコメント。
 
 ---
 
@@ -135,10 +158,26 @@ make all
 make bench              # latency bench (hyperfine + microbench + fio)     → /tmp/bench/
 make bench-write        # write-back throughput 1M/10M/100M                → /tmp/bench-write/
 make bench-scale        # 並列度スケール numjobs=1..64                     → /tmp/bench-scale/
-make bench-3way         # ebpf vs fuse-raw vs fuse-cache 3-way             → /tmp/bench-3way/
+make bench-3way         # ebpf vs fuse-raw vs fuse-cache 3-way (+ fuse-diskcache vs ebpf-pcachedrop。PCACHEDROP=0 で省く) → /tmp/bench-3way/
 ```
 
 計測 script は `scripts/bench-*.sh`。`docs/journal/benchmark-results.md §7-§10` に結果解釈。hit-rate bench (`make bench-hitrate*`) は [`../journal/hit-rate-bench.md`](../journal/hit-rate-bench.md)。
+
+### 6 構成 × A〜H の測り直し (issue #35)
+
+fuse-raw / fuse-diskcache / fuse-cache / ebpf-nocache / ebpf-pcachedrop / ebpf-pcache を同じ項目で比べる。各項目 (A: open+read+close、B: 新規 durable write、C: 既存の途中書き換え、D: cold read、E: 小さいファイル 10,000 個、F: 64 jobs 並列 read、G: SQLite とベクトル検索、H: policy ごとの hit rate) が**何の側面を測るか**は [`../dev-notes/bench-suite-overview.md`](../dev-notes/bench-suite-overview.md)。結果は `benchmark-results.md` §18.48 / §18.49。`make` のターゲットはなく、script を直接呼ぶ (`OUT=<dir>` で出力先):
+
+```bash
+OUT=/tmp/r/main   STEPS="A B C D" scripts/bench-pcache-remeasure.sh   # A〜D (STEPS=E で小さいファイル。BACKENDS で構成を絞る)
+OUT=/tmp/r/main-F scripts/bench-read-64jobs.sh                         # F
+OUT=/tmp/r/main-G scripts/bench-oltp-vector-warm.sh                    # G (cold は bench-oltp-vector-cold.sh)
+N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 PCACHE_DROP=1 DAEMON_EXTRA_FLAGS=--arena-metadata-only \
+  POLICIES="observe_ops lru_pick_ops sieve_pick_ops s3fifo_pick_ops wtinylfu_pick_ops" scripts/bench-hitrate.sh   # H
+OUT=/tmp/r/layer  scripts/bench-layer-latency.sh                       # page cache / kmod の chunk 表 / daemon の disk cache / S3 の層ごとのレイテンシ
+```
+
+- 全部で 2〜3 時間かかる。測定の前に、MinIO に `mc admin trace` が残っていないこと (`docker top s3fs-ebpf-minio`)、ディスクの空きが十分あること (MinIO は空きが少ないと書き込みを拒否する) を確かめる。`minio_require` が前者を検出して止まる。環境の確認、結果の検証、記録の手順は `.claude/skills/perf-bench-verify/SKILL.md`。
+- 結果の値は、page cache だけで終わる項目 (A の ebpf-pcache など) を対照にして読む。S3 を伴う項目だけが前回から大きくずれたら、コードではなく環境を疑う。
 
 **手動ライフサイクル**:
 
@@ -156,7 +195,9 @@ make unmount            # daemon-stop + umount + rmmod
 - Prometheus: <http://localhost:9090>
 - MinIO Console: <http://localhost:9001> (minioadmin / minioadmin)
 
-ダッシュボードの定義は `deploy/grafana/dashboards/s3fs-ebpf-overview.json`。デーモンの `/metrics` は `:9600` で公開されます。
+ダッシュボードの定義は `deploy/grafana/dashboards/s3fs-ebpf-overview.json`。デーモンの `/metrics` は `:9600` で公開されます (read-miss / flush の遅延 histogram は 50 µs から)。
+
+層ごとのレイテンシの結果は **S3FS-eBPF Layer latency** (<http://localhost:3000/d/s3fs-ebpf-layer-latency>) に出せる。`scripts/bench-layer-latency.sh` のあとに `scripts/grafana-layer-latency.sh <layer-latency.csv>` で取り込む (Grafana の API を使い、棒グラフ用の TestData datasource がなければ作る。bench が各 run を annotation として投稿する)。このダッシュボードは provisioning ではなく API で入れるので、Grafana のデータ volume を消すと再度取り込む。
 
 ---
 
@@ -179,8 +220,9 @@ s3fs-ebpf/
 ├── include/         C/Go/eBPF 共有型定義
 ├── policies/        CEL ポリシー (Layer 1)
 ├── deploy/          docker-compose（MinIO + Prom + Grafana + node_exporter）
-├── scripts/         セットアップ・ヘルパスクリプト + bench (bench-latency/write/scale/3way)
+├── scripts/         セットアップ・ヘルパスクリプト + bench (bench-latency/write/scale/3way、6 構成の bench-pcache-remeasure / bench-layer-latency など) + 実機の回帰テスト (test-*.sh)
 ├── docs/            設計 / 背景 / 先行研究 (索引は docs/INDEX.md)
+├── .claude/skills/  Claude Code の skill (perf-bench-verify: 性能試験の実行・検証・記録の手順)
 ├── Makefile         トップレベル
 ├── README.md        概要
 └── s3fs-ebpf.sh     mount / unmount / reload ラッパ
