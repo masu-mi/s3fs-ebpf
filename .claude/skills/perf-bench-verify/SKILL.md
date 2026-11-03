@@ -49,7 +49,7 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 1. 生データを `docs/journal/data/<名前>-<日付>/` に置く (`A.txt` `B.txt` … `*.json` `results.jsonl` `summary.txt` `environment.txt`、スクリーンショット)。`docs/INDEX.md` に 1 行足す。
 2. `docs/journal/benchmark-results.md` の次の節 (`### 18.NN`) に、**条件** (日付、`uname -r`、commit、各構成の起動オプションと module param、n、cold の手順)、**値** (中央値 + 四分位範囲 + 最小・最大)、**比** (「s3fs-fuse の時間 ÷ s3fs-ebpf の時間」。1 超が ebpf の勝ち。IOPS や ops/s は逆数にする) を書く。表は構成ごとの絶対値と 3 組の比 (fuse-raw/ebpf-nocache = 構造の差、fuse-diskcache/ebpf-pcachedrop = 独自キャッシュの差、fuse-cache/ebpf-pcache = 全体)。
 3. 以前の値と ±20% 以上違う項目は、**理由 + 根拠**か「未切り分け」と書く。推測を理由として書かない。
-4. 発表の資料 (`docs/user/meetup-ebpf-outline.md`) と `docs/design/where-fs-layer-can-win.md` に新しい値を反映する (出典の節番号つきで)。
+4. `docs/design/where-fs-layer-can-win.md` と `docs/user/meetup-qa.md` に新しい値を反映する (出典の節番号つきで)。
 
 ## 4. 検証 (不審な点の洗い出し)
 

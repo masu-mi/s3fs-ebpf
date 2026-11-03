@@ -2,7 +2,7 @@
 
 ## Overview
 
-`bpf_arena` (kernel 6.8+) provides zero-copy kernel↔userspace shared memory for eBPF programs, with a practical limit of **128MB–256MB** per arena due to kernel virtual memory allocation constraints. This document codifies appropriate and inappropriate use cases based on memory scaling and access patterns.
+`bpf_arena` (kernel 6.9+。導入は 6.9) provides zero-copy kernel↔userspace shared memory for eBPF programs, with a practical limit of **128MB–256MB** per arena due to kernel virtual memory allocation constraints. This document codifies appropriate and inappropriate use cases based on memory scaling and access patterns.
 
 ## Appropriate Use Cases
 

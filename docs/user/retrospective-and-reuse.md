@@ -22,7 +22,7 @@
 | 本当の律速を perf と A/B で特定した。64 jobs の並列 read の劣後は、自分で付けた `fentry/generic_file_read_iter` の負担 (約 19%) だった | Q34、§18.16、`docs/design/read-iter-hook-overhead.md` |
 | 自前の VFS の race を、不変条件の文書化、修正前に FAIL するテスト、KUnit で止めた | `docs/kmod-pcache-invariants.md`、Q51、`docs/journal/history.md` §4〜§5 |
 | 計測の無効化を記録し、数字を置き換えた (hit rate 88.5%、§16 / §17 など) | `docs/journal/history.md` §4.4 |
-| upstream への具体的な要望が出た | K-01 / K-02、cilium/ebpf の marshal 修正 (`docs/dev-notes/ebpf-ecosystem-gaps.md`、`docs/misc/`) |
+| upstream への具体的な要望が出た | K-01 / K-02、cilium/ebpf の marshal 修正 (`docs/dev-notes/ebpf-ecosystem-gaps.md`。patch は取り込み後に削除済み) |
 
 ### 2.2 うまくいかなかったこと
 
@@ -95,7 +95,7 @@
 
 | 項目 | 内容 | 見込み |
 |---|---|---|
-| cilium/ebpf の marshal 修正 | `addr_space_cast` の Offset が 0 に潰れる (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch`) | 済み: 自分で出し、cilium/ebpf の main に `cc4947e` として取り込まれた (2026-10-24 に確認。リリースはまだ)。いまの依存 `v0.22.1-0.20261008…` はこれを含む |
+| cilium/ebpf の marshal 修正 | `addr_space_cast` の Offset が 0 に潰れる (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` (削除済み。cilium/ebpf の main に取り込まれたので不要になった。git の履歴に残る)) | 済み: 自分で出し、cilium/ebpf の main に `cc4947e` として取り込まれた (2026-10-24 に確認。リリースはまだ)。いまの依存 `v0.22.1-0.20261008…` はこれを含む |
 | K-01 `bpf_arena_get_kern_vm_start` の export | 1 行の変更 | 低い。in-tree に使う側のない、out-of-tree の kmod のための export は通りにくい (一般的な傾向。未確認) |
 | K-02 kern_vm の generic context 用 fault handler | 約 50 行の見込み | 低い。arena の設計の前提 (BPF の実行中だけの shadow mapping) に踏み込む。強い use case が要る (`docs/dev-notes/ebpf-ecosystem-gaps.md` §1.2) |
 
