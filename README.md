@@ -12,9 +12,9 @@ Linux 6.12 LTS の eBPF 機能 (**`bpf_arena`**、**KFunc**、**struct_ops**) �
               │
               ▼
   ┌──────────────────────────────────────────────┐
-  │ kmod: VFS (s3fs_ebpf) + KFunc                 │
-  │  eBPF: fentry + struct_ops policy vtable     │
-  │  bpf_arena / page cache にあれば即応答         │
+  │ kmod: VFS (s3fs_ebpf) + KFunc                │
+  │  eBPF: struct_ops policy vtable (+ fentry)   │
+  │  bpf_arena / page cache にあれば即応答       │
   └──────────────┬──────────────────┬────────────┘
                  │ hit              │ miss
                  ▼                  ▼
@@ -64,17 +64,21 @@ make unmount            # daemon 停止 + umount + rmmod
 
 ## 性能
 
-ローカル MinIO で s3fs-fuse (fuse-raw / fuse-cache) と比べた主な結果です (pcache モード)。
+ローカル MinIO で s3fs-fuse と比べた主な結果です (pcache モード、n=5〜10 の中央値、2026-11-03)。比は「s3fs-fuse の時間 ÷ s3fs-ebpf の時間」で、1 より大きいほど s3fs-ebpf が速いことを表します。
 
-| 場面 | FUSE | s3fs-ebpf | 差 |
-|---|---:|---:|---:|
-| open+read+close (キャッシュあり) | 524.6 µs | 3.05 µs | 172× (fuse-cache 比) |
-| 小さいファイル 10,000 個を cat (warm) | 18.3 s | 0.20 s | 93× |
-| 小さいファイル 10,000 個を `ls -l` (cold) | 3.11 s | 0.27 s | 11× |
-| durable write 100 MiB (新規) | 360 ms | 262 ms | 1.37× |
-| cold read 300 MiB | 309.6 ms | 385.1 ms | 0.80× (負け) |
+| 場面 | s3fs-fuse | s3fs-ebpf | 比 | 比べた相手 |
+|---|---:|---:|---:|---|
+| open+read+close (キャッシュあり) | 520.1 µs | 2.9 µs | 180× | fuse-cache |
+| 小さいファイル 10,000 個を cat (warm) | 6.42 s | 0.16 s | 39× | fuse-cache |
+| 小さいファイル 10,000 個を `ls -l` (cold) | 3.40 s | 68 ms | 50× | fuse-raw |
+| durable write 100 MiB (新規) | 346 ms | 337 ms | 1.03× (差なし) | fuse-raw |
+| 既存 100 MiB の途中に 4 KiB + fsync | 171.0 ms | 170.5 ms | 1.00× (`--partial-modify` が効く) | fuse-raw |
+| 既存 10 MiB の途中に 4 KiB + fsync | 47.9 ms | 70.2 ms | 0.68× (負け) | fuse-raw |
+| cold read 300 MiB | 314.1 ms | 367.3 ms | 0.86× (負け) | fuse-raw |
 
-open / fsync を繰り返す小さいファイルの使い方で勝ち、大きいファイルの cold read ではまだ負けます。表と測り方は [`docs/journal/benchmark-results.md`](docs/journal/benchmark-results.md) (§18.32、§18.37)、ベンチの実行方法は [`docs/user/getting-started.md`](docs/user/getting-started.md#ベンチマーク)。キャッシュ policy ごとの hit rate は [`docs/journal/hit-rate-bench.md`](docs/journal/hit-rate-bench.md) にあります。
+open / `ls -l` / cat を何度も繰り返す小さいファイルの使い方で勝ち、大きいファイルの cold read と、`--partial-modify` の対象 (16 MiB) 未満の途中書き換えではまだ負けます。page cache のヒットで終わる warm の SQLite / ベクトル検索は fuse-cache と ±3% で差がつきません。新規ファイルの durable write は、fsync が PUT の完了前に返る不具合を直した後は 1 MiB / 10 MiB が 1.3〜1.5×、100 MiB は差がなくなりました。
+
+表と測り方は [`docs/journal/benchmark-results.md`](docs/journal/benchmark-results.md) の §18.48 (6 構成 × 8 項目の測り直し) と §18.49 (page cache / kmod の chunk 表 / daemon の disk cache / S3 の層ごとのレイテンシ)、試験の概要と測っている側面は [`docs/dev-notes/bench-suite-overview.md`](docs/dev-notes/bench-suite-overview.md)、ベンチの実行方法は [`docs/user/getting-started.md`](docs/user/getting-started.md#ベンチマーク) です。キャッシュ policy ごとの hit rate は [`docs/journal/hit-rate-bench.md`](docs/journal/hit-rate-bench.md) と §18.48 (open のたびに page cache を捨てる構成では、policy なしの 27.8% に対して W-TinyLFU が 50.9%) にあります。
 
 ## ドキュメント
 
