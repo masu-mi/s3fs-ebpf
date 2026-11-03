@@ -108,11 +108,124 @@ static void s3k_pol_hot_reload(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, s3k_pol_active());
 }
 
+
+/* -- Data members (flags / name): init_member and validate ------------------
+ * s3fs_policy_init_member reads one thing from the BTF the kernel hands it: the
+ * member's bit offset.  A struct btf_type with kind_flag clear and one btf_member
+ * stand in for it, so the rules run without a BPF struct_ops map. */
+
+struct s3k_fake_btf {
+	struct btf_type   t;
+	struct btf_member m;
+};
+
+static int s3k_init_member(size_t byte_off, const struct s3fs_policy_ops *u,
+			   struct s3fs_policy_ops *k)
+{
+	struct s3k_fake_btf f = {};
+
+	f.t.info = (u32)BTF_KIND_STRUCT << 24 | 1;	/* kind_flag clear, vlen 1 */
+	f.m.offset = byte_off * 8;
+	return s3fs_policy_init_member(&f.t, &f.m, k, u);
+}
+
+static void s3k_pol_data_members_taken(struct kunit *test)
+{
+	struct s3fs_policy_ops u = {}, k = {};
+
+	u.flags = S3FS_POLICY_F_NO_ON_HIT;
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, flags), &u, &k), 1);
+	KUNIT_EXPECT_EQ(test, k.flags, (u32)S3FS_POLICY_F_NO_ON_HIT);
+
+	strscpy(u.name, "unit.test_1", sizeof(u.name));
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, name), &u, &k), 1);
+	KUNIT_EXPECT_STREQ(test, k.name, "unit.test_1");
+	/* the rest of the array is zero, not stale bytes */
+	KUNIT_EXPECT_EQ(test, k.name[sizeof(k.name) - 1], 0);
+
+	/* a policy built before the name member existed leaves it empty: allowed */
+	memset(&u, 0, sizeof(u));
+	memset(k.name, 'x', sizeof(k.name) - 1);
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, name), &u, &k), 1);
+	KUNIT_EXPECT_STREQ(test, k.name, "");
+}
+
+static void s3k_pol_data_members_refused(struct kunit *test)
+{
+	struct s3fs_policy_ops u = {}, k = {};
+
+	/* a flag bit the kmod does not know; kdata is left alone */
+	u.flags = S3FS_POLICY_F_ALL << 1;
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, flags), &u, &k), -EINVAL);
+	KUNIT_EXPECT_EQ(test, k.flags, 0u);
+
+	/* a character outside [A-Za-z0-9_.] */
+	memset(&u, 0, sizeof(u));
+	strscpy(u.name, "bad name", sizeof(u.name));
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, name), &u, &k), -EINVAL);
+	strscpy(u.name, "dash-ed", sizeof(u.name));
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, name), &u, &k), -EINVAL);
+
+	/* no NUL inside the array */
+	memset(u.name, 'a', sizeof(u.name));
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, name), &u, &k), -EINVAL);
+
+	/* a function pointer is not this callback's: 0 hands it to the framework */
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, on_hit), &u, &k), 0);
+	KUNIT_EXPECT_EQ(test, s3k_init_member(offsetof(struct s3fs_policy_ops, pick_victim), &u, &k), 0);
+}
+
+static void s3k_pol_validate(struct kunit *test)
+{
+	struct s3fs_policy_ops o = {};
+
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&o), 0);		/* empty */
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&s3k_pol_legacy), 0);
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&s3k_pol_full), 0);
+
+	/* pick_victim needs on_insert and on_remove (AC-58, AC-64) */
+	o.pick_victim = s3k_pol_pick;
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&o), -EINVAL);
+	o.on_insert = s3k_pol_insert;
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&o), -EINVAL);
+	o.on_remove = s3k_pol_remove;
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&o), 0);
+
+	/* NO_ON_HIT must agree with the vtable */
+	memset(&o, 0, sizeof(o));
+	o.flags = S3FS_POLICY_F_NO_ON_HIT;
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&o), 0);
+	o.on_hit = s3k_pol_hit;
+	KUNIT_EXPECT_EQ(test, s3fs_policy_validate(&o), -EINVAL);
+}
+
+/* The name and flags are in the vtable that reg publishes: what a BPF_LINK_UPDATE
+ * swaps in comes with its own data. */
+static void s3k_pol_data_swap_with_vtable(struct kunit *test)
+{
+	struct s3fs_policy_ops a = s3k_pol_legacy, b = s3k_pol_legacy;
+
+	strscpy(a.name, "first", sizeof(a.name));
+	strscpy(b.name, "second", sizeof(b.name));
+	b.flags = S3FS_POLICY_F_NO_ON_HIT;
+	KUNIT_ASSERT_EQ(test, s3fs_policy_reg(&a, NULL), 0);
+	KUNIT_EXPECT_STREQ(test, s3k_pol_active()->name, "first");
+	KUNIT_ASSERT_EQ(test, s3fs_policy_update(&b, &a, NULL), 0);
+	KUNIT_EXPECT_STREQ(test, s3k_pol_active()->name, "second");
+	KUNIT_EXPECT_EQ(test, s3k_pol_active()->flags, (u32)S3FS_POLICY_F_NO_ON_HIT);
+	s3fs_policy_unreg(&b, NULL);
+	KUNIT_EXPECT_NULL(test, s3k_pol_active());
+}
+
 static struct kunit_case s3k_pol_cases[] = {
 	KUNIT_CASE(s3k_pol_defaults),
 	KUNIT_CASE(s3k_pol_dispatch),
 	KUNIT_CASE(s3k_pol_legacy_vtable),
 	KUNIT_CASE(s3k_pol_hot_reload),
+	KUNIT_CASE(s3k_pol_data_members_taken),
+	KUNIT_CASE(s3k_pol_data_members_refused),
+	KUNIT_CASE(s3k_pol_validate),
+	KUNIT_CASE(s3k_pol_data_swap_with_vtable),
 	{}
 };
 

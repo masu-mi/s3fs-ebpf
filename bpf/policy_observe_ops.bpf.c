@@ -24,11 +24,20 @@ enum {
 	PSTAT_MAX,
 };
 
+/* The full vtable, data members included (kmod/policy_struct_ops.h). Members
+ * this policy does not implement stay 0 / NULL. */
+#define S3FS_POLICY_NAME_MAX 16
 struct s3fs_policy_ops {
 	int (*on_admit)(__u64 count, __u64 arena_used_hint);
 	int (*on_evict)(__u64 ino);
 	int (*on_pressure)(__u64 count, __u64 threshold);
 	int (*on_hit)(__u64 ino);
+	int (*on_insert)(__u64 ino);
+	int (*on_remove)(__u64 ino);
+	__u64 (*pick_victim)(void);
+	int (*on_size)(__u64 ino, __u64 bytes);
+	__u32 flags;                         /* S3FS_POLICY_F_* */
+	char name[S3FS_POLICY_NAME_MAX];     /* shown in the kmod's log */
 };
 
 struct {
@@ -93,6 +102,8 @@ struct s3fs_policy_ops observe_ops = {
 	.on_evict    = (void *)observe_evict,
 	.on_pressure = (void *)observe_pressure,
 	.on_hit      = (void *)observe_hit,
+	/* data members: plain constants in the initializer */
+	.name        = "observe",
 };
 
 char _license[] SEC("license") = "GPL";

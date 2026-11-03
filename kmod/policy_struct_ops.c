@@ -11,6 +11,8 @@
  */
 
 #include <linux/bpf.h>
+#include <linux/ctype.h>
+#include <linux/string.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/filter.h>
@@ -200,13 +202,65 @@ static const struct bpf_verifier_ops s3fs_policy_verifier_ops = {
 	.is_valid_access = s3fs_policy_is_valid_access,
 };
 
-/* init_member: run per struct_ops slot when the BPF map is created.
- * The framework populates function-pointer members automatically
- * from the loaded BPF program; we just accept them. */
+/* name: [A-Za-z0-9_.]*, NUL-terminated inside the array.  The same rule as
+ * bpf_obj_name_cpy (not exported to modules), except that "" is allowed: a policy
+ * built before the name member existed leaves it empty. */
+static int s3fs_policy_copy_name(char *dst, const char *src)
+{
+	size_t n = strnlen(src, S3FS_POLICY_NAME_MAX);
+	size_t i;
+
+	if (n == S3FS_POLICY_NAME_MAX)	/* no NUL */
+		return -EINVAL;
+	for (i = 0; i < n; i++)
+		if (!isalnum(src[i]) && src[i] != '_' && src[i] != '.')
+			return -EINVAL;
+	memset(dst, 0, S3FS_POLICY_NAME_MAX);
+	memcpy(dst, src, n);
+	return 0;
+}
+
+/* init_member: called per struct member when the BPF side loads the vtable.
+ * Returning 1 means "taken: kdata holds the value"; returning 0 leaves the
+ * member to the framework, which fills function pointers and requires every
+ * other member to be zero (-EINVAL otherwise) -- so a data member that is not
+ * handled here cannot be set.  Pattern: net/ipv4/bpf_tcp_ca.c. */
 static int s3fs_policy_init_member(const struct btf_type *t,
 				   const struct btf_member *member,
 				   void *kdata, const void *udata)
 {
+	const struct s3fs_policy_ops *uops = udata;
+	struct s3fs_policy_ops *ops = kdata;
+	u32 moff = __btf_member_bit_offset(t, member) / 8;
+	int err;
+
+	switch (moff) {
+	case offsetof(struct s3fs_policy_ops, flags):
+		if (uops->flags & ~S3FS_POLICY_F_ALL)
+			return -EINVAL;
+		ops->flags = uops->flags;
+		return 1;
+	case offsetof(struct s3fs_policy_ops, name):
+		err = s3fs_policy_copy_name(ops->name, uops->name);
+		return err ? err : 1;
+	}
+	return 0;
+}
+
+/* validate: runs once after every member is in place, before reg / update.
+ * Checks the combinations a single-member check cannot see. */
+static int s3fs_policy_validate(void *kdata)
+{
+	const struct s3fs_policy_ops *ops = kdata;
+
+	/* pick_victim returns inos from the policy's own list: without on_insert /
+	 * on_remove that list never learns what the kmod admitted or evicted
+	 * (AC-58, AC-64). */
+	if (ops->pick_victim && (!ops->on_insert || !ops->on_remove))
+		return -EINVAL;
+	/* the declaration must match the vtable */
+	if ((ops->flags & S3FS_POLICY_F_NO_ON_HIT) && ops->on_hit)
+		return -EINVAL;
 	return 0;
 }
 
@@ -217,7 +271,8 @@ static int s3fs_policy_reg(void *kdata, struct bpf_link *link)
 	struct s3fs_policy_ops *ops = kdata;
 
 	rcu_assign_pointer(s3fs_policy_active, ops);
-	pr_info("s3fs_ebpf: policy struct_ops registered (ops=%p)\n", ops);
+	pr_info("s3fs_ebpf: policy struct_ops registered (ops=%p name=%s flags=0x%x)\n",
+		ops, ops->name[0] ? ops->name : "-", ops->flags);
 	return 0;
 }
 
@@ -250,7 +305,8 @@ static int s3fs_policy_update(void *kdata, void *old_kdata,
 
 	rcu_assign_pointer(s3fs_policy_active, ops);
 	synchronize_rcu();
-	pr_info("s3fs_ebpf: policy struct_ops updated (hot swap)\n");
+	pr_info("s3fs_ebpf: policy struct_ops updated (hot swap) name=%s flags=0x%x\n",
+		ops->name[0] ? ops->name : "-", ops->flags);
 	return 0;
 }
 
@@ -263,6 +319,7 @@ static struct bpf_struct_ops bpf_s3fs_policy_ops = {
 	.verifier_ops = &s3fs_policy_verifier_ops,
 	.init         = s3fs_policy_init,
 	.init_member  = s3fs_policy_init_member,
+	.validate     = s3fs_policy_validate,
 	.reg          = s3fs_policy_reg,
 	.unreg        = s3fs_policy_unreg,
 	.update       = s3fs_policy_update,

@@ -18,6 +18,8 @@ OBJS := s3fs_fastpath.bpf.o policy_observe_ops.bpf.o \
         policy_wtinylfu_ops.bpf.o policy_wtinylfu_full_ops.bpf.o \
         policy_pressure_ops.bpf.o policy_time_decay_ops.bpf.o \
         policy_size_aware_ops.bpf.o \
+        policy_test_named_ops.bpf.o policy_test_badflags_ops.bpf.o policy_test_badname_ops.bpf.o \
+        policy_test_noonhit_hit_ops.bpf.o policy_test_pickonly_ops.bpf.o \
         kfunc_walk.bpf.o
 
 .PHONY: all clean vmlinux check-clang

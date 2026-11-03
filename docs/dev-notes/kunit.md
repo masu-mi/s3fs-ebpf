@@ -47,7 +47,7 @@ make test-daemon-cov           # -> coverage/daemon.out
 | `s3fs_ebpf_chunks` | `kmod/vfs_ops_kunit.c` | chunk 表 (AC-45: 確保サイズ、倍々、hole の 0、truncate、M1 の `fd->cap` と `s3fs_fd_buf_bytes`、pin)、populate の `populated` 判定 (T5)、modify op (AC-50/51: `s3fs_mop_*`、mpin の対称性、remote) |
 | `s3fs_ebpf_tables` | 同上 | dyn entry index (AC-55)、admit 表 (P1/P3/S4、per-file cache)、pending (U13/P1/H-06、C2 の verify)、miss / flush / evict queue (F1)、pending の並行 get/put/signal |
 | `s3fs_ebpf_vfs` | 同上 | `kern_mount` した fs を VFS 経由で操作: bootstrap の read、write 後の page cache、truncate、close の flush event と W1 pin、fsync と古い PUT (W3)、再 mount、2 GiB を超える read、write / read / truncate の並行実行 |
-| `s3fs_ebpf_policy_ops` | `kmod/policy_struct_ops_kunit.c` | struct_ops vtable の dispatch、欠けた member の既定値、reg / unreg / update の hot reload 規則 |
+| `s3fs_ebpf_policy_ops` | `kmod/policy_struct_ops_kunit.c` | struct_ops vtable の dispatch、欠けた member の既定値、reg / unreg / update の hot reload 規則、データメンバ (`flags` / `name`) の `init_member` と `validate`、名前と flags が vtable と一緒に入れ替わること (fake の BTF で `init_member` を直接呼ぶ。`docs/dev-notes/struct-ops-data-members.md`) |
 
 user memory が要る呼び出し (`.write`、`POPULATE_PAGES`、`READ_DIRTY`) は `kunit_vm_mmap` の領域を使う。daemon の代わりに、テストが ioctl の中身の関数 (`s3fs_ebpf_populate_pages`、`s3fs_ebpf_flush_pop`、`s3fs_ebpf_signal_flush` など) を直接呼ぶ。
 

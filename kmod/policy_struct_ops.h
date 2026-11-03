@@ -17,6 +17,15 @@
  *       .on_hit      = (void *)my_on_hit,
  *   };
  *
+ * The vtable also carries two DATA members after the hooks (docs/dev-notes/
+ * struct-ops-data-members.md): `flags` (S3FS_POLICY_F_*) and `name`.  The kernel
+ * only accepts a non-function member that the type's init_member took (see
+ * s3fs_policy_init_member); both are optional (0 / empty).  A BPF policy sets
+ * them in its initializer:
+ *
+ *       .flags = S3FS_POLICY_F_NO_ON_HIT,
+ *       .name  = "my_policy",
+ *
  * Programs must be non-sleepable (SEC("struct_ops/..."), not
  * "struct_ops.s/..."): the eval wrappers call them inside
  * rcu_read_lock(), and on_hit fires per folio on the read path.
@@ -25,6 +34,15 @@
  * vtable is swapped by one BPF_LINK_UPDATE on the struct_ops link
  * (-> s3fs_policy_update, a single rcu_assign_pointer).
  */
+#define S3FS_POLICY_NAME_MAX    16
+
+/* The policy declares it has no on_hit.  s3fs_policy_validate rejects the flag
+ * together with an on_hit program, so the declaration cannot disagree with the
+ * vtable.  (Not yet used to skip the hit accounting on the read path: that would
+ * change the issue #22 hit_accum invariants.) */
+#define S3FS_POLICY_F_NO_ON_HIT (1u << 0)
+#define S3FS_POLICY_F_ALL       (S3FS_POLICY_F_NO_ON_HIT)
+
 struct s3fs_policy_ops {
 	int (*on_admit)(u64 count, u64 arena_used_hint);
 	int (*on_evict)(u64 ino);
@@ -42,6 +60,11 @@ struct s3fs_policy_ops {
 	 * pass charges ino this round, called right after on_insert under
 	 * the same lock, so a policy can keep byte budgets. */
 	int (*on_size)(u64 ino, u64 bytes);
+	/* Data members (appended, like the AC-58 hooks: programs built against a
+	 * shorter vtable load with 0 / empty).  Set once at load; a
+	 * BPF_LINK_UPDATE swaps them together with the hooks. */
+	u32  flags;                          /* S3FS_POLICY_F_* */
+	char name[S3FS_POLICY_NAME_MAX];     /* [A-Za-z0-9_.], NUL-terminated; "" = unnamed */
 };
 
 /* Kmod entry points: call these from hot paths in vfs_ops.c. Each
