@@ -35,8 +35,11 @@ fmod_ret は「既存の関数の戻り値を上書きする」ので、呼び�
 
 ### 2.4 `init` / `init_member`
 
-- やること: `init` は登録時に 1 回、`init_member` は daemon が vtable を map に書いたとき member ごとに呼ばれる。どちらも 0 を返すだけ。
-- なぜ: フレームワークが NULL チェックなしで呼ぶので、中身が無くても書く必要がある。関数ポインタ以外の member (設定値など) を持つ vtable なら、`init_member` でユーザー側の値をカーネル側にコピーする。
+- やること: `init` は登録時に 1 回 (0 を返すだけ)。`init_member` は daemon が vtable を map に書いたとき member ごとに呼ばれる。`s3fs_policy_init_member` は、データメンバの `flags` と `name` を検査してカーネル側にコピーし、受け取ったら 1 を返す。それ以外 (関数ポインタ) は 0 を返してフレームワークに任せる。`validate` は全メンバが入った後に 1 回、`pick_victim` と `on_insert` / `on_remove` の組み合わせなどを検査する。
+- なぜ:
+  - フレームワークが NULL チェックなしで呼ぶので、`init` は中身が無くても書く必要がある。
+  - 関数ポインタ以外の member (設定値、名前) を持つ vtable は、`init_member` で受け取って 1 を返さないと、0 以外の値が `-EINVAL` で拒否される。
+  - 詳細、検査の中身、試験、新しいカーネルでの変化は [`struct-ops-data-members.md`](struct-ops-data-members.md)。
 
 ### 2.5 `reg` / `unreg`
 
