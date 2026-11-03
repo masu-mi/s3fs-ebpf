@@ -108,7 +108,7 @@ start_ebpf() {
         # the pattern-aware admit that needs it): the hook-less baseline.
         ebpf_start_daemon "$OUT/daemon-${mode}.log" \
             --cache-dir="$EBPF_CACHE_DIR" \
-            --policy-bpf="builtin:policy_observe" \
+            --policy-bpf="builtin:policy_observe_ops" \
             --arena-metadata-only \
             --no-read-iter-hook --pattern-aware-admit=false \
             --metrics-addr=:9600 \
@@ -117,7 +117,7 @@ start_ebpf() {
     elif [ "$mode" = "pcache" ]; then
         ebpf_start_daemon "$OUT/daemon-${mode}.log" \
             --cache-dir="$EBPF_CACHE_DIR" \
-            --policy-bpf="builtin:policy_observe" \
+            --policy-bpf="builtin:policy_observe_ops" \
             --arena-metadata-only \
             --metrics-addr=:9600 \
             --sample-every=2s --sync-every=60s \
@@ -125,7 +125,7 @@ start_ebpf() {
     else
         ebpf_start_daemon "$OUT/daemon-${mode}.log" \
             --cache-dir="$EBPF_CACHE_DIR" \
-            --policy-bpf="builtin:policy_observe" \
+            --policy-bpf="builtin:policy_observe_ops" \
             --metrics-addr=:9600 \
             --sample-every=2s --sync-every=60s \
             --softcap=8 --cache-capacity=0

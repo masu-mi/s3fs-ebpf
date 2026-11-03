@@ -1,0 +1,20 @@
+RESULT policy=observe_ops     folio= 2000  pc=    0  miss= 1444  err=  0  rate_arena=100.00%  hit_rate= 27.80%  evictions= 1436  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=6.66
+DETAIL policy=observe_ops hits_replayed=2000 n_access=2000 upcalls=1444
+RESULT policy=lru_pick_ops    folio= 2000  pc=    0  miss= 1222  err=  0  rate_arena=100.00%  hit_rate= 38.90%  evictions= 1214  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=6.81
+DETAIL policy=lru_pick_ops hits_replayed=2000 n_access=2000 upcalls=1222
+RESULT policy=sieve_pick_ops  folio= 2000  pc=    0  miss= 1079  err=  0  rate_arena=100.00%  hit_rate= 46.05%  evictions= 1071  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=6.63
+DETAIL policy=sieve_pick_ops hits_replayed=2000 n_access=2000 upcalls=1079
+RESULT policy=s3fifo_pick_ops  folio= 2000  pc=    0  miss= 1013  err=  0  rate_arena=100.00%  hit_rate= 49.35%  evictions= 1005  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=6.79
+DETAIL policy=s3fifo_pick_ops hits_replayed=2000 n_access=2000 upcalls=1013
+RESULT policy=wtinylfu_pick_ops  folio= 2000  pc=    0  miss=  995  err=  0  rate_arena=100.00%  hit_rate= 50.25%  evictions=  987  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=6.77
+DETAIL policy=wtinylfu_pick_ops hits_replayed=2000 n_access=2000 upcalls=995
+
+REFERENCE (dev trace-replay on /tmp/s35/r2/main-H/drop1-seed23/trace.jsonl, softcap=8, cold start;
+           live runs used capacity_bytes=368 — 0 means legacy mode, not slot-bounded)
+           prewarmed live runs: opt bound += at most 8/2000)
+# trace-replay: 2000 events, softcap=8
+# policy       accesses       hits     misses     rate
+  lru              2000        778       1222   38.90%
+  sieve            2000        921       1079   46.05%
+  opt              2000       1293        707   64.65%
+  noevict          2000       1970         30   98.50%

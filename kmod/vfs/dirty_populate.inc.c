@@ -2,7 +2,16 @@
 /* dirty read/layout, file_data lifecycle, populate_pages.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
-long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
+/*
+ * AC-71: a read claims the flush only if it takes the whole content.  The
+ * daemon sizes its buffer from the event's size, which is the size when the
+ * event was queued; a stale event (the 0-byte placeholder .create queues) read
+ * a larger file with cap < fd->size, claimed every enqueue (W1) and so woke an
+ * fsync before its data had been PUT (W3) -- and the PUT it then made was the
+ * short one.  With cap < fd->size nothing is copied or claimed: -ENOSPC, and
+ * *size (if given) is the size to ask for.
+ */
+long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap, u64 *size)
 {
 	struct inode *inode;
 	struct s3fs_file_data *fd;
@@ -21,9 +30,16 @@ long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap)
 	}
 
 	mutex_lock(&fd->lock);
+	if (size)
+		*size = fd->size;
+	if (cap < fd->size) {
+		mutex_unlock(&fd->lock);
+		iput(inode);
+		return -ENOSPC;
+	}
 	/* W1: this read covers every enqueue so far (writes precede enqueue). */
 	fd->flush_read_seq = fd->flush_seq;
-	n = min_t(size_t, fd->size, cap);
+	n = fd->size;
 	ret = n ? s3fs_fd_copy_out(fd, uaddr, n) : 0;
 	mutex_unlock(&fd->lock);
 	iput(inode);

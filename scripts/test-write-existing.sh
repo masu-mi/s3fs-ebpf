@@ -43,6 +43,10 @@ OUT=${OUT:-/tmp/test-write-existing}
 SETTLE=${SETTLE:-6}
 FLUSH_WAIT=${FLUSH_WAIT:-30}
 TEST_NAME=${TEST_NAME:-test-write-existing}
+# PARTIAL_MODIFY=false runs the AC-50 whole-object path (--partial-modify=false);
+# unset keeps the daemon default (AC-51 on).
+pm_flag=()
+[ -n "${PARTIAL_MODIFY:-}" ] && pm_flag=(--partial-modify="$PARTIAL_MODIFY")
 S3_BUCKET=${WRITE_EXISTING_BUCKET:-s3fs-write-existing}
 MIB=$(( 1024 * 1024 ))
 SIZE=$(( 6 * MIB ))
@@ -110,7 +114,8 @@ run_mode() {
     ebpf_start_daemon "$OUT/daemon-$mode.log" \
         --bucket="$S3_BUCKET" \
         "${extra[@]}" \
-        --policy-bpf="builtin:policy_observe" \
+        "${pm_flag[@]}" \
+        --policy-bpf="builtin:policy_observe_ops" \
         --softcap=8 --cache-capacity=0 \
         --metrics-addr=:9600 \
         --sample-every=1s --sync-every=0

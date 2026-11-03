@@ -1011,7 +1011,7 @@ static void s3k_vfs_close_flush(struct kunit *test)
 	/* W1: a signal for a PUT that never read the buffer covers nothing */
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(inode->i_ino, 0), -ENOENT);
 	KUNIT_EXPECT_TRUE(test, fd->flushing);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(inode->i_ino, v->ubuf, 32), 17L);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(inode->i_ino, v->ubuf, 32, NULL), 17L);
 	KUNIT_ASSERT_EQ(test, copy_from_user(out, v->ubuf, 17), 0ul);
 	KUNIT_EXPECT_STREQ(test, out, "Jello, s3fs-ebpf\n");
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(inode->i_ino, 0), -ENOENT);
@@ -1052,7 +1052,7 @@ static void s3k_vfs_fsync_waits_for_its_put(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 0, "1", 1), 1L);
 	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
 	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 32), 17L);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 32, NULL), 17L);
 
 	/* a second write, then fsync blocks on its own flush */
 	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 1, "2", 1), 1L);
@@ -1074,7 +1074,54 @@ static void s3k_vfs_fsync_waits_for_its_put(struct kunit *test)
 			       "fsync returned %d before its data was read", c->ret);
 
 	/* the fsync's own PUT */
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 32), 17L);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 32, NULL), 17L);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
+	KUNIT_ASSERT_GT(test, wait_for_completion_timeout(&c->done, 5 * HZ), 0ul);
+	KUNIT_EXPECT_EQ(test, c->ret, 0);
+	s3k_close(f);
+}
+
+/* AC-71: a READ_DIRTY whose buffer is smaller than the content (a stale
+ * event's size: the 0-byte placeholder .create queues, read after the file
+ * grew) neither copies nor claims the flush.  Before, it claimed every enqueue,
+ * so the signal of its (short) PUT woke an fsync whose data had not been read
+ * yet.  The fsync's own read, with a buffer of exactly the content, completes it. */
+static void s3k_vfs_read_dirty_short_buffer_claims_nothing(struct kunit *test)
+{
+	struct s3k_vfs *v = test->priv;
+	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3k_fsync_ctx *c = kunit_kzalloc(test, sizeof(*c), GFP_KERNEL);
+	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
+	struct s3fs_file_data *fd = s3k_fd_of(f);
+	u64 ino = file_inode(f)->i_ino;
+	u64 size = 0;
+	struct task_struct *t;
+	int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	KUNIT_ASSERT_NOT_NULL(test, c);
+	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 0, "1", 1), 1L);
+	c->f = f;
+	init_completion(&c->done);
+	t = kthread_run(s3k_fsync_thread, c, "s3k_fsync_short");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(t));
+	for (i = 0; i < 100; i++)
+		if (s3fs_ebpf_flush_pop_wait(ev) == 0)
+			break;
+	KUNIT_ASSERT_LT(test, i, 100);
+
+	/* the stale event: a buffer of the size it had (0) */
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_read_dirty(ino, NULL, 0, &size), (long)-ENOSPC);
+	KUNIT_EXPECT_EQ(test, size, 17ull);
+	KUNIT_EXPECT_NE(test, fd->flush_read_seq, fd->flush_seq);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
+	msleep(50);
+	KUNIT_EXPECT_FALSE_MSG(test, completion_done(&c->done),
+			       "fsync returned %d on a PUT that read no data", c->ret);
+
+	/* the fsync's own read: exactly the content */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 17, NULL), 17L);
+	KUNIT_EXPECT_EQ(test, fd->flush_read_seq, fd->flush_seq);
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
 	KUNIT_ASSERT_GT(test, wait_for_completion_timeout(&c->done, 5 * HZ), 0ul);
 	KUNIT_EXPECT_EQ(test, c->ret, 0);
@@ -1105,7 +1152,7 @@ static void s3k_vfs_fsync_empty_file(struct kunit *test)
 			break;
 	KUNIT_ASSERT_LT(test, i, 100);
 	KUNIT_EXPECT_EQ(test, ev->size, 0ull);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_read_dirty(ino, NULL, 0), 0L);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_read_dirty(ino, NULL, 0, NULL), 0L);
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
 	KUNIT_ASSERT_GT(test, wait_for_completion_timeout(&c->done, 5 * HZ), 0ul);
 	KUNIT_EXPECT_EQ(test, c->ret, 0);
@@ -1630,6 +1677,7 @@ static struct kunit_case s3k_vfs_cases[] = {
 	KUNIT_CASE(s3k_vfs_close_flush),
 	KUNIT_CASE(s3k_vfs_fsync_waits_for_its_put),
 	KUNIT_CASE(s3k_vfs_fsync_empty_file),
+	KUNIT_CASE(s3k_vfs_read_dirty_short_buffer_claims_nothing),
 	KUNIT_CASE(s3k_vfs_fill_past_dirty_eof),
 	KUNIT_CASE(s3k_vfs_remount_fsync_queue),
 	KUNIT_CASE(s3k_vfs_concurrent_modify),

@@ -1,0 +1,560 @@
+check-kmod-invariants: ok
+  ok   lists the lockdep kernel
+  ok   lists the generic kernel
+  ok   lists the 6.8 kernel
+  ok   no recovery entries
+  ok   titles keep their first letter
+  ok   generic sets the default
+  ok   no quote in the id
+  ok   lockdep sets the default
+  ok   --once uses grub-reboot
+  ok   --once leaves the default
+  ok   --once does not set the default
+  ok   a version substring
+  ok   unknown kernel is refused
+  ok   refuses without GRUB_DEFAULT=saved
+RESULT name=test-boot-kernel status=PASS
+LD_LIBRARY_PATH=/home/masumi/.local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} make -C /home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/kmod KDIR=/lib/modules/6.12.0-061200-generic/build CC=gcc-14 HOSTCC=gcc-14 PAHOLE=/home/masumi/.local/bin/pahole 
+make[1]: Entering directory '/home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/kmod'
+make -C /lib/modules/6.12.0-061200-generic/build M=/home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/kmod modules
+make[2]: Entering directory '/usr/src/linux-headers-6.12.0-061200-generic'
+warning: the compiler differs from the one used to build the kernel
+  The kernel was built by: x86_64-linux-gnu-gcc-14 (Ubuntu 14.2.0-4ubuntu2) 14.2.0
+  You are using:           gcc-14 (Ubuntu 14.2.0-4ubuntu2~24.04.1) 14.2.0
+make[2]: Leaving directory '/usr/src/linux-headers-6.12.0-061200-generic'
+make[1]: Leaving directory '/home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/kmod'
+  BTF     s3fs_kfunc.ko: 14180 bytes
+cd /home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/daemon && GOROOT=/usr/local/go PATH=/usr/local/go/bin/:$PATH /usr/local/go/bin/go build -o /home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/bin/s3fs-ebpf ./cmd/s3fs-ebpf
+==> test-write-readback (T1/AC-22)
+[write-readback] mounting s3fs-ebpf
+[write-readback] daemon started, settling 8s
+[write-readback] sub-test 1: echo/cat on new file
+[write-readback]   sub-test 1 PASS
+[write-readback] sub-test 2: write crossing 4 MiB chunk boundary
+[write-readback]   reference sha256: 69071ca569963a4b6cd80a648bab6e42347f4b6d9bb3a9ecbd98a1087f41e10d (4718592 bytes)
+[write-readback]   readback sha256:  69071ca569963a4b6cd80a648bab6e42347f4b6d9bb3a9ecbd98a1087f41e10d
+[write-readback]   sub-test 2 PASS
+[write-readback] sub-test 3: truncate-extend (setattr) then write and read
+[write-readback]   reference sha256: da74d94c0f1d66ac6f5d605255d4cff821ee812869588e72553d40dc2edbaa07 (2098176 bytes)
+[write-readback]   readback sha256:  da74d94c0f1d66ac6f5d605255d4cff821ee812869588e72553d40dc2edbaa07
+[write-readback]   sub-test 3 PASS
+[write-readback] sub-test 4: flush → drop_caches → re-read (bitmap-empty path)
+[write-readback]   reference sha256: 30514acb4fb0bcc47e2ab877f44e84e442884672ca96e7c15988a47f46991276
+[write-readback]   flush confirmed in MinIO (content matches)
+[write-readback]   re-read sha256:   30514acb4fb0bcc47e2ab877f44e84e442884672ca96e7c15988a47f46991276
+[write-readback]   sub-test 4 PASS
+[write-readback] sub-test 5: write → close → drop_caches before PUT → S3 + re-read
+[write-readback]   reference sha256: be612500ce30dcb9f6b39f64e08caddb44e75fecc61c6f749b08f7386b2eca6f
+[write-readback]   re-read sha256:   be612500ce30dcb9f6b39f64e08caddb44e75fecc61c6f749b08f7386b2eca6f
+[write-readback]   sub-test 5 PASS
+
+==============================================================
+test-write-readback  2026-11-03
+==============================================================
+sub-test 1 (echo/cat new file)             : PASS
+sub-test 2 (cross-chunk write/read)        : PASS
+sub-test 3 (truncate-extend + write)       : PASS
+sub-test 4 (flush+drop_caches re-read)     : PASS
+sub-test 5 (drop_caches before flush PUT)   : PASS
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-write-readback status=PASS
+DETAIL fd_buf_audit status=OK gauge=4194304 walk=4194304 pcache=0 nonpcache=4194304 drift=0
+==> test-large-file-read (T2/AC-23)
+[large-file-read] generating 314572800B (300 MiB) test file
+[large-file-read] original sha256: ca862ed62bcf46a4bf924a5aade434c088db567ce0b3a1980fa5bbee7dab9e1d
+[large-file-read] seeding large-file-read-test.bin into MinIO (300 MiB)
+[large-file-read] seed done
+[large-file-read] mounting s3fs-ebpf in pcache mode (--arena-metadata-only)
+[large-file-read] daemon started, settling 10s
+[large-file-read] cold read pass 1 (populates all 75 chunks)
+[large-file-read] cold read done
+[large-file-read] reading back file for sha256 comparison
+[large-file-read] readback sha256: ca862ed62bcf46a4bf924a5aade434c088db567ce0b3a1980fa5bbee7dab9e1d
+
+==============================================================
+test-large-file-read  2026-11-03
+==============================================================
+file size : 300 MiB (314572800 bytes)
+chunks    : 75  (last chunk index 74, well above 64-chunk limit)
+sha256    : PASS (ca862ed62bcf46a4bf924a5aade434c088db567ce0b3a1980fa5bbee7dab9e1d)
+file size : PASS (314572800 bytes)
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-large-file-read status=PASS file_size_mib=300
+DETAIL fd_buf_audit status=OK gauge=314572800 walk=314572800 pcache=314572800 nonpcache=0 drift=0
+==> test-evict-readback (Q1/S8/AC-24)
+[evict-readback] generating 9437184B test file
+[evict-readback] original sha256: c2290d979c49094cb1ba87868055e6e2b3d420e20dda9f8eccbb0b64b0807a4e
+[evict-readback] seeding evict-readback-test.bin into MinIO
+[evict-readback] seed done
+[evict-readback] mounting s3fs-ebpf in pcache mode (capacity_bytes=4194304, forces eviction)
+[evict-readback] daemon started, settling 10s
+[evict-readback] step 1: cold read to populate all 3 chunks
+[evict-readback] initial read done
+[evict-readback] stat size before eviction: 9437184 (expected 9437184)
+[evict-readback] evictions before: 0
+[evict-readback] step 3: forcing eviction via POST /policy/eval
+[evict-readback] evictions after: 2 (delta=2)
+[evict-readback] step 4: stat after eviction (Q1: i_size must survive eviction)
+[evict-readback] stat size after eviction: 9437184 (expected 9437184)
+[evict-readback]   Q1 PASS: i_size=9437184 preserved
+[evict-readback] step 5: re-reading full file after eviction (S8: partial re-populate must not shrink size)
+[evict-readback] re-read sha256: c2290d979c49094cb1ba87868055e6e2b3d420e20dda9f8eccbb0b64b0807a4e
+[evict-readback] stat size after re-read: 9437184 (expected 9437184)
+
+==============================================================
+test-evict-readback  2026-11-03
+==============================================================
+file size      : 9 MiB
+evictions      : before=0 after=2 delta=2
+
+Q1 (i_size survives eviction)            : PASS  (before=9437184 after=9437184)
+sha256 (content correct after re-read)   : PASS
+S8 (i_size not shrunk by partial repop.) : PASS  (final=9437184)
+evictions occurred                       : PASS  (delta=2)
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-evict-readback status=PASS q1=PASS sha256=PASS s8=PASS evict_delta=2
+DETAIL fd_buf_audit status=OK gauge=1048576 walk=1048576 pcache=1048576 nonpcache=0 drift=0
+==> test-populate-boundary (P2/Q3/AC-25)
+[populate-boundary] seeding populate-boundary-seed.bin into MinIO (before daemon start)
+[populate-boundary] seed done (hash: 5e72b82a6cb406fd321a6023aa1b34967da4248c32aa1d7ca907ff78fab14498)
+[populate-boundary] mounting s3fs-ebpf
+[populate-boundary] daemon started, settling 8s
+[populate-boundary] running ioctl boundary checks (populate-boundary-ioctl.py)
+  ioctl-boundary size=0: PASS  (errno=22, want 22)
+  ioctl-boundary overflow: PASS  (errno=22, want 22)
+  ioctl-boundary size>64MiB: PASS  (errno=22, want 22)
+  ioctl-boundary 5GiB+4MiB: PASS  (errno=2, must not be EINVAL=22)
+[populate-boundary]   ioctl boundary: PASS
+[populate-boundary] functional: reading populate-boundary-seed.bin (seeded before daemon start)
+[populate-boundary]   normal 1 MiB read: PASS (sha256 match)
+[populate-boundary] final checks
+[populate-boundary]   dmesg scan: no kernel WARN/BUG — PASS
+[populate-boundary]   daemon still running — PASS
+
+==============================================================
+test-populate-boundary  2026-11-03
+==============================================================
+ioctl boundary (4 cases)            : PASS
+functional (1 MiB normal read)      : PASS
+dmesg (no WARN/BUG)                 : PASS
+daemon alive                        : PASS
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-populate-boundary status=PASS ioctl=PASS func=PASS dmesg=PASS daemon=PASS
+DETAIL fd_buf_audit status=OK gauge=1048576 walk=1048576 pcache=1048576 nonpcache=0 drift=0
+==> test-pcache-multiread (AC-01)
+[pcache-split] generating 8388609B test file
+[pcache-split] original sha256: 0a798dcf7fb222c7173996bb453129cafdafa6a0bb91f50d6670536ff59e2671
+[pcache-split] seeding pcache-split-test.bin into MinIO
+[pcache-split] seed done
+[pcache-split] mounting s3fs-ebpf in pcache mode (--arena-metadata-only)
+[pcache-split] daemon started, settling 8s
+[pcache-split] first read (cold, triggers ≥2 POPULATE_PAGES chunks)
+[pcache-split] reading back file for sha256 comparison
+[pcache-split] read sha256:     0a798dcf7fb222c7173996bb453129cafdafa6a0bb91f50d6670536ff59e2671
+[pcache-split] PASS — sha256 matches (split-chunk pcache read correct)
+RESULT name=test-pcache-multiread status=PASS sha256=ok
+DETAIL fd_buf_audit status=OK gauge=8388609 walk=8388609 pcache=8388609 nonpcache=0 drift=0
+==> test-pcache-evict-race (R1/S1/T3, short, DURATION=30)
+[evict-race] seeding 4 files (9437184B each) into MinIO
+[evict-race]   seeded evict-race-test-1.bin (sha256=a1b6bf2e21de745ecd9eb6c795275bd3751c186795460c1935b42c142e062ce0)
+[evict-race]   seeded evict-race-test-2.bin (sha256=48ea4e043a05bad3ad206e622490bd3238c6c2cc5e41b0751be62ff5fa3fec36)
+[evict-race]   seeded evict-race-test-3.bin (sha256=c61034e304ee8e1a846d36c1bc514e4a23f386882ec6cdf914fea43d3b1b8f10)
+[evict-race]   seeded evict-race-test-4.bin (sha256=ca4132c748f866e3227366af2cd492d8ea4c081e6a231bb485203da94bd5a41d)
+[evict-race] seed done
+[evict-race] mounting s3fs-ebpf in pcache mode (capacity_bytes=4194304)
+[evict-race] daemon started, settling 8s
+[evict-race] evictions before stress: 0
+[evict-race] retry_exhausted before stress: 0
+[evict-race] upcall_timeout before stress: 0
+[evict-race] INFO: /proc/lockdep_stats absent (CONFIG_PROVE_LOCKING disabled) — lockdep check will be SKIP
+[evict-race] policy/eval hammer started (pid=396663)
+[evict-race] 32 reader processes started (8 per file × 4 files)
+[evict-race] stress running for 30s …
+[evict-race] evictions after stress: 6252 (delta=6252)
+[evict-race] retry_exhausted after stress: 0 (delta=0)
+[evict-race] upcall_timeout after stress: 0 (delta=0)
+[evict-race] gen0_fail_buf_null after stress: 0 (delta=0)
+[evict-race] gen0_fail_bitmap after stress: 0 (delta=0)
+[evict-race] gen0_fail_other after stress: 0 (delta=0)
+
+==============================================================
+test-pcache-evict-race  2026-11-03
+==============================================================
+files      : 4 × 9 MiB
+readers    : 8 per file (32 total)
+capacity   : 4 MiB  (forces eviction after each chunk)
+duration   : 30s
+evictions  : before=0 after=6252 delta=6252
+retry_exh  : before=0 after=0 delta=0  (T4: capacity-pressure -EIO)
+upcall_tmo : before=0 after=0 delta=0  (U11: goroutine-pool timeout retries)
+gen0_fail  : buf_null=0 bitmap=0 other=0  (D-diag: gen=0 fallback breakdown)
+fd_buf     : peak=25 MiB settled=1 MiB  capacity=4 MiB  reset_skipped=1452  (M1)
+
+sha256     : PASS (all reads matched originals)
+read_err   : PASS (no -EIO observed)
+evictions  : PASS
+fd_buf     : PASS  (settled 1048576 B <= capacity 4194304 B after readers stop)
+lockdep    : SKIP
+  (rerun with CONFIG_PROVE_LOCKING=y for full lockdep coverage)
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-pcache-evict-race-short status=PASS sha256_fail=0 read_err=0 evict_delta=6252 retry_exh_delta=0 timeout_delta=0 fd_buf_peak=26214400 fd_buf_settled=1048576 reset_skipped=1452 lockdep=SKIP
+DETAIL fd_buf_audit status=OK gauge=1048576 walk=1048576 pcache=1048576 nonpcache=0 drift=0
+==> test-pcache-capacity-tail (AC-41)
+[capacity-tail] seeding 4 files (9 MiB each) into MinIO
+[capacity-tail] seed done
+[capacity-tail] mounting s3fs-ebpf in pcache mode (capacity_bytes=12582912)
+[capacity-tail] daemon started, settling 8s
+[capacity-tail]   read tail of capacity-tail-1.bin: fd_buf=1048576 B
+[capacity-tail]   read tail of capacity-tail-2.bin: fd_buf=2097152 B
+[capacity-tail]   read tail of capacity-tail-3.bin: fd_buf=3145728 B
+[capacity-tail]   read tail of capacity-tail-4.bin: fd_buf=4194304 B
+
+==============================================================
+test-pcache-capacity-tail  2026-11-03
+==============================================================
+files      : 4 × 9 MiB, tail read [8 MiB, 9 MiB) only
+capacity   : 12 MiB
+fd_buf     : peak=4194304 B settled=4194304 B  evictions=0
+
+tail sha256: PASS
+fd_buf     : PASS  (settled <= capacity)
+prewarm    : PASS  (0 arena admits, want 0)
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-pcache-capacity-tail status=PASS tail_fail=0 fd_buf_peak=4194304 fd_buf_settled=4194304 capacity=12582912 prewarm_admits=0
+DETAIL fd_buf_audit status=OK gauge=4194304 walk=4194304 pcache=4194304 nonpcache=0 drift=0
+==> test-pcache-prewarm-none (AC-43)
+[prewarm-none] seeding objects into MinIO (bucket=s3fs-prewarm-none)
+[prewarm-none] seed done
+[prewarm-none] mounting s3fs-ebpf in pcache mode with an empty prewarm
+[prewarm-none] daemon started, settling 8s
+[prewarm-none]   small.txt: sha256 OK
+[prewarm-none]   large.bin: sha256 OK
+
+==============================================================
+test-pcache-prewarm-none  2026-11-03
+==============================================================
+objects    : small.txt, large.bin (9 MiB)
+prewarm    : [admit] 0 entries
+read fail  : 0
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-pcache-prewarm-none status=PASS read_fail=0
+==> test-pcache-prewarm (AC-67)
+[pcache-prewarm] seeding objects into MinIO (bucket=s3fs-pcache-prewarm)
+[pcache-prewarm] seed done
+[pcache-prewarm] mounting s3fs-ebpf in pcache mode with --pcache-prewarm
+[pcache-prewarm] prewarm: [pcache-prewarm] 2 files, 9437222 bytes in 10ms
+[pcache-prewarm]   warm-small.txt: sha256 OK
+[pcache-prewarm]   warm-large.bin: sha256 OK
+[pcache-prewarm]   cold.bin: sha256 OK
+
+==============================================================
+test-pcache-prewarm  2026-11-03
+==============================================================
+objects    : warm-small.txt, warm-large.bin (9 MiB), cold.bin
+prewarm    : [pcache-prewarm] 2 files, 9437222 bytes in 10ms
+failures   : 0
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-pcache-prewarm status=PASS failures=0
+==> test-prefetch-next (AC-68)
+[prefetch-next] seeding objects into MinIO (bucket=s3fs-prefetch-next)
+[prefetch-next] seed done
+[prefetch-next] mounting s3fs-ebpf in pcache mode with prefetch_next
+[prefetch-next] daemon started, settling 8s
+[prefetch-next]   shard-0001: sha256 OK
+[prefetch-next] prefetch: [pcache-prewarm] 2 files, 2097152 bytes in 4ms
+[prefetch-next]   shard-0002: sha256 OK
+[prefetch-next]   shard-0003: sha256 OK
+[prefetch-next]   shard-0005: sha256 OK
+
+==============================================================
+test-prefetch-next  2026-11-03
+==============================================================
+objects    : train/shard-0001 .. shard-0005 (1 MiB each)
+prefetch   : [pcache-prewarm] 2 files, 2097152 bytes in 4ms
+failures   : 0
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-prefetch-next status=PASS failures=0
+==> test-arena-partial-readback (AC-48)
+[arena-partial] seeding partial.bin (10 MiB random) into s3fs-arena-partial
+[arena-partial] random-first: 4 KiB in chunk 1, 4 KiB in chunk 0, then full read
+[arena-partial]   probes=4096/4096 read=10485760 stat=10485760 sha=ok → PASS
+[arena-partial] parallel: 4 concurrent full reads
+[arena-partial]   mismatched readers=0/4 → PASS
+
+==============================================================
+test-arena-partial-readback  2026-11-03
+==============================================================
+object     : partial.bin (10 MiB random), arena mode, chunk admits only
+random     : PASS  (probes 4096/4096 B, read 10485760 B, stat 10485760 B, upcalls 3)
+fetches    : PASS  (3 upcalls for 3 chunks, want <= 3)
+parallel   : PASS  (0/4 readers mismatched)
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-arena-partial-readback status=PASS random=PASS read_size=10485760 stat_size=10485760 par_bad=0 upcalls=3 chunks=3
+==> test-pcache-capacity-noeval (AC-45)
+[capacity-noeval] seeding 4 files (9 MiB each) into s3fs-capacity-noeval
+[capacity-noeval] seed done
+[capacity-noeval] mounting s3fs-ebpf in pcache mode (capacity_bytes=12582912, no eval)
+[capacity-noeval] daemon started, settling 8s
+[capacity-noeval]   read capacity-noeval-1.bin: fd_buf=9437184 B
+[capacity-noeval]   read capacity-noeval-2.bin: fd_buf=9437184 B
+[capacity-noeval]   read capacity-noeval-3.bin: fd_buf=9437184 B
+[capacity-noeval]   read capacity-noeval-4.bin: fd_buf=9437184 B
+
+==============================================================
+test-pcache-capacity-noeval  2026-11-03
+==============================================================
+files      : 4 x 9 MiB, full read each, no /policy/eval
+capacity   : 12 MiB
+fd_buf     : peak=9437184 B settled=9437184 B  evictions=3
+
+sha256     : PASS
+fd_buf     : PASS  (settled <= capacity)
+evictions  : PASS  (> 0)
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-pcache-capacity-noeval status=PASS read_fail=0 fd_buf_peak=9437184 fd_buf_settled=9437184 capacity=12582912 evictions=3
+DETAIL fd_buf_audit status=OK gauge=9437184 walk=9437184 pcache=9437184 nonpcache=0 drift=0
+==> test-pcache-capacity-seq (AC-45)
+[capacity-seq] seeding capacity-seq.bin (40 MiB random) into s3fs-capacity-seq
+[capacity-seq] phase chunk: daemon flags: --pattern-aware-admit=false
+[capacity-seq]   phase chunk: peak=12582912 B sha=PASS
+[capacity-seq] phase auto: daemon flags: 
+[capacity-seq]   phase auto: peak=12582912 B sha=PASS
+
+==============================================================
+test-pcache-capacity-seq  2026-11-03
+==============================================================
+file       : 40 MiB, read in 1 MiB steps, no /policy/eval
+capacity   : 12 MiB, limit for the peak: 20 MiB
+chunk      : peak=12582912 B  peak=PASS  sha256=PASS
+auto       : peak=12582912 B  peak=PASS  sha256=PASS
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-pcache-capacity-seq status=PASS peak_chunk=12582912 peak_auto=12582912 limit=20971520 sha_chunk=PASS sha_auto=PASS
+==> test-write-existing (AC-50)
+[write-existing] [pcache] seeding 7 x 6 MiB random objects into s3fs-write-existing
+[write-existing] [pcache] mounting s3fs-ebpf
+[write-existing]   [pcache] overwrite: S3 object PASS, re-read PASS
+[write-existing]   [pcache] shrink: S3 object PASS, re-read PASS
+[write-existing]   [pcache] extend: S3 object PASS, re-read PASS
+[write-existing]   [pcache] append: S3 object PASS, re-read PASS
+[write-existing]   [pcache] empty: S3 object PASS, re-read PASS
+[write-existing]   [pcache] otrunc: S3 object PASS, re-read PASS
+[write-existing]   [pcache] append2: S3 object PASS, re-read PASS
+[write-existing] [arena] seeding 7 x 6 MiB random objects into s3fs-write-existing
+[write-existing] [arena] mounting s3fs-ebpf
+[write-existing]   [arena] overwrite: S3 object PASS, re-read PASS
+[write-existing]   [arena] shrink: S3 object PASS, re-read PASS
+[write-existing]   [arena] extend: S3 object PASS, re-read PASS
+[write-existing]   [arena] append: S3 object PASS, re-read PASS
+[write-existing]   [arena] empty: S3 object PASS, re-read PASS
+[write-existing]   [arena] otrunc: S3 object PASS, re-read PASS
+[write-existing]   [arena] append2: S3 object PASS, re-read PASS
+
+==============================================================
+test-write-existing  2026-11-03
+==============================================================
+mode     scenario   S3-object  re-read   
+pcache   overwrite  PASS       PASS      
+pcache   shrink     PASS       PASS      
+pcache   extend     PASS       PASS      
+pcache   append     PASS       PASS      
+pcache   empty      PASS       PASS      
+pcache   otrunc     PASS       PASS      
+pcache   append2    PASS       PASS      
+arena    overwrite  PASS       PASS      
+arena    shrink     PASS       PASS      
+arena    extend     PASS       PASS      
+arena    append     PASS       PASS      
+arena    empty      PASS       PASS      
+arena    otrunc     PASS       PASS      
+arena    append2    PASS       PASS      
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-write-existing status=PASS failed= none
+==> test-write-existing-nopm (AC-50, --partial-modify=false)
+[write-existing] [pcache] seeding 7 x 6 MiB random objects into s3fs-write-existing
+[write-existing] [pcache] mounting s3fs-ebpf
+[write-existing]   [pcache] overwrite: S3 object PASS, re-read PASS
+[write-existing]   [pcache] shrink: S3 object PASS, re-read PASS
+[write-existing]   [pcache] extend: S3 object PASS, re-read PASS
+[write-existing]   [pcache] append: S3 object PASS, re-read PASS
+[write-existing]   [pcache] empty: S3 object PASS, re-read PASS
+[write-existing]   [pcache] otrunc: S3 object PASS, re-read PASS
+[write-existing]   [pcache] append2: S3 object PASS, re-read PASS
+[write-existing] [arena] seeding 7 x 6 MiB random objects into s3fs-write-existing
+[write-existing] [arena] mounting s3fs-ebpf
+[write-existing]   [arena] overwrite: S3 object PASS, re-read PASS
+[write-existing]   [arena] shrink: S3 object PASS, re-read PASS
+[write-existing]   [arena] extend: S3 object PASS, re-read PASS
+[write-existing]   [arena] append: S3 object PASS, re-read PASS
+[write-existing]   [arena] empty: S3 object PASS, re-read PASS
+[write-existing]   [arena] otrunc: S3 object PASS, re-read PASS
+[write-existing]   [arena] append2: S3 object PASS, re-read PASS
+
+==============================================================
+test-write-existing  2026-11-03
+==============================================================
+mode     scenario   S3-object  re-read   
+pcache   overwrite  PASS       PASS      
+pcache   shrink     PASS       PASS      
+pcache   extend     PASS       PASS      
+pcache   append     PASS       PASS      
+pcache   empty      PASS       PASS      
+pcache   otrunc     PASS       PASS      
+pcache   append2    PASS       PASS      
+arena    overwrite  PASS       PASS      
+arena    shrink     PASS       PASS      
+arena    extend     PASS       PASS      
+arena    append     PASS       PASS      
+arena    empty      PASS       PASS      
+arena    otrunc     PASS       PASS      
+arena    append2    PASS       PASS      
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-write-existing-nopm status=PASS failed= none
+==> test-write-existing-capacity (AC-50)
+[write-capacity] round 1: seeding
+[write-capacity]   r1 conc2: S3 PASS, re-read PASS
+[write-capacity]   r1 conc3: S3 PASS, re-read PASS
+[write-capacity]   r1 conc1: S3 PASS, re-read PASS
+[write-capacity]   r1 conc4: S3 PASS, re-read PASS
+[write-capacity]   r1 shrink2: S3 PASS, re-read PASS
+[write-capacity]   r1 shrink3: S3 PASS, re-read PASS
+[write-capacity]   r1 shrink1: S3 PASS, re-read PASS
+[write-capacity]   r1 shrink4: S3 PASS, re-read PASS
+[write-capacity]   r1 patch3: S3 PASS, re-read PASS
+[write-capacity]   r1 patch2: S3 PASS, re-read PASS
+[write-capacity]   r1 patch1: S3 PASS, re-read PASS
+[write-capacity]   r1 patch4: S3 PASS, re-read PASS
+[write-capacity] round 2: seeding
+[write-capacity]   r2 conc2: S3 PASS, re-read PASS
+[write-capacity]   r2 conc3: S3 PASS, re-read PASS
+[write-capacity]   r2 conc1: S3 PASS, re-read PASS
+[write-capacity]   r2 conc4: S3 PASS, re-read PASS
+[write-capacity]   r2 shrink2: S3 PASS, re-read PASS
+[write-capacity]   r2 shrink3: S3 PASS, re-read PASS
+[write-capacity]   r2 shrink1: S3 PASS, re-read PASS
+[write-capacity]   r2 shrink4: S3 PASS, re-read PASS
+[write-capacity]   r2 patch3: S3 PASS, re-read PASS
+[write-capacity]   r2 patch2: S3 PASS, re-read PASS
+[write-capacity]   r2 patch1: S3 PASS, re-read PASS
+[write-capacity]   r2 patch4: S3 PASS, re-read PASS
+[write-capacity] round 3: seeding
+[write-capacity]   r3 conc2: S3 PASS, re-read PASS
+[write-capacity]   r3 conc3: S3 PASS, re-read PASS
+[write-capacity]   r3 conc1: S3 PASS, re-read PASS
+[write-capacity]   r3 conc4: S3 PASS, re-read PASS
+[write-capacity]   r3 shrink2: S3 PASS, re-read PASS
+[write-capacity]   r3 shrink3: S3 PASS, re-read PASS
+[write-capacity]   r3 shrink1: S3 PASS, re-read PASS
+[write-capacity]   r3 shrink4: S3 PASS, re-read PASS
+[write-capacity]   r3 patch3: S3 PASS, re-read PASS
+[write-capacity]   r3 patch2: S3 PASS, re-read PASS
+[write-capacity]   r3 patch1: S3 PASS, re-read PASS
+[write-capacity]   r3 patch4: S3 PASS, re-read PASS
+OVERALL: PASS
+RESULT name=test-write-existing-capacity status=PASS failed= none
+==> test-write-partial (AC-51)
+PASS mid write
+PASS start / end / boundary writes
+PASS shrink / extend / append
+PASS chunk-aligned write
+PASS external overwrite after a load (412 fallback)
+PASS external overwrite before an aligned flush
+PASS half-filled remote chunk (partial flush path)
+RESULT PASS
+[write-partial] flushes that copied server-side: 7
+OVERALL: PASS
+RESULT name=test-write-partial status=PASS
+==> test-fsync-new-file
+fs-a.bin PASS
+fs-b.bin PASS
+fs-c.bin PASS
+RESULT name=test-fsync-new-file status=PASS
+==> test-fsync-large-new-file
+files=12 fsync_returned_early=0 wrong_content=0
+RESULT name=test-fsync-large-new-file status=PASS files=12 early=0 wrong=0
+==> test-pattern-aware-admit (AC-47)
+[pattern-aware] seeding pattern.bin (10 MiB random) into s3fs-pattern-aware
+[pattern-aware]   seq: upcalls=1 promotes=1 sha=OK
+[pattern-aware]   random: upcalls=3 promotes=1 sha=OK
+[pattern-aware]   par: upcalls=1 promotes=1 sha=OK
+[pattern-aware]   off: upcalls=3 promotes=0 sha=OK
+[pattern-aware]   ok   : seq promoted with a single upcall
+[pattern-aware]   ok   : two scattered 4 KiB reads were not promoted
+[pattern-aware]   ok   : 4 concurrent readers still promoted
+[pattern-aware]   ok   : no promotion with --pattern-aware-admit=false
+[pattern-aware]   ok   : seq: bytes match
+[pattern-aware]   ok   : random: bytes match
+[pattern-aware]   ok   : par: bytes match
+[pattern-aware]   ok   : off: bytes match
+
+==============================================================
+test-pattern-aware-admit  2026-11-03
+==============================================================
+seq     upcalls=1 promotes=1 sha=OK
+random  upcalls=3 promotes=1 sha=OK
+par     upcalls=1 promotes=1 sha=OK
+off     upcalls=3 promotes=0 sha=OK
+random: promotions before the full read = 0
+
+OVERALL: PASS
+==============================================================
+RESULT name=test-pattern-aware-admit status=PASS seq_promotes=1 par_promotes=1 random_early=0 off_promotes=0
+==> test-pick-victim-stale (AC-64)
+[pick-stale] policy list after prewarm: 112 111
+[pick-stale] deleting stale_007.txt (ino 112)
+[pick-stale] deleting stale_006.txt (ino 111)
+[pick-stale] policy list after the round: 106 107
+OVERALL: PASS
+RESULT name=test-pick-victim-stale status=PASS
+==> test-sync-keeps-cache
+[sync-keeps-cache] upcalls 1 -> 1 across 4 sync rounds
+RESULT name=test-sync-keeps-cache status=PASS sync_rounds=4 upcalls_before=1 upcalls_after=1
+==> test-splice-hits
+[splice-hits] replayed 0 -> 7 (+7) for 6 sendfile opens
+RESULT name=test-splice-hits status=PASS sendfile_opens=6 replayed_delta=7
+==> test-pcache-drop
+pcache_drop: folio_hits +6144 upcalls +0 over 8 opens
+RESULT name=test-pcache-drop status=PASS
+make[1]: '/home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/bpf/vmlinux.h' is up to date.
+make -C /home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/bpf CLANG=clang-20 BPFTOOL=/usr/lib/linux-tools/6.8.0-147-generic/bpftool
+make[1]: Entering directory '/home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/bpf'
+make[1]: Leaving directory '/home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8W3sTT32vkQG3vVMCh/bpf'
+==> test-policy-reload
+reloads=41 reads=578 bad_reads=0
+dmesg: hot_swap=41 registered/superseded=0
+RESULT name=test-policy-reload status=PASS reloads=41 reads=578 bad_reads=0
+==> test-policy-conformance (policies: lru_pick_ops sieve_pick_ops s3fifo_pick_ops wtinylfu_pick_ops, HIT_ACCUM=1, up to 3 attempts)
+  lru_pick_ops (attempt 1): ok live_hits=775 sim_hits=784 gap_pt=0.5 differ=35 (1.8%)
+  sieve_pick_ops (attempt 1): ok live_hits=876 sim_hits=876 gap_pt=0.0 differ=0 (0.0%)
+  s3fifo_pick_ops (attempt 1): ok live_hits=981 sim_hits=936 gap_pt=2.2 differ=177 (8.8%)
+  wtinylfu_pick_ops (attempt 1): FAIL live_hits=1064 sim_hits=969 gap_pt=4.8 differ=243 (12.2%)
+  wtinylfu_pick_ops (attempt 2): ok live_hits=967 sim_hits=969 gap_pt=0.1 differ=126 (6.3%)
+RESULT name=test-policy-conformance status=PASS lru_pick_ops=ok sieve_pick_ops=ok s3fifo_pick_ops=ok wtinylfu_pick_ops=ok
+exit=0

@@ -16,6 +16,8 @@ type coalescer = coalesce.Coalescer
 func newCoalescer(devFd int, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, window time.Duration) *coalescer {
 	return coalesce.New(window, func(ctx context.Context, ev *flushEvent) {
-		handleFlush(ctx, devFd, devPath, progs, s3c, ev)
+		flushOrd.runParked(ev.Ino, func() {
+			handleFlush(ctx, devFd, devPath, progs, s3c, ev)
+		})
 	})
 }

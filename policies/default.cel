@@ -40,5 +40,5 @@ prewarm: metric("last_entry_size", entry.size) && entry.size <= 33554432 && !ent
 #   builtin:policy_lru_ops       coarse-grained LRU by admit-epoch
 #   builtin:policy_s3fifo_ops    3-tier S3-FIFO (Yang et al 2023)
 #   builtin:policy_freq2bit_ops  single-tier 2-bit reference counter
-#   builtin:policy_observe       no eviction, baseline for measurement
+#   builtin:policy_observe_ops   no eviction, baseline for measurement
 policy: "builtin:policy_sieve_ops"

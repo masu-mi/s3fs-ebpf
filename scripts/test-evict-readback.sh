@@ -77,7 +77,7 @@ log "mounting s3fs-ebpf in pcache mode (capacity_bytes=${CHUNK_BYTES}, forces ev
 ebpf_mount "$MOUNT"
 ebpf_start_daemon "$OUT/daemon.log" \
     --arena-metadata-only \
-    --policy-bpf="builtin:policy_observe" \
+    --policy-bpf="builtin:policy_observe_ops" \
     --softcap=2 \
     --cache-capacity="${CHUNK_BYTES}" \
     --metrics-addr=:9600 \

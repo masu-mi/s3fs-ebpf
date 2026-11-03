@@ -40,9 +40,18 @@
   - 「FUSE は large folio を使うので速い」という仮説は、計測カーネル 6.12 で両方とも order 0 だったので外れた。
 - **100 MiB の warm read は fuse-cache より速い** (9.5 ms / 10.5 ms、§18.16 T6)。§18.2 の 1.20 倍は再現しない。
 - **kmod が kern_vm を使えない理由** (v6.12 `kernel/bpf/arena.c`): `bpf_arena_get_kern_vm_start` は未 export。この PoC は `struct bpf_arena` のレイアウトを BTF から複製して番地を取っている (`kmod/s3fs_ebpf_dev.c`) が、普通のカーネル C には BPF のような例外テーブルがないので、未割り当てのページや `bpf_arena_free_pages` と競合したときに oops になる。read 経路が GUP を使う決め手はこちら。
-- **勝てる・負けるところの数字** (§18.27〜18.41、2026-10-17、ローカル MinIO)
+- **2026-11-03 の測り直し (§18.48、6 構成 × A〜G と 2 構成 × H、issue #35)**。性能の表はこの値で書く。ここまでの値 (下の §18.27〜18.41、§18.47) は出典を分けて残す。
+  - 構成: fuse-raw / fuse-diskcache (`use_cache`、`kernel_cache` なし) / fuse-cache、ebpf-nocache / ebpf-pcachedrop (open のたびに page cache だけ捨てる。chunk 表と policy は残す) / ebpf-pcache。比は「s3fs-fuse の時間 ÷ s3fs-ebpf の時間」。
+  - 独自キャッシュの効果 (fuse-diskcache 対 ebpf-pcachedrop): open+read+close p50 140×、小さいファイル 10,000 個の cat (warm) 33.9×、`ls -l` 46〜47×、cold read の 300 MiB 1.44×。warm の OLTP は 2.4〜2.5×、ベクトルは同等。64 jobs の 18 B read は 0.96×。
+  - 全体 (fuse-cache 対 ebpf-pcache): open+read+close 180×、cat (warm) 39×。OLTP とベクトルの warm は ±3% で差がつかない (page cache のヒットで終わる)。
+  - **policy の差は FS 全体の hit rate に出る (page cache の有無によらない)**: ebpf-pcachedrop は observe 27.8% に対して LRU 39.2%、SIEVE 47.5%、S3-FIFO 49.0%、W-TinyLFU 50.9% (5 seed で順位が同じ、最良と +23.1 pp)。ebpf-pcache も順位は同じで W-TinyLFU が 57.1% (observe 38.6% より +18.5 pp、ただし LRU は +0.6 pp で差なし。page cache のヒットも数えるので絶対値は比べられない)。
+  - 負けるところ: 既存 10 MiB の途中への 4 KiB write は 0.66〜0.68× (`partial_modify_min` の 16 MiB 未満は全体を読み書きする)。100 MiB は `--partial-modify` が既定で有効になり、fuse-raw とほぼ同じ (170.5 対 171.0 ms。以前の 0.53×)。cold read は 300 MiB が 0.74× (ebpf-nocache)、100 MiB が 0.78×。
+  - **新規 100 MiB の durable write の「1.37× 速い」は取り下げ**。fsync が PUT の完了前に返る不具合 (遅れた 0 byte の PUT でオブジェクトが空になることもあった) を計測中の verify で見つけて直した (回帰テスト `make test-fsync-large-new-file`)。修正後は 0.97〜1.20× (差は揺れの範囲に近い)。1 / 10 MiB は 1.3〜1.5×。
+  - **最初の run は無効だった**: MinIO に `mc admin trace` が残り、S3 を伴う項目が 25〜30% 遅く、`test-policy-conformance` も落ちた。測り直した値がこの節の値。測定前の環境確認は skill (`perf-bench-verify`) に書いた。
+  - **折り返す層ごとのレイテンシ (§18.49、18 B の open+read+close p50)**: page cache 2.8 µs → kmod の chunk 表 3.8 µs → daemon の disk cache 62.4 µs (upcall の固定費 約 59 µs) → S3 (ローカル MinIO) 543 µs。s3fs-fuse は S3 を叩かない構成でも 528〜541 µs (open の FUSE 往復だけで upcall 付きの約 8.5 倍)、毎回 S3 は 1.69 ms。chunk 表は page cache より 2.8〜3.4 倍遅い。**daemon の disk cache は 4 MiB を超える object には効かない** (range GET の経路は disk cache を使わない。64 MiB は disk cache 付きでも毎回 S3 で、s3fs-fuse の disk cache の 0.58×、backlog AC-75)。Grafana ダッシュボード `S3FS-eBPF Layer latency` に図がある (`scripts/grafana-layer-latency.sh`)。
+- **勝てる・負けるところの数字** (§18.27〜18.41、2026-10-17、ローカル MinIO。上の §18.48 で置き換わる項目がある)
   - open+read+close と durable write は pcache モードで測り直した (§18.27 / 18.28)。arena モードと同じ水準。
-  - 既存の大きいオブジェクトの途中の書き換えは、AC-50 の読み込みで一度 2.46× 遅くなった (§18.29)。AC-51 (`--partial-modify`、既定では無効) で、触れる chunk だけを読み、残りを `UploadPartCopy` で運ぶようにして、100 MiB で fuse-raw と互角 (§18.36)。16 MiB 未満は全体を読み書きするので、10 MiB はまだ 0.61×。
+  - 既存の大きいオブジェクトの途中の書き換えは、AC-50 の読み込みで一度 2.46× 遅くなった (§18.29)。AC-51 (`--partial-modify`、現在は既定で有効。この値の計測時は無効が既定だった) で、触れる chunk だけを読み、残りを `UploadPartCopy` で運ぶようにして、100 MiB で fuse-raw と互角 (§18.36)。16 MiB 未満は全体を読み書きするので、10 MiB はまだ 0.61×。
   - cold read は AC-52 (ディスクキャッシュを非同期に、4 並列の range GET と chunk ごとの populate) で直した (§18.34〜18.37)。bench で続けて読むと遅いのはホストのメモリ回収待ちで (§18.39)、毎回 `drop_caches` すると 300 MiB で fuse-raw の 1.26×。pcache の容量の既定値が無制限でホストのメモリを見ないのは設計の課題 (§18.39.1)。
   - AC-51 のレビュー指摘 (remote の区間が短いと flush が永久に失敗する、古い ETag pin、`partial_modify` が 0 に戻らない ほか) は AC-59〜65 で修正済み。
   - 実際の S3 での計測はまだ。
@@ -214,7 +223,7 @@ syscall.Syscall(SYS_BPF, BPF_LINK_UPDATE, uintptr(unsafe.Pointer(&attr)), ...)
 ```
 
 - kmod 側: `rcu_dereference(policy_ops)` → vtable 呼び出し → 1 syscall でポインタがアトミックにスワップ
-- **fmod_ret との違い**: tracing link は `BPF_LINK_UPDATE` 非対応 → 「新 N 本 attach → 旧 N 本 close」でその間は新旧が同時に走る。`struct_ops` は 1 syscall でアトミック
+- **差し替えは `BPF_LINK_UPDATE` の 1 経路だけ** (issue #35 で fmod_ret の policy と「新を attach → 旧を close」の fallback を実装から外した)。fmod_ret は hook ごとの link で、差し替えの間は新旧が同時に走り、一式を不可分に替えられない。link が 2 本あると、link の fd を閉じたときの `unreg` が 6.12 では `update_mutex` を取らず、新しい vtable が外れる競合がありうる。`struct_ops` は 1 syscall で RCU のポインタが 1 本替わる。失敗したときは古い policy が残り、struct_ops でない `.bpf.o` の reload は HTTP 400。一般的な知見としては、この比較は話さない
 - ポリシーの状態 (map) は引き継がない — 新ポリシーは空の `sieve_visited` から始まる
 - デモ: `curl -X POST localhost:9600/policy/reload -d builtin:policy_sieve_ops` → dmesg に `s3fs_ebpf: policy struct_ops updated (hot swap)`。前提: daemon を `--policy-bpf=builtin:<struct_ops 版>` で起動していること。`--metrics-token` 設定時は `-H "Authorization: Bearer $S3FS_METRICS_TOKEN"`
 
@@ -243,6 +252,7 @@ syscall.Syscall(SYS_BPF, BPF_LINK_UPDATE, uintptr(unsafe.Pointer(&attr)), ...)
 
 - bpftrace で fuse-raw は 1 op あたり `/dev/fuse` **4.01 往復** (read_iter 2 + flush 1 + release 1)、S3 GET は 0 → 1.69 ms はほぼ純粋な IPC コスト
 - ebpf は miss 時の upcall が共有メモリ経由で、open/flush/release の往復が無い → **構造差**
+- 2026-11-03 の測り直し (`br §18.48`): open+read+close p50 は fuse-raw 1.675 ms 対 ebpf-nocache 528 µs (3.17×)。以下の 2026-10-11 の値は出典を分けて残す
 - キャッシュ有り同士 (2026-10-13, `br §12.1`): warm cat は ebpf 586 µs / fuse-cache 1.4 ms / mount-s3 769 µs、open+read+close p50 は ebpf 3.2 µs / fuse-cache 513 µs / mount-s3 113 µs
 - **ただし「open 済み fd の read」は速くない** → ここから §6 へ
 
@@ -327,6 +337,9 @@ while (remaining > 0) {
 | スケールの敵はコピーより**共有書き込み** | memcpy を 1 回減らしても、mmap_lock / refcount / rwlock カウンタを全 reader が叩けば負ける |
 | 受け入れ条件を先に書く | 「≤ 2 µs」「≥ fuse-raw」を事前に決めていたから「失敗」と言い切れた |
 | 仮説 → 実装の前にプロファイル | 「lock が重い」は計測ではなく推測だった。先に `perf c2c` / `lockstat` を取るべきだった |
+| 計測の verify を飛ばさない | 新規ファイルの durable write を測っていて、sha256 の verify が失敗して fsync が PUT の完了前に返る不具合を見つけた。「1.37× 速い」はその分を含んでいた。直したあと 0.97〜1.20× になった (§18.48) |
+| 環境の異常を疑う (対照項目を置く) | MinIO に残った `mc admin trace` で、S3 を伴う項目だけが 25〜30% 遅くなり、「page cache があると policy の差は出ない」という誤った結論まで出た。page cache だけで終わる項目を対照に置くと見分けられる (§18.48) |
+| 比べる相手と土俵をそろえる | open のたびに page cache だけ捨てる構成 (ebpf-pcachedrop) と s3fs-fuse の `use_cache` のみの構成 (fuse-diskcache) を対にして、独自キャッシュの効果だけを見た (§18.48)。policy の差はこの構成でも page cache のある構成でも hit rate に出た |
 | struct_ops は vtable 設計が本体 | 差し替えの仕組みは完璧でも、hook の粒度がアルゴリズムに合わないと sim の性能が出ない (§4) |
 
 #### 今後の対応 (検討中 — 未実装・未計測)

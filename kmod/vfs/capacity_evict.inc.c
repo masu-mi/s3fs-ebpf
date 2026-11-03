@@ -304,11 +304,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	changed = NULL;
 	atomic_long_add(n_changed, &s3fs_admit_invalidations);
 
-	/* Policy hook fires after the admit snapshot lands. Both attach
-	 * paths (fmod_ret + struct_ops) are consulted so either can be
-	 * active. See docs/design/policy-engine-design.md §4.5 Layer 2 and
-	 * docs/design/policy-attach-comparison.md for the trade-off. */
-	s3fs_policy_on_admit((u64)count, (u64)0);
+	/* Policy hook fires after the admit snapshot lands (struct_ops only).
+	 * See docs/design/policy-engine-design.md §4.5 Layer 2. */
 	(void)s3fs_policy_ops_eval_admit((u64)count, (u64)0);
 
 	/* Capacity pressure hook: fires when the new snapshot exceeds a
@@ -318,24 +315,19 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 * eviction round. Threshold is soft on purpose — daemon-side
 	 * pruneAdmitsTo is the actual enforcement path. */
 	if (count > (1u << S3FS_ADMIT_HASH_BITS) / 2) {
-		s3fs_policy_on_pressure((u64)count,
-					(u64)((1u << S3FS_ADMIT_HASH_BITS) / 2));
 		(void)s3fs_policy_ops_eval_pressure((u64)count,
 			(u64)((1u << S3FS_ADMIT_HASH_BITS) / 2));
 	}
 
 	/* Consult the policy on each entry in the new snapshot: 1 = evict
-	 * (skip re-add), 0 = keep. Return value now flows through fmod_ret
-	 * (kmod registered these hooks via register_btf_fmodret_id_set;
-	 * see tree_traversal.c). Enforcement itself is still an advisory
+	 * (skip re-add), 0 = keep. Return value flows through the struct_ops
+	 * vtable (policy_struct_ops.c). Enforcement itself is still an advisory
 	 * count logged here — the daemon's prune loop consumes it via a
 	 * followup ioctl. */
 	/*
 	 * Policy vote consumption. For every ino in the freshly-admitted
 	 * snapshot (arena entries + surviving pcache entries), ask the loaded
-	 * policy programs whether the entry should be evicted.  struct_ops
-	 * wins when both are attached (primary path).
-	 *
+	 * policy programs whether the entry should be evicted.  	 *
 	 * P3: pcache entries are now included so capacity_bytes bounds the
 	 * total admitted set, not just the arena subset.  eval_inos/cand are
 	 * sized for count + pcache_remaining unique inos.
@@ -344,7 +336,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 	 * exceeds a soft cap (S3FS_EVICT_SOFTCAP).
 	 */
 	{
-		u32 fmodret_votes = 0, structops_votes = 0, evicted = 0;
+		u32 structops_votes = 0, evicted = 0;
 		const u32 softcap = READ_ONCE(s3fs_softcap);
 		const u64 cap_bytes = READ_ONCE(s3fs_capacity_bytes);
 		/* P3: total candidate entries = arena + pcache */
@@ -433,9 +425,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			{
 				/* Issue #22: with hit_accum the votes wait for
 				 * the replay below. */
-				int fr_vote = hrec ? 0 : s3fs_policy_on_evict(ino);
 				int so_vote = hrec ? 0 : s3fs_policy_ops_eval_evict(ino);
-				int score   = max3(fr_vote, so_vote, 0);
+				int score   = max(so_vote, 0);
 
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
@@ -447,8 +438,6 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 						cap_bytes ? s3fs_arena_ino_bytes(entries, count, i, ino) : 0,
 						cap_bytes);
 
-				if (fr_vote != 0)
-					fmodret_votes++;
 				if (so_vote != 0)
 					structops_votes++;
 			}
@@ -468,9 +457,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 			{
 				/* Issue #22: with hit_accum the votes wait for
 				 * the replay below. */
-				int fr_vote = hrec ? 0 : s3fs_policy_on_evict(ino);
 				int so_vote = hrec ? 0 : s3fs_policy_ops_eval_evict(ino);
-				int score   = max3(fr_vote, so_vote, 0);
+				int score   = max(so_vote, 0);
 
 				eval_inos[eval_count]   = ino;
 				eval_scores[eval_count] = score;
@@ -481,8 +469,6 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 						cap_bytes ? s3fs_ino_buf_bytes(ino) : 0,
 						cap_bytes);
 
-				if (fr_vote != 0)
-					fmodret_votes++;
 				if (so_vote != 0)
 					structops_votes++;
 			}
@@ -495,12 +481,9 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 
 			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_AFTER_INSERT, s3fs_hit_signal);
 			for (e = 0; e < eval_count; e++) {
-				int fr_vote = s3fs_policy_on_evict(eval_inos[e]);
 				int so_vote = s3fs_policy_ops_eval_evict(eval_inos[e]);
 
-				eval_scores[e] = max3(fr_vote, so_vote, 0);
-				if (fr_vote != 0)
-					fmodret_votes++;
+				eval_scores[e] = max(so_vote, 0);
 				if (so_vote != 0)
 					structops_votes++;
 			}
@@ -639,9 +622,6 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		}
 		if (pv || ha)
 			s3fs_policy_evict_unlock();
-		if (fmodret_votes)
-			pr_info("s3fs_ebpf: fmod_ret voted evict on %u/%u entries\n",
-				fmodret_votes, total_count);
 		if (structops_votes)
 			pr_info("s3fs_ebpf: struct_ops voted evict on %u/%u entries\n",
 				structops_votes, total_count);

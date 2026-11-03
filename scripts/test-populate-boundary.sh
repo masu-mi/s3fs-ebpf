@@ -71,7 +71,7 @@ ebpf_mount "$MOUNT"
 DMESG_BEFORE=$(dmesg 2>/dev/null | wc -l || echo 0)
 ebpf_start_daemon "$OUT/daemon.log" \
     --arena-metadata-only \
-    --policy-bpf="builtin:policy_observe" \
+    --policy-bpf="builtin:policy_observe_ops" \
     --softcap=8 --cache-capacity=0 \
     --metrics-addr=:9600 \
     --sample-every=1s --sync-every=5s

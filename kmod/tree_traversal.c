@@ -22,7 +22,7 @@
 #include <linux/uaccess.h>
 
 #include "tree_traversal.h"
-#include "vfs_ops.h"            /* s3fs_policy_on_* prototypes */
+#include "vfs_ops.h"
 #include "policy_struct_ops.h"  /* s3fs_policy_ops_eval_hit */
 
 __bpf_kfunc_start_defs();
@@ -213,9 +213,8 @@ __bpf_kfunc_end_defs();
 #define BTF_KFUNCS_END(name)   BTF_SET8_END(name)
 #endif
 
-/* KFuncs callable from BPF_PROG_TYPE_TRACING (fentry / fmod_ret /
- * kprobe programs). The Layer 0 primitives live here so fmod_ret
- * policies can consult them. */
+/* KFuncs callable from BPF_PROG_TYPE_TRACING (fentry /
+ * kprobe programs). */
 BTF_KFUNCS_START(s3fs_kfunc_ids_tracing)
 BTF_ID_FLAGS(func, s3fs_kfunc_traverse_stub, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
@@ -234,8 +233,7 @@ BTF_ID_FLAGS(func, s3fs_kfunc_arena_list_walk, KF_SLEEPABLE)
 BTF_KFUNCS_END(s3fs_kfunc_ids_syscall)
 
 /* KFuncs callable from BPF_PROG_TYPE_STRUCT_OPS (policy vtables).
- * Full Layer 0 set — struct_ops policies get everything the fmod_ret
- * side has (see bpf/policy_pressure_ops.bpf.c for a consumer). */
+ * Full Layer 0 set (see bpf/policy_pressure_ops.bpf.c for a consumer). */
 BTF_KFUNCS_START(s3fs_kfunc_ids_struct_ops)
 BTF_ID_FLAGS(func, s3fs_kfunc_admit_count)
 BTF_ID_FLAGS(func, s3fs_kfunc_softcap)
@@ -244,26 +242,6 @@ BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
 BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
 BTF_ID_FLAGS(func, s3fs_kfunc_ino_size)
 BTF_KFUNCS_END(s3fs_kfunc_ids_struct_ops)
-
-/*
- * Policy hooks registered for BPF_MODIFY_RETURN (fmod_ret programs).
- * Attaching a BPF program with SEC("fmod_ret/<name>") to these hooks
- * lets the BPF program override the return value directly, so
- * eviction votes / admission decisions flow through as function
- * return values rather than side-channel maps. See
- * docs/design/policy-engine-design.md §4.5 and P-10 in docs/journal/backlog.md.
- */
-BTF_SET8_START(s3fs_policy_fmodret_ids)
-BTF_ID_FLAGS(func, s3fs_policy_on_admit)
-BTF_ID_FLAGS(func, s3fs_policy_on_evict)
-BTF_ID_FLAGS(func, s3fs_policy_on_pressure)
-BTF_ID_FLAGS(func, s3fs_policy_on_hit)
-BTF_SET8_END(s3fs_policy_fmodret_ids)
-
-static const struct btf_kfunc_id_set s3fs_policy_fmodret_set = {
-	.owner = THIS_MODULE,
-	.set   = &s3fs_policy_fmodret_ids,
-};
 
 static const struct btf_kfunc_id_set s3fs_kfunc_set_tracing = {
 	.owner = THIS_MODULE,
@@ -296,12 +274,6 @@ int s3fs_kfunc_register(void)
 
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS,
 					&s3fs_kfunc_set_struct_ops);
-	if (ret)
-		return ret;
-
-	/* Enable SEC("fmod_ret/s3fs_policy_on_*") programs to override
-	 * the hooks' return values (used for eviction votes etc.). */
-	ret = register_btf_fmodret_id_set(&s3fs_policy_fmodret_set);
 	if (ret)
 		return ret;
 

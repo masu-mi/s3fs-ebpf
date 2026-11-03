@@ -555,68 +555,6 @@ u64 s3fs_admit_size(u64 ino)
 }
 
 /*
- * Policy hooks — fentry attach anchors for Layer 2/3 BPF programs.
- *
- * Three hook points that BPF programs can attach to:
- *   - on_admit(count, hint): after each admit_replace, observation
- *     point for building access-freq sketches, ghost lists, etc.
- *   - on_evict(ino): asks the policy whether `ino` should be evicted
- *     from the admit table on capacity pressure. Return 1 = evict,
- *     0 = keep. BPF programs use their own state maps to make the
- *     decision (LRU tail check, freq threshold, etc.).
- *   - on_pressure(count, threshold): fires when admit count crosses
- *     the configured cap. Advisory only (no return value consumed);
- *     BPF can log, emit metrics, or trigger ghost-list refresh.
- *
- * noinline + non-static so kallsyms / BTF picks up the symbols for
- * fentry attachment. Bodies wrap args in asm volatile so -O2 doesn't
- * drop them. See docs/design/policy-engine-design.md §4.5.
- */
-/* fmod_ret trampolines override our return value at runtime, but the
- * compiler doesn't know that — a plain `return 0;` gets constant-
- * propagated into the caller and the whole check becomes dead code.
- * `asm volatile("" : "+r"(ret) :: "memory")` marks the value opaque,
- * so GCC keeps the load and honors whatever the trampoline stores. */
-/* Default returns are held in module-scope volatiles so GCC can't
- * prove them constant across the call. Without this the caller's
- * `if (s3fs_policy_on_evict(ino) != 0)` gets constant-folded to
- * `if (false)` and the entire evict-count loop is removed — fmod_ret
- * overrides the runtime return, but the compiler still sees zero. */
-static volatile int s3fs_policy_default_ret;
-
-noinline int s3fs_policy_on_admit(u64 count, u64 arena_used_hint)
-{
-	(void)count;
-	(void)arena_used_hint;
-	return s3fs_policy_default_ret;
-}
-
-noinline int s3fs_policy_on_evict(u64 ino)
-{
-	(void)ino;
-	return s3fs_policy_default_ret;
-}
-
-noinline int s3fs_policy_on_pressure(u64 count, u64 threshold)
-{
-	(void)count;
-	(void)threshold;
-	return s3fs_policy_default_ret;
-}
-
-/*
- * on_hit: fires on every admit-hit in the read path. Policies use
- * this signal to refresh recency (LRU seed) / bump frequency
- * (freq2bit / real S3-FIFO 3-tier) / set visited bit (SIEVE clock). Return
- * value is currently ignored — hit signals are advisory.
- */
-noinline int s3fs_policy_on_hit(u64 ino)
-{
-	(void)ino;
-	return s3fs_policy_default_ret;
-}
-
-/*
  * Drop the page cache of a policy-evicted ino. Without this an evicted
  * file keeps being served from its page cache (.read_iter =
  * generic_file_read_iter never reaches .read_folio), so eviction would

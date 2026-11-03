@@ -17,7 +17,7 @@ need_cmds jq python3 docker; need_built
 minio_require ov_kv.db ov_vec.bin
 mkdir -p "$OUT"; : >"$OUT/results.jsonl"
 FC=0 FR=0
-cleanup() { ebpf_stop "$MOUNT" || true; [ $FC = 1 ] && umount_hard "$MP_FUSE_CACHE" || true; [ $FR = 1 ] && umount_hard "$MP_FUSE_RAW" || true; }
+cleanup() { bench_down; }
 trap cleanup EXIT
 kc() { curl -s localhost:9600/metrics | awk '$1=="s3fs_ebpf_read_miss_upcalls_total"{u=$2} $1=="s3fs_ebpf_folio_hits_total"{h=$2} END{printf "{\"upcalls\":%d,\"folio_hits\":%d}", u, h}'; }
 run() { # label mp
@@ -31,22 +31,18 @@ run() { # label mp
 		done
 	done; done
 }
-ebpf_variant() { # label flags...
-	local label=$1; shift
-	sudo rm -rf "$EBPF_CACHE_DIR"; mkdir -p "$EBPF_CACHE_DIR"
-	ebpf_mount "$MOUNT"
-	ebpf_start_daemon "$OUT/daemon-$label.log" --cache-dir="$EBPF_CACHE_DIR" --policy-bpf=builtin:policy_observe \
-		--arena-metadata-only --metrics-addr=:9600 --sample-every=2s --sync-every=60s --softcap=8 --cache-capacity=0 "$@"
-	sleep "$SETTLE"
-	local before after; before=$(kc); run "$label" "$MOUNT"; after=$(kc)
-	echo "$label kmod before=$before after=$after" >>"$OUT/kmod.txt"
-	ebpf_stop "$MOUNT" || true
-}
+BACKENDS=${BACKENDS:-$BENCH_BACKENDS_ALL}
 : >"$OUT/kmod.txt"
-ebpf_variant ebpf-pcache
-ebpf_variant ebpf-pcache-nohook --no-read-iter-hook --pattern-aware-admit=false
-fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; FC=1; run fuse-cache "$MP_FUSE_CACHE"; umount_hard "$MP_FUSE_CACHE"; FC=0
-fuse_mount_raw "$MP_FUSE_RAW"; FR=1; run fuse-raw "$MP_FUSE_RAW"
+for b in $BACKENDS; do
+	bench_up "$b" "$OUT/daemon-$b.log" --sample-every=2s --sync-every=60s --softcap=8 --cache-capacity=0 $EBPF_FLAGS
+	if [ "$BENCH_KIND" = ebpf ]; then
+		sleep "$SETTLE"; before=$(kc); run "$b" "$BENCH_MP"; after=$(kc)
+		echo "$b kmod before=$before after=$after" >>"$OUT/kmod.txt"
+	else
+		run "$b" "$BENCH_MP"
+	fi
+	bench_down
+done
 python3 -I - "$OUT/results.jsonl" <<'PY'
 import json,sys,statistics as s,collections
 d=collections.defaultdict(list)

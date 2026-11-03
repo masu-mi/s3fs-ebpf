@@ -67,8 +67,11 @@ static int __init s3fs_ebpf_init(void)
 
 	ret = s3fs_policy_struct_ops_register();
 	if (ret) {
-		pr_warn("s3fs_ebpf: struct_ops register failed: %d (fmod_ret path still works)\n", ret);
-		/* Non-fatal — fmod_ret path is available independently. */
+		pr_err("s3fs_ebpf: struct_ops register failed: %d\n", ret);
+		s3fs_ebpf_dev_unregister();
+		unregister_filesystem(&s3fs_ebpf_fs_type);
+		s3fs_kfunc_unregister();
+		return ret;
 	}
 
 	pr_info("s3fs_ebpf: loaded (skeleton)\n");

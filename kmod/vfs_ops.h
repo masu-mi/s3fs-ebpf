@@ -73,13 +73,14 @@ int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err, u32 flags);
  *
  * s3fs_ebpf_flush_pop: dequeue one event; returns 0 on success (out
  * populated), -EAGAIN if empty.
- * s3fs_ebpf_read_dirty: copy up to `cap` bytes of ino's scratch
- * buffer into user-space `uaddr`. Returns bytes copied on success,
- * negative errno on failure.
+ * s3fs_ebpf_read_dirty: copy ino's scratch buffer into user-space `uaddr`.
+ * Returns bytes copied on success, negative errno on failure. -ENOSPC when
+ * `cap` is smaller than the content (AC-71): nothing is copied and the flush
+ * is not claimed; *size (optional) is the content size either way.
  */
 int  s3fs_ebpf_flush_pop(struct s3fs_flush_event *out);
 int  s3fs_ebpf_flush_pop_wait(struct s3fs_flush_event *out);
-long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap);
+long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap, u64 *size);
 long s3fs_ebpf_read_dirty_range(u64 ino, void __user *uaddr, u64 offset, u64 cap);
 long s3fs_ebpf_dirty_layout(u64 ino, u8 __user *states, u32 cap, u64 *size,
 			    u32 *nr);
@@ -168,17 +169,5 @@ u64 s3fs_admit_size(u64 ino);
  * `cap` slots; kmod writes the actual count into *filled and any
  * dropped entries (since last drain) into *overflow. */
 void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow);
-
-/*
- * Policy hooks (Layer 2/3 fentry attach anchors). See
- * docs/design/policy-engine-design.md §4.5. Bodies are no-ops — BPF programs
- * supply the real behavior via fentry attach. Return values are
- * consumed by callers (kmod side) as advisory when the hook is
- * BPF-overridden.
- */
-int s3fs_policy_on_admit(u64 count, u64 arena_used_hint);
-int s3fs_policy_on_evict(u64 ino);
-int s3fs_policy_on_pressure(u64 count, u64 threshold);
-int s3fs_policy_on_hit(u64 ino);
 
 #endif /* _S3FS_EBPF_VFS_OPS_H */

@@ -1,6 +1,6 @@
 # FS 層 (s3fs-ebpf) が s3fs-fuse の use_cache + kernel_cache に勝てる局面と難しさ
 
-2026-10-30。OLTP / ベクトル検索の計測 (`docs/journal/ann-workload-results.md`) を踏まえた整理。数値の出所は同ファイルと `docs/journal/benchmark-results.md`。出典つきの外部情報は末尾の一覧。
+2026-10-30 (2026-11-03 に §3.4 と §5 の末尾を追記)。OLTP / ベクトル検索の計測 (`docs/journal/ann-workload-results.md`) を踏まえた整理。数値の出所は同ファイルと `docs/journal/benchmark-results.md`。出典つきの外部情報は末尾の一覧。
 
 ## 1. 結論
 
@@ -49,6 +49,26 @@
 - chunk の大きさ (`S3FS_CHUNK_SIZE` はビルド時定数)。simulator では小さい chunk ほど同容量でヒット率が高く、取得バイトも少ない (ann-workload-results.md)。
 - chunk 1 件 6〜7 ms の内訳 (daemon の disk 読み、populate の memcpy、signal) は未調査。
 
+### 3.4 2026-11-03 の測り直し: 独自キャッシュ (chunk 表と policy) だけの効果
+
+`docs/journal/benchmark-results.md` §18.48 (同じ日に trace の残りで無効になった最初の run を取り直したもの)。page cache を使う構成 (ebpf-pcache) では warm の読みは page cache のヒットで終わり、独自キャッシュの差が見えない (D1)。そこで kmod に `pcache_drop` を足し、open のたびに page cache だけを捨てて chunk 表と policy は残す構成 (ebpf-pcachedrop) を作った。s3fs-fuse の `use_cache` あり・`kernel_cache` なし (fuse-diskcache) と同じ形で、**この組が独自キャッシュの効果だけを比べる**。
+
+| 場面 | fuse-diskcache | ebpf-pcachedrop | 比 (fuse ÷ ebpf) |
+|---|---:|---:|---:|
+| open+read+close p50 | 537 µs | 3.8 µs | 140× |
+| 小さいファイル 10,000 個の cat (warm) | 6,950 ms | 205 ms | 33.9× |
+| 同 `ls -l` (warm) | 1,462 ms | 32 ms | 45.7× |
+| cold read 300 MiB | 470.8 ms | 327.6 ms | 1.44× |
+| OLTP warm (ops/s、α=0 / 1.1) | 96k / 122k | 244k / 290k | 2.5× / 2.4× |
+| ベクトル warm (ops/s、α=0 / 1.1) | 52.3k / 56.0k | 52.0k / 56.5k | 0.99× / 1.01× |
+| 64 jobs の 18 B read (IOPS) | 6.12M | 5.88M | 0.96× |
+
+- 勝つのは open が繰り返される経路 (FUSE の往復がなくなる分)。ベクトル検索のように fd を保持して mmap や pread を繰り返す負荷では差がない。OLTP の差 (2.4〜2.5×) は fuse-diskcache の read が毎回 FUSE を通ることによる可能性があるが、切り分けていない。
+- 全体 (fuse-cache 対 ebpf-pcache) の warm OLTP / ベクトルは ±3% で、D1 のとおり差がつかない。
+- 新規ファイルの durable write は、計測中に fsync が PUT の完了前に返る不具合を見つけて直した (§18.48)。100 MiB の差は 0.97〜1.20× で、以前の「1.37× 速い」は取り下げる。
+- **daemon の disk cache (`--cache-dir`) は 4 MiB を超える object には効かない** (§18.49): 大きい object の読みは range GET の経路で、disk cache を読みも書きもしない。chunk 表から落ちたあとの再読みは毎回 S3 に戻り、64 MiB は s3fs-fuse の disk cache (26.2 ms) の 0.58× (45.5 ms)。「S3 → disk cache → kmod」の段が大きい object には 1 段足りない (backlog AC-75)。
+- 層ごとのレイテンシ (§18.49、18 B): page cache 2.8 µs、kmod の chunk 表 3.8 µs、daemon の disk cache 62.4 µs、S3 (ローカル MinIO) 543 µs。upcall の固定費は約 59 µs。
+
 ## 4. 競合と制約
 
 - 重み・データセット・イメージは、ストリーミングローダ ([1])、Mountpoint の共有キャッシュ ([4])、SOCI ([7]) のように、専用の仕組みがすでにある。
@@ -65,6 +85,7 @@
 - 構造上、信号が少ない: pcache の policy が決めるのは kmod の chunk の保持で、page cache のヒットは policy に届かない (`hit_accum` で一部を再送する設計。issue #22 の調査で効果は小さかった)。
 - admit・prefetch のほうが効く: cold 調査では、全体 admit か chunk ごとの fill かの判定が、s3 cold では 20% 勝ち、local cold では 1.7 倍負けを分けた (D4・D5)。汎用の readahead は逆効果 (GET が増え、ヒット率は改善せず、精度 3〜13%) だったが、IVF のクラスタ表や HNSW のレイアウトのように **アプリの構造を知った** prefetch は未検証で、policy をエンジンの外から差し替える価値 (計画書 H4) はここにある。
 - 隣接する先行研究: cache_ext [12] は eBPF で Linux の **page cache 本体** の eviction policy を差し替える枠組みで、8 つの policy を実装し、最大 70% のスループット向上と 58% の tail latency 低下を報告している (アプリごとに tune した場合。論文の掲載先のメタデータは情報源ごとに食い違うため、詳細は原典で確認すること)。本 PoC の pcache は page cache とは別に kmod に複本を持つので (D6)、policy を差し替える対象としては、page cache 本体を使う cache_ext のほうが素直。本 PoC が差別化できるのは、S3 という遅い下層を持つ点 (miss が高い: chunk 1 件 6〜7 ms) と、admit・prefetch の判断を daemon (S3 の知識を持つ側) と連携させられる点。
+- **2026-11-03 追記 (§18.48): policy の差は FS 全体の hit rate に出る。** ebpf-pcachedrop (open のたびに page cache を捨てる、chunk 表と policy は残す) の hit rate は、policy なし (observe) の 27.8% に対して LRU 39.2%、SIEVE 47.5%、S3-FIFO 49.0%、W-TinyLFU 50.9% (30 ファイル・softcap 8・Zipf α=0.7・2000 access・5 seed で順位が同じ)。差は +11〜23 ポイントで、上の「evict の差は小さい」より大きい。page cache があるとき (ebpf-pcache) も順位は同じで、W-TinyLFU は 57.1% (observe 38.6% より +18.5 pp)。ただし LRU は +0.6 pp で observe と差がなく、observe 自体が seed 間で 29.9〜47.5% と大きくばらつく (原因は未切り分け、backlog AC-74)。page cache のヒットも hit に数えるので、pcachedrop と絶対値は比べられない。なお、同じ日の最初の run (MinIO に `mc admin trace` が残っていた) では「page cache があると順位が崩れる」ように見えたが、環境の異常による見かけだった。
 - 注意: 合成 trace・単一ホスト・容量圧力のない実機計測のみ。実データ (計画 P3) と、容量を絞った実 kmod での確認 (P4) は未実施。
 
 ## 6. 次に確かめること (優先順)

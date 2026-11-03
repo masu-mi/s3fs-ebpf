@@ -15,7 +15,7 @@ JOBS=${JOBS:-64}; RUNTIME=${RUNTIME:-5}; REPS=${REPS:-5}; SETTLE=${SETTLE:-10}
 need_cmds fio jq docker; need_built; minio_require "$FILE"
 mkdir -p "$OUT"; rm -f "$OUT"/*.json
 FC=0 FR=0
-cleanup() { ebpf_stop "$MOUNT" || true; [ $FC = 1 ] && umount_hard "$MP_FUSE_CACHE" || true; [ $FR = 1 ] && umount_hard "$MP_FUSE_RAW" || true; }
+cleanup() { ebpf_stop "$MOUNT" || true; bench_down; }
 trap cleanup EXIT
 log() { echo "[read-64jobs] $*" >&2; }
 
@@ -34,29 +34,40 @@ ebpf_run() { # label flags...
 	local label=$1; shift
 	sudo rm -rf "$EBPF_CACHE_DIR"; mkdir -p "$EBPF_CACHE_DIR"
 	ebpf_mount "$MOUNT"
-	ebpf_start_daemon "$OUT/daemon-$label.log" --cache-dir="$EBPF_CACHE_DIR" --policy-bpf=builtin:policy_observe \
+	ebpf_start_daemon "$OUT/daemon-$label.log" --cache-dir="$EBPF_CACHE_DIR" --policy-bpf=builtin:policy_observe_ops \
 		--metrics-addr=:9600 --sample-every=2s --sync-every=60s --softcap=8 --cache-capacity=0 "$@"
 	sleep "$SETTLE"
 	fio_runs "$label" "$MOUNT"
 	ebpf_stop "$MOUNT" || true
 }
-
+BACKENDS=${BACKENDS:-$BENCH_BACKENDS_ALL}
 {
 	echo "date_utc: $(date -u +%FT%TZ)"; echo "git: $(git -C "$TOPDIR" rev-parse HEAD)"
 	echo "kernel: $(uname -srv)"; echo "cpus: $(nproc)"; echo "s3fs: $(s3fs --version 2>&1 | head -1)"; echo "fio: $(fio --version)"
 	echo "jobs=$JOBS runtime=${RUNTIME}s reps=$REPS file=$FILE (psync, bs=1, size=1, --thread)"
-	echo "ebpf-pcache: --arena-metadata-only; nohook adds --no-read-iter-hook --pattern-aware-admit=false; arena = neither"
+	echo "backends: $BACKENDS"; echo "ebpf-pcache: --arena-metadata-only; nohook adds --no-read-iter-hook --pattern-aware-admit=false; arena = neither"
 } >"$OUT/environment.txt"
 
-fuse_mount_raw "$MP_FUSE_RAW"; FR=1; fio_runs fuse-raw "$MP_FUSE_RAW"; umount_hard "$MP_FUSE_RAW"; FR=0
-fuse_mount_cache "$MP_FUSE_CACHE" "$FUSE_CACHE_DIR"; FC=1; fio_runs fuse-cache "$MP_FUSE_CACHE"; umount_hard "$MP_FUSE_CACHE"; FC=0
-ebpf_run ebpf-arena
-ebpf_run ebpf-pcache --arena-metadata-only
-ebpf_run ebpf-pcache-nohook --arena-metadata-only --no-read-iter-hook --pattern-aware-admit=false
+# BACKENDS: the six configurations of issue #35 by default; the old ebpf-arena /
+# ebpf-pcache-nohook variants stay available by name.
+for b in $BACKENDS; do
+	case $b in
+	ebpf-arena|ebpf-pcache-nohook) ;;   # handled by ebpf_run below
+	*) bench_up "$b" "$OUT/daemon-$b.log" --sample-every=2s --sync-every=60s --softcap=8 --cache-capacity=0
+	   [ "$BENCH_KIND" = ebpf ] && sleep "$SETTLE"
+	   fio_runs "$b" "$BENCH_MP"; bench_down ;;
+	esac
+done
+for b in $BACKENDS; do
+	case $b in
+	ebpf-arena) ebpf_run ebpf-arena ;;
+	ebpf-pcache-nohook) ebpf_run ebpf-pcache-nohook --arena-metadata-only --no-read-iter-hook --pattern-aware-admit=false ;;
+	esac
+done
 
 echo
 printf '%-20s %12s %10s %10s %10s\n' backend iops_median iops_min iops_max clat_p99_us
-for b in fuse-raw fuse-cache ebpf-arena ebpf-pcache ebpf-pcache-nohook; do
+for b in $BACKENDS; do
 	jq -rs --arg b "$b" '[.[]|{i:.jobs[0].read.iops, p:(.jobs[0].read.clat_ns.percentile["99.000000"] // 0)}] as $v
 		| ($v|map(.i)|sort) as $i | ($v|map(.p)|sort) as $p
 		| [$b, ($i[($i|length/2|floor)]|floor), ($i[0]|floor), ($i[-1]|floor), ($p[($p|length/2|floor)]/1000|.*10|floor/10)] | @tsv' "$OUT/$b".[0-9]*.json

@@ -69,6 +69,6 @@ build の問題 (テストなし):
 
 ## 直していない気になる点
 
-- W3 の残る窓: fsync の WAIT event の read_dirty の後に古い PUT の signal が届くと、seq が一致して fsync を起こす。`SIGNAL_FLUSH` に seq を持たせれば閉じられる (uapi と daemon の変更)。
+- (解消: AC-71) W3 の残る窓。`read_dirty` が buffer の足りない読みを claim しないようにし (`s3k_vfs_read_dirty_short_buffer_claims_nothing`)、daemon が同じ ino の flush を直列にした。`SIGNAL_FLUSH` に seq を持たせる案は不要になった。
 - `S3FS_IOC_STATS` で `count == 13` のとき、slot 12 は 0 のまま `filled = 13` を返す (12 と 13 は 1 回の走査で両方埋めるため)。
 - write が `s3fs_fd_store` の途中で失敗 (-EFAULT / -EFBIG) すると、`s3fs_fd_mark_remote_locked` がつけた remote と途中まで書いた chunk が clean な fd に残る。-EFBIG は書く前に判定できる。

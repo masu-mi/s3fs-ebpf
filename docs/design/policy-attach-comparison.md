@@ -1,5 +1,7 @@
 # fmod_ret vs struct_ops — Layer 2 attach pattern の比較評価
 
+> **状態 (issue #35)**: fmod_ret の経路は実装から削除済み。policy は struct_ops だけで、差し替えは `BPF_LINK_UPDATE` 1 回 (RCU ポインタ 1 本) の経路にそろえた。理由: fmod_ret は hook ごとの link なので差し替えの間に新旧の policy が同時に動き、一式を不可分に替えられない。link を 2 本同時に持つと kmod の `unreg` に「ポインタが自分を指すときだけ NULL にする」判定が要り、6.12 では link の fd を閉じたときの `unreg` が `update_mutex` を取らないため、新しい vtable が外れる競合がありうる。以下は削除前の比較の記録で、`policy_observe` / `policy_freq2bit` は struct_ops 版 (`policy_observe_ops` / `policy_freq2bit_ops`) に置き換わっている。kmod の `unreg` の判定は残してあるが、link が 1 本なので常に真になる。
+
 Week 4 (d) Layer 2 で policy BPF program の attach pattern を fmod_ret と struct_ops の 2 方式で実装し、同一 algorithm を両方で動作させた。実測に基づく比較と recommendation。
 
 **Naming note (Oct 2026)**: 本節で「S3-FIFO」と書かれた実装は当時のファイル名で、実際は single-tier 2-bit reference counter だった。honest naming の追加で `policy_freq2bit(_ops)` に rename 済 (`docs/journal/hit-rate-bench.md` 参照)。attach pattern (fmod_ret vs struct_ops) の比較には algorithm 選択は影響しない — 「per-hook attach vs 1 vtable atomic swap」の構造比較としてそのまま読める。

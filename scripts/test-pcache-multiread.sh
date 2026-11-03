@@ -76,7 +76,7 @@ log "mounting s3fs-ebpf in pcache mode (--arena-metadata-only)"
 ebpf_mount "$MOUNT"
 ebpf_start_daemon "$OUT/daemon.log" \
     --arena-metadata-only \
-    --policy-bpf="builtin:policy_observe" \
+    --policy-bpf="builtin:policy_observe_ops" \
     --softcap=8 --cache-capacity=0
 log "daemon started, settling ${SETTLE}s"
 sleep "$SETTLE"

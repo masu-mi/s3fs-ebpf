@@ -26,7 +26,7 @@ docker exec "$MINIO_CONTAINER" mc rm --recursive --force "local/$S3_BUCKET" >/de
 docker exec "$MINIO_CONTAINER" mc mb --ignore-existing "local/$S3_BUCKET" >/dev/null
 ebpf_mount "$MOUNT"
 ebpf_start_daemon "$OUT/daemon.log" --bucket="$S3_BUCKET" --arena-metadata-only \
-    --policy-bpf="builtin:policy_observe" --softcap=8 --cache-capacity=0 \
+    --policy-bpf="builtin:policy_observe_ops" --softcap=8 --cache-capacity=0 \
     --metrics-addr=:9600 --sample-every=1s --sync-every=0
 sleep 3
 head -c $((3 * 1024 * 1024)) /dev/urandom > "$OUT/payload"

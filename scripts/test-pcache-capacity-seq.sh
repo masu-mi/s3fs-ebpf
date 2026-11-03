@@ -90,7 +90,7 @@ run_phase() {
     ebpf_start_daemon "$OUT/daemon-${phase}.log" \
         --bucket="$S3_BUCKET" \
         --arena-metadata-only \
-        --policy-bpf="builtin:policy_observe" \
+        --policy-bpf="builtin:policy_observe_ops" \
         --softcap=64 \
         --cache-capacity="${CAPACITY}" \
         --metrics-addr=:9600 \

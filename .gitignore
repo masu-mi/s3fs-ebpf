@@ -33,7 +33,9 @@ bench/results/
 *.swo
 .idea/
 .vscode/
-.claude
+# Claude Code local state; project skills (.claude/skills) are tracked
+.claude/*
+!.claude/skills/
 daemon/s3fs-ebpf
 
 # Coverage (make test-kunit-cov / test-daemon-cov)

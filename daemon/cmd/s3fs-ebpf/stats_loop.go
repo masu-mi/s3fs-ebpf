@@ -17,7 +17,7 @@ import (
 
 // samplePolicyStats mirrors the loaded policy BPF program's counters
 // into metrics.Global on a ticker. Uses lookups from the shared map
-// (see bpf/policy_observe.bpf.c PSTAT_* indices).
+// (see bpf/policy_observe_ops.bpf.c PSTAT_* indices).
 func samplePolicyStats(ctx context.Context, mu *sync.Mutex, cur **policyprog.Program, every time.Duration) {
 	t := time.NewTicker(every)
 	defer t.Stop()

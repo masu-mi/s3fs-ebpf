@@ -665,10 +665,31 @@ module_param_named(nocache, s3fs_nocache, bool, 0644);
 MODULE_PARM_DESC(nocache,
 	"Drop page cache + arena admit on every open (FUSE-raw-like reads, benchmark only)");
 
+/*
+ * pcache_drop=1 — drop the page cache on every open, keep the rest.
+ *
+ * The second stage of nocache only: .open runs invalidate_inode_pages2()
+ * but leaves the admit ranges and the chunk table alone, and does not
+ * push an evict-log entry. Every read after an open therefore enters
+ * .read_folio; a chunk-table hit returns without an upcall, a miss goes
+ * through the daemon to S3. This is the shape of s3fs-fuse with
+ * use_cache but without kernel_cache (page cache dropped per open, disk
+ * cache serves the read), so the effect of the chunk table and the
+ * policy can be measured on their own. mmap uses the page cache and is
+ * not a target. Dirty inodes are left alone, as with nocache.
+ * nocache wins when both are set. Runtime-toggleable:
+ *   echo 1 > /sys/module/s3fs_kfunc/parameters/pcache_drop
+ */
+static bool s3fs_pcache_drop;
+module_param_named(pcache_drop, s3fs_pcache_drop, bool, 0644);
+MODULE_PARM_DESC(pcache_drop,
+	"Drop only the page cache on every open; keep admit + chunk table (benchmark only; nocache wins)");
+
 static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 {
 	struct s3fs_file_data *fd = inode->i_private;
 	bool dirty = false;
+	bool drop_pcache_only = false;
 
 	/* AB-10: allocate per-file admit cache; gen=0 forces first-read re-check. */
 	if (!file->private_data) {
@@ -678,8 +699,13 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 			file->private_data = fc;
 	}
 
-	if (!READ_ONCE(s3fs_nocache))
-		return 0;
+	if (!READ_ONCE(s3fs_nocache)) {
+		if (!READ_ONCE(s3fs_pcache_drop))
+			return 0;
+		drop_pcache_only = true;
+	} else if (READ_ONCE(s3fs_pcache_drop)) {
+		pr_info_once("s3fs_ebpf: nocache and pcache_drop are both set; nocache wins\n");
+	}
 	if (fd) {
 		mutex_lock(&fd->lock);
 		dirty = fd->dirty;
@@ -687,6 +713,13 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 	}
 	if (dirty)
 		return 0;
+
+	if (drop_pcache_only) {
+		/* Page cache only; no-op on a dirty folio, which the check
+		 * above already excluded. */
+		invalidate_inode_pages2(inode->i_mapping);
+		return 0;
+	}
 
 	/*
 	 * S-09 fix — two-part invalidation for reliable nocache behaviour:

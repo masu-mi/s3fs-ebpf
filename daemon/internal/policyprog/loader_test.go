@@ -1,6 +1,7 @@
 package policyprog
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -82,4 +83,17 @@ func TestLoadOpts_UnknownMapIgnored(t *testing.T) {
 	}
 	// Must be a parse/open error, not a panic from the opts loop.
 	t.Logf("got expected error: %v", err)
+}
+
+// TestSwapFrom_RequiresLiveStructOpsLink pins that SwapFrom has no
+// attach+close fallback: without a live struct_ops link on the current
+// policy it refuses with ErrNotStructOps instead of attaching anything.
+func TestSwapFrom_RequiresLiveStructOpsLink(t *testing.T) {
+	p := &Program{}
+	for _, old := range []*Program{nil, {}, {IsStruct: true}} {
+		err := p.SwapFrom(old)
+		if !errors.Is(err, ErrNotStructOps) {
+			t.Errorf("SwapFrom(%+v) = %v, want ErrNotStructOps", old, err)
+		}
+	}
 }

@@ -1,0 +1,500 @@
+{
+ "uid": "s3fs-ebpf-layer-latency",
+ "title": "S3FS-eBPF Layer latency",
+ "tags": [
+  "s3fs-ebpf",
+  "latency"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 39,
+ "version": 1,
+ "editable": true,
+ "refresh": "",
+ "graphTooltip": 1,
+ "panels": [
+  {
+   "id": 100,
+   "type": "text",
+   "title": "",
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 3
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "**Where a read turns around.** Same object, answered at a different layer per configuration: 1 page cache → 2 kmod chunk table (no upcall) → 3 daemon disk cache (upcall) → 4 daemon → S3 (MinIO). `ref` rows are s3fs-fuse. Value = open + read whole file + close, log scale, µs. Numbers: `docs/journal/benchmark-results.md` §18.48 (`scripts/bench-layer-latency.sh`). Time series below are Prometheus; the shaded bands are the runs (annotations tagged `layer-latency`)."
+   }
+  },
+  {
+   "id": 1,
+   "type": "barchart",
+   "title": "18 B object (one 4 KiB folio)",
+   "datasource": {
+    "type": "grafana-testdata-datasource",
+    "uid": "testdata-layer"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 3,
+    "w": 8,
+    "h": 11
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-testdata-datasource",
+      "uid": "testdata-layer"
+     },
+     "scenarioId": "csv_content",
+     "csvContent": "layer,p50,p95,p99\n1 page cache,2.83,4.10,5.34\n2 kmod chunk table,3.84,4.41,7.06\n3 daemon disk cache,62.39,78.86,108.32\n4 daemon → S3,543.28,643.11,891.45\nFUSE kernel_cache,527.72,604.49,691.10\nFUSE disk cache,541.10,615.93,706.81\nFUSE → S3,1693.36,2365.10,2560.58"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "µs",
+     "decimals": 1,
+     "custom": {
+      "scaleDistribution": {
+       "type": "log",
+       "log": 10
+      },
+      "fillOpacity": 85,
+      "lineWidth": 1,
+      "gradientMode": "none",
+      "axisSoftMin": 1,
+      "axisSoftMax": 20000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "xField": "layer",
+    "orientation": "horizontal",
+    "showValue": "auto",
+    "barWidth": 0.9,
+    "groupWidth": 0.75,
+    "legend": {
+     "showLegend": true,
+     "placement": "bottom",
+     "displayMode": "list"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "none"
+    },
+    "xTickLabelRotation": 0,
+    "xTickLabelSpacing": 0
+   }
+  },
+  {
+   "id": 2,
+   "type": "barchart",
+   "title": "4 MiB object (one chunk)",
+   "datasource": {
+    "type": "grafana-testdata-datasource",
+    "uid": "testdata-layer"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 3,
+    "w": 8,
+    "h": 11
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-testdata-datasource",
+      "uid": "testdata-layer"
+     },
+     "scenarioId": "csv_content",
+     "csvContent": "layer,p50,p95,p99\n1 page cache,320.72,360.94,396.13\n2 kmod chunk table,1079.64,1213.66,1322.35\n3 daemon disk cache,2828.09,3497.46,4070.24\n4 daemon → S3,6715.54,8509.11,11335.11\nFUSE kernel_cache,1149.22,1242.03,1388.99\nFUSE disk cache,2436.44,2578.88,2797.26\nFUSE → S3,6598.44,7295.66,7752.60"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "µs",
+     "decimals": 1,
+     "custom": {
+      "scaleDistribution": {
+       "type": "log",
+       "log": 10
+      },
+      "fillOpacity": 85,
+      "lineWidth": 1,
+      "gradientMode": "none",
+      "axisSoftMin": 1,
+      "axisSoftMax": 30000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "xField": "layer",
+    "orientation": "horizontal",
+    "showValue": "auto",
+    "barWidth": 0.9,
+    "groupWidth": 0.75,
+    "legend": {
+     "showLegend": true,
+     "placement": "bottom",
+     "displayMode": "list"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "none"
+    },
+    "xTickLabelRotation": 0,
+    "xTickLabelSpacing": 0
+   }
+  },
+  {
+   "id": 3,
+   "type": "barchart",
+   "title": "64 MiB object (16 chunks)",
+   "datasource": {
+    "type": "grafana-testdata-datasource",
+    "uid": "testdata-layer"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 3,
+    "w": 8,
+    "h": 11
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-testdata-datasource",
+      "uid": "testdata-layer"
+     },
+     "scenarioId": "csv_content",
+     "csvContent": "layer,p50,p95,p99\n1 page cache,7436.21,7788.30,8239.18\n2 kmod chunk table,20825.21,22065.82,23645.19\n3 daemon disk cache,45545.25,47906.71,51081.23\n4 daemon → S3,45467.32,47929.71,49497.66\nFUSE kernel_cache,9661.72,10105.77,10681.32\nFUSE disk cache,26245.44,27290.88,28810.48\nFUSE → S3,70061.14,73469.48,75803.81"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "µs",
+     "decimals": 1,
+     "custom": {
+      "scaleDistribution": {
+       "type": "log",
+       "log": 10
+      },
+      "fillOpacity": 85,
+      "lineWidth": 1,
+      "gradientMode": "none",
+      "axisSoftMin": 1,
+      "axisSoftMax": 200000
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "xField": "layer",
+    "orientation": "horizontal",
+    "showValue": "auto",
+    "barWidth": 0.9,
+    "groupWidth": 0.75,
+    "legend": {
+     "showLegend": true,
+     "placement": "bottom",
+     "displayMode": "list"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "none"
+    },
+    "xTickLabelRotation": 0,
+    "xTickLabelSpacing": 0
+   }
+  },
+  {
+   "id": 4,
+   "type": "table",
+   "title": "All rows (open + read whole file + close; deltas over the run)",
+   "datasource": {
+    "type": "grafana-testdata-datasource",
+    "uid": "testdata-layer"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 14,
+    "w": 24,
+    "h": 11
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "grafana-testdata-datasource",
+      "uid": "testdata-layer"
+     },
+     "scenarioId": "csv_content",
+     "csvContent": "layer,config,size,p50 µs,p95 µs,p99 µs,upcalls,S3 GETs,daemon handler p50 µs,daemon handler mean µs\n1 page cache,ebpf-pcache,18B,2.83,4.10,5.34,0,0,-,-\n2 kmod chunk table,ebpf-pcachedrop,18B,3.84,4.41,7.06,0,0,-,-\n3 daemon disk cache,ebpf-nocache-diskcache,18B,62.39,78.86,108.32,194210,0,25.5,32.3\n4 daemon → S3,ebpf-nocache,18B,543.28,643.11,891.45,22622,22622,498.9,511.9\nFUSE kernel_cache,fuse-cache,18B,527.72,604.49,691.10,0,0,-,-\nFUSE disk cache,fuse-diskcache,18B,541.10,615.93,706.81,0,0,-,-\nFUSE → S3,fuse-raw,18B,1693.36,2365.10,2560.58,0,6944,-,-\n1 page cache,ebpf-pcache,4MiB,320.72,360.94,396.13,0,0,-,-\n2 kmod chunk table,ebpf-pcachedrop,4MiB,1079.64,1213.66,1322.35,0,0,-,-\n3 daemon disk cache,ebpf-nocache-diskcache,4MiB,2828.09,3497.46,4070.24,4402,0,3000.5,1454.5\n4 daemon → S3,ebpf-nocache,4MiB,6715.54,8509.11,11335.11,2133,2133,6885.5,6266.0\nFUSE kernel_cache,fuse-cache,4MiB,1149.22,1242.03,1388.99,0,0,-,-\nFUSE disk cache,fuse-diskcache,4MiB,2436.44,2578.88,2797.26,0,0,-,-\nFUSE → S3,fuse-raw,4MiB,6598.44,7295.66,7752.60,0,1784,-,-\n1 page cache,ebpf-pcache,64MiB,7436.21,7788.30,8239.18,0,0,-,-\n2 kmod chunk table,ebpf-pcachedrop,64MiB,20825.21,22065.82,23645.19,0,0,-,-\n3 daemon disk cache,ebpf-nocache-diskcache,64MiB,45545.25,47906.71,51081.23,288,1136,18212.9,24008.2\n4 daemon → S3,ebpf-nocache,64MiB,45467.32,47929.71,49497.66,274,1088,18491.7,24024.1\nFUSE kernel_cache,fuse-cache,64MiB,9661.72,10105.77,10681.32,0,0,-,-\nFUSE disk cache,fuse-diskcache,64MiB,26245.44,27290.88,28810.48,0,0,-,-\nFUSE → S3,fuse-raw,64MiB,70061.14,73469.48,75803.81,0,1316,-,-"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "align": "auto"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm"
+   }
+  },
+  {
+   "id": 5,
+   "type": "timeseries",
+   "title": "Daemon read-miss handler latency (p50 / p99)",
+   "description": "Daemon-side service time of one upcall (event received → signalAdmit): disk-cache read or S3 GET, plus the admit ioctl. Buckets from 50 µs (issue #35).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 25,
+    "w": 12,
+    "h": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.5, sum by (le) (rate(s3fs_ebpf_read_miss_latency_seconds_bucket[15s])))",
+     "legendFormat": "p50",
+     "interval": "5s"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "histogram_quantile(0.99, sum by (le) (rate(s3fs_ebpf_read_miss_latency_seconds_bucket[15s])))",
+     "legendFormat": "p99",
+     "interval": "5s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 6,
+   "type": "timeseries",
+   "title": "kmod: upcalls/s and folio hits/s",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 25,
+    "w": 12,
+    "h": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "rate(s3fs_ebpf_read_miss_upcalls_total[15s])",
+     "legendFormat": "upcalls/s",
+     "interval": "5s"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "rate(s3fs_ebpf_folio_hits_total[15s])",
+     "legendFormat": "folio hits/s (chunk table)",
+     "interval": "5s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ops",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 7,
+   "type": "timeseries",
+   "title": "Daemon read-miss handler mean latency",
+   "description": "sum / count of the daemon's read-miss histogram: exact to the µs, unlike its buckets. MinIO's own TTFB histogram starts at 50 ms, so it cannot resolve local GETs and is not plotted.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 34,
+    "w": 12,
+    "h": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "rate(s3fs_ebpf_read_miss_latency_seconds_sum[15s]) / rate(s3fs_ebpf_read_miss_latency_seconds_count[15s])",
+     "legendFormat": "mean per upcall",
+     "interval": "5s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  },
+  {
+   "id": 8,
+   "type": "timeseries",
+   "title": "S3 GetObject rate (MinIO)",
+   "description": "",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "prometheus"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 34,
+    "w": 12,
+    "h": 9
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "prometheus"
+     },
+     "expr": "sum(rate(minio_s3_requests_total{api=\"getobject\"}[15s]))",
+     "legendFormat": "GET/s",
+     "interval": "5s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "reqps",
+     "custom": {
+      "lineWidth": 2,
+      "fillOpacity": 8,
+      "showPoints": "never",
+      "spanNulls": true
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi"
+    }
+   }
+  }
+ ],
+ "time": {
+  "from": "2026-11-03T08:59:25.000Z",
+  "to": "2026-11-03T09:13:00.000Z"
+ },
+ "annotations": {
+  "list": [
+   {
+    "name": "Layer runs",
+    "enable": true,
+    "iconColor": "rgba(120,120,255,0.8)",
+    "datasource": {
+     "type": "grafana",
+     "uid": "-- Grafana --"
+    },
+    "target": {
+     "type": "tags",
+     "tags": [
+      "layer-latency"
+     ],
+     "limit": 100,
+     "matchAny": false
+    }
+   }
+  ]
+ }
+}

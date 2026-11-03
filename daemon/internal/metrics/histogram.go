@@ -99,9 +99,13 @@ func formatBound(v float64) string {
 	return fmt.Sprintf("%g", v)
 }
 
-// Default bucket set for the read-miss latency histogram. Covers
-// MinIO-local (1-5 ms) through S3-cold-object (up to seconds).
+// Default bucket set for the read-miss latency histogram. Covers a disk-cache
+// hit (tens of µs) and MinIO-local (0.1-5 ms) through S3-cold-object (up to
+// seconds). The buckets below 1 ms were added in issue #35: with the lowest
+// bound at 1 ms every local read-miss landed in the first bucket and the
+// per-layer latency could not be told apart.
 var DefaultLatencyBounds = []float64{
+	0.00005, 0.0001, 0.00025, 0.0005,
 	0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 }
 
