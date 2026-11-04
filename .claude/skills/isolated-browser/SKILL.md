@@ -74,6 +74,6 @@ ls /tmp/browse.* ~/.cache/ms-playwright 2>&1                                    
 
 ## 落とし穴
 
-- コンテナ内は root で動く (Chrome の apt インストールのため)。出力の所有者はスクリプトが `chown` で呼び出したユーザーに戻す。自前で `docker run` するときは `chown` を忘れると、root 所有のファイルが残って消せなくなる。
+- コンテナ内は root で動く (Chrome の apt インストールのため)。出力の所有者は、docker / rootful では `chown` で呼び出したユーザーに戻す (自前で `docker run` するときに忘れると、root 所有のファイルが残って消せない)。**rootless podman では `chown` しない** (コンテナの root がすでにホストの自分で、chown すると subuid の所有になって消せなくなる)。それでも消せなくなったら `podman unshare rm -rf <dir>`。
 - `--cap-drop ALL` は付けない (apt が動かない)。
 - `waitUntil: 'networkidle'` で止まらないページ (ストリーミング・長いポーリング) は、steps の `goto` の代わりに `wait` / `waitFor` で待つ。

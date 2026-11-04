@@ -24,6 +24,10 @@ echo "runtime: $RT" >&2
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(mktemp -d /tmp/browse.XXXXXX)
 CID="browse-$$"
+# rootless podman はコンテナの root = ホストの自分。chown すると subuid の所有になって消せなくなるので、しない。
+# docker / rootful では root 所有のファイルを自分に戻す (戻さないと scratch を消せない)。
+CHOWN=1
+[ "$(basename "$RT")" != podman ] || [ "$("$RT" info --format '{{.Host.Security.Rootless}}' 2>/dev/null)" != true ] || CHOWN=
 cleanup() { "$RT" rm -f "$CID" >/dev/null 2>&1 || true; rm -rf "$W"; }
 trap cleanup EXIT
 
@@ -33,10 +37,10 @@ cp "$HERE/browse.js" "$W/"
 
 "$RT" run --rm --name "$CID" --ipc=host --security-opt no-new-privileges \
   --add-host host.docker.internal:host-gateway \
-  -e URL="$URL" -e AUTH="$AUTH" -e OUT=/work/out -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+  -e URL="$URL" -e AUTH="$AUTH" -e OUT=/work/out -e HOST_UID="${CHOWN:+$(id -u)}" -e HOST_GID="${CHOWN:+$(id -g)}" \
   -e STEPS="${STEPS:+/work/steps.json}" -e SCRIPT="${SCRIPT:+/work/custom.js}" \
   -v "$W:/work" -w /work mcr.microsoft.com/playwright:latest \
-  bash -c 'trap "chown -R $HOST_UID:$HOST_GID /work/out 2>/dev/null" EXIT
+  bash -c 'trap "[ -z \"$HOST_UID\" ] || chown -R $HOST_UID:$HOST_GID /work/out 2>/dev/null" EXIT
            npm i --no-save --prefix /tmp/pw playwright >/dev/null 2>&1
            /tmp/pw/node_modules/.bin/playwright install chrome >/dev/null 2>&1
            NODE_PATH=/tmp/pw/node_modules node browse.js'
