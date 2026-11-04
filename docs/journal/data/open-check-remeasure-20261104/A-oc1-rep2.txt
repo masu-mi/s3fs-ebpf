@@ -1,0 +1,8 @@
+[microbench] fuse-raw
+  iters=5000 warmup=1000 total=8.671783096s ops/s=577
+  min=1.500507ms  p50=1.676281ms  p95=2.177361ms  p99=2.488847ms  max=22.121215ms
+[microbench] ebpf-nocache
+  iters=5000 warmup=1000 total=5.002812653s ops/s=999
+  min=429.003µs  p50=984.57µs  p95=1.129617ms  p99=1.505407ms  max=4.522932ms
+upcalls[ebpf-nocache]: 1 -> 5996
+open_checks[ebpf-nocache]: 6092

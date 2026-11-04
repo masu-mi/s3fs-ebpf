@@ -231,3 +231,80 @@ func TestLoadForWrite(t *testing.T) {
 		t.Errorf("signals %v, want [-2 -61]", u.signals)
 	}
 }
+
+// statBackend answers Stat only: present keys succeed, absent ones wrap
+// objstore.ErrNotFound, and failErr (if set) is returned for every key.
+type statBackend struct {
+	objstore.Backend
+	present map[string]bool
+	failErr error
+	stats   []string
+}
+
+func (s *statBackend) Stat(_ context.Context, key string) (objstore.ObjectMeta, error) {
+	s.stats = append(s.stats, key)
+	if s.failErr != nil {
+		return objstore.ObjectMeta{}, s.failErr
+	}
+	if !s.present[key] {
+		return objstore.ObjectMeta{}, errors.Join(objstore.ErrNotFound, errors.New("404"))
+	}
+	return objstore.ObjectMeta{Key: key}, nil
+}
+
+func TestOpenCheck(t *testing.T) {
+	u := fakeUpcall(t, true)
+	withEntry(t, fpebpf.Entry{Ino: 909, Name: "o", S3Key: "o", Fallback: 10})
+	b := &statBackend{present: map[string]bool{"o": true}}
+	ev := readMissEvent{Ino: 909, Flags: missFlagOpenCheck}
+
+	handleReadMiss(context.Background(), "/dev/x", nil, b, ev)
+	if len(b.stats) != 1 || len(u.signals) != 1 || u.signals[0] != 0 {
+		t.Errorf("present: stats=%v signals=%v, want one HEAD and [0]", b.stats, u.signals)
+	}
+
+	u.signals = nil
+	delete(b.present, "o") // deleted from S3 after the last sync
+	handleReadMiss(context.Background(), "/dev/x", nil, b, ev)
+	if len(u.signals) != 1 || u.signals[0] != -2 {
+		t.Errorf("deleted: signals=%v, want [-2]", u.signals)
+	}
+
+	u.signals = nil
+	b.failErr = errors.New("connection refused")
+	handleReadMiss(context.Background(), "/dev/x", nil, b, ev)
+	if len(u.signals) != 1 || u.signals[0] != -5 {
+		t.Errorf("S3 failure: signals=%v, want [-5] (not ENOENT)", u.signals)
+	}
+
+	// Unknown ino / no backend; neither counts as a read-miss upcall.
+	u.signals = nil
+	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 999999, Flags: missFlagOpenCheck})
+	handleReadMiss(context.Background(), "/dev/x", nil, nil, ev)
+	if len(u.signals) != 2 || u.signals[0] != -2 || u.signals[1] != -61 {
+		t.Errorf("signals %v, want [-2 -61]", u.signals)
+	}
+}
+
+// A file this daemon created or renamed is not in the entry mirror until the
+// next sync: the open check must HEAD the key it wrote, not fail "unknown ino"
+// and not HEAD the key from before a rename.
+func TestOpenCheckLocalKeys(t *testing.T) {
+	u := fakeUpcall(t, true)
+	t.Cleanup(func() { localKeys.Delete(uint64(910)); localKeys.Delete(uint64(911)) })
+	b := &statBackend{present: map[string]bool{"dir/new.txt": true, "after": true}}
+
+	noteLocalKey(910, "dir/new.txt") // created, flushed, not in the mirror
+	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 910, Flags: missFlagOpenCheck})
+	if len(b.stats) != 1 || b.stats[0] != "dir/new.txt" || len(u.signals) != 1 || u.signals[0] != 0 {
+		t.Errorf("created: stats=%v signals=%v, want HEAD dir/new.txt and [0]", b.stats, u.signals)
+	}
+
+	withEntry(t, fpebpf.Entry{Ino: 911, Name: "before", S3Key: "before", Fallback: 1})
+	noteLocalKey(911, "after") // renamed since the last sync
+	b.stats, u.signals = nil, nil
+	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 911, Flags: missFlagOpenCheck})
+	if len(b.stats) != 1 || b.stats[0] != "after" || u.signals[0] != 0 {
+		t.Errorf("renamed: stats=%v signals=%v, want HEAD of the new key and [0]", b.stats, u.signals)
+	}
+}

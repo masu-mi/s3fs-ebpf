@@ -165,5 +165,6 @@ func handleRename(ctx context.Context, s3c objstore.Backend, ev *renameEvent) {
 	// Rewire the ino → S3Key map so subsequent flushes / deletes
 	// use the new key.
 	registerIno(newKey, ev.Ino)
+	noteLocalKey(ev.Ino, newKey) // open_check HEADs the new key until the next sync
 	fmt.Printf("[rename] ino=%d s3://%s → s3://%s\n", ev.Ino, oldKey, newKey)
 }

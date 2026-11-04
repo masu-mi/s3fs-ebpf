@@ -1,0 +1,5 @@
+date_utc: 2026-11-04T21:26:44Z
+uname: Linux 6.12.0-061200-generic #202411220723 SMP PREEMPT_DYNAMIC Tue Nov 26 13:49:49 UTC 2024
+git: 5a01a4c + working tree (open_check)
+A: STEPS=A BACKENDS='fuse-cache ebpf-pcache fuse-diskcache ebpf-pcachedrop' MICRO_ITERS=5000 (warmup 1000), 3 reps x open_check {0,1}, no netem
+fuse-cache: use_cache + kernel_cache + max_stat_cache_size=100000; fuse-diskcache: use_cache, no kernel_cache; ebpf-pcache: defaults; ebpf-pcachedrop: pcache_drop=1

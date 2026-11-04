@@ -104,6 +104,8 @@ step_A() {
 		"$S3FS_BIN" dev microbench --op=read --path="$BENCH_MP/hello.txt" --iters="$MICRO_ITERS" --label="$be" | tee -a "$OUT/A.txt" >&2
 		u1=$({ curl -s $METRICS_URL 2>/dev/null || true; } | awk '$1=="s3fs_ebpf_read_miss_upcalls_total"{print $2+0}')
 		[ "$BENCH_KIND" = ebpf ] && echo "upcalls[$be]: ${u0:-0} -> ${u1:-0}" | tee -a "$OUT/A.txt" >&2
+		# open_check=1 (BENCH_OPEN_CHECK): one S3 HEAD per open, counted by the daemon.
+		[ "$BENCH_KIND" = ebpf ] && echo "open_checks[$be]: $({ curl -s $METRICS_URL 2>/dev/null || true; } | awk '$1=="s3fs_ebpf_open_checks_total"{print $2+0}')" | tee -a "$OUT/A.txt" >&2
 	done
 	stop_everything
 }

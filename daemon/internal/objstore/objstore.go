@@ -7,8 +7,14 @@ package objstore
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrNotFound is wrapped by Backend.Stat when the key does not exist (S3
+// 404 / NoSuchKey, GCS ErrObjectNotExist), so callers can tell a missing
+// object from a failed request with errors.Is.
+var ErrNotFound = errors.New("object not found")
 
 // Backend kind constants — the value the operator passes to
 // --backend. Exposed here so callers switch on the constant rather

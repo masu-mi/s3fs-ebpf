@@ -1,0 +1,4 @@
+MinIO (silo) requests for N=1000 open+read+close of hello.txt (18 B), after a warm-up cat; cluster metrics read with a 12 s settle.
+fuse-raw open_check=0 N=1000: GET +1000  HEAD +1002
+ebpf-nocache open_check=0 N=1000: GET +999  HEAD +0
+ebpf-nocache open_check=1 N=1000: GET +999  HEAD +1019

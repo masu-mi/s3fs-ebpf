@@ -21,6 +21,7 @@
 - `s3fs_pending` は `(ino, chunk_offset)` 単位で、chunk は 4 MiB (`S3FS_PCACHE_CHUNK_SHIFT=22`)。hash key は `ino` のみ (P1: 同じ ino の全チャンクが同じ bucket に入る)。照合は `p->ino` と `p->chunk_offset` の両方で行うので、チャンクごとの完了待ちは独立 (U13)。
 - refcount は 2 本立て (H-06)。作成時は refs=2 (hash の分 + caller の分)。SIGNAL_ADMIT / shutdown が落とすのは hash の分だけで、waiter は `p->err` を読んだ後に自分の分を `pending_put` で落とす。
 - `pending_exists(ino)` は eviction 側のガードで、pending 中の ino を evict 候補から外す。key=`ino` の bucket を走査し、どのチャンクの pending でも見つける。hash key を変えるときはこの前提を崩さないこと。
+- open_check (module param、既定 0): `open(2)` (O_CREAT なし、通常ファイル、dirty / flushing でない) は `pending_get_or_create(ino, S3FS_OPEN_CHECK_KEY = U64_MAX)` を作り、`S3FS_MISS_FLAG_OPEN_CHECK` の miss event を送って待つ。U64_MAX は 4 MiB の倍数ではないので read の chunk の pending とは衝突しない。daemon は HEAD して `SIGNAL_ADMIT(chunk_offset=U64_MAX)` で 0 / -ENOENT / -EIO を返す (VERIFY_POPULATED は付けない: chunk を持たない)。タイムアウトは -EIO。待つのは `file->private_data` を確保する**前**なので、失敗した open に release は来ない。chunk の pin は取らない (chunk を読まない)。open_check の pending も `pending_exists(ino)` に見えるので、待っている間その ino は丸ごとは evict されない。
 
 ## 成功 signal の契約 (AC-45 C2)
 - `S3FS_IOC_SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を付けて `err == 0` で呼ぶと、`s3fs_ebpf_signal_admit` は pending (ino, chunk_offset) を見つけたあと、その chunk が確保済みかつ `populated` であることを `fd->lock` 下で確かめる。なければ **pending を完了させず `-EAGAIN`** を返す。pcache モードの daemon (`handleReadMiss`) だけがこのフラグを付ける (arena の admit は chunk を持たない)。

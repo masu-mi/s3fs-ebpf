@@ -169,6 +169,14 @@ ebpf_pcache_drop() {
 	echo "$1" | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/pcache_drop" >/dev/null
 }
 
+# ebpf_open_check <0|1> — toggle the kmod's open_check mode: open(2) without
+# O_CREAT asks the daemon to HEAD the object and fails with its error (ENOENT
+# when S3 says 404) instead of trusting the entry table (see
+# kmod/vfs/aops_read.inc.c s3fs_open_verify). Resets on rmmod.
+ebpf_open_check() {
+	echo "$1" | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/open_check" >/dev/null
+}
+
 # fd_buf_audit — print one `DETAIL fd_buf_audit ...` line comparing the M1
 # gauge (incremental) with M2's walk over live inodes and the pcache share
 # the AC-41 capacity loop charges. Call before ebpf_stop, with I/O idle.
@@ -261,6 +269,7 @@ BENCH_KIND=""      # fuse | ebpf
 bench_down() {
 	ebpf_nocache 0 2>/dev/null || true
 	ebpf_pcache_drop 0 2>/dev/null || true
+	ebpf_open_check 0 2>/dev/null || true
 	echo 0 | sudo tee "/sys/module/${S3FS_KMOD_NAME}/parameters/partial_modify" >/dev/null 2>&1 || true
 	ebpf_stop "$BENCH_MP_EBPF" >/dev/null 2>&1 || true
 	umount_hard "$BENCH_MP_FUSE"
@@ -293,6 +302,8 @@ bench_up() {
 			ebpf-nocache|ebpf-nocache-diskcache) ebpf_nocache 1 ;;
 			ebpf-pcachedrop) ebpf_pcache_drop 1 ;;
 		esac
+		# BENCH_OPEN_CHECK=1: open(2) pays an S3 HEAD like s3fs-fuse's open.
+		[ "${BENCH_OPEN_CHECK:-0}" = 1 ] && ebpf_open_check 1
 		BENCH_KIND=ebpf; BENCH_MP=$BENCH_MP_EBPF ;;
 	*) echo "bench_up: unknown backend $be" >&2; return 1 ;;
 	esac
@@ -310,6 +321,7 @@ bench_env_report() {
 	echo "fuse-cache:     s3fs -o use_cache=<dir> -o kernel_cache -o max_stat_cache_size=100000"
 	echo "ebpf-*:         fastpath --arena-metadata-only --policy-bpf=builtin:policy_observe_ops (+ --cache-dir except nocache)"
 	echo "ebpf-nocache:   kmod nocache=1;  ebpf-pcachedrop: kmod pcache_drop=1;  ebpf-pcache: defaults"
+	echo "open_check:     kmod open_check=${BENCH_OPEN_CHECK:-0} (1 = open(2) HEADs the object; set BENCH_OPEN_CHECK=1)"
 	echo "partial_modify: daemon default (on); partial_modify_min default"
 }
 

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
+	"sync"
 	"time"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
@@ -31,6 +33,72 @@ const missFlagForWrite = 0x1
 // missFlagPinned mirrors S3FS_MISS_FLAG_PINNED (AC-51): the fd depends on the
 // pinned ETag, so a changed object is a conflict, not a stale pin.
 const missFlagPinned = 0x2
+
+// missFlagOpenCheck mirrors S3FS_MISS_FLAG_OPEN_CHECK: kmod's open(2) (module
+// param open_check=1) asks whether the object still exists.
+const missFlagOpenCheck = 0x4
+
+// openCheckKey mirrors S3FS_OPEN_CHECK_KEY, the pending chunk_offset of an open
+// check (all ones as a u64; a read's chunk offsets are 4 MiB multiples).
+const openCheckKey int64 = -1 // uint64(openCheckKey) is all ones
+
+// localKeys remembers the S3 key of every ino this daemon created (flush) or
+// renamed. The entry mirror only learns them at the next sync, but an open
+// check for such a file must HEAD the key the daemon wrote, not "unknown ino"
+// (ENOENT) or the key before the rename. It is not cleared by a sync (a flush
+// racing the listing would otherwise lose its key); one small entry per file
+// this daemon wrote, and a later sync keeps ino <-> key stable.
+var localKeys sync.Map // ino (uint64) -> S3 key (string)
+
+func noteLocalKey(ino uint64, key string) {
+	if key != "" {
+		localKeys.Store(ino, key)
+	}
+}
+
+// openCheckKeyFor returns the key to HEAD for ino.
+func openCheckKeyFor(ino uint64) (name, key string, ok bool) {
+	if v, hit := localKeys.Load(ino); hit {
+		k := v.(string)
+		return path.Base(k), k, true
+	}
+	if e := fpebpf.LookupByIno(ino); e != nil {
+		return e.Name, e.S3Key, true
+	}
+	return "", "", false
+}
+
+// handleOpenCheck HEADs the object behind ev.Ino and signals the open's
+// waiter: 0 if it exists, -ENOENT if S3 says 404 (or the ino is unknown),
+// -EIO for any other failure. It is not a read miss, so it is neither counted
+// as an upcall nor observed in the miss latency histogram.
+func handleOpenCheck(ctx context.Context, devPath string, s3c objstore.Backend, ev readMissEvent) {
+	metrics.Global.OpenChecks.Add(1)
+	signal := func(code int32) { _ = signalAdmitFn(devPath, ev.Ino, openCheckKey, code) }
+	name, key, ok := openCheckKeyFor(ev.Ino)
+	if !ok {
+		metrics.Global.OpenCheckMissing.Add(1)
+		signal(-2 /* -ENOENT */)
+		return
+	}
+	if s3c == nil {
+		signal(-61 /* -ENODATA */)
+		return
+	}
+	if _, err := s3c.Stat(ctx, key); err != nil {
+		if errors.Is(err, objstore.ErrNotFound) {
+			metrics.Global.OpenCheckMissing.Add(1)
+			fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: not in S3 — ENOENT\n", ev.Ino, name)
+			signal(-2)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: %v\n", ev.Ino, name, err)
+		metrics.Global.ReadMissErrors.Add(1)
+		signal(-5 /* -EIO */)
+		return
+	}
+	signal(0)
+}
 
 // handleLoadForWrite serves a miss that kmod flagged S3FS_MISS_FLAG_FOR_WRITE
 // (AC-50): load the 4 MiB chunk containing ev.Offset into the ino's fd with
@@ -221,6 +289,10 @@ var readMissShutdownWarn = 5 * time.Second
 
 func handleReadMiss(ctx context.Context, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, ev readMissEvent) {
+	if ev.Flags&missFlagOpenCheck != 0 {
+		handleOpenCheck(ctx, devPath, s3c, ev)
+		return
+	}
 	metrics.Global.ReadMissUpcalls.Add(1)
 	// Time the full miss-service path (S3 Get + arena write +
 	// admit_replace) and observe on every return path — including

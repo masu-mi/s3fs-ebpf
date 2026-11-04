@@ -1,0 +1,16 @@
+[microbench] fuse-cache
+  iters=5000 warmup=1000 total=2.557425533s ops/s=1955
+  min=398.337µs  p50=505.275µs  p95=574.809µs  p99=618.201µs  max=6.431293ms
+[microbench] ebpf-pcache
+  iters=5000 warmup=1000 total=15.116183ms ops/s=330771
+  min=2.727µs  p50=2.826µs  p95=3.15µs  p99=5.772µs  max=17.619µs
+upcalls[ebpf-pcache]: 1 -> 1
+open_checks[ebpf-pcache]: 0
+[microbench] fuse-diskcache
+  iters=5000 warmup=1000 total=2.718450643s ops/s=1839
+  min=441.587µs  p50=535.962µs  p95=610.088µs  p99=740.075µs  max=4.232336ms
+[microbench] ebpf-pcachedrop
+  iters=5000 warmup=1000 total=20.129498ms ops/s=248392
+  min=3.601µs  p50=3.743µs  p95=4.306µs  p99=7.347µs  max=21.065µs
+upcalls[ebpf-pcachedrop]: 1 -> 1
+open_checks[ebpf-pcachedrop]: 0

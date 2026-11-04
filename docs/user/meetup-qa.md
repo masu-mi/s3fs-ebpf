@@ -615,7 +615,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 | 場面 | 結果 |
 |---|---|
-| open+read+close (キャッシュなし同士) | 3.3× |
+| open+read+close (キャッシュなし同士) | 3.3× (※ s3fs-ebpf の open が S3 に HEAD しない分を含む。`open_check=1` で HEAD すると約 1.7×、§18.51) |
 | open+read+close (キャッシュあり同士) | 172× |
 | 4 KiB × 10,000 個の cat (2 回目) | 93× (fuse-cache 比 32×) |
 | 4 KiB × 10,000 個の `ls -l` (初回) | 11× |

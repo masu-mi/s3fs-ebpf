@@ -148,6 +148,9 @@ struct s3fs_read_miss_event {
  * changed object is then a conflict.  Without this flag the fd depends on
  * nothing, so the daemon may drop a stale pin and re-Stat. */
 #define S3FS_MISS_FLAG_PINNED		0x2u
+/* open_check: not a read; HEAD the object and signal 0 (exists) or -ENOENT /
+ * -EIO.  chunk_offset of the pending is S3FS_OPEN_CHECK_KEY (all ones). */
+#define S3FS_MISS_FLAG_OPEN_CHECK	0x4u
 /* AC-51: also sent for a read of a remote chunk of a dirty file: load the
  * whole chunk at `offset` into the fd (kmod accepts it because the chunk is
  * remote; the daemon needs nothing else). */
