@@ -13,9 +13,13 @@ shift $((OPTIND - 1))
 [ $# -ge 1 ] || { echo "usage: $0 [-o OUTDIR] [-a user:pass] [-s SCRIPT.js] URL [STEPS.json]" >&2; exit 2; }
 URL=$1 STEPS=${2:-}
 
+# ランタイム: BROWSER_RUNTIME で指定、なければ podman (rootless) → docker → nerdctl の順で最初に見つかったもの。
 RT=${BROWSER_RUNTIME:-}
-[ -n "$RT" ] || RT=$(command -v docker || command -v podman || true)
-[ -n "$RT" ] || { echo "docker / podman がない。SKILL.md の qemu 手順を使うか、撮影を諦める" >&2; exit 3; }
+if [ -z "$RT" ]; then
+  for c in podman docker nerdctl; do RT=$(command -v "$c" || true); [ -z "$RT" ] || break; done
+fi
+[ -n "$RT" ] || { echo "コンテナランタイム (podman / docker / nerdctl) がない。SKILL.md の qemu 手順を使うか、撮影を諦める" >&2; exit 3; }
+echo "runtime: $RT" >&2
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(mktemp -d /tmp/browse.XXXXXX)
