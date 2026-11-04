@@ -11,11 +11,7 @@ kmod の誤りはカーネルの oops になる。**oops すると、そのプ�
 
 - `docs/kmod-pcache-invariants.md` を読む (CLAUDE.md の指示)。ロック順は `fd->lock` → `s3fs_admits_lock`。不変条件を変えるなら同じ変更でこのメモを更新する。
 - 関数は `scripts/fn.sh <func>` で引く。`vfs_ops.c` を全文 Read しない。
-- folio / page cache API の落とし穴:
-  - `readahead_count()` と `readahead_pos()` は、直前に取った folio の分だけ**遅れる**。覗き見に使わない。`while ((folio = readahead_folio(rac)))` で取り、位置は `folio_pos(folio)`。覗き見の版は NULL の folio を触って oops した。取った folio は成功でも失敗でも `folio_unlock` する (not-uptodate のまま unlock すれば、残りは core が unlock し、reader が `.read_folio` を呼ぶ)。
-  - `kmap_local_folio(folio, 0)` は 1 ページしか map しない。large folio では `memcpy_to_folio` / `folio_zero_range` を使う。
-  - `file->f_ra.ra_pages` は `->open` のあとの `file_ra_state_init` で上書きされる。readahead の窓は sb の bdi (`super_setup_bdi` → `sb->s_bdi->ra_pages`) で決める。専用の bdi が無い sb は `ra_pages == 0` で、readahead が一度も呼ばれない。
-  - hit の計上 (`s3fs_folio_hits`、`s3fs_hit_signal_direct`) は folio 単位。large folio では 1 hit が複数ページ分になる。
+- folio / readahead / page cache を触るなら `docs/dev-notes/ac75-ac76-lessons.md` の「AC-76」の知見と、`docs/kmod-pcache-invariants.md` の「読み取りの readahead と large folio」を読む (`readahead_*` の遅れ、`kmap_local_folio` の範囲、`ra_pages` は bdi で決めること、hit の計上単位)。
 
 ## 2. 載せる
 
@@ -32,10 +28,9 @@ kmod の誤りはカーネルの oops になる。**oops すると、そのプ�
 
 ## 4. oops したら
 
-1. `sudo dmesg | grep -n -E "BUG|Oops|RIP: 0010|Call Trace"` の最初の oops を見る。`RIP: 0010:<関数>+0x..` を `addr2line -e kmod/s3fs_kfunc.ko -f -i <関数の先頭+offset>` (先頭は `nm`) で行に落とす。
-2. 後続のログ ("scheduling while atomic"、"Fixing recursive fault but reboot is needed") は連鎖。最初の 1 件だけ読む。
-3. ベンチ、daemon、`sudo cat` を kill し、`umount -l`、`rmmod`。`Module is in use` / `Resource temporarily unavailable` なら**再起動する**。再起動できなければホストを止める。ここで時間を使わない。
-4. 再起動後: `make compose-up`、`lsmod | grep s3fs` が空、`git status`。
+1. 最初の oops の `RIP: 0010:<関数>+0x..` を `addr2line` で行に落とす (`docs/dev-notes/ac75-ac76-lessons.md` の「環境の落とし穴」)。後続のログは連鎖なので読まない。
+2. ベンチ、daemon、`sudo cat` を kill し、`umount -l`、`rmmod`。`Module is in use` / `Resource temporarily unavailable` なら**再起動する**。再起動できなければホストを止める。ここで時間を使わない。
+3. 再起動後: `make compose-up`、`lsmod | grep s3fs` が空、`git status`。
 
 ## 5. 終わり
 

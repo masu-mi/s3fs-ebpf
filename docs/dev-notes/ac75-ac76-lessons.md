@@ -29,9 +29,15 @@
   - hit の計上が folio 単位なので、large folio では `folio_hits` が減る。
   - 未了: `make test-lockdep` (lockdep 付きカーネルが要る)。
 
+## 切り分けの方法 (perf / bpftrace)
+
+- 走行中に `sudo $P record -a -g -F 2000 -o <out> -- sleep 6`、`sudo $P report -i <out> --children --sort sym -g none | grep -E "<関数>"`。`--children` の割合が、その関数の下の合計。比べる関数: `filemap_read`、`page_cache_ra_order`、`read_pages`、`invalidate_inode_pages2`、`__memcpy`、`_copy_to_iter`、`filemap_add_folio`。
+- 呼び出し回数と状態: `sudo timeout 20 bpftrace -e 'kprobe:<kmod の関数>{@a=count();} fentry:vmlinux:page_cache_sync_ra{@ra=lhist(args->ractl->ra->ra_pages,0,2048,256);} interval:s:4{exit();}'`。kmod の関数は kprobe、BTF のあるカーネル関数は fentry ("No BTF found" になる関数もある)。AC-76 は readahead が 0 回で、`ra_pages` の分布が [0,256) だけだったことで原因に気づいた。
+
 ## 環境の落とし穴
 
 - kmod が oops すると、`rmmod` も `rmmod -f` も効かず、再起動が要る (今回はホストを止めた)。再起動後は docker のコンテナが止まっているので `make compose-up`。
+- oops の読み方: 最初の `RIP: 0010:<関数>+0x..` だけ読み、`addr2line -e kmod/s3fs_kfunc.ko -f -i <nm の関数先頭 + offset>` で行に落とす。後続の "scheduling while atomic"、"Fixing recursive fault but reboot is needed" は連鎖。
 - `perf` は kernel 版が合わず、`/usr/lib/linux-tools/<版>/perf` を直接指定する。
 - `bench-layer-latency.sh` はリポジトリのルートから実行する (bpf の相対パス)。`timeout` を付ける。
 - `/tmp` は再起動で消える。ベンチの出力は scratchpad に置く。
