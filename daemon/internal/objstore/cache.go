@@ -149,6 +149,64 @@ func (c *DiskCache) Observe(key, etag string, size int64) {
 	c.remote.Store(key, remoteState{etag: etag, size: size})
 }
 
+// ETag returns the ETag the backend last reported for key, if any.
+func (c *DiskCache) ETag(key string) (string, bool) {
+	if !c.enabled() {
+		return "", false
+	}
+	if v, ok := c.remote.Load(key); ok {
+		return v.(remoteState).etag, true
+	}
+	return "", false
+}
+
+// rangeKey names the cache entry of [off, off+n) of key (AC-75).  The NUL
+// keeps it from colliding with any object key.
+func rangeKey(key string, off, n int64) string {
+	return key + "\x00range:" + strconv.FormatInt(off, 10) + ":" + strconv.FormatInt(n, 10)
+}
+
+// ReadRange returns the cached bytes of [off, off+n) of key, if they were read
+// from the object whose ETag is etag (AC-75: a chunk of a large object, which
+// Read/Write do not hold because they are keyed on the whole object).  A
+// stale entry is removed.
+func (c *DiskCache) ReadRange(key string, off, n int64, etag string) ([]byte, bool) {
+	if !c.enabled() || etag == "" {
+		return nil, false
+	}
+	rk := rangeKey(key, off, n)
+	raw, err := os.ReadFile(c.path(rk))
+	if err != nil {
+		return nil, false
+	}
+	hetag, size, body, ok := parseCacheFile(raw)
+	if ok && hetag == etag && size == n && int64(len(body)) == n {
+		return body, true
+	}
+	c.drop(rk)
+	return nil, false
+}
+
+// WriteRangeAsync stores the n = len(buf) bytes at off of key, which came from
+// the object whose ETag is etag.  Unlike WriteAsync it waits for a free
+// write-behind slot rather than dropping the write: a 64 MiB object is 16
+// chunks at once, and a dropped chunk is an S3 GET on the next read.  buf must
+// not be modified afterwards.
+func (c *DiskCache) WriteRangeAsync(key string, off int64, buf []byte, etag string) {
+	if !c.enabled() || etag == "" || len(buf) == 0 {
+		return
+	}
+	rk := rangeKey(key, off, int64(len(buf)))
+	st := c.async
+	st.sem <- struct{}{}
+	st.wg.Add(1)
+	go func() {
+		defer st.wg.Done()
+		defer func() { <-st.sem }()
+		c.write(rk, buf, etag, nil)
+	}()
+}
+
 // Read returns the cached body for `key`. ok=false on any error
 // (missing file, permission denied, a file without a valid header, a body
 // that does not match the recorded size, or one the backend has since
@@ -172,7 +230,7 @@ func (c *DiskCache) Read(key string) ([]byte, bool) {
 		}
 	}
 	// Stale or unreadable: drop it so the refetch replaces it.
-	c.Invalidate(key)
+	c.drop(key)
 	return nil, false
 }
 
@@ -312,10 +370,20 @@ func writeFileParts(path string, head, body []byte) error {
 
 // Invalidate drops the cached body for `key`. Called from Put /
 // Delete / Rename so the next Get re-fetches authoritative state.
+//
+// It also forgets the ETag observed for key: chunk entries (AC-75) cannot be
+// enumerated, so they are retired by the next Observe naming the new ETag;
+// until then ranges are neither read from nor written to the cache.
 func (c *DiskCache) Invalidate(key string) {
 	if !c.enabled() {
 		return
 	}
+	c.remote.Delete(key)
+	c.drop(key)
+}
+
+// drop removes the cached body stored under key.
+func (c *DiskCache) drop(key string) {
 	p := c.path(key)
 	c.async.mu.Lock()
 	defer c.async.mu.Unlock()

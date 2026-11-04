@@ -57,6 +57,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/pcache-mode.md`](design/pcache-mode.md) | pcache モード (`--arena-metadata-only`) の全体像: arena モードとの違い、chunk の表、read / eviction / write の流れ、性能と残課題 |
 | [`design/pcache-chunk-table.md`](design/pcache-chunk-table.md) | pcache の chunk 表 (`fd->chunks[]`) のレイアウト: 構造体、4 MiB の番地の対応、chunk の状態、admit entry と容量の関係 |
 | [`design/cache-algorithms.md`](design/cache-algorithms.md) | LRU / SIEVE / S3-FIFO / W-TinyLFU の図つきの早見と、この PoC での実装の形 |
+| [`design/disk-cache-range.md`](design/disk-cache-range.md) | daemon の disk cache (`--cache-dir`) の対象サイズ。4 MiB 以下は object 全体、超える object は chunk (key, offset, size) 単位で、ETag を照合して使う (AC-75) |
 | [`design/backing-file-tier.md`](design/backing-file-tier.md) | 案 (未実装・未計測): pcache の下にローカル FS の backing file へ素通しする段 (warm) を足し、メモリの上限を緩める設計。fuse-bpf / FUSE passthrough と同じ形。将来の検証項目 8 つ |
 | [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計 (実装済み、`--partial-modify`、既定 off) |
 | [`design/ac58-pick-victim.md`](design/ac58-pick-victim.md) | AC-58: policy の vtable に `on_insert` / `on_remove` / `pick_victim` を足し、victim の選択を BPF に渡す設計 (実装済み、SIEVE / LRU / S3-FIFO の `*_pick_ops`) |
