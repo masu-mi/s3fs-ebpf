@@ -119,9 +119,29 @@ func (c *Client) Rename(ctx context.Context, oldKey, newKey string) error {
 
 // GetRange fetches a byte slice via S3 HTTP Range GET so only the
 // requested chunk crosses the wire — critical for D-01's
-// partial-admit path. Local disk cache is skipped for range GETs
-// (cache is keyed on whole object).
+// partial-admit path.
+//
+// AC-75: when the disk cache is on and the object's ETag is known (List /
+// Stat), the chunk is read from and written to the cache under
+// (key, offset, size) tagged with that ETag; the fetch is pinned to it with
+// If-Match, so a cached chunk is always bytes of the ETag it names.
 func (c *Client) GetRange(ctx context.Context, key string, offset int64, size int64) ([]byte, error) {
+	if etag, ok := c.cache.ETag(key); ok {
+		if buf, hit := c.cache.ReadRange(key, offset, size, etag); hit {
+			return buf, nil
+		}
+		buf, err := c.GetRangeMatch(ctx, key, offset, size, etag)
+		if err == nil {
+			if int64(len(buf)) == size { // short = past the end: not a chunk
+				c.cache.WriteRangeAsync(key, offset, buf, etag)
+			}
+			return buf, nil
+		}
+		if !errors.Is(err, objstore.ErrSourceChanged) {
+			return nil, err
+		}
+		// Changed under us: serve the current bytes, uncached.
+	}
 	opts := minio.GetObjectOptions{}
 	if err := opts.SetRange(offset, offset+size-1); err != nil {
 		return nil, fmt.Errorf("s3 range set: %w", err)

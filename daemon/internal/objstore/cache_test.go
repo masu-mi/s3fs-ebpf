@@ -312,3 +312,33 @@ func TestDiskCache_StaleBodyIsNotServed(t *testing.T) {
 		}
 	})
 }
+
+// AC-75: chunks of a large object are cached per (key, offset, size), tagged
+// with the ETag they were read from.
+func TestDiskCache_Range(t *testing.T) {
+	cache, err := NewDiskCache(t.TempDir(), KindS3, "bucket", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.Observe("k", "e1", 8)
+	cache.WriteRangeAsync("k", 4, []byte("WXYZ"), "e1")
+	cache.WaitAsync()
+	if b, ok := cache.ReadRange("k", 4, 4, "e1"); !ok || string(b) != "WXYZ" {
+		t.Fatalf("ReadRange = %q, %v", b, ok)
+	}
+	if _, ok := cache.ReadRange("k", 0, 4, "e1"); ok {
+		t.Error("a different chunk must miss")
+	}
+	if _, ok := cache.ReadRange("k", 4, 4, "e2"); ok {
+		t.Error("a chunk of another ETag must miss")
+	}
+	if _, ok := cache.ReadRange("k", 4, 4, "e1"); ok {
+		t.Error("a stale chunk must have been removed")
+	}
+	cache.WriteRangeAsync("k", 4, []byte("WXYZ"), "e1")
+	cache.WaitAsync()
+	cache.Invalidate("k")
+	if _, ok := cache.ETag("k"); ok {
+		t.Error("Invalidate must forget the observed ETag")
+	}
+}
