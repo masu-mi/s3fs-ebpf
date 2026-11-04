@@ -1,0 +1,6 @@
+fuse-cache open_check=0 N=1000: GET +0  HEAD +1001
+ebpf-pcache open_check=0 N=1000: GET +0  HEAD +0
+ebpf-pcache open_check=1 N=1000: GET +0  HEAD +1012
+fuse-diskcache open_check=0 N=1000: GET +0  HEAD +1001
+ebpf-pcachedrop open_check=0 N=1000: GET +0  HEAD +0
+ebpf-pcachedrop open_check=1 N=1000: GET +0  HEAD +1008

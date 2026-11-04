@@ -1,0 +1,7 @@
+date_utc: 2026-11-04T15:31:18Z
+uname: Linux 6.12.0-061200-generic #202411220723 SMP PREEMPT_DYNAMIC Tue Nov 26 13:49:49 UTC 2024
+git: 5a01a4c1e7857e6f2459d4f6644089eb3b9303eb (HEAD) + working tree (open_check not used by this run; kmod built before open_check)
+silo: docker.io/pgsty/silo:latest sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+netem: silo container netns, eth0 egress: delay 12.5ms 2.5ms (uniform 10-15ms, one way = RTT +10..15ms)
+H: N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 PCACHE_DROP=1 --arena-metadata-only seeds 42 43 44
+note: a 'go test ./internal/s3' (20 s) ran concurrently with seed43 delay

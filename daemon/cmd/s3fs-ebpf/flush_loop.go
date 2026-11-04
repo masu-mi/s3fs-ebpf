@@ -400,6 +400,7 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	name := string(ev.Name[:ev.NameLen])
 
 	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
+	noteLocalKey(ev.Ino, s3key) // open_check: the mirror learns this key only at the next sync
 
 	if s3c == nil {
 		fmt.Printf("[flush] drop ino=%d name=%s (no S3 backend)\n",

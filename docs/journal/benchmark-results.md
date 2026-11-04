@@ -291,7 +291,7 @@ fuse-cache  | p50=0.519 ms   ops/s=1 878      (3.3× faster than raw)
 ebpf-A+C    | p50=3.075 μs   ops/s=308 104    (169× faster than fuse-cache, 550× vs raw)
 ```
 
-ebpf-nocache p50=526 µs も同一 run → fuse-raw 1.691 ms / ebpf-nocache 526 µs = **3.22×** (同一 run 由来)。
+ebpf-nocache p50=526 µs も同一 run → fuse-raw 1.691 ms / ebpf-nocache 526 µs = **3.22×** (同一 run 由来)。**[2026-11-04 訂正: ebpf の open が S3 の存在確認 (HEAD) をしていない分が入っている。open_check=1 で測ると約 1.7×。§18.51]**
 
 旧 (10k iters): fuse-raw p50=5.012 ms / fuse-cache p50=1.244 ms / ebpf-A+C p50=5.075 µs (245× vs fuse-cache)。比率傾向は同じで、新 run はシステム全体がより warm。
 
@@ -384,7 +384,7 @@ ebpf-nocache | p50=558 µs   ops/s=1 733   total=11.5 s / 20k iters   (≈100% S
 ebpf-nocache | p50=526 µs   ops/s=1 872   total=10.7 s / 20k iters   (≈100% S3 miss)
 fuse-raw     | p50=1.691 ms  (同一 run §7.3)
 ```
-1.691 ms / 526 µs = **3.22×** — 同一 run で確定。Meetup の「約 3×」は `3.22×` が実測値。
+1.691 ms / 526 µs = **3.22×** — 同一 run で確定。Meetup の「約 3×」は `3.22×` が実測値。 **[2026-11-04: ebpf の open が HEAD しない分を含む。HEAD すると約 1.7×、§18.51]**
 
 #### 7.7.3 perf stat (ebpf-nocache、per cat)
 
@@ -609,7 +609,7 @@ fuse_dev_do_read  (upcalls 総計): 8029  → 4.01 / op
 - getattr/open/lookup は kernel_cache 無しの fuse-raw でもほぼゼロ (warmup 後の inode はキャッシュ済み)
 - p50=1.691ms / 4 = **423 µs/upcall** — `/dev/fuse` を経由した 1 往復の平均コスト
 
-**結論**: fuse-raw の 3.22× 差 = 4 upcall × 423 µs/upcall = 1.69ms。ebpf-nocache も miss ごとに daemon upcall するが、`/dev/fuse` IPC ではなく共有メモリ経由のため open/flush/release が不要。構造上の IPC 往復数の差が 3× の主因。
+**結論** (2026-11-04: この 3.22× には s3fs-fuse が open ごとに払う HEAD が含まれる。ebpf 側も HEAD すると約 1.7×、§18.51): fuse-raw の 3.22× 差 = 4 upcall × 423 µs/upcall = 1.69ms。ebpf-nocache も miss ごとに daemon upcall するが、`/dev/fuse` IPC ではなく共有メモリ経由のため open/flush/release が不要。構造上の IPC 往復数の差が 3× の主因。
 
 ### 11.3 mount-s3 cross-impl microbench (2026-10-11、5000 iters)
 
@@ -628,7 +628,7 @@ mount-s3      5000   1000    545–562 ms  8,896–9,167  110 µs   140 µs    1
 
 | 対象 | fuse-raw に対して | ebpf-nocache に対して |
 |---|---:|---:|
-| ebpf-nocache | 3.2× 速い | — |
+| ebpf-nocache | 3.2× 速い (§18.51: open の HEAD を除いた値) | — |
 | mount-s3 (--cache) | **15× 速い** | **4.8× 速い** |
 
 **注意点**:
@@ -2425,3 +2425,62 @@ cold (open + 全 op の wall time、ms。s3 = backend の cache を空にして�
 - MinIO の TTFB の histogram は最小の bucket が 50 ms で、ローカルの GET (約 0.5 ms) は分解できない。Grafana には載せていない。
 - 実際の S3 (遠い、数十 ms) での層 4 は未計測。層 4 の値は「MinIO がローカルで速いときの daemon 側の固定費」を見るものとして読む。
 - Grafana のスクリーンショットでは、棒グラフの右端の目盛りが一部切れている (表示だけの問題)。
+
+### 18.50 キャッシュ policy の比較に silo への遅延 (netem 10〜15 ms) を足した参考値 (2026-11-04)
+
+ローカルの silo (MinIO fork) は S3 の往復が 0.5 ms 程度で、miss の代償が小さい。遠い S3 を想定して、silo コンテナの netns に入って `eth0` の egress に `tc qdisc add dev eth0 root netem delay 12.5ms 2.5ms` を付け (応答側だけに付くので、1 往復あたり +10〜15 ms)、policy 5 種の H (Zipf、`pcache_drop=1`) を遅延なし / ありで流した。**シミュレーションなので参考値**。生データ: `journal/data/policy-latency-netem-20261104/`。
+
+**条件**: 日付 2026-11-04、`uname -r` 6.12.0-061200-generic、HEAD `5a01a4c` (open_check の変更前に build した kmod / daemon)、`bench-hitrate.sh` (`N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 PCACHE_DROP=1 --arena-metadata-only`)、seed 42 / 43 / 44 × {遅延なし, あり}。tc は silo の netns だけ (`nsenter -t <pid> -n tc`)。daemon ↔ silo の経路だけが遅くなり、`mc` (コンテナ内 loopback) と他の通信は影響を受けない。
+
+**値** (3 seed の中央値、括弧は最小–最大)。ms/access は `sudo cat` 1 回の壁時計で、プロセス起動の固定費 (約 6.5 ms) を含む。hit は S3 に行かないので ms/access は policy によらず 6.5 ms 前後で、差が出るのは miss だけ。
+
+| policy | hit rate (%) | ms/access 遅延なし | ms/access 遅延あり | 差 (ms) |
+|---|---:|---:|---:|---:|
+| observe_ops | 28.1 (27.4–28.1) | 6.51 (6.48–6.61) | 15.69 (15.64–15.74) | 9.18 |
+| lru_pick_ops | 38.8 (38.5–39.8) | 6.63 (6.59–6.68) | 14.42 (14.33–14.52) | 7.79 |
+| sieve_pick_ops | 45.4 (43.8–47.5) | 6.59 (6.58–6.60) | 13.50 (13.26–13.74) | 6.91 |
+| s3fifo_pick_ops | 48.0 (46.7–49.0) | 6.56 (6.50–6.60) | 13.24 (13.00–13.35) | 6.68 |
+| wtinylfu_pick_ops | 50.4 (48.3–50.8) | 6.54 (6.46–6.56) | 12.93 (12.89–13.17) | 6.39 |
+
+- **差は miss 数 × 約 12.7 ms と一致する**: (遅延あり − なし) × 2000 ÷ miss 数 = 12.5〜13.0 ms/miss (全 15 run)。設定した netem の中心 12.5 ms と合う。hit は遅延の影響を受けない (層の判定は upcall 数で確認: 遅延なしとありで miss 数が seed ごとに同一)。
+- 遅延あり 1 access あたりでは observe_ops (policy なし) 15.7 ms に対し wtinylfu_pick_ops 12.9 ms (-18%)。順位は遅延なしの hit rate と同じ (wtinylfu > s3fifo > sieve > lru > observe)。これは §18.48 の H の順位と一致し、遅延は順位を変えず、miss 1 回の代償を 0.5 ms から約 13 ms に上げただけ。
+- 全 run で `err=0`。
+
+**限界**: ms/access が `sudo cat` の起動費を含むので、miss の代償の絶対値は「差」の列を見る。seed 43 の遅延あり run は、`go test ./internal/s3` (約 20 秒) と重なったが、他の seed と揃っている (差 6.37〜7.93 ms、12.5〜12.9 ms/miss)。遅延は片方向 (応答側) のみで、RTT 換算で +10〜15 ms。silo 側の処理時間は変えていない。
+
+### 18.51 「構造差 3.2×」の訂正: open が S3 の存在確認をしていなかった (2026-11-04)
+
+§11.2 / §18.27〜18.32 の「ebpf-nocache と fuse-raw の open+read+close の差 3.2×」は、**s3fs-ebpf の open が S3 に何も聞いていなかった分** が混ざっていた。
+
+- kmod は lookup も open も自分の entry table (daemon の sync が更新する) だけで答える。sync の後に S3 から消えた key でも open は成功し、エラーは最初の read まで出ない (page cache に載っていれば出ない)。O_CREAT でない open が存在を確かめないのは、FUSE ファイルシステムとして不完全。
+- s3fs-fuse は open のたびに HEAD する: **fuse-raw は 1000 回の open+read+close で silo への GET が 1000、HEAD が 1002** (`head-get-counts.txt`)。ebpf-nocache は GET 999、HEAD 0 だった。比べていた「構造差」には、この HEAD 1 往復 (ローカル silo で約 0.44 ms) が丸ごと入っていた。
+
+**修正**: kmod の module param **`open_check`** (既定 0、実行時に切り替え可)。1 のとき、O_CREAT でない open (通常ファイル、dirty / flushing でないもの) は `S3FS_MISS_FLAG_OPEN_CHECK` の upcall を送り、daemon が HEAD して 0 / `-ENOENT` (404) / `-EIO` を返し、open がそのエラーで失敗する。既定を 0 にしたのは、cache hit の open が S3 の往復を払わないようにするため (§18.27〜 の「キャッシュあり同士」の値はこれに依存する)。daemon は自分が flush / rename した ino の key を `localKeys` に覚え (mirror は次の sync まで知らない)、`objstore.ErrNotFound` で 404 と他の失敗を区別する。bench は `BENCH_OPEN_CHECK=1` で `open_check=1` にする。回帰試験: `make test-open-check` (daemon の単体テストは `TestOpenCheck*`)。
+
+**再測定** (A、`bench-pcache-remeasure.sh`、5000 iters + warmup 1000、3 回ずつ交互、tc なし、HEAD `5a01a4c` + 作業ツリー): `journal/data/open-check-remeasure-20261104/`
+
+| 構成 | fuse-raw p50 | ebpf-nocache p50 | 比 (fuse ÷ ebpf) |
+|---|---:|---:|---:|
+| `open_check=0` (従来の open) | 1696 µs (1678–1709) | 537 µs (534–540) | **3.16×** |
+| `open_check=1` (open が HEAD する) | 1678 µs (1676–1702) | 977 µs (965–985) | **1.72×** |
+
+- 従来の 3.2× は §18.48 までの値 (3.22×) と合う (対照が動いていない)。open が HEAD を払うと ebpf-nocache は +440 µs (S3 の HEAD 1 往復) 遅くなり、**構造差は約 3.2× ではなく約 1.7×**。「同じ仕事をしたとき」の差は、HEAD を払う FUSE の open の往復と、daemon が flush / release の upcall を持たない分だけ。
+- 1000 回あたりの silo への要求: ebpf-nocache `open_check=1` は GET 999、HEAD 1019 (fuse-raw は GET 1000、HEAD 1002)。HEAD の余分な約 2% (A では 6000 open に対し `open_checks_total` が 6078〜6092) は **未切り分け** (microbench / bench 起動時の別の open が数えられている可能性。上限は 1.5%)。
+- 他の項目 (B〜H) の「構造差」「全体」の値は、`open_check=0` で測ったもの。キャッシュあり同士 (ebpf-pcache) は、cache hit の open が HEAD しない設計のままなので値は変わらない。fuse-cache は kernel_cache で open の FUSE 往復が残る。**この訂正は nocache / pcachedrop の「open が S3 に行く」比較だけに効く**。
+
+### 18.52 キャッシュあり同士の open+read+close を、open が S3 を確認する条件 (`open_check=1`) で揃えた値 (2026-11-04)
+
+§18.51 の続き。キャッシュありの構成でも、s3fs-fuse は open のたびに HEAD する。**正確性を揃えた (ebpf も open で HEAD する) ときの差**を測った。A、5000 iters + warmup 1000、3 回、tc なし。生データ: `journal/data/open-check-cached-20261104/`。
+
+| 組 | fuse p50 | ebpf `open_check=0` | ebpf `open_check=1` | 比 (`=0`) | 比 (`=1`) |
+|---|---:|---:|---:|---:|---:|
+| kernel_cache / page cache (fuse-cache ÷ ebpf-pcache) | 506–517 µs | 3.0 µs | 425 µs | 約 170× | **約 1.2×** |
+| disk cache / chunk 表 (fuse-diskcache ÷ ebpf-pcachedrop) | 536 µs | 3.8 µs | 423 µs | 約 140× | **約 1.27×** |
+
+(fuse-cache は `open_check` と無関係で、列の 506 / 517 µs は同じ構成の 2 組の run。)
+
+1000 回の open+read+close あたりの silo への要求 (`head-get-counts.txt`): fuse-cache / fuse-diskcache は GET 0、**HEAD 1001** (kernel_cache も `max_stat_cache_size=100000` も open の HEAD を省かない)。ebpf-pcache / pcachedrop は `open_check=0` で GET 0・HEAD 0、`=1` で HEAD 1008〜1012。
+
+- **キャッシュありの 170× は、open で S3 を一度も確認しない設計の値**。S3 の存在を確認する条件では、時間のほぼ全部が HEAD 1 往復 (ローカル silo で約 420 µs) で、s3fs-ebpf の優位は約 1.2× に縮む。fuse 側の 506 µs も、その HEAD + FUSE の往復。
+- 速くできる余地は HEAD の頻度にある: `open_check=0` の 3 µs (確認なし) が上限、`=1` の 425 µs (毎回) が下限。間 (確認結果を一定時間または ETag で再利用する) は未実装・未測定。遠い S3 (数十 ms) では HEAD の割合がさらに大きくなる。
+- 未切り分け: HEAD が +8〜12 余分 (1%) に数えられる (§18.51 と同じ)。

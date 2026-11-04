@@ -70,6 +70,9 @@ func (c *Client) Bucket() string { return c.cfg.Bucket }
 func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, error) {
 	info, err := c.mc.StatObject(ctx, c.cfg.Bucket, key, minio.StatObjectOptions{})
 	if err != nil {
+		if r := minio.ToErrorResponse(err); r.StatusCode == http.StatusNotFound || r.Code == "NoSuchKey" {
+			return objstore.ObjectMeta{}, fmt.Errorf("s3 stat %q: %w: %w", key, objstore.ErrNotFound, err)
+		}
 		return objstore.ObjectMeta{}, fmt.Errorf("s3 stat %q: %w", key, err)
 	}
 	c.cache.Observe(key, info.ETag, info.Size) // AC-40

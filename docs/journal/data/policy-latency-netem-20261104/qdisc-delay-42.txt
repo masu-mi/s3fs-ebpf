@@ -1,0 +1,1 @@
+qdisc netem 8001: root refcnt 7 limit 1000 delay 12.5ms  2.5ms

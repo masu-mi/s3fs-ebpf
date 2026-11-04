@@ -109,6 +109,9 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`journal/fuse-baseline-raw-data.md`](journal/fuse-baseline-raw-data.md) | s3fs-fuse (raw / use_cache) の基準データ (2026-10-30): 小ファイル 10,000 cat、新規ファイル + fsync、64 jobs 並列 read。生データは `journal/data/` |
 | [`dev-notes/bench-suite-overview.md`](dev-notes/bench-suite-overview.md) | 性能試験 A〜H と層ごとのレイテンシの概要、6 構成、何の側面を測るか、測っていないこと、結果を疑うときの見方。手順は `.claude/skills/perf-bench-verify/SKILL.md` |
 | [`journal/data/s18-48-20261103/`](journal/data/s18-48-20261103/) | `benchmark-results.md` §18.48 の生データ (2026-11-03、issue #35): 6 構成 × A〜G、2 構成 × H、fsync の不具合の修正前後の B / C。`report.md` が表の元。`layer-latency/` は §18.49 (層ごとのレイテンシ、Grafana のスクリーンショット) |
+| [`journal/data/policy-latency-netem-20261104/`](journal/data/policy-latency-netem-20261104/) | `benchmark-results.md` §18.50 の生データ: policy 5 種 × silo への netem 遅延 10〜15 ms の有無 × 3 seed |
+| [`journal/data/open-check-remeasure-20261104/`](journal/data/open-check-remeasure-20261104/) | `benchmark-results.md` §18.51 の生データ: open の存在確認 (`open_check`) 前後の A、silo への GET / HEAD 数 |
+| [`journal/data/open-check-cached-20261104/`](journal/data/open-check-cached-20261104/) | `benchmark-results.md` §18.52 の生データ: キャッシュあり同士 (fuse-cache / fuse-diskcache 対 ebpf-pcache / pcachedrop) の A を `open_check` 0/1 で |
 | [`journal/hit-rate-bench.md`](journal/hit-rate-bench.md) | Zipf workload の policy hit-rate 実測 (2026-09-28 の数値は容量が効いておらず無効。2026-10-05 以降の capacity mode が正。`pick_victim` 版の比較は `journal/benchmark-results.md` §18.41〜18.43) |
 | [`journal/bench-env-notes.md`](journal/bench-env-notes.md) | bench 環境 caveats、Grafana metric surface、`make bench*` の修正記録 |
 

@@ -1,0 +1,20 @@
+RESULT policy=observe_ops     folio= 2000  pc=    0  miss= 1437  err=  0  rate_arena=100.00%  hit_rate= 28.15%  evictions= 1429  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=15.64
+DETAIL policy=observe_ops hits_replayed=2000 n_access=2000 upcalls=1437
+RESULT policy=lru_pick_ops    folio= 2000  pc=    0  miss= 1205  err=  0  rate_arena=100.00%  hit_rate= 39.75%  evictions= 1197  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=14.33
+DETAIL policy=lru_pick_ops hits_replayed=2000 n_access=2000 upcalls=1205
+RESULT policy=sieve_pick_ops  folio= 2000  pc=    0  miss= 1050  err=  0  rate_arena=100.00%  hit_rate= 47.50%  evictions= 1042  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=13.26
+DETAIL policy=sieve_pick_ops hits_replayed=2000 n_access=2000 upcalls=1050
+RESULT policy=s3fifo_pick_ops  folio= 2000  pc=    0  miss= 1040  err=  0  rate_arena=100.00%  hit_rate= 48.00%  evictions= 1032  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=13.24
+DETAIL policy=s3fifo_pick_ops hits_replayed=2000 n_access=2000 upcalls=1040
+RESULT policy=wtinylfu_pick_ops  folio= 2000  pc=    0  miss=  993  err=  0  rate_arena=100.00%  hit_rate= 50.35%  evictions=  985  adm_mean=  0.0  adm_max=  0  iter_mult=2.00  ms/access=12.89
+DETAIL policy=wtinylfu_pick_ops hits_replayed=2000 n_access=2000 upcalls=993
+
+REFERENCE (dev trace-replay on /tmp/claude-1000/-home-masumi-dev-src-github-com-masu-mi-s3fs-ebpf--claude-worktrees-bridge-cse-01Azpk8XEC6H6mEosrxiZAeh/016a0002-ee2f-56f4-98ef-f2a312ee2d66/scratchpad/r/delay-seed44/trace.jsonl, softcap=8, cold start;
+           live runs used capacity_bytes=368 — 0 means legacy mode, not slot-bounded)
+           prewarmed live runs: opt bound += at most 8/2000)
+# trace-replay: 2000 events, softcap=8
+# policy       accesses       hits     misses     rate
+  lru              2000        817       1183   40.85%
+  sieve            2000        950       1050   47.50%
+  opt              2000       1297        703   64.85%
+  noevict          2000       1970         30   98.50%

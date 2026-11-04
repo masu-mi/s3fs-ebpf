@@ -685,11 +685,81 @@ module_param_named(pcache_drop, s3fs_pcache_drop, bool, 0644);
 MODULE_PARM_DESC(pcache_drop,
 	"Drop only the page cache on every open; keep admit + chunk table (benchmark only; nocache wins)");
 
+/*
+ * open_check=1 — open(2) without O_CREAT verifies the object still exists.
+ *
+ * The entry table is the kmod's only knowledge of the bucket, and it is
+ * refreshed by the daemon's periodic sync.  Without this, .open succeeds for
+ * a key that was deleted from S3 after the last sync and the error only
+ * shows later, at the first read (or never, when the page cache holds the
+ * file).  s3fs-fuse asks S3 (HEAD) in its open, so a comparison with it must
+ * pay the same round trip.  With open_check set, .open sends an
+ * S3FS_MISS_FLAG_OPEN_CHECK upcall and fails with the daemon's error
+ * (-ENOENT when the HEAD says 404).  Not done for O_CREAT (the file may not
+ * exist yet), for a non-regular inode, or for an inode with an unflushed
+ * write buffer (its local content is newer than S3).  Default off: every open
+ * then costs one S3 HEAD, which a cache hit path should not pay.  Runtime-
+ * toggleable:
+ *   echo 1 > /sys/module/s3fs_kfunc/parameters/open_check
+ */
+static bool s3fs_open_check;
+module_param_named(open_check, s3fs_open_check, bool, 0644);
+MODULE_PARM_DESC(open_check,
+	"open(2) without O_CREAT asks the daemon (S3 HEAD) whether the object exists; fail with its error (default off)");
+
+/* pending key of an open check: not a multiple of the 4 MiB chunk size, so it
+ * never collides with a read's (ino, chunk_offset). */
+#define S3FS_OPEN_CHECK_KEY	((u64)-1)
+
+static int s3fs_open_verify(struct inode *inode)
+{
+	struct s3fs_file_data *fd = inode->i_private;
+	struct s3fs_pending *p;
+	long remaining;
+	bool local = false;
+	int err;
+
+	if (!S_ISREG(inode->i_mode))
+		return 0;
+	if (fd) {
+		mutex_lock(&fd->lock);
+		local = fd->dirty || fd->flushing;
+		mutex_unlock(&fd->lock);
+	}
+	if (local)
+		return 0;
+
+	p = pending_get_or_create(inode->i_ino, S3FS_OPEN_CHECK_KEY);
+	if (!p)
+		return -ENOMEM;
+	err = miss_enqueue(inode->i_ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK);
+	if (err) {
+		pending_put(p);
+		return err;
+	}
+	remaining = wait_for_completion_interruptible_timeout(
+		&p->done, S3FS_UPCALL_WAIT_JIFFIES);
+	err = p->err;
+	pending_put(p);
+	if (remaining < 0)
+		return remaining;	/* -ERESTARTSYS */
+	if (remaining == 0)
+		return -EIO;		/* daemon absent or saturated */
+	return err;
+}
+
 static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 {
 	struct s3fs_file_data *fd = inode->i_private;
 	bool dirty = false;
 	bool drop_pcache_only = false;
+
+	if (READ_ONCE(s3fs_open_check) && !(file->f_flags & O_CREAT)) {
+		int verr = s3fs_open_verify(inode);
+
+		if (verr)
+			return verr;	/* before private_data: no release on failure */
+	}
 
 	/* AB-10: allocate per-file admit cache; gen=0 forces first-read re-check. */
 	if (!file->private_data) {

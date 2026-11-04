@@ -1,0 +1,5 @@
+date_utc: 2026-11-04T15:58:53Z
+uname: Linux 6.12.0-061200-generic #202411220723 SMP PREEMPT_DYNAMIC Tue Nov 26 13:49:49 UTC 2024
+git: 5a01a4c1e7857e6f2459d4f6644089eb3b9303eb + working tree (open_check)
+A: STEPS=A BACKENDS='fuse-raw ebpf-nocache' MICRO_ITERS=5000 (warmup 1000), 3 reps x open_check {0,1}, no tc netem (qdisc noqueue)
+fuse-raw: s3fs <bucket> (no use_cache, no kernel_cache); ebpf-nocache: kmod nocache=1, daemon --arena-metadata-only, no --cache-dir

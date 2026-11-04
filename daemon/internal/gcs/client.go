@@ -71,6 +71,9 @@ func (c *Client) Close() error { return c.gc.Close() }
 func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, error) {
 	attrs, err := c.bucket.Object(key).Attrs(ctx)
 	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return objstore.ObjectMeta{}, fmt.Errorf("gcs stat %q: %w: %w", key, objstore.ErrNotFound, err)
+		}
 		return objstore.ObjectMeta{}, fmt.Errorf("gcs stat %q: %w", key, err)
 	}
 	c.cache.Observe(key, cacheTag(attrs), attrs.Size) // AC-40
