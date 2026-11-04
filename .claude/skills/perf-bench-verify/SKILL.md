@@ -68,6 +68,18 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 - **回帰試験**: `make test-regression` が全 PASS (所要 約 25 分)。KUnit は `make test-kunit KSRC=<linux-6.12 の tree>` (UML) と `KUNIT_ARGS="--arch=x86_64 --qemu_args='-smp 4'"` (SMP)。
 - **ログ**: `dmesg` に新しい warning / BUG が出ていないか、daemon のログに `put: ` `read dirty:` `mark dirty:` などのエラーがないか。
 
+## 4b. 遅い行の原因を切り分ける (perf / bpftrace)
+
+層ごとのレイテンシなどで「ある層が想定より遅い」とき、**変更を入れる前に**、時間の内訳を取る。推測で入れた変更 (AC-76 の readahead) は、`.read_folio` の呼び出しを 0 にしても時間が変わらなかった。
+
+1. 対象の行を長めに走らせる (`LAYERS=<層> SIZES=<サイズ> TARGET_SEC=40`)。**リポジトリのルートから実行する** (bpf の相対パス)。`timeout` を付ける。
+2. 走行中に採る。perf は kernel 版が合わないので直接指定する: `P=/usr/lib/linux-tools/6.8.0-147-generic/perf; sudo $P record -a -g -F 2000 -o <scratch>/x.data -- sleep 6`。`sudo $P report -i <scratch>/x.data --children --sort sym -g none | grep -E "<関数>"` で、自分のコードと core (`filemap_read`、`page_cache_ra_*`、`invalidate_inode_pages2`、`__memcpy`、`_copy_to_iter`) の割合を並べる。`--children` の割合が、その関数の下の合計。
+3. 呼び出し回数と状態は bpftrace: `sudo timeout 20 bpftrace -e 'kprobe:<fn>{@a=count();} fentry:vmlinux:page_cache_sync_ra{@ra=lhist(args->ractl->ra->ra_pages,0,2048,256);} interval:s:4{exit();}'`。kmod の関数は kprobe、BTF のあるカーネル関数は fentry (BTF が無いと "No BTF found")。「その関数が 1 回も呼ばれていない」を確かめるのに使う (AC-76 は readahead が 0 回で、`ra_pages == 0` が原因だった)。
+4. ベンチの仕組みが数字に入っていないか確かめる。`ebpf-pcachedrop` は open のたびに `invalidate_inode_pages2` するので、約 10% はその費用 (実運用の hit にはない)。
+5. 変更の前後で同じ行を同じ条件で測り (n と四分位範囲)、割合も取り直す。「`read_folio` 18% が `read_pages` 18% になっただけ」のように、割合が動かなければ効いていない。
+
+AC-75 / AC-76 で分かったこと: `docs/dev-notes/ac75-ac76-lessons.md`。
+
 ## 5. バグ・調査課題の起票
 
 不審な点が実際のバグか調査課題だったら、`docs/journal/backlog.md` の `## AC.` の表に 1 行足す (列は `| # | 内容 | 優先度 | 状態 |`、ID は末尾の次の番号)。
