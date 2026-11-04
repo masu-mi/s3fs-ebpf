@@ -41,7 +41,7 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 
 - `scripts/grafana-layer-latency.sh <layer-latency.csv>`: ダッシュボード "S3FS-eBPF Layer latency" (`http://localhost:3000/d/s3fs-ebpf-layer-latency`、admin:admin) を取り込む。棒グラフと表は CSV を埋め込み、時系列は Prometheus (daemon の `:9600` を 5 秒間隔で scrape)。bench が各 run を annotation (`layer-latency` タグ) で投稿する。
 - Grafana の bind mount は**メインのチェックアウト**の `deploy/` を指す。worktree で `deploy/grafana/dashboards/` に置いても読み込まれないので API で取り込む。
-- 見た目の確認: ブラウザがなければ `npm i playwright && npx playwright install chromium` を**スクラッチのディレクトリ**で行い (`/tmp/<scratch>/pw`)、`Authorization: Basic` ヘッダ付きでスクリーンショットを撮る。ブラウザがなくても、`POST /api/ds/query` で各パネルのクエリがデータを返すことは確かめられる。
+- 見た目の確認: `isolated-browser` skill を使う (隔離した使い捨てコンテナの最新 Chrome。ホストに playwright / ブラウザを入れない)。`.claude/skills/isolated-browser/browse.sh -a admin:admin -o /tmp/<scratch>/shots http://localhost:3000/d/s3fs-ebpf-layer-latency`。docker も podman も使えなければ撮らず、`POST /api/ds/query` で各パネルのクエリがデータを返すことだけ確かめる。
 - daemon の histogram は `s3fs_ebpf_read_miss_latency_seconds` (50 µs〜10 s)。MinIO の TTFB histogram は最小 bucket が 50 ms でローカルの GET を分解できないので、図にしない。
 
 ## 3. 記録
@@ -80,5 +80,5 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 ## 6. 後片付け
 
 - MinIO の scratch bucket (`s35-*` など自分が作ったもの) と、`/tmp` の大きい cache dir / payload を消す。既存の bucket (`s3fs-test` `s3fs-ab-exact` …) は消さない。
-- スクラッチに入れた道具 (playwright など) と、`docker exec` で起動したものが残っていないか確かめる。
+- `isolated-browser` の「後片付けの確認」を実行する。`docker exec` で起動したものが残っていないかも確かめる。
 - `go build` は repo のルートか `daemon/` で行う (`daemon/cmd/s3fs-ebpf` の中で行うと 60 MB のバイナリが出て commit に混ざる)。
