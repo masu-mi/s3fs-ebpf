@@ -74,6 +74,14 @@
 - フォールバック (412 のあとの全体 PUT) で、現在の object が remote chunk の範囲より短いとき (外部の truncate) は、足りない bytes を 0 で埋めて警告を出す (`getNowClamped` + `fillRange` の非 pinned)。
 - **flush 成功で `populated` にしない chunk:** remote の chunk は buffer (`p`) を持っていても、flush が copy したのは object のバイトで buffer ではない。`signal_flush` は `p` を持つ chunk のうち remote でないものだけを populated にする (途中までしか埋まっていない chunk を clean として返さない)。
 
+## 読み取りの readahead と large folio (AC-76、`read_large_folios`、既定は on)
+- `read_large_folios=1` のとき、通常ファイルの inode は `mapping_set_large_folios` され、sb は専用の bdi (`super_setup_bdi`、`ra_pages` = 4 MiB) を持つ。以前は `noop_backing_dev_info` で `ra_pages == 0` のため readahead が一度も呼ばれず、cold な sequential read が 4 KiB の folio ごとの `.read_folio` だった。module 引数は inode / sb の作成時に読む (変えたあとに作る inode から効く。sb は次の mount から)。
+- `.readahead` (`s3fs_ebpf_readahead`) は **`fd->lock` を 1 回取って**、chunk 内の folio をまとめて chunk 表から埋める。条件は `s3fs_folio_fill_from_kmalloc` の `gen != 0` 経路と同じ (clean な fd、chunk が確保済みで `populated`、`fc_pcache_check`、`s3fs_admit_gen` が動いていれば entry を read_lock で再検証 = S1)。`fc_pcache_check` (admits_lock の read) は `fd->lock` の内側で呼ぶ: ロック順 `fd->lock` → `s3fs_admits_lock` の範囲内。
+- 埋められない folio (dirty / flushing、chunk 未 populate、entry なし、i_size 以降、chunk を跨ぐ folio) は not-uptodate のまま unlock して打ち切る。残りは core が unlock し、reader の `.read_folio` が upcall / fallback を行う。**readahead は upcall を出さない。**
+- folio は large でありうる。folio と chunk 表の copy は `memcpy_to_folio` / `folio_zero_range` を使う (`kmap_local_folio(folio, 0)` は 1 ページしか map しない)。large folio は自然アラインで、`S3FS_PCACHE_CHUNK_SHIFT` 以下の order なら chunk を跨がない (跨ぐ場合は打ち切り)。
+- `readahead_count` / `readahead_pos` は直前に取った folio の分だけ遅れる。覗き見に使わず、`readahead_folio()` のループで folio ごとに `folio_pos()` を見ること (覗き見の版は NULL の folio を触って oops した)。
+- `s3fs_folio_hits` / `s3fs_hit_signal_direct` は **folio 単位**で数える。large folio では 1 回の hit が複数ページ分になる (hit 数は以前より減る)。
+
 ## hit の集計 (issue #22、`hit_accum`、既定 on)
 - 設計は `docs/design/hit-signal-percpu-accumulation.md`。`hit_accum=1` (既定) のとき、`.read_iter` は `s3fs_file_data` の per-CPU 値 (`fd->hit`、fd と同じ寿命) を進めるだけで、ロックを取らない。`on_hit` の直接の呼び出し (fentry の KFunc、`.read_folio`、arena 直読み) は何もしない。
 - `fd->hit_flushed` / `fd->policy_seen` は **`s3fs_policy_evict_lock` の下でだけ** 触る。`admit_replace` の Phase 1 が `pv || hit_accum` のときにこの mutex を取り、`ilookup` で fd を引いて差分を集め (`iput` は mutex の中、`s3fs_ino_buf_bytes` と同じ)、Phase 1 のあとで `last_tick` の昇順に `on_hit` を呼び、その後で `on_evict` の票を取る。`on_remove` を呼ぶ所は `s3fs_hit_forget` で `policy_seen` を落とす。

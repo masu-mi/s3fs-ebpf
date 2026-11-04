@@ -64,6 +64,8 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		inode->i_op      = &s3fs_ebpf_file_iops;
 		inode->i_fop     = &s3fs_ebpf_file_fops;
 		inode->i_mapping->a_ops = &s3fs_ebpf_aops;
+		if (READ_ONCE(s3fs_read_large_folios))
+			mapping_set_large_folios(inode->i_mapping);	/* AC-76 */
 		/* No dirty tracking: content is either in-arena (read-only
 		 * from VFS's view) or in the kmalloc scratch buffer that
 		 * .write mutates directly, bypassing the page cache. */
@@ -509,6 +511,16 @@ int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_maxbytes		= MAX_LFS_FILESIZE;
 	sb->s_op		= &s3fs_ebpf_super_ops;
 	sb->s_time_gran		= 1;
+
+	/* AC-76: without its own bdi the sb used noop_backing_dev_info, whose
+	 * ra_pages is 0: the kernel never called a readahead op. */
+	if (READ_ONCE(s3fs_read_large_folios)) {
+		int err = super_setup_bdi(sb);
+
+		if (err)
+			return err;
+		sb->s_bdi->ra_pages = S3FS_CHUNK_SIZE >> PAGE_SHIFT;
+	}
 
 	root = new_inode(sb);
 	if (!root)

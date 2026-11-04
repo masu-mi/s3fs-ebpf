@@ -27,7 +27,6 @@ static bool s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
 				       u64 uaddr, u64 asize)
 {
 	size_t remaining, total = 0;
-	void *fkva;
 
 	if ((u64)pos >= asize) {
 		folio_zero_range(folio, 0, fs_size);
@@ -35,7 +34,6 @@ static bool s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
 	}
 	remaining = min_t(size_t, fs_size, asize - (u64)pos);
 
-	fkva = kmap_local_folio(folio, 0);
 	while (remaining > 0) {
 		struct page *ap = NULL;
 		void *akva;
@@ -54,7 +52,7 @@ static bool s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
 			break; /* short — remainder gets zero-filled below */
 
 		akva = kmap_local_page(ap);
-		memcpy((u8 *)fkva + total, (u8 *)akva + pgoff, chunk);
+		memcpy_to_folio(folio, total, (u8 *)akva + pgoff, chunk);
 		kunmap_local(akva);
 		unpin_user_pages(&ap, 1);
 
@@ -62,8 +60,7 @@ static bool s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
 		remaining -= chunk;
 	}
 	if (total < fs_size)
-		memset((u8 *)fkva + total, 0, fs_size - total);
-	kunmap_local(fkva);
+		folio_zero_range(folio, total, fs_size - total);
 	return total > 0;
 }
 
@@ -81,7 +78,6 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 					  loff_t pos, struct s3fs_file_data *fd,
 					  u64 ino, u32 gen, bool quiet)
 {
-	void *fkva;
 	size_t avail = 0;
 	bool buf_valid;
 
@@ -175,7 +171,8 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 					 fd->size);
 		avail = min_t(size_t, fs_size, chunk_end - (size_t)pos);
 	}
-	fkva = kmap_local_folio(folio, 0);
+	/* AC-76: the folio may be a large folio; memcpy_to_folio /
+	 * folio_zero_range map it page by page. */
 	if (avail > 0) {
 		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
 		u32 off = (u32)((u64)pos & (S3FS_CHUNK_SIZE - 1));
@@ -187,13 +184,12 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 		    fd->chunks[ci].cap > off)
 			have = min_t(size_t, avail, fd->chunks[ci].cap - off);
 		if (have)
-			memcpy(fkva, fd->chunks[ci].p + off, have);
+			memcpy_to_folio(folio, 0, fd->chunks[ci].p + off, have);
 		if (have < avail)
-			memset((u8 *)fkva + have, 0, avail - have);
+			folio_zero_range(folio, have, avail - have);
 	}
 	if (avail < fs_size)
-		memset((u8 *)fkva + avail, 0, fs_size - avail);
-	kunmap_local(fkva);
+		folio_zero_range(folio, avail, fs_size - avail);
 	mutex_unlock(&fd->lock);
 	return buf_valid;
 }
@@ -516,8 +512,108 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	return generic_file_read_iter(iocb, to);
 }
 
+/* AC-76: read_large_folios=1 (default) lets the page cache of a regular file
+ * hold large folios (up to a chunk), and gives the superblock a chunk-sized
+ * readahead window, so a cold sequential read is served by s3fs_ebpf_readahead
+ * in a few large folios instead of one .read_folio per 4 KiB.  Read when an
+ * inode is created, so it applies to inodes created after the change. */
+static bool s3fs_read_large_folios = true;
+module_param_named(read_large_folios, s3fs_read_large_folios, bool, 0644);
+MODULE_PARM_DESC(read_large_folios,
+	"Large folios + readahead for chunk-table reads (inodes created after the change)");
+
+/* .readahead fills a run of folios from the chunk table under one fd->lock.
+ * Per chunk it applies the conditions of the gen != 0 path of
+ * s3fs_folio_fill_from_kmalloc (clean fd, chunk populated, S1 re-verify when
+ * the admit generation moved); a folio it cannot fill is left not-uptodate and
+ * unlocked, the rest stay in rac for the core to unlock, and filemap_read then
+ * calls .read_folio for them (upcall, fallback).
+ *
+ * readahead_folio() hands out the folios in order; readahead_count/_pos lag
+ * one folio behind it, so they are not used to peek. */
+static void s3fs_ebpf_readahead(struct readahead_control *rac)
+{
+	struct inode *inode = rac->mapping->host;
+	struct s3fs_file_data *fd = inode->i_private;
+	struct file *file = rac->file;
+	struct s3fs_chunk *c = NULL;
+	u64 ino = inode->i_ino;
+	loff_t isize = i_size_read(inode);
+	u32 cur_ci = U32_MAX;
+	size_t chunk_end = 0;
+	unsigned long hits = 0;
+	struct folio *folio;
+
+	if (!fd)
+		return;
+	mutex_lock(&fd->lock);
+	while ((folio = readahead_folio(rac))) {
+		loff_t pos = folio_pos(folio);
+		size_t fs_size = folio_size(folio);
+		u32 ci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
+		u64 cstart = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+		size_t have = 0, off, avail;
+
+		if (pos >= isize || fd->dirty || fd->flushing ||
+		    (u64)pos + fs_size > cstart + S3FS_CHUNK_SIZE)
+			goto stop;
+		if (ci != cur_ci) {
+			u32 gen;
+
+			cur_ci = U32_MAX;
+			if (ci >= fd->nr_chunks)
+				goto stop;
+			c = &fd->chunks[ci];
+			if (!c->p || !c->populated || (size_t)pos >= fd->size)
+				goto stop;
+			/* fc_pcache_check takes admits_lock (read): after
+			 * fd->lock, the documented order. */
+			if (!fc_pcache_check(file ? file->private_data : NULL,
+					     ino, (u64)pos, &gen))
+				goto stop;
+			if (atomic_read(&s3fs_admit_gen) != gen) {
+				struct s3fs_admit *a;
+				bool ok;
+
+				read_lock(&s3fs_admits_lock);
+				a = admit_lookup_at_locked(ino, (u64)pos);
+				ok = a && (a->flags & S3FS_ADMIT_FLAG_PCACHE);
+				read_unlock(&s3fs_admits_lock);
+				if (!ok)
+					goto stop;
+			}
+			chunk_end = min_t(size_t,
+					  (size_t)(ci + 1) << S3FS_PCACHE_CHUNK_SHIFT,
+					  fd->size);
+			cur_ci = ci;
+		}
+		if ((size_t)pos >= chunk_end)
+			goto stop;
+		off = (size_t)(pos - cstart);
+		avail = min_t(size_t, fs_size, chunk_end - (size_t)pos);
+		if (c->cap > off)
+			have = min_t(size_t, avail, c->cap - off);
+		if (have)
+			memcpy_to_folio(folio, 0, c->p + off, have);
+		if (have < fs_size)
+			folio_zero_range(folio, have, fs_size - have);
+		folio_mark_uptodate(folio);
+		folio_unlock(folio);
+		hits++;
+		continue;
+stop:
+		folio_unlock(folio);
+		break;
+	}
+	mutex_unlock(&fd->lock);
+	atomic_long_add(hits, &s3fs_folio_hits);
+	while (hits--)
+		s3fs_hit_signal_direct(ino);
+}
+
 static const struct address_space_operations s3fs_ebpf_aops = {
 	.read_folio	= s3fs_ebpf_read_folio,
+	.readahead	= s3fs_ebpf_readahead,
 	.dirty_folio	= noop_dirty_folio,
 };
 
