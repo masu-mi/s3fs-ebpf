@@ -70,7 +70,7 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 
 ## 7. 性能 (ローカル MinIO、`docs/journal/benchmark-results.md`)
 
-- open+read+close は fuse-cache の 172 倍、小さいファイル 10,000 個の warm cat は 93 倍 (§18.26〜18.32)。
+- open+read+close は fuse-cache の 172 倍、小さいファイル 10,000 個の warm cat は 93 倍 (§18.26〜18.32)。前者は open で S3 を確認しない条件の値で、確認する条件 (`open_check=1`) では約 1.2 倍 (§18.52)。再測定は §18.48 (180× / 39×)。
 - AB-07 の gate (`4329711`、§18.43): 64 jobs psync read は fuse-raw 比 0.983 (フックなしの pcache は fuse-raw 以上)、100 MiB の cat は fuse-cache より速い (14.7 ms 対 17.1 ms)、microbench は arena モードより速い。
 - 負けている所: 大きいファイルの cold read (300 MiB で fuse-raw の中央値 0.80×、§18.37〜18.39)。既存オブジェクトの途中書き換えは `--partial-modify` で fuse-raw 並み (§18.36)。
 - hit rate は §18.43 で 29〜35%。prewarm がメタデータだけになったので、§18.1 の 52〜54% とは条件が違う。並べないこと。
