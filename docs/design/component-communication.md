@@ -109,18 +109,18 @@ flowchart LR
     App -->|"T1: syscall"| VFS
     %% T2
     VFS -->|"T2: fop dispatch"| Fops
-    Fops --- AdmitTbl
-    Fops --- LocalEntries
-    Fops --- FlushQ
+    Fops -.- AdmitTbl
+    Fops -.- LocalEntries
+    Fops -.- FlushQ
     %% T3
     Fops -->|"T3: fmod_ret /<br/>struct_ops dispatch"| Policy
     %% T4
     Policy -->|"T4: KFunc call<br/>(admit_count / softcap /<br/>ino_size / ...)"| Fops
     %% T5
-    Fentry <-->|"T5: bpf_map helper"| Idx
-    Fentry -->|"T5: increment"| Ctr
-    Fentry -->|"T5: reserve+submit"| Ring
-    Policy <--> Idx
+    Fentry <-.->|"T5: bpf_map helper"| Idx
+    Fentry -.->|"T5: increment"| Ctr
+    Fentry ==>|"T5: reserve+submit<br/>(event)"| Ring
+    Policy <-.-> Idx
     %% arena bytes (T6 side write, kmod side GUP)
     Fops -.->|"pin_user_pages_remote<br/>+ kmap + copy_to_user"| Arena
     %% T6
@@ -132,13 +132,13 @@ flowchart LR
     FlushLoop -->|"T7: POP_FLUSH READ_DIRTY<br/>SIGNAL_FLUSH MARK_DIRTY"| Miscdev
     SyncLoop -->|"T7: SYNC_ENTRIES"| Miscdev
     DrainLoop -->|"T7: STATS<br/>DRAIN_EVICTIONS"| Miscdev
-    Miscdev <--> Fops
-    Miscdev --- FlushQ
-    Miscdev --- AdmitTbl
+    Miscdev <-.-> Fops
+    Miscdev -.- FlushQ
+    Miscdev -.- AdmitTbl
     %% T8 miscdev read (kmod → daemon)
-    Miscdev -->|"T8: blocking read(2)<br/>s3fs_read_miss_event"| MissLoop
+    Miscdev ==>|"T8: blocking read(2)<br/>s3fs_read_miss_event (event)"| MissLoop
     %% T9 BPF ringbuf (BPF → daemon)
-    Ring -->|"T9: ringbuf.Reader"| SyncLoop
+    Ring ==>|"T9: ringbuf.Reader (event)"| SyncLoop
     %% T10 backend
     MissLoop -->|"T10: HTTP GET/<br/>GetRange"| Objstore
     FlushLoop -->|"T10: HTTP PUT"| Objstore
@@ -150,9 +150,13 @@ flowchart LR
 
 **読み方の凡例**:
 
-- 実線 → : syscall / helper / HTTP など明示的な呼び出し
-- 点線 -.-> : shared memory 経由 (arena mmap は syscall なし)
-- 太字 ID (T1..T11) は上表と対応
+矢印は意味で 3 種類に分けている。
+
+- **太線 `==>` : イベント・データの流れ** (miss の通知、ringbuf の event、`read(2)` で運ばれる `s3fs_read_miss_event`)
+- **実線 `-->` : 呼び出し** (syscall、fop の dispatch、KFunc / ioctl / HTTP の呼び出し)
+- **点線 `-.->` / `-.-` : 参照** (map や表の読み書き、arena の mmap と GUP。呼び出しは起こさない)
+- ID (T1..T11) は上表と対応
+- シーケンス図 (§3、§4、§6) は `->>` が呼び出し・操作、`-->>` が戻り・イベント・データ
 
 ---
 
@@ -310,18 +314,18 @@ flowchart TB
     CEL --> SO
     Daemon -->|"link.AttachTracing"| FMR
     Daemon -->|"link.AttachStructOps"| SO
-    Anchor1 -.->|"fmod_ret override"| FMR
-    Anchor2 -.->|"fmod_ret override"| FMR
-    Anchor3 -.->|"fmod_ret override"| FMR
-    Anchor4 -.->|"fmod_ret override"| FMR
-    Anchor1 --> Vtable
-    Anchor2 --> Vtable
-    Anchor3 --> Vtable
-    Anchor4 --> Vtable
-    Vtable -.->|"rcu_dereference<br/>→ fn ptr call"| SO
+    Anchor1 -->|"fmod_ret override"| FMR
+    Anchor2 -->|"fmod_ret override"| FMR
+    Anchor3 -->|"fmod_ret override"| FMR
+    Anchor4 -->|"fmod_ret override"| FMR
+    Anchor1 -.-> Vtable
+    Anchor2 -.-> Vtable
+    Anchor3 -.-> Vtable
+    Anchor4 -.-> Vtable
+    Vtable -->|"rcu_dereference<br/>→ fn ptr call"| SO
     SO --> KF
     FMR --> KF
-    KF --> Anchor1
+    KF -.->|"kmod の状態を参照"| Anchor1
 ```
 
 fmod_ret と struct_ops の trade-off は `docs/design/policy-attach-comparison.md`。両者が同時 attach 可能 (kmod 側 call site は両方 evaluate) で、meetup demo では struct_ops の atomic swap narrative を推奨 (§3)。
