@@ -288,7 +288,6 @@ retry:
 						 inode->i_ino, pcache_gen,
 						 false)) {
 			atomic_long_inc(&s3fs_folio_hits);
-			s3fs_hit_signal_direct(inode->i_ino);
 			filled = true;
 			goto done;
 		}
@@ -310,7 +309,6 @@ retry:
 	    admit_snapshot(inode->i_ino, (u64)pos, &uaddr, &asize, &mm) && mm) {
 		if (s3fs_folio_fill_from_arena(folio, fs_size, 0, mm, uaddr, asize)) {
 			atomic_long_inc(&s3fs_folio_hits);
-			s3fs_hit_signal_direct(inode->i_ino);
 			filled = true;
 			goto done;
 		}
@@ -461,8 +459,7 @@ static ssize_t s3fs_ebpf_splice_read(struct file *in, loff_t *ppos,
 				     struct pipe_inode_info *pipe, size_t len,
 				     unsigned int flags)
 {
-	if (READ_ONCE(s3fs_hit_accum))
-		s3fs_hit_count(in, file_inode(in));
+	s3fs_hit_count(in, file_inode(in));
 	return filemap_splice_read(in, ppos, pipe, len, flags);
 }
 
@@ -485,8 +482,7 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	u64 uaddr = 0, avail = 0;
 	struct mm_struct *mm = NULL;
 
-	if (READ_ONCE(s3fs_hit_accum))
-		s3fs_hit_count(file, inode);
+	s3fs_hit_count(file, inode);
 
 	/* AB-04 / AB-10: page-cache mode — data in fd->buf / page cache.
 	 * fc_pcache_check avoids the rwlock on the hot path once the cache
@@ -504,7 +500,6 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 							  to, copy_len);
 		if (copied > 0) {
 			atomic_long_inc(&s3fs_folio_hits);
-			s3fs_hit_signal_direct(inode->i_ino);
 			iocb->ki_pos += copied;
 			return copied;
 		}
@@ -607,8 +602,6 @@ stop:
 	}
 	mutex_unlock(&fd->lock);
 	atomic_long_add(hits, &s3fs_folio_hits);
-	while (hits--)
-		s3fs_hit_signal_direct(ino);
 }
 
 static const struct address_space_operations s3fs_ebpf_aops = {

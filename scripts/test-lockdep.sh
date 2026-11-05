@@ -5,8 +5,7 @@
 # Needs a kernel with CONFIG_PROVE_LOCKING=y: scripts/setup-kernel-lockdep.sh
 # builds and installs one; boot it, run `make setup-toolchain`, then:
 #
-#   scripts/test-lockdep.sh                 # make test-regression with hit_accum 1 and 0
-#   MODES="1" scripts/test-lockdep.sh       # only the default
+#   scripts/test-lockdep.sh                 # make test-regression
 #   TARGETS="test-pcache-evict-race test-pick-victim-stale" scripts/test-lockdep.sh
 #   KUNIT=1 scripts/test-lockdep.sh         # also load the KUnit build of the kmod first
 #
@@ -24,7 +23,7 @@ cd "$TOPDIR"
 # shellcheck source=lib/common.sh
 source "$TOPDIR/scripts/lib/common.sh"
 
-MODES=${MODES:-"1 0"}
+MODES=${MODES:-"1"}
 TARGETS=${TARGETS:-test-regression}
 OUT=${OUT:-/tmp/test-lockdep}
 KUNIT=${KUNIT:-0}
@@ -94,11 +93,11 @@ fi
 status=PASS
 detail=""
 for mode in $MODES; do
-	log "mode hit_accum=$mode: make $TARGETS"
+	log "mode $mode: make $TARGETS"
 	sudo scripts/kmod-unload.sh s3fs_kfunc >/dev/null 2>&1 || true
 	sudo dmesg -C
 	rc=0
-	HIT_ACCUM=$mode make -k $TARGETS >"$OUT/run-$mode.log" 2>&1 || rc=$?
+	make -k $TARGETS >"$OUT/run-$mode.log" 2>&1 || rc=$?
 	sudo dmesg >"$OUT/dmesg-$mode.log"
 	on=$(lockdep_on)
 	hits=$(grep -c -E "$PATTERN" "$OUT/dmesg-$mode.log" || true)
@@ -111,9 +110,9 @@ for mode in $MODES; do
 	fi
 	if [[ "$rc" -ne 0 || "$hits" -gt 0 || "$on" != 1 ]]; then
 		status=FAIL
-		detail="$detail hit_accum=$mode:FAIL(rc=$rc,reports=$hits,debug_locks=$on)"
+		detail="$detail mode=$mode:FAIL(rc=$rc,reports=$hits,debug_locks=$on)"
 	else
-		detail="$detail hit_accum=$mode:ok"
+		detail="$detail mode=$mode:ok"
 	fi
 done
 

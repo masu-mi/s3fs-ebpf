@@ -33,14 +33,6 @@ static void s3fs_hit_signal(u64 ino)
 	(void)s3fs_policy_ops_eval_hit(ino);
 }
 
-/* The direct (pre-#22) on_hit signal. */
-static void s3fs_hit_signal_direct(u64 ino)
-{
-	if (READ_ONCE(s3fs_hit_accum))
-		return;
-	s3fs_hit_signal(ino);
-}
-
 /* fd-level core of s3fs_hit_collect.  Caller holds s3fs_policy_evict_lock
  * (hit_flushed / policy_seen).  Returns true when rec has accesses to replay.
  *

@@ -349,8 +349,6 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 		int *eval_scores = NULL;
 		u32 eval_count = 0;
 		bool pv = s3fs_policy_has_pick_victim(); /* AC-58 */
-		/* Issue #22: replay accumulated hits for every ino. */
-		bool ha = READ_ONCE(s3fs_hit_accum);
 		struct s3fs_hit_rec *hrec = NULL;
 		u32 nhrec = 0;
 		int pi;
@@ -389,10 +387,8 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 
 		/* AC-58: on_insert / pick_victim / on_remove mutate policy state
 		 * without a BPF-side lock, so one round holds the evict mutex. */
-		if (ha)
-			hrec = kcalloc(total_count, sizeof(*hrec), GFP_KERNEL);
-		if (pv || ha)
-			s3fs_policy_evict_lock();
+		hrec = kcalloc(total_count, sizeof(*hrec), GFP_KERNEL);
+		s3fs_policy_evict_lock();
 
 		/* Issue #22: hits on inos the policy already knows are older
 		 * than anything this round inserts, so they go in first; hits
@@ -620,8 +616,7 @@ int s3fs_ebpf_admit_replace(struct mm_struct *mm,
 				pr_info_ratelimited("s3fs_ebpf: admit set %llu B still over capacity %llu B (in-flight misses)\n",
 						    live_bytes, cap_bytes);
 		}
-		if (pv || ha)
-			s3fs_policy_evict_unlock();
+		s3fs_policy_evict_unlock();
 		if (structops_votes)
 			pr_info("s3fs_ebpf: struct_ops voted evict on %u/%u entries\n",
 				structops_votes, total_count);

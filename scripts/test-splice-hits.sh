@@ -38,8 +38,7 @@ docker exec "$MINIO_CONTAINER" mc mb --ignore-existing "local/$S3_BUCKET" >/dev/
 printf 'splice-hits file A\n' | docker exec -i "$MINIO_CONTAINER" mc pipe "local/$S3_BUCKET/a.txt" >/dev/null
 printf 'splice-hits file B\n' | docker exec -i "$MINIO_CONTAINER" mc pipe "local/$S3_BUCKET/b.txt" >/dev/null
 
-# HIT_ACCUM=1 explicitly: this test is about the hit_accum path.
-HIT_ACCUM=1 ebpf_mount "$MOUNT"
+ebpf_mount "$MOUNT"
 ebpf_start_daemon "$OUT/daemon.log" --bucket="$S3_BUCKET" --arena-metadata-only \
 	--cache-capacity=100000000 --policy-bpf=builtin:policy_sieve_pick_ops \
 	--metrics-addr=:9600 --sample-every=1s --sync-every=0

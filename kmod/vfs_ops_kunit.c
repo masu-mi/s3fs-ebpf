@@ -1589,14 +1589,12 @@ static u64 s3k_hit_sum(struct s3fs_file_data *fd)
 	return sum;
 }
 
-/* .read_iter counts one access per open file (hit_rearm_jiffies = 0), and only
- * while hit_accum is on. */
+/* .read_iter counts one access per open file (hit_rearm_jiffies = 0). */
 static void s3k_vfs_hit_count(struct kunit *test)
 {
 	const u64 ino = S3K_INO_BASE + 31;
-	const bool old_accum = s3fs_hit_accum;
 	const unsigned int old_rearm = s3fs_hit_rearm_jiffies;
-	struct file *f, *g, *h;
+	struct file *f, *g;
 	struct s3fs_file_data *fd;
 	char buf[8];
 	loff_t pos;
@@ -1604,7 +1602,6 @@ static void s3k_vfs_hit_count(struct kunit *test)
 	s3k_one_entry(test, ino, "hc", 64);
 	f = s3k_open(test, "hc", O_RDONLY);
 	fd = s3k_fd_of(f);
-	s3fs_hit_accum = true;
 	s3fs_hit_rearm_jiffies = 0;
 
 	/* read at EOF: no upcall, but .read_iter still counts */
@@ -1620,15 +1617,7 @@ static void s3k_vfs_hit_count(struct kunit *test)
 	kernel_read(g, buf, sizeof(buf), &pos);
 	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 2ull);
 
-	s3fs_hit_accum = false;			/* hit_accum=0: nothing counted */
-	h = s3k_open(test, "hc", O_RDONLY);
-	pos = 64;
-	kernel_read(h, buf, sizeof(buf), &pos);
-	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 2ull);
-
-	s3fs_hit_accum = old_accum;
 	s3fs_hit_rearm_jiffies = old_rearm;
-	s3k_close(h);
 	s3k_close(g);
 	s3k_close(f);
 }
