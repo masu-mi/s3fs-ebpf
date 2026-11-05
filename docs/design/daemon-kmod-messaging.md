@@ -67,7 +67,7 @@ flowchart LR
 
 - kmod から「押す」のは miss だけ。write-back、unlink、rename、evict は kmod が自分のキューに積み、daemon が取りに来る。
 - 呼んだプロセスを待たせるのは 2 種類だけ (read の miss と open の確認は `s3fs_pending`、fsync は `s3fs_flush_pending`)。どちらも完了は ③ の ioctl で起こす。
-- キューは **全部 kmod のメモリ**。件数の上限はなく (`kmalloc` / `kzalloc` で 1 件ずつ。flush の event は、確保に失敗すると黙って捨てられる)、daemon が落ちると未処理分は失われる。上限があるのは `s3fs_evict_log` だけ (512 件、溢れたら `overflow` を数える)。
+- キューは **全部 kmod のメモリ**。件数の上限はなく (`kmalloc` / `kzalloc` で 1 件ずつ。flush・delete・rename の event は、確保に失敗すると黙って捨てられる。miss は `-ENOMEM` を返す)、daemon が落ちると未処理分は失われる。上限があるのは `s3fs_evict_log` だけ (512 件、溢れたら `overflow` を数える)。
 
 ---
 
@@ -316,7 +316,7 @@ BPF map を daemon が書くもう一本の経路は、policy の差し替え (`
 | イベント | daemon が応えない | キューが増え続ける |
 |---|---|---|
 | E1〜E3 (read / open) | 2 秒待って最大 3 回再試行。そのあと失敗か、手元の chunk | `s3fs_miss_events` が伸びる (件数の上限なし) |
-| E5 (fsync) | 30 秒で `-EIO` | `s3fs_flush_wait_queue` |
+| E5 (fsync) | 30 秒で `-EIO` (`S3FS_FSYNC_WAIT_JIFFIES`、確認済み) | `s3fs_flush_wait_queue` |
 | E4 / E6 / E7 (非同期) | 呼んだプロセスには見えない。daemon が戻れば拾う | 件数の上限なし。daemon が落ちると失われる |
 | E9 (evict の報告) | 512 件で頭打ち。溢れた分は `overflow` に数えられ、daemon は表全体を合わせ直す | 上限あり |
 
@@ -324,7 +324,21 @@ daemon の正常終了では `SYNC_ENTRIES (count=0)` と `ADMIT_ARENA (count=0)
 
 ---
 
-## 10. 変えるとき
+## 10. 確認状況と未確認事項 (2026-11-05)
+
+この doc は **コードを読んで書いたもので、kmod をロードした実機では動かしていない。** 図は mermaid (Chrome で描画) の構文と見た目を確認した。
+
+**コードで確認した:** キューと pending の構造とロック (`read_miss.inc.c`、`flush_queue.inc.c`、`delete_rename_queue.inc.c`、`admit_table.inc.c`)、ioctl の一覧と `OPEN_CHECK` (uapi)、daemon のループと周期 (`fastpath.go`)、worker 16 (`readmiss.go`)、`S3FS_UPCALL_WAIT_JIFFIES` 2 秒、`S3FS_UPCALL_MAX_RETRIES` 3、`S3FS_FSYNC_WAIT_JIFFIES` 30 秒、`S3FS_EVICT_LOG_CAP` 512、F1 の捨て方。
+
+**未確認:**
+- 実機での動作 (特に §4 の `VERIFY_POPULATED` の再 populate、§5 の fsync と close の順序)。回帰テスト (`make test-regression`) は走らせていない。
+- §4.2 の `PINNED` を「修飾」と書いたのは uapi のコメントと daemon 側の扱いからの解釈で、kmod 側の全呼び出し元は追っていない。
+- §4 の worker が全部使われているときの back-pressure (`read` が止まり kmod のキューが伸びる) はコードの読み。キューが実際にどこまで伸びるかは未計測。
+- **arena モード**の E1 (§8) は、今回の読みでは追い直していない (差の表は `readmiss.go` の分岐からの要約)。
+- flush の PUT のあと daemon が arena へ書き直す処理は、mode に関係なく走る。書いた直後の read が arena から返る (GUP) ことはコードの読みで、実機での確認と影響の計測は未了 (`component-communication.md` §4、backlog AC-82)。
+- E8 の約 30 秒は `--sync-every` の既定。他のループの周期はコード内の定数で、設定からは変えられないと見ているが、全部の呼び出しは追っていない。
+
+## 11. 変えるとき
 
 - 新しいイベントを足すときは、この doc の §2 の表と §1 の図、`dev-s3fs-ebpf-protocol.md` の §3、`component-communication.md` の §1.1 を同じ変更で直す。
 - 構造体のサイズを変えたら kmod と daemon を同時にビルドし直す (バージョン交渉はない)。

@@ -215,6 +215,8 @@ sequenceDiagram
 
 ---
 
+> **確認状況 (2026-11-05):** §2〜§4、§6 は現行コード (pcache モード) を読んで直したもので、kmod をロードした実機では動かしていない。arena モードの流れは今回は追い直していない (§3 の差の表は `readmiss.go` の分岐からの要約)。§4 の PUT 後の arena への書き直しが書いた直後の read を支えること、その影響は未確認 (backlog AC-82)。§5 は今回の変更の対象外 (線種の変更のみ)。
+
 ## 4. Write flush (close → PUT → sync 促進)
 
 `echo hi > /mnt/s3demo/foo.txt` の close (fire-and-forget) と `fsync(fd)` (blocking) の 2 semantics を同 flush queue で捌く。

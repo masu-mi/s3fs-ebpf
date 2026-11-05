@@ -304,7 +304,21 @@ flowchart LR
 
 ---
 
-## 7. 変えるとき
+## 7. 確認状況と未確認事項 (2026-11-05)
+
+この doc は **BPF のソース (`bpf/policy_*_ops.bpf.c`) と kmod のコードを読んで書いたもので、policy を実機で動かして map の中身を見たものではない。** 図は mermaid (Chrome) で描画を確認した。
+
+**コードで確認した:** 各 policy の map の型・件数・フック、`pick_victim` 型 4 種のアルゴリズムの手順 (ソース冒頭のコメントと本体)、kmod が各フックを呼ぶ位置 (`capacity_evict.inc.c`、`hit_accum.inc.c`)、daemon が `policy_stats` から読むスロットが 0 / 1 / 5 / 6 だけであること (`ReadStat` の呼び出し)、hit rate の定義 (`bench-hitrate.sh`)。
+
+**未確認:**
+- §3.5 W-TinyLFU の状態図は、ソース冒頭のコメントと主な関数からの要約で、limbo (L) と rejected (X) の遷移は全分岐を追っていない。
+- §4 の旧世代 (score 型) 10 種の動きは、ソースの `on_hit` / `on_evict` の本体を読んだもの。`wtinylfu_full_ops` の窓・doorkeeper・aging の細部はソース冒頭のコメントによる。実行して確かめていない。
+- §5 のフックの所要時間は `ac58-pick-victim.md` §6 の計測値 (8 候補) の転記。**W-TinyLFU の `on_hit` (sketch の 4 行更新) と、候補が数千のときの `pick_victim` は未計測。**
+- §1 の「`on_evict` を全件に呼ぶ」は `ac58-pick-victim.md` §8 と `capacity_evict.inc.c` の呼び出しからの理解で、`pick_victim` を持つ policy でも呼ばれるかの分岐は追っていない。
+- §6 の「`wtinylfu_pick_ops` の `ADMITTED` などは `/metrics` に出ない」は、`ReadStat` の呼び出しがないことからの判断。bpftool で map を読んで値が溜まっていることまでは確認していない。
+- map の大きさ N と、候補が N を超えたときに起きる「古いものが忘れられる」挙動は、LRU / SIEVE / S3-FIFO で読んだが、実際に溢れさせた試験はしていない。
+
+## 8. 変えるとき
 
 - 新しい policy を足すとき: (1) `bpf/policy_<name>_ops.bpf.c` で `struct s3fs_policy_ops` を実装 (`pick_victim` 型なら `on_insert` / `on_remove` / `pick_victim` も)、(2) `policy_stats` を同じスロット配置で持つ (`daemon` の mirror が動くように)、(3) `scripts/bench-hitrate.sh` の `POLICIES` と `make test-policy-conformance` の対象に足す、(4) この doc の §3 / §4 と、状態の形の図を足す。
 - `on_hit` に map の update を入れる前に、`ac58-pick-victim.md` §6 の「lookup + 1 bit の store にした」の経緯を見る。並行に走るフックは、取りこぼしてもよい更新だけにする。
