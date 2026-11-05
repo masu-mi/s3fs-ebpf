@@ -1,4 +1,4 @@
-# Unit tests with coverage: go test for the daemon, KUnit (UML) for kmod.
+# Unit tests with coverage: go test for the daemon, KUnit (UML) for kmod; TLA+ models with TLC.
 # Coverage goes to Codecov only while the repository is public (the upload
 # steps are skipped for a private repo); set the CODECOV_TOKEN secret then.
 name: test
@@ -24,6 +24,15 @@ permissions:
   contents: read
 
 jobs:
+  # specs/tla: every model variant must give the result its cfg expects (EXPECT: ok / violated).
+  # TLC runs in a container (docker is on the runner); the jar is downloaded and sha256-checked.
+  spec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test-spec
+
   daemon:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

@@ -17,6 +17,17 @@
 static DEFINE_SPINLOCK(s3fs_evseq_lock);
 static u64 s3fs_evseq;
 
+/* The highest seq handed out so far (S3FS_IOC_STATS slot 15). */
+u64 s3fs_ebpf_event_seq(void)
+{
+	u64 seq;
+
+	spin_lock(&s3fs_evseq_lock);
+	seq = s3fs_evseq;
+	spin_unlock(&s3fs_evseq_lock);
+	return seq;
+}
+
 struct s3fs_flush_item {
 	struct list_head link;
 	u64 ino;

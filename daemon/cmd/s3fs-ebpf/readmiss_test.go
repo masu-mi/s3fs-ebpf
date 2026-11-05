@@ -293,7 +293,7 @@ func TestOpenCheckUsesRecordedKeys(t *testing.T) {
 	u := fakeUpcall(t, true)
 	b := &statBackend{present: map[string]bool{"dir/new.txt": true, "after": true}}
 
-	fpebpf.RecordKey(910, 3, "new.txt", "dir/new.txt", 5) // created and flushed, not in the mirror
+	fpebpf.RecordKey(910, 3, "new.txt", "dir/new.txt", 5, 2) // created and flushed, not in the mirror
 	t.Cleanup(func() { fpebpf.Replace(nil) })
 	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 910, Flags: missFlagOpenCheck})
 	if len(b.stats) != 1 || b.stats[0] != "dir/new.txt" || len(u.signals) != 1 || u.signals[0] != 0 {
@@ -301,7 +301,7 @@ func TestOpenCheckUsesRecordedKeys(t *testing.T) {
 	}
 
 	withEntry(t, fpebpf.Entry{Ino: 911, Name: "before", S3Key: "before", Fallback: 1})
-	fpebpf.RecordKey(911, 0, "after", "after", 0) // renamed since the last sync
+	fpebpf.RecordKey(911, 0, "after", "after", 0, 3) // renamed since the last sync
 	b.stats, u.signals = nil, nil
 	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 911, Flags: missFlagOpenCheck})
 	if len(b.stats) != 1 || b.stats[0] != "after" || u.signals[0] != 0 {

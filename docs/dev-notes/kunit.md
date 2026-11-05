@@ -13,7 +13,7 @@ apt-get source --download-only linux-hwe-6.14 && tar xzf linux-hwe-6.14_6.14.0.o
 sudo apt install build-essential flex bison bc
 # pahole は無くてよい (壊れた pahole は kunit.sh が無視する)
 
-# deb-src が使えなければ tarball でよい (6.12 で確認。解凍後 build まで約 80 秒):
+# deb-src が使えなければ tarball でよい (6.12 で確認。解凍後 build まで約 80 秒。sha256 は https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc の行と照合する):
 #   curl -O https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz && tar xf linux-6.12.tar.xz
 
 make test-kunit KSRC=$PWD/linux-6.14                  # UML (既定)
@@ -45,7 +45,7 @@ make test-daemon-cov           # -> coverage/daemon.out
 | suite | ファイル | 対象 |
 |---|---|---|
 | `s3fs_ebpf_chunks` | `kmod/vfs_ops_kunit.c` | chunk 表 (AC-45: 確保サイズ、倍々、hole の 0、truncate、M1 の `fd->cap` と `s3fs_fd_buf_bytes`、pin)、populate の `populated` 判定 (T5)、modify op (AC-50/51: `s3fs_mop_*`、mpin の対称性、remote) |
-| `s3fs_ebpf_tables` | 同上 | dyn entry index (AC-55)、admit 表 (P1/P3/S4、per-file cache)、pending (U13/P1/H-06、C2 の verify)、miss / flush / evict queue (F1)、pending の並行 get/put/signal |
+| `s3fs_ebpf_tables` | 同上 | dyn entry index (AC-55)、tombstone と local entry の昇格条件 (AC-85: `seq <= applied_seq` かつ listing の一致で消す・昇格する)、flush / delete / rename イベントが共有する単調増加の `seq` (AC-84)、admit 表 (P1/P3/S4、per-file cache)、pending (U13/P1/H-06、C2 の verify)、miss / flush / evict queue (F1)、pending の並行 get/put/signal |
 | `s3fs_ebpf_vfs` | 同上 | `kern_mount` した fs を VFS 経由で操作: bootstrap の read、write 後の page cache、truncate、close の flush event と W1 pin、fsync と古い PUT (W3)、再 mount、2 GiB を超える read、write / read / truncate の並行実行 |
 | `s3fs_ebpf_policy_ops` | `kmod/policy_struct_ops_kunit.c` | struct_ops vtable の dispatch、欠けた member の既定値、reg / unreg / update の hot reload 規則、データメンバ (`flags` / `name`) の `init_member` と `validate`、名前と flags が vtable と一緒に入れ替わること (fake の BTF で `init_member` を直接呼ぶ。`docs/dev-notes/struct-ops-data-members.md`) |
 

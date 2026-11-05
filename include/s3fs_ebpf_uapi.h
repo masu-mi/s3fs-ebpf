@@ -313,6 +313,11 @@ struct s3fs_mark_dirty {
  *   [14] s3fs_hits_replayed_total — hit_accum: accesses counted in
  *                              .read_iter and replayed into the policy
  *                              (before the hit_replay_max cut)
+ *   [15] s3fs_evseq          — AC-85: the highest seq given to a flush /
+ *                              rename / delete event so far.  A sync reads it,
+ *                              handles every queued event up to it, and reports
+ *                              that as "applied up to" (survives a daemon
+ *                              restart: kmod's counter keeps counting).
  */
 #define S3FS_STATS_MAX 16
 struct s3fs_stats {

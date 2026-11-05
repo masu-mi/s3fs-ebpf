@@ -140,6 +140,27 @@ func (c *Coalescer) FireAll(ctx context.Context) {
 	c.wg.Wait() // timers that fired just before we took the lock
 }
 
+// FireMatching is FireAll for the parked events `match` selects: the others keep
+// their debounce window.
+func (c *Coalescer) FireMatching(ctx context.Context, match func(*kmodio.FlushEvent) bool) {
+	c.mu.Lock()
+	var victims []*pendingCoalesce
+	for ino, p := range c.pending {
+		if match(&p.ev) {
+			p.timer.Stop()
+			victims = append(victims, p)
+			delete(c.pending, ino)
+		}
+	}
+	c.mu.Unlock()
+	sort.Slice(victims, func(i, j int) bool { return victims[i].ev.Seq < victims[j].ev.Seq })
+	for _, p := range victims {
+		metrics.Global.FlushCoalescedFired.Add(1)
+		c.handle(ctx, &p.ev)
+	}
+	c.wg.Wait()
+}
+
 // Shutdown drains any deferred timers by firing them immediately.
 // Called from runFlushLoop's defer so ctx-cancel flushes rather
 // than dropping unwritten data.

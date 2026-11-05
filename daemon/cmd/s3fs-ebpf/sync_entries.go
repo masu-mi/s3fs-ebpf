@@ -100,7 +100,7 @@ func syncEntriesOnce(ctx context.Context, devPath string, s3c objstore.Backend) 
 	// AC-85: events with seq <= applied are in S3 before the listing starts, so
 	// the listing reflects them; kmod uses it to drop tombstones / promote local
 	// entries only when that is true.
-	applied := appliedSeq()
+	applied := appliedSeqFor(devPath)
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	fresh, err := buildEntriesFromS3(timedCtx, s3c)
@@ -113,7 +113,7 @@ func syncEntriesOnce(ctx context.Context, devPath string, s3c objstore.Backend) 
 		metrics.Global.SyncErrors.Add(1)
 		return nil, err
 	}
-	fpebpf.Replace(fresh)
+	fpebpf.ReplaceApplied(fresh, applied) // keeps what a flush / rename newer than `applied` recorded
 	metrics.Global.SyncRounds.Add(1)
 	metrics.Global.SyncEntriesCurrent.Store(uint64(len(fresh)))
 	// V-02: flush the ino state once per sync round instead of on every

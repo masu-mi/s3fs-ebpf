@@ -51,6 +51,7 @@ struct s3fs_entry_dyn {
 	__u32 name_len;
 	char name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
 };
+u64 s3fs_ebpf_event_seq(void);
 int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count);
 /* AC-85: as above, with the daemon's "applied up to seq" (docs/design/kmod-entry-table-state-machine.md). */
 int s3fs_ebpf_entries_replace_applied(struct s3fs_entry_dyn *entries, u32 count,

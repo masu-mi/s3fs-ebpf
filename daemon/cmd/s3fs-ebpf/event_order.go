@@ -46,6 +46,7 @@ type orderedOps struct {
 // run(its seq) first, so a rename or delete queued before it is done before its
 // PUT, never after.
 type orderedDrain struct {
+	failed  atomic.Bool   // the last step stopped on a pop error
 	handled atomic.Uint64 // seq of the last event passed to the handlers
 	mu      sync.Mutex
 	ops     orderedOps
@@ -73,7 +74,18 @@ func drainOrdered(ops orderedOps) { newOrderedDrain(ops).run(noSeqLimit) }
 
 func (d *orderedDrain) run(limit uint64) { d.runWith(d.ops, limit) }
 
+// runWith handles events with seq < limit, one at a time. The lock is taken per
+// event, not for the whole run: an fsync that calls run(its seq) has to wait for
+// the event being handled (a rename or delete does S3 work), not for everything
+// the ticker's run has queued up.
 func (d *orderedDrain) runWith(ops orderedOps, limit uint64) {
+	for d.step(ops, limit) {
+	}
+}
+
+// step handles the smallest-seq event (if its seq < limit) and reports whether
+// there may be more.
+func (d *orderedDrain) step(ops orderedOps, limit uint64) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	failed := false
@@ -111,47 +123,44 @@ func (d *orderedDrain) runWith(ops orderedOps, limit uint64) {
 		}
 		return got && !failed
 	}
-	for {
-		for fill() {
-		}
-		if failed {
-			return
-		}
-		sf, sd, sr := noSeqLimit, noSeqLimit, noSeqLimit
-		if d.hf != nil {
-			sf = d.hf.Seq
-		}
-		if d.hd != nil {
-			sd = d.hd.Seq
-		}
-		if d.hr != nil {
-			sr = d.hr.Seq
-		}
-		if min3(sf, sd, sr) >= limit {
-			return // nothing older than limit is left (held events wait for a later run)
-		}
-		switch {
-		case sf <= sd && sf <= sr:
-			ev := d.hf
-			d.hf = nil
-			trackFlush(ev.Ino, ev.Seq)
-			ops.flush(ev)
-			d.noteHandled(ev.Seq)
-		case sr <= sd:
-			ev := d.hr
-			d.hr = nil
-			ops.rename(ev)
-			d.noteHandled(ev.Seq)
-		default:
-			ev := d.hd
-			d.hd = nil
-			ops.delete(ev)
-			d.noteHandled(ev.Seq)
-		}
-		if ops.stop != nil && ops.stop() {
-			return
-		}
+	for fill() {
 	}
+	d.failed.Store(failed)
+	if failed {
+		return false
+	}
+	sf, sd, sr := noSeqLimit, noSeqLimit, noSeqLimit
+	if d.hf != nil {
+		sf = d.hf.Seq
+	}
+	if d.hd != nil {
+		sd = d.hd.Seq
+	}
+	if d.hr != nil {
+		sr = d.hr.Seq
+	}
+	if min3(sf, sd, sr) >= limit {
+		return false // nothing older than limit is left (held events wait for a later run)
+	}
+	switch {
+	case sf <= sd && sf <= sr:
+		ev := d.hf
+		d.hf = nil
+		trackFlush(ev.Ino, ev.Seq)
+		ops.flush(ev)
+		d.noteHandled(ev.Seq)
+	case sr <= sd:
+		ev := d.hr
+		d.hr = nil
+		ops.rename(ev)
+		d.noteHandled(ev.Seq)
+	default:
+		ev := d.hd
+		d.hd = nil
+		ops.delete(ev)
+		d.noteHandled(ev.Seq)
+	}
+	return ops.stop == nil || !ops.stop()
 }
 
 func min3(a, b, c uint64) uint64 {
@@ -173,53 +182,105 @@ func (d *orderedDrain) noteHandled(seq uint64) {
 	}
 }
 
-// flushInFlight: ino -> the smallest seq of a flush event that was handed on
-// (parked in the coalescer, or being PUT) and whose PUT has not finished. A
-// parked flush is not applied to S3 yet, although the drain has "handled" it.
+// flushInFlight: ino -> the seqs of flush events that were handed on (parked in
+// the coalescer, or being PUT) and whose PUT has not finished. A parked flush is
+// not applied to S3 yet, although the drain has "handled" it.
 var flushInFlight struct {
 	mu sync.Mutex
-	m  map[uint64]uint64
+	m  map[uint64][]uint64
 }
 
 func trackFlush(ino, seq uint64) {
 	flushInFlight.mu.Lock()
 	defer flushInFlight.mu.Unlock()
 	if flushInFlight.m == nil {
-		flushInFlight.m = map[uint64]uint64{}
+		flushInFlight.m = map[uint64][]uint64{}
 	}
-	if old, ok := flushInFlight.m[ino]; !ok || seq < old {
-		flushInFlight.m[ino] = seq
-	}
+	flushInFlight.m[ino] = append(flushInFlight.m[ino], seq)
 }
 
-// untrackFlush is called when handleFlush for ino returns. The event it handled
-// is the latest for the ino; every earlier one (dropped by the coalescer, or
-// covered by an fsync's PUT) is covered by that PUT.
-func untrackFlush(ino uint64) {
+// untrackFlush is called when handleFlush for ino returns, having PUT the event
+// with seq `upto`. Every event of the ino up to that seq is covered by that PUT
+// (the coalescer keeps only the latest event; an fsync's PUT covers the older
+// ones). A newer event, parked while this PUT was running, stays tracked.
+func untrackFlush(ino, upto uint64) {
 	flushInFlight.mu.Lock()
-	delete(flushInFlight.m, ino)
-	flushInFlight.mu.Unlock()
+	defer flushInFlight.mu.Unlock()
+	rest := flushInFlight.m[ino][:0]
+	for _, s := range flushInFlight.m[ino] {
+		if s > upto {
+			rest = append(rest, s)
+		}
+	}
+	if len(rest) == 0 {
+		delete(flushInFlight.m, ino)
+		return
+	}
+	flushInFlight.m[ino] = rest
 }
 
 // appliedSeq returns W: every flush / rename / delete event with seq <= W has
 // been applied to S3 (AC-85). kmod's sync uses it to decide when a tombstone or
 // a local entry may go (docs/design/kmod-entry-table-state-machine.md).
 //
-// The drain handles events in seq order, so all events <= the last handled one
-// have been handed on, and any not yet popped have a larger seq. Renames and
-// deletes are synchronous; a flush only counts once its PUT has finished.
+// This is the conservative form that needs no device: the drain handles events
+// in seq order, so all events <= the last handled one have been handed on, and
+// any not yet popped have a larger seq. Renames and deletes are synchronous; a
+// flush only counts once its PUT has finished. It starts at 0 in a new daemon
+// (kmod's counter keeps counting); appliedSeqFor is what a sync uses.
 func appliedSeq() uint64 {
 	d := ordDrain.Load()
 	if d == nil {
 		return 0
 	}
-	w := d.handled.Load()
+	return capByUnfinishedFlushes(d.handled.Load())
+}
+
+func capByUnfinishedFlushes(w uint64) uint64 {
 	flushInFlight.mu.Lock()
-	for _, s := range flushInFlight.m {
-		if s > 0 && s-1 < w {
-			w = s - 1
+	defer flushInFlight.mu.Unlock()
+	for _, seqs := range flushInFlight.m {
+		for _, s := range seqs {
+			if s > 0 && s-1 < w {
+				w = s - 1
+			}
 		}
 	}
-	flushInFlight.mu.Unlock()
 	return w
+}
+
+// kmodEventSeq reads the highest event seq kmod has handed out (S3FS_IOC_STATS
+// slot 15).
+func kmodEventSeq(devPath string) (uint64, error) {
+	st, err := readStats(devPath)
+	if err != nil {
+		return 0, err
+	}
+	if len(st) <= 15 {
+		return 0, fmt.Errorf("kmod reports %d stats slots, event seq is slot 15", len(st))
+	}
+	return st[15], nil
+}
+
+// appliedSeqFor is the W a sync reports: read kmod's current event seq C, handle
+// every queued event up to C (they are all visible: seq is assigned under the
+// lock that queues), and report C, held back by flushes whose PUT is still
+// running. Unlike appliedSeq it does not depend on how long this daemon has been
+// up: after a restart the local entries and tombstones kmod kept from before
+// still get promoted / dropped. Falls back to appliedSeq when the device cannot
+// say, or a pop failed and events up to C may be left.
+func appliedSeqFor(devPath string) uint64 {
+	d := ordDrain.Load()
+	if d == nil {
+		return 0
+	}
+	c, err := kmodEventSeq(devPath)
+	if err != nil {
+		return appliedSeq()
+	}
+	d.run(c + 1)
+	if d.failed.Load() {
+		return appliedSeq()
+	}
+	return capByUnfinishedFlushes(c)
 }

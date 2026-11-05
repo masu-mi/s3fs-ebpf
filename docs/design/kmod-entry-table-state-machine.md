@@ -72,5 +72,5 @@ stateDiagram-v2
 | `tomb` | `s3fs_hidden_entries` (`kmod/vfs/entries.inc.c`)、`entries_mtx` の下 |
 | `Rename` / `Unlink` | `entry_rename` / `entry_forget` (`kmod/vfs/dir_super_ops.inc.c`) |
 | `Sync` | `s3fs_ebpf_entries_replace(entries, count, applied_seq)`、ioctl `S3FS_IOC_SYNC_ENTRIES` の `applied_seq` |
-| daemon の「適用済み」 | `appliedSeq()` (`event_order.go`): 最後に処理したイベントの seq と、PUT 前の flush の最小 seq - 1 の小さい方 |
+| daemon の「適用済み」 | `appliedSeqFor()` (`event_order.go`): kmod の現在のイベント番号 C (`S3FS_IOC_STATS` slot 15) まで処理して、PUT 前の flush の最小 seq - 1 で止めた値。daemon が再起動しても C は続く (`appliedSeq()` は device なしの保守的な形) |
 | `View` | `resolve_entry_by_name` (hidden を飛ばす)、`emit_one_entry` (readdir) |

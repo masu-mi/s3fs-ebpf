@@ -58,6 +58,7 @@ func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 			ev.Ino, s3key, err)
 		return
 	}
+	fpebpf.DropRecorded(ev.Ino) // the key RecordKey recorded for it is gone
 	fmt.Printf("[delete] ino=%d s3://%s deleted\n", ev.Ino, s3key)
 }
 
@@ -111,6 +112,6 @@ func handleRename(ctx context.Context, s3c objstore.Backend, ev *renameEvent) {
 	// Rewire the ino → S3Key map so subsequent flushes / deletes
 	// use the new key.
 	registerIno(newKey, ev.Ino)
-	fpebpf.RecordKey(ev.Ino, ev.NewParentIno, newName, newKey, 0) // AC-82
+	fpebpf.RecordKey(ev.Ino, ev.NewParentIno, newName, newKey, 0, ev.Seq) // AC-82
 	fmt.Printf("[rename] ino=%d s3://%s → s3://%s\n", ev.Ino, oldKey, newKey)
 }

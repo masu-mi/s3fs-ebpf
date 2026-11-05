@@ -76,7 +76,7 @@ Flushed の間、`mirror` はこの ino を知らない (`local` だけが知る
 | 反例 | 修正 | 実機 (`make test-parity`) |
 |---|---|---|
 | 1 mirror が作成を学ばない (AC-82) | `handleFlush` / `handleRename` が `fpebpf.RecordKey` で mirror を更新 (open_check 用の `localKeys` は mirror に一本化) | `rename_open_new`: 修正前 EIO → 修正後 s3fs-fuse と一致 |
-| 2 作成直後の rename で旧名の key (AC-84) | kmod が全イベントに通し番号 `seq` を付け、daemon が seq 順に 1 本のループで処理 (`orderedDrain`)。rename / delete の前に coalescer の保留中の flush を全部出す (`FireAll`) | `create_rename_quick`: 修正前 S3 は `q1.txt` → 修正後 `q2.txt` |
+| 2 作成直後の rename で旧名の key (AC-84) | kmod が全イベントに通し番号 `seq` を付け、daemon が seq 順に 1 本のループで処理 (`orderedDrain`)。rename / delete の前に、それと衝突しうる coalescer の保留中の flush (同じ inode か、旧名・新名の flush) を出す (`FireMatching`。無関係な flush の debounce は崩さない) | `create_rename_quick`: 修正前 S3 は `q1.txt` → 修正後 `q2.txt` |
 | 3 rename 後の同名作成でデータ損失 (AC-84) | 同上。fsync (WAIT) の flush も PUT の前に `orderedBefore(seq)` で自分より前のイベントを処理する | `fsync_rename_reuse_name`: 修正前 ENOENT → 修正後 s3fs-fuse と一致 |
 
 モデルが予測したとおり、AC-82 を直すと、これまで EIO に隠れていた旧名の open (AC-85) が露出した。AC-85 は `docs/design/kmod-entry-table-state-machine.md` (tombstone) で直した。

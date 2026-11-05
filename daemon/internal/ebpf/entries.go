@@ -16,6 +16,7 @@ type Entry struct {
 	Mode      uint32 // file mode as passed to inode->i_mode. S_IFDIR bit distinguishes subdirs.
 	Fallback  uint64 // size in bytes when S3 stat is unavailable
 	Prewarm   bool   // if false, wait for a read-miss upcall before fetching
+	RecSeq    uint64 // AC-82/85: seq of the flush / rename event RecordKey recorded this key for (0 = from a listing)
 }
 
 // bootstrap mirrors kmod's compile-time s3fs_bootstrap_entries so the
@@ -102,8 +103,9 @@ func SetSizeByIno(ino, size uint64) {
 // the ino up here) found no entry, or the key from before a rename (AC-82).
 // An ino the mirror does not know becomes a regular-file entry with the given
 // parent, name, key and size; a known one keeps its mode and flags and gets the
-// new parent, name and key.
-func RecordKey(ino, parentIno uint64, name, key string, size uint64) {
+// new parent, name and key. `seq` is the kmod event it comes from: ReplaceApplied
+// keeps the recorded values while a listing may predate that event.
+func RecordKey(ino, parentIno uint64, name, key string, size, seq uint64) {
 	entriesMu.Lock()
 	defer entriesMu.Unlock()
 	for i := range entries {
@@ -111,9 +113,58 @@ func RecordKey(ino, parentIno uint64, name, key string, size uint64) {
 			entries[i].ParentIno = parentIno
 			entries[i].Name = name
 			entries[i].S3Key = key
+			if seq > entries[i].RecSeq {
+				entries[i].RecSeq = seq
+			}
 			return
 		}
 	}
 	entries = append(entries, Entry{Ino: ino, ParentIno: parentIno, Name: name,
-		S3Key: key, Mode: 0o100644, Fallback: size})
+		S3Key: key, Mode: 0o100644, Fallback: size, RecSeq: seq})
+}
+
+// DropRecorded forgets the entries RecordKey made for ino (the file was
+// deleted): a later listing will not have them, and ReplaceApplied would keep
+// them until the daemon restarts.
+func DropRecorded(ino uint64) {
+	entriesMu.Lock()
+	defer entriesMu.Unlock()
+	out := entries[:0]
+	for _, e := range entries {
+		if e.Ino == ino && e.RecSeq > 0 {
+			continue
+		}
+		out = append(out, e)
+	}
+	entries = out
+}
+
+// ReplaceApplied swaps in a fresh listing like Replace, except for entries that
+// RecordKey recorded for an event newer than `applied` (every event with
+// seq <= applied was in S3 before the listing was taken): the listing may
+// predate those, so their recorded parent / name / key win, and a recorded file
+// the listing does not have yet stays. Without this a sync that overlaps a
+// flush or rename throws the new key away (open_check then fails ENOENT on a
+// file that exists, a read miss GETs the old key).
+func ReplaceApplied(fresh []Entry, applied uint64) {
+	entriesMu.Lock()
+	defer entriesMu.Unlock()
+	recorded := map[uint64]Entry{}
+	for _, e := range entries {
+		if e.RecSeq > applied {
+			recorded[e.Ino] = e
+		}
+	}
+	dup := make([]Entry, len(fresh), len(fresh)+len(recorded))
+	copy(dup, fresh)
+	for i := range dup {
+		if r, ok := recorded[dup[i].Ino]; ok {
+			dup[i].ParentIno, dup[i].Name, dup[i].S3Key, dup[i].RecSeq = r.ParentIno, r.Name, r.S3Key, r.RecSeq
+			delete(recorded, dup[i].Ino)
+		}
+	}
+	for _, r := range recorded {
+		dup = append(dup, r)
+	}
+	entries = dup
 }

@@ -282,6 +282,16 @@ static bool emit_one_entry(struct dir_context *ctx, unsigned long want_parent,
 		list_for_each_entry(le, &s3fs_local_entries, link) {
 			if (norm_parent(le->parent_ino) != want_parent)
 				continue;
+			/* AC-85: a local entry is kept until the daemon reports its event
+			 * applied, so for a while a listing may already have the same
+			 * (name, ino): emit it once. */
+			if (s3fs_dyn_entries) {
+				const struct s3fs_entry_dyn *de =
+					dyn_find_name(want_parent, le->name, le->name_len);
+
+				if (de && de->ino == le->ino && !dyn_entry_hidden_locked(de))
+					continue;
+			}
 			if (matched++ != idx)
 				continue;
 			ino      = le->ino;
@@ -501,8 +511,13 @@ static void entry_forget(unsigned long parent, const char *name, size_t len,
 	struct s3fs_hidden_entry *h = kzalloc(sizeof(*h), GFP_KERNEL);
 
 	local_entry_remove(parent, name, len);
-	if (!h)
-		return;	/* OOM: the old behaviour (the dcache hides it until a sync) */
+	if (!h || !seq) {
+		/* OOM, or no event was queued so S3 keeps the object: a tombstone could
+		 * never be dropped (the listing would keep it).  The old behaviour: the
+		 * dcache hides the name until the next sync lists it again. */
+		kfree(h);
+		return;
+	}
 	mutex_lock(&s3fs_entries_mtx);
 	hidden_add_locked(h, parent, name, len, ino, seq);
 	mutex_unlock(&s3fs_entries_mtx);

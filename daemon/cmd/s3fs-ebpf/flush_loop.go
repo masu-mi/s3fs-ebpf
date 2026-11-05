@@ -265,7 +265,7 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 			// SIGINT durably PUTs the last write instead of dropping
 			// it on the floor. Bounded so a stuck S3 doesn't hang
 			// shutdown forever.
-			drainFlushOnShutdown(drain, int(f.Fd()), devPath, progs, s3c,
+			drainFlushOnShutdown(drain, coal, int(f.Fd()), devPath, progs, s3c,
 				shutdownDrainBudget)
 			return
 		case <-t.C:
@@ -284,7 +284,7 @@ var shutdownDrainBudget = 10 * time.Second
 // background ctx so a canceled parent doesn't short-circuit the PUTs
 // we are actively trying to complete. coal.Shutdown() (deferred by
 // the caller) drains the debounce layer after this returns.
-func drainFlushOnShutdown(d *orderedDrain, devFd int, devPath string, progs *fpebpf.Programs,
+func drainFlushOnShutdown(d *orderedDrain, coal *coalescer, devFd int, devPath string, progs *fpebpf.Programs,
 	s3c objstore.Backend, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	ctx := context.Background()
@@ -299,8 +299,22 @@ func drainFlushOnShutdown(d *orderedDrain, devFd int, devPath string, progs *fpe
 		popDelete: func(ev *deleteEvent) error { return popDelete(devFd, ev) },
 		popRename: func(ev *renameEvent) error { return popRename(devFd, ev) },
 		flush:     func(ev *flushEvent) { handleFlush(ctx, devFd, devPath, progs, s3c, ev); drained++ },
-		delete:    func(ev *deleteEvent) { handleDelete(ctx, s3c, ev); drained++ },
-		rename:    func(ev *renameEvent) { handleRename(ctx, s3c, ev); drained++ },
+		// the flushes parked in the debounce window are older than these: let them
+		// reach S3 first, as in the running daemon (flushQueueOps)
+		delete: func(ev *deleteEvent) {
+			if coal != nil {
+				coal.FireAll(ctx)
+			}
+			handleDelete(ctx, s3c, ev)
+			drained++
+		},
+		rename: func(ev *renameEvent) {
+			if coal != nil {
+				coal.FireAll(ctx)
+			}
+			handleRename(ctx, s3c, ev)
+			drained++
+		},
 		stop: func() bool {
 			timedOut = time.Now().After(deadline)
 			return timedOut
@@ -322,9 +336,12 @@ func drainFlushOnShutdown(d *orderedDrain, devFd int, devPath string, progs *fpe
 // event older than it to reach S3, because it acts on the keys those PUT.
 func flushQueueOps(ctx context.Context, devFd int, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, coal *coalescer) orderedOps {
-	barrier := func() {
+	// Before a rename or delete, the parked flushes it could conflict with must
+	// reach S3: those of the same inode and those under either name. The rest keep
+	// their debounce window (an rm -rf would otherwise fire every pending PUT).
+	barrier := func(match func(*flushEvent) bool) {
 		if coal != nil {
-			coal.FireAll(ctx)
+			coal.FireMatching(ctx, match)
 		}
 	}
 	return orderedOps{
@@ -351,8 +368,14 @@ func flushQueueOps(ctx context.Context, devFd int, devPath string,
 			flushOrd.noteParked(ev.Ino)
 			coal.Submit(ctx, ev)
 		},
-		delete: func(ev *deleteEvent) { barrier(); handleDelete(ctx, s3c, ev) },
-		rename: func(ev *renameEvent) { barrier(); handleRename(ctx, s3c, ev) },
+		delete: func(ev *deleteEvent) {
+			barrier(func(f *flushEvent) bool { return flushTouchesDelete(f, ev) })
+			handleDelete(ctx, s3c, ev)
+		},
+		rename: func(ev *renameEvent) {
+			barrier(func(f *flushEvent) bool { return flushTouchesRename(f, ev) })
+			handleRename(ctx, s3c, ev)
+		},
 	}
 }
 
@@ -391,7 +414,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, ev *flushEvent) {
 	metrics.Global.FlushEvents.Add(1)
-	defer untrackFlush(ev.Ino) // AC-85: this PUT (and every older event it covers) is done
+	defer untrackFlush(ev.Ino, ev.Seq) // AC-85: this PUT (and every older event of the ino it covers) is done
 	// Time the full flush service path (readDirty + S3 Put +
 	// arena admit refresh). Defer covers every return branch so
 	// the histogram reflects Put-failure retries and no-backend
@@ -416,7 +439,7 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
 	// AC-82: the mirror learns a created file (or its new name) only at the next
 	// sync; read misses and open_check look the key up there.
-	fpebpf.RecordKey(ev.Ino, ev.ParentIno, name, s3key, ev.Size)
+	fpebpf.RecordKey(ev.Ino, ev.ParentIno, name, s3key, ev.Size, ev.Seq)
 
 	if s3c == nil {
 		fmt.Printf("[flush] drop ino=%d name=%s (no S3 backend)\n",
@@ -512,4 +535,22 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d admit arena: %v\n",
 			ev.Ino, err)
 	}
+}
+
+// flushTouchesDelete / flushTouchesRename: could the flush event f and the
+// delete / rename event conflict on an S3 key? Same inode, or the flush is for
+// one of the names the event acts on (a re-created name is a different inode:
+// rename a->b, create a).
+func flushTouchesDelete(f *flushEvent, d *deleteEvent) bool {
+	return f.Ino == d.Ino || (f.ParentIno == d.ParentIno &&
+		string(f.Name[:f.NameLen]) == string(d.Name[:d.NameLen]))
+}
+
+func flushTouchesRename(f *flushEvent, r *renameEvent) bool {
+	if f.Ino == r.Ino {
+		return true
+	}
+	name := string(f.Name[:f.NameLen])
+	return (f.ParentIno == r.OldParentIno && name == string(r.OldName[:r.OldNameLen])) ||
+		(f.ParentIno == r.NewParentIno && name == string(r.NewName[:r.NewNameLen]))
 }

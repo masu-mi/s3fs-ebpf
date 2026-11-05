@@ -174,17 +174,69 @@ func TestAppliedSeqStopsBeforeUnfinishedFlush(t *testing.T) {
 	}
 	trackFlush(7, 12) // flush #12 parked in the coalescer
 	trackFlush(8, 15)
-	trackFlush(7, 18) // a later event for the same ino keeps the earliest seq
 	if got := appliedSeq(); got != 11 {
 		t.Errorf("with flush #12 unfinished: appliedSeq = %d, want 11", got)
 	}
-	untrackFlush(7) // its PUT finished (it covers #12 and #18)
+	untrackFlush(7, 12) // its PUT finished
 	if got := appliedSeq(); got != 14 {
 		t.Errorf("with flush #15 unfinished: appliedSeq = %d, want 14", got)
 	}
-	untrackFlush(8)
+	untrackFlush(8, 15)
 	d.noteHandled(9) // never goes backwards
 	if got := appliedSeq(); got != 20 {
 		t.Errorf("appliedSeq = %d, want 20", got)
+	}
+}
+
+// A PUT for event #5 that finishes while a newer event #9 of the same ino is
+// parked must not make #9 look applied.
+func TestAppliedSeqKeepsNewerParkedFlush(t *testing.T) {
+	resetFlushTracking(t)
+	d := newOrderedDrain(orderedOps{})
+	ordDrain.Store(d)
+	t.Cleanup(func() { ordDrain.Store(nil) })
+	d.noteHandled(30)
+
+	trackFlush(7, 5) // #5 fires: PUT in flight
+	trackFlush(7, 9) // #9 is parked meanwhile
+	untrackFlush(7, 5)
+	if got := appliedSeq(); got != 8 {
+		t.Errorf("appliedSeq = %d after #5's PUT with #9 parked, want 8", got)
+	}
+	untrackFlush(7, 9)
+	if got := appliedSeq(); got != 30 {
+		t.Errorf("appliedSeq = %d after #9's PUT, want 30", got)
+	}
+}
+
+func TestFlushBarrierPredicates(t *testing.T) {
+	mk := func(ino, parent uint64, name string) *flushEvent {
+		ev := &flushEvent{Ino: ino, ParentIno: parent, NameLen: uint32(len(name))}
+		copy(ev.Name[:], name)
+		return ev
+	}
+	ren := &renameEvent{Ino: 1, OldParentIno: 0, NewParentIno: 0, OldNameLen: 1, NewNameLen: 1}
+	ren.OldName[0], ren.NewName[0] = 'a', 'b'
+	del := &deleteEvent{Ino: 1, ParentIno: 0, NameLen: 1}
+	del.Name[0] = 'a'
+
+	for _, tt := range []struct {
+		name string
+		f    *flushEvent
+		ren  bool
+		del  bool
+	}{
+		{"same inode, other name", mk(1, 0, "zzz"), true, true},
+		{"re-created old name (other inode)", mk(2, 0, "a"), true, true},
+		{"someone created the new name", mk(3, 0, "b"), true, false},
+		{"unrelated file", mk(4, 0, "c"), false, false},
+		{"same name in another directory", mk(5, 9, "a"), false, false},
+	} {
+		if got := flushTouchesRename(tt.f, ren); got != tt.ren {
+			t.Errorf("%s: touches rename a->b = %v, want %v", tt.name, got, tt.ren)
+		}
+		if got := flushTouchesDelete(tt.f, del); got != tt.del {
+			t.Errorf("%s: touches delete a = %v, want %v", tt.name, got, tt.del)
+		}
 	}
 }

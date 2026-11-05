@@ -494,6 +494,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			s3fs_ebpf_fd_buf_audit(&st.values[12], &st.values[13]);
 		if (st.count > 14)
 			st.values[14] = (u64)atomic_long_read(&s3fs_hits_replayed_total);
+		if (st.count > 15)
+			st.values[15] = s3fs_ebpf_event_seq();
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;
