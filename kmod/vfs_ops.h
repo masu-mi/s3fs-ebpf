@@ -16,16 +16,13 @@
 int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc);
 
 /*
- * Admit table API — populated by the /dev/s3fs_ebpf ioctl handler,
- * consumed by the read path. `mm` is the daemon's mm_struct (with a
- * reference held by kmod); entries carry userspace addresses into
- * that mm which .read pins via pin_user_pages_remote. count==0 clears
- * the arena entries; a non-NULL mm still replaces the held mm (AC-43),
- * mm==NULL keeps it. Only admit_shutdown drops the mm ref.
+ * Capacity / policy pass and daemon arming.  s3fs_ebpf_capacity_pass runs the
+ * admit_replace-style pass (hit replay, on_insert / on_size, votes, eviction
+ * down to capacity_bytes); the EVAL ioctl calls it.  Opening /dev/s3fs_ebpf arms
+ * the read-miss upcall; admit_shutdown (umount) disarms it.
  */
-int  s3fs_ebpf_admit_replace(struct mm_struct *mm,
-			     const struct s3fs_admit_entry *entries,
-			     u32 count);
+int  s3fs_ebpf_capacity_pass(void);
+void s3fs_ebpf_daemon_arm(void);
 void s3fs_ebpf_admit_shutdown(void);
 
 /* AB-04: populate the Linux page cache (via fd->buf) for `ino` with `size`
@@ -165,6 +162,5 @@ u64 s3fs_admit_size(u64 ino);
 /* Drain the ring buffer of policy-evicted inos. `out` holds up to
  * `cap` slots; kmod writes the actual count into *filled and any
  * dropped entries (since last drain) into *overflow. */
-void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow);
 
 #endif /* _S3FS_EBPF_VFS_OPS_H */

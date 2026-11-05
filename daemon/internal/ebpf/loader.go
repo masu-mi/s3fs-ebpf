@@ -72,20 +72,10 @@ type Programs struct {
 
 	// cache admission state for WarmCache. cacheKnown deduplicates
 	// concurrent misses on the same ino; cacheNextOff is a bump
-	// allocator into the arena.
-	//
-	// D-02: arenaFree is a free-list of {offset, size} chunks that
-	// eviction returns to. AdmitContent searches this list first
-	// (first-fit) before extending cacheNextOff. Turns the arena
-	// from a monotonic high-water buffer into a reusable pool.
-	//
-	// T-05: offsets and sizes use uint64 so the API is safe for arenas
-	// larger than 4 GiB. Current arena is 128 MiB, but keeping the
-	// arithmetic in uint64 prevents silent truncation if the limit grows.
+	// allocator into the arena (stubs only: file content is not kept there).
 	cacheMu      sync.Mutex
 	cacheKnown   map[uint64]uint64
 	cacheNextOff uint64
-	arenaFree    []arenaChunk
 }
 
 // Load pulls the bpf2go collection into the kernel and returns a handle.

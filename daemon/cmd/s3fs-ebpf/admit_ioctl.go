@@ -44,43 +44,22 @@ func populatePagesOn(devFd int, ino uint64, offset int64, data []byte) error {
 	return nil
 }
 
-// s3fsIocAdmitArena encodes _IOW(0xE3, 0x02, struct s3fs_admit_arena).
-// _IOW direction = 1; size = sizeof(admitArenaArg) = 16 bytes.
-
-// admitArena is a package var (rather than a plain func) so the
-// concurrent-push stress test can swap in a snapshot-capturing fake
-// without wiring a real /dev/s3fs_ebpf. Production callers get the
-// ioctl-backed implementation below.
-var admitArena = admitArenaIoctl
-
-// admitArenaIoctl issues S3FS_IOC_ADMIT_ARENA against /dev/s3fs_ebpf.
-// Passing an empty `entries` slice clears the kmod-side admit table.
-// The ioctl must be issued from a process whose mm holds the uaddr
-// mappings (kmod calls get_task_mm(current) internally).
-func admitArenaIoctl(devPath string, entries []admitEntry) error {
+// evalPass issues S3FS_IOC_EVAL: the kmod runs its capacity / policy pass now
+// (replay hits, on_insert / on_size, votes, evict down to capacity_bytes).
+// The returned count is always 0 (the kmod keeps no admit snapshot for the
+// daemon to count any more); it stays so /policy/eval and the capacity hook
+// keep their shape.
+func evalPass(devPath string) (int, error) {
 	f, closeFn, err := devFileOrOpen(devPath)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer closeFn()
-	return admitArenaOn(f, entries)
-}
-
-// admitArenaOn is admitArena on a caller-provided fd. Reuse when
-// several ioctls should share one open (mm anchoring, etc.).
-func admitArenaOn(f *os.File, entries []admitEntry) error {
-	arg := admitArenaArg{
-		Count: uint32(len(entries)),
-	}
-	if len(entries) > 0 {
-		arg.Entries = uint64(uintptr(unsafe.Pointer(&entries[0])))
-	}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		f.Fd(), uintptr(s3fsIocAdmitArena),
-		uintptr(unsafe.Pointer(&arg))); errno != 0 {
-		return fmt.Errorf("ioctl ADMIT_ARENA: %w", errno)
+		f.Fd(), uintptr(s3fsIocEval), 0); errno != 0 {
+		return 0, fmt.Errorf("ioctl EVAL: %w", errno)
 	}
-	return nil
+	return 0, nil
 }
 
 // -- C: read-miss upcall reader + handler ---------------------------------

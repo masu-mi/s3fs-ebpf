@@ -343,8 +343,8 @@ func runFastpath(args []string) int {
 			fmt.Printf("[policy-bpf] hot-reloaded %s → %s (BPF_LINK_UPDATE)\n", old.Path, newPath)
 			fmt.Fprintf(w, "reloaded to %s (BPF_LINK_UPDATE)\n", newPath)
 		}
-		// POST /policy/eval: force an admit_replace with the current
-		// snapshot so the policy program's on_admit / on_evict fires
+		// POST /policy/eval: run the kmod's capacity / policy pass so the
+		// policy program's on_admit / on_evict fires
 		// another round without needing bucket-side churn. Bench
 		// harnesses use this to drive SIEVE's grace → clear → evict
 		// state machine on a controllable schedule.
@@ -353,12 +353,12 @@ func runFastpath(args []string) int {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
 				return
 			}
-			n, err := refreshAdmits(*dev)
+			n, err := evalPass(*dev)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			fmt.Fprintf(w, "re-eval fired with %d admit entries\n", n)
+			fmt.Fprintf(w, "re-eval fired (%d)\n", n)
 		}
 	}
 
@@ -378,7 +378,7 @@ func runFastpath(args []string) int {
 	}
 
 	// V-01: open /dev/s3fs_ebpf once and share the fd across all admit /
-	// signal ioctls. Previously admitArenaIoctl and signalAdmit reopened
+	// signal ioctls. Previously signalAdmit reopened
 	// the device on every call, adding an open/close pair per upcall.
 	devF, err := openSharedDev(*dev)
 	if err != nil {
@@ -396,8 +396,6 @@ func runFastpath(args []string) int {
 		return 1
 	}
 	defer progs.Close()
-	setAdmitProgs(progs)
-	defer setAdmitProgs(nil)
 
 	fentry, err := progs.AttachFentry()
 	if err != nil {
@@ -466,7 +464,7 @@ func runFastpath(args []string) int {
 		// On daemon exit, revert kmod's dyn table to the compile-time
 		// bootstrap so a subsequent daemon restart (or an operator
 		// browsing the mount without daemon) doesn't see the stale
-		// snapshot from this session. Mirrors the clearAdmits defer.
+		// snapshot from this session. 
 		defer func() {
 			if err := syncEntriesIoctl(*dev, nil); err != nil {
 				fmt.Fprintf(os.Stderr, "[sync clear] %v\n", err)
@@ -480,27 +478,15 @@ func runFastpath(args []string) int {
 	// point of Week 4 (a) — copy the object body into the arena so
 	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
 	prewarm(context.Background(), progs, s3c, pol)
-	// An empty admit set: kmod keeps no arena ranges any more, but this call
-	// also arms the upcall path (it records the daemon's mm).
-	if err := setAdmits(*dev, nil); err != nil {
-		fmt.Fprintf(os.Stderr, "[admit] %v — kmod fallback (kmalloc scratch) still works\n", err)
-	} else {
-		fmt.Printf("[admit] 0 entries via %s (armed)\n", *dev)
-		defer func() {
-			if err := clearAdmits(*dev); err != nil {
-				fmt.Fprintf(os.Stderr, "[admit clear] %v\n", err)
-			}
-		}()
+	// Opening the device (above) armed the kmod's upcall path.
+	fmt.Printf("[admit] 0 entries via %s (armed)\n", *dev)
 
-		// Read-miss upcall reader: services `cat` on any admitted
-		// entry with Prewarm=false, or any ino kmod knows about
-		// that daemon hasn't warmed yet.
-		go runReadMissLoop(ctx, *dev, progs, s3c)
-		// AC-67: the prewarm reads block on upcalls, so start after
-		// runReadMissLoop.
-		if pcachePrewarmEnabled || prefetchPolicy != nil {
-			go runPcachePrewarm(ctx)
-		}
+	// Read-miss upcall reader: services `cat` on any admitted entry with
+	// Prewarm=false, or any ino kmod knows about that daemon hasn't warmed yet.
+	go runReadMissLoop(ctx, *dev, progs, s3c)
+	// AC-67: the prewarm reads block on upcalls, so start after runReadMissLoop.
+	if pcachePrewarmEnabled || prefetchPolicy != nil {
+		go runPcachePrewarm(ctx)
 	}
 
 	fmt.Printf("[fastpath] Ctrl+C to stop.\n")
@@ -508,7 +494,6 @@ func runFastpath(args []string) int {
 	// W-03: one goroutine samples all three stats sources (BPF counters,
 	// kmod ioctl, arena free-list) on a single ticker.
 	go runStatsLoop(ctx, progs, *dev, *sampleEvery)
-	go drainEvictionsLoop(ctx, *dev, progs, 2*time.Second)
 	// Periodic bucket sync: keep kmod's entry table + daemon mirror
 	// aligned with S3 without re-mounting. New keys become visible
 	// via `ls`, deleted keys stop resolving. When admit state is
@@ -525,15 +510,9 @@ func runFastpath(args []string) int {
 				lastSyncCount, len(fresh))
 			lastSyncCount = len(fresh)
 		}
-		// Drop admit entries whose ino no longer appears in the fresh
-		// entry set (S3 rm made the key disappear). Without this the
-		// admit hash and arena buffer leak. See A-02 in docs/journal/backlog.md.
 		keep := make(map[uint64]struct{}, len(fresh))
 		for _, e := range fresh {
 			keep[e.Ino] = struct{}{}
-		}
-		if err := pruneAdmitsTo(*dev, keep); err != nil {
-			fmt.Fprintf(os.Stderr, "[admit prune] %v\n", err)
 		}
 		// F-01: prewarm any entry we haven't seen before so the
 		// first cat hits Path A/B. Skips inos gone from the fresh

@@ -58,7 +58,7 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 ## 5. 容量と eviction
 
 - 容量は arena の entry のサイズと、pcache の ino ごとの `fd->cap` (確保済み chunk の合計) で数える (AC-41)。
-- evict は `admit_replace` の中で行う (`docs/design/admit-and-softcap.md`)。pcache の miss は `admit_replace` を通らないので、`--cache-capacity` があるとき daemon は populate の後、signal の前に `admit_replace` をやり直して上限を守る (AC-45 C2)。
+- evict は kmod の容量パス (`s3fs_ebpf_capacity_pass`、旧 `admit_replace`、`docs/design/admit-and-softcap.md`) の中で行う。pcache の miss は `admit_replace` を通らないので、`--cache-capacity` があるとき daemon は populate の後、signal の前に `admit_replace` をやり直して上限を守る (AC-45 C2)。
 - evict は entry を落としてから page cache を落とし、`s3fs_file_data_reset` で chunk を free する。miss が in-flight の ino は丸ごとは evict せず、pin されていない chunk だけを free する (shed、AC-45 C3)。capacity より大きいファイルを順に読んでも、読み終わった chunk は溜まらない。
 - victim の選び方は arena モードと同じ (score 順、または AC-58 の `pick_victim`、`docs/design/ac58-pick-victim.md`)。
 

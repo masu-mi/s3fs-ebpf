@@ -35,33 +35,6 @@ func signalFlush(devFd int, ino uint64, errCode int32) error {
 	return nil
 }
 
-// drainEvictionsOn issues S3FS_IOC_DRAIN_EVICTIONS on a caller-provided
-// fd. Use this in loops where the fd is opened once and reused (T-03).
-func drainEvictionsOn(devFd int) ([]uint64, uint32, error) {
-	arg := drainEvictionsArg{Cap: evictLogMax}
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(devFd), uintptr(s3fsIocDrainEvictions),
-		uintptr(unsafe.Pointer(&arg))); errno != 0 {
-		return nil, 0, fmt.Errorf("ioctl DRAIN_EVICTIONS: %w", errno)
-	}
-	out := make([]uint64, arg.Filled)
-	copy(out, arg.Inos[:arg.Filled])
-	return out, arg.Overflow, nil
-}
-
-// drainEvictions returns the ino list kmod evicted since the last
-// drain. Callers use this to prune their local admit snapshot so the
-// next admit_replace doesn't re-send evicted inos. For callers that
-// already hold an open fd use drainEvictionsOn instead.
-func drainEvictions(devPath string) ([]uint64, uint32, error) {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
-	if err != nil {
-		return nil, 0, fmt.Errorf("open %s: %w", devPath, err)
-	}
-	defer f.Close()
-	return drainEvictionsOn(int(f.Fd()))
-}
-
 // readStatsOn issues S3FS_IOC_STATS on a caller-provided fd.
 // Slot 0 is s3fs_evictions_total; slot layout is UAPI-defined additive-only.
 // Use this in loops where the fd is opened once and reused (T-03).

@@ -2,8 +2,12 @@ package ebpf
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
+
+// ErrCacheFull signals the arena has no more slots for InodeStubs.
+var ErrCacheFull = errors.New("arena cache full")
 
 // InodeStub mirrors `struct s3fs_inode_stub` in bpf/arena_types.h.
 // Layout is packed to match the BPF-side struct byte-for-byte.

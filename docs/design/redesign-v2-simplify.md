@@ -413,6 +413,8 @@ FL-4 は **枠を 1 つにまとめる設計に固有の落とし穴**: 今は e
 - Phase 2 (pcache だけにする): arena の読み (kmod の GUP)・書き (daemon の `AdmitContent`、content prewarm、arena の先読み、flush 後の書き直し) を削除し、AC-82 の kmod 側 (`SIGNAL_FLUSH` 成功で PCACHE entry を入れ直す) を入れた。`ADMIT_ARENA` は `count == 0` だけ受ける。`--arena-metadata-only` は何もしない旧フラグ。**`make test-regression` 28 件 PASS**。
   - arena の書き直しが隠していた既存の穴が 2 つ出たので直した: (1) 新規に作って evict されたファイルの read miss を daemon が `ENOENT` にしていた (entry 表は次の sync まで知らない → `localKeys` + S3 の Stat で解決)、(2) flush の通常 PUT のあと entry 表のサイズが古いまま (縮めた後の全体 admit が EOF を超えた)。
 - Phase 3a: read pattern (seq / rand) を kmod の `.read_iter` で数え、`s3fs_read_miss_event` (24 → 32 B) で daemon に渡す。fentry `generic_file_read_iter`、`s3fs_ino_slots`、KFunc `s3fs_kfunc_policy_hit`、`--no-read-iter-hook` (旧フラグ、no-op) を削除。IOC_STATS の slot 3 / 4 は GUP の数から `.read_iter` の呼び出し数 / 先頭の read 数に転用。`make test-regression` 28 件 PASS。
+- Phase 3b: `ADMIT_ARENA` を引数なしの `EVAL` に置き換え (kmod の容量パス `s3fs_ebpf_capacity_pass` を走らせる)、upcall の有効化は daemon の mm ではなくデバイスの open (`s3fs_daemon_armed`) に。`evict_log` + `DRAIN_EVICTIONS`、daemon の admit 表 (`internal/admit`)、arena の allocator / free-list、AC-48 / AC-56 を削除。ioctl は 13 本。`make test-regression` 28 件 PASS。
+- 単体テスト: Go (`readmiss_v2_test.go`: 事象のデコード、pattern 比、`entryForMiss`、pattern による全体 admit の判定、`evalPass`、flush 後のサイズ更新。意図的に壊して失敗することも確認) と KUnit (read pattern と miss event、flush 成功時の PCACHE entry (AC-82)、容量パス、upcall の有効化)。**KUnit は UML 環境がなく実行していない** (`CONFIG_KUNIT=m` でのコンパイルだけ確認)。
   - 残り (Phase 3 で消える): `internal/admit` の daemon 側の表と arena の free-list、`s3fs_arena` map と stub、kmod の admit hash の uaddr / mm の扱い。
 
 ## 10. 更新運用
