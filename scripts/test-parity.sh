@@ -40,7 +40,7 @@ seed() {
 	mc rm --recursive --force "local/$S3_BUCKET" >/dev/null 2>&1 || true
 	mc mb --ignore-existing "local/$S3_BUCKET" >/dev/null
 	local k
-	for k in keep.txt keep2.txt gone.txt src.txt del.txt; do
+	for k in keep.txt keep2.txt gone.txt src.txt del.txt r1.txt; do
 		printf 'content-of-%s\n' "$k" | docker exec -i "$MINIO_CONTAINER" mc pipe "local/$S3_BUCKET/$k" >/dev/null
 	done
 }
@@ -73,6 +73,18 @@ op('trunc_write_reopen',   lambda: (wr('keep2.txt', os.O_WRONLY | os.O_TRUNC, b'
 op('rename_open_new',      lambda: (os.rename(p('src.txt'), p('dst.txt')), time.sleep(settle), rd('dst.txt'))[2])
 op('rename_open_old',      lambda: rd('src.txt'))
 op('unlink_open',          lambda: (os.unlink(p('del.txt')), time.sleep(settle), rd('del.txt'))[2])
+# Races the TLA+ model (specs/tla/FileLifecycle.tla) found: no settle between the steps.
+def create_rename_quick():                       # model counterexample 2
+    wr('q1.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, b'q1'); os.rename(p('q1.txt'), p('q2.txt'))
+    time.sleep(settle * 2); return rd('q2.txt') + ' | s3:' + ' '.join(sorted(k for k in s3keys() if k.startswith('q')))
+def rename_then_reuse_name():                    # model counterexample 3
+    os.rename(p('r1.txt'), p('r2.txt')); wr('r1.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, b'new-r1')
+    time.sleep(settle * 2); return rd('r2.txt') + ' | ' + rd('r1.txt')
+def s3keys():
+    out = subprocess.run(['docker', 'exec', ct, 'mc', 'ls', 'local/%s/' % bucket], capture_output=True, text=True).stdout
+    return [l.split()[-1] for l in out.splitlines() if l.strip()]
+op('create_rename_quick',     create_rename_quick)
+op('rename_then_reuse_name',  rename_then_reuse_name)
 # Another client deletes / creates a key behind the mount's back.
 mc('rm', 'local/%s/gone.txt' % bucket)
 op('ext_delete_open',      lambda: rd('gone.txt'))
