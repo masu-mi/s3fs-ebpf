@@ -17,8 +17,15 @@ IMAGE=${TLC_IMAGE:-docker.io/library/eclipse-temurin:21-jre}
 CACHE=${TLC_CACHE:-$HOME/.cache/s3fs-ebpf/tlc}
 JAR=$CACHE/tla2tools-$TLA_VERSION.jar
 # TLC_RUNTIME overrides; else the first runtime that already has the image, else the first runtime.
-RUNTIME=${TLC_RUNTIME:-$(for r in podman docker nerdctl; do command -v "$r" >/dev/null && "$r" image inspect "$IMAGE" >/dev/null 2>&1 && { echo "$r"; break; }; done)}
-RUNTIME=${RUNTIME:-$(for r in podman docker nerdctl; do command -v "$r" >/dev/null && { echo "$r"; break; }; done)}
+# "|| true": the loops end with a failed test when no runtime has the image yet (a fresh CI
+# runner), and under set -e that would end the script here, silently.
+RUNTIME=${TLC_RUNTIME:-$(for r in podman docker nerdctl; do command -v "$r" >/dev/null && "$r" image inspect "$IMAGE" >/dev/null 2>&1 && { echo "$r"; break; }; done || true)}
+RUNTIME=${RUNTIME:-$(for r in podman docker nerdctl; do command -v "$r" >/dev/null && { echo "$r"; break; }; done || true)}
+# Files the container writes into the work dir must belong to the caller. With docker (a root
+# daemon) that takes --user; with rootless podman root in the container already is the caller, and
+# --user would map to a sub-uid that cannot write the caller's directory.
+USER_ARGS=(--user "$(id -u):$(id -g)")
+[ "$RUNTIME" = podman ] && USER_ARGS=()
 [ -n "$RUNTIME" ] || { echo "tlc.sh: no container runtime (podman/docker/nerdctl)" >&2; exit 2; }
 
 if [ ! -f "$JAR" ]; then
@@ -34,7 +41,7 @@ tlc() { # <tla> <cfg> — paths relative to the repo root
 	work=$(mktemp -d)
 	trap 'rm -rf "$work"' RETURN
 	meta=$work/states
-	"$RUNTIME" run --rm --user "$(id -u):$(id -g)" --network none --read-only --tmpfs /tmp \
+	"$RUNTIME" run --rm "${USER_ARGS[@]}" --network none --read-only --tmpfs /tmp \
 		-v "$TOPDIR/$(dirname "$1"):/spec:ro" -v "$JAR:/tla2tools.jar:ro" -v "$work:/work" \
 		"$IMAGE" java -XX:+UseSerialGC -cp /tla2tools.jar tlc2.TLC \
 		-workers 2 -noGenerateSpecTE -metadir /work/states -config "/spec/$(basename "$2")" "/spec/$(basename "$1")" 2>&1
