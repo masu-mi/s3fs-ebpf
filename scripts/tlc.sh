@@ -44,9 +44,9 @@ if [ "${1:-}" = --all ]; then
 	# Each cfg's first line says what TLC must report: "\* EXPECT: ok" or "\* EXPECT: violated".
 	# A variant that is meant to fail is a record of a known counterexample; a mismatch fails the run.
 	rc=0
-	for cfg in "$TOPDIR"/specs/tla/*.cfg; do
+	for cfg in "$TOPDIR"/specs/tla/*.cfg "$TOPDIR"/specs/tla/*/*.cfg; do
 		cfg_rel=${cfg#"$TOPDIR"/}
-		tla="specs/tla/$(basename "$cfg" | sed 's/\..*//').tla"
+		tla="$(dirname "$cfg_rel")/$(basename "$cfg" | sed 's/\..*//').tla"
 		want=$(sed -n '1s/^.*EXPECT: *//p' "$cfg")
 		out=$(tlc "$tla" "$cfg_rel" || true)
 		if grep -q "Invariant .* is violated" <<<"$out"; then got=violated; r="violated ($(grep -o 'Invariant [A-Za-z]* is violated' <<<"$out" | head -1 | awk '{print $2}'))"

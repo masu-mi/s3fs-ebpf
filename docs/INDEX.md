@@ -113,6 +113,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`journal/data/open-check-remeasure-20261104/`](journal/data/open-check-remeasure-20261104/) | `benchmark-results.md` §18.51 の生データ: open の存在確認 (`open_check`) 前後の A、silo への GET / HEAD 数 |
 | [`journal/data/open-check-cached-20261104/`](journal/data/open-check-cached-20261104/) | `benchmark-results.md` §18.52 の生データ: キャッシュあり同士 (fuse-cache / fuse-diskcache 対 ebpf-pcache / pcachedrop) の A を `open_check` 0/1 で |
 | [`design/file-lifecycle-state-machine.md`](design/file-lifecycle-state-machine.md) | ファイルの状態遷移図 (kmod / daemon / S3) と、TLA+ (`specs/tla/FileLifecycle.tla`) の検証結果 (反例 3 件、うち 1 件を実機で再現) |
+| [`dev-notes/tlaplus-introduction.md`](dev-notes/tlaplus-introduction.md) | TLA+ と TLC による設計の記述と検証の入門 (教材モデル `specs/tla/tutorial/LostUpdate.tla` を動かして読む) |
 | [`dev-notes/design-verification.md`](dev-notes/design-verification.md) | 設計・既存実装の調査で状態遷移図と形式検証を行う手順 (`make test-spec`) |
 | [`journal/hit-rate-bench.md`](journal/hit-rate-bench.md) | Zipf workload の policy hit-rate 実測 (2026-09-28 の数値は容量が効いておらず無効。2026-10-05 以降の capacity mode が正。`pick_victim` 版の比較は `journal/benchmark-results.md` §18.41〜18.43) |
 | [`journal/bench-env-notes.md`](journal/bench-env-notes.md) | bench 環境 caveats、Grafana metric surface、`make bench*` の修正記録 |

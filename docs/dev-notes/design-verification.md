@@ -15,4 +15,6 @@ PR #44 で、open が S3 を確認しない設計漏れと、作成直後のフ�
 
 形式手法を使わない場合 (単純な直列の処理、表を引くだけの変更) は、図だけでよい。使わなかった理由は PR に 1 行書く。
 
+手順の詳細と落とし穴は skill `tlc-design-verification`、TLA+ の入門は `docs/dev-notes/tlaplus-introduction.md`。
+
 最初の適用例: `docs/design/file-lifecycle-state-machine.md` (`specs/tla/FileLifecycle.tla`)。
