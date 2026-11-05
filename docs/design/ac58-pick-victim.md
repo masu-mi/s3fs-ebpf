@@ -2,6 +2,8 @@
 
 状態: **実装済み (2026-10-17)**。SIEVE / LRU / S3-FIFO の `*_pick_ops` を実装し、結果は §6 に要約した。コードを変えたらこのメモも更新する。
 
+map の形とフック・指標の対応は [`policy-bpf-maps.md`](policy-bpf-maps.md) (2026-11-05)。
+
 ## 1. 今の仕組みと問題
 
 capacity 超過時の eviction は、kmod が主導する。

@@ -287,7 +287,7 @@ func TestOpenCheck(t *testing.T) {
 }
 
 // A file this daemon created or renamed is not in the entry mirror until the
-// next sync, so flush and rename record its key there (RecordKey, AC-82): the
+// next sync, so flush and rename record its key there (RecordKey, AC-86): the
 // open check HEADs the key the daemon wrote, and a read miss would GET it.
 func TestOpenCheckUsesRecordedKeys(t *testing.T) {
 	u := fakeUpcall(t, true)

@@ -9,7 +9,7 @@ func resetEntries(t *testing.T, e ...Entry) {
 }
 
 // A sync whose listing predates a flush or rename must not throw away the key
-// RecordKey recorded for it (AC-82); one taken after the event is authoritative.
+// RecordKey recorded for it (AC-86); one taken after the event is authoritative.
 func TestReplaceAppliedKeepsNewerRecordedKeys(t *testing.T) {
 	resetEntries(t, Entry{Ino: 10, Name: "a", S3Key: "a", Mode: 0o100644})
 	RecordKey(10, 0, "b", "b", 0, 7)     // renamed a -> b (event #7)

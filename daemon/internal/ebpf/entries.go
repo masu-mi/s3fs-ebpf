@@ -16,7 +16,7 @@ type Entry struct {
 	Mode      uint32 // file mode as passed to inode->i_mode. S_IFDIR bit distinguishes subdirs.
 	Fallback  uint64 // size in bytes when S3 stat is unavailable
 	Prewarm   bool   // if false, wait for a read-miss upcall before fetching
-	RecSeq    uint64 // AC-82/85: seq of the flush / rename event RecordKey recorded this key for (0 = from a listing)
+	RecSeq    uint64 // AC-86/85: seq of the flush / rename event RecordKey recorded this key for (0 = from a listing)
 }
 
 // bootstrap mirrors kmod's compile-time s3fs_bootstrap_entries so the
@@ -100,7 +100,7 @@ func SetSizeByIno(ino, size uint64) {
 // RecordKey makes the mirror agree with a key the daemon just wrote or moved:
 // a flush of a file created since the last sync, or a rename. The mirror is
 // otherwise only refreshed by a sync, so until then a read miss (which looks
-// the ino up here) found no entry, or the key from before a rename (AC-82).
+// the ino up here) found no entry, or the key from before a rename (AC-86).
 // An ino the mirror does not know becomes a regular-file entry with the given
 // parent, name, key and size; a known one keeps its mode and flags and gets the
 // new parent, name and key. `seq` is the kmod event it comes from: ReplaceApplied

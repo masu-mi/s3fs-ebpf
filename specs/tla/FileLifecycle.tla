@@ -13,7 +13,7 @@
  *
  * Variants (constants):
  *   RecordKeys     the daemon's flush / rename also update its entry mirror
- *                  (backlog AC-82). FALSE = the code as of PR #44.
+ *                  (backlog AC-86). FALSE = the code as of PR #44.
  *   Serialized     the daemon handles flush and rename events in the order
  *                  kmod queued them. FALSE = today: the flush loop and the
  *                  rename loop are independent tickers, so a later event of
@@ -21,7 +21,7 @@
  *
  * The code now is RecordKeys=TRUE, Serialized=TRUE (variant keys-serialized, the
  * only one that must hold); the other variants are kept as the record of the
- * counterexamples that led to the change (AC-82, AC-84).
+ * counterexamples that led to the change (AC-86, AC-84).
  *)
 EXTENDS Naturals, Sequences, FiniteSets
 

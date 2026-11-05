@@ -1,6 +1,6 @@
 # kmod の entry 表 (local / dyn / tombstone) の状態遷移と、AC-85 の設計
 
-2026-11-05。`docs/design/file-lifecycle-state-machine.md` の続き。AC-84 / AC-82 を直すと、S3 由来の entry (dyn) が rename / unlink の後も旧名で見え続ける問題 (AC-85) が露出した。モデルは `specs/tla/KmodEntries.tla`、実行は `make test-spec`。
+2026-11-05。`docs/design/file-lifecycle-state-machine.md` の続き。AC-84 / AC-86 を直すと、S3 由来の entry (dyn) が rename / unlink の後も旧名で見え続ける問題 (AC-85) が露出した。モデルは `specs/tla/KmodEntries.tla`、実行は `make test-spec`。
 
 ## 1. 現状 (AC-84 まで)
 

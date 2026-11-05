@@ -437,7 +437,7 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	name := string(ev.Name[:ev.NameLen])
 
 	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
-	// AC-82: the mirror learns a created file (or its new name) only at the next
+	// AC-86: the mirror learns a created file (or its new name) only at the next
 	// sync; read misses and open_check look the key up there.
 	fpebpf.RecordKey(ev.Ino, ev.ParentIno, name, s3key, ev.Size, ev.Seq)
 
