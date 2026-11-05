@@ -270,7 +270,10 @@ sequenceDiagram
     end
 ```
 
-fsync は専用の queue (`s3fs_flush_wait_queue`) と blocking の `POP_FLUSH_WAIT` で、ticker の遅れと coalescer の debounce を通らない。close の分と同じ ino の `handleFlush` は直列にし、`.create` の 0 byte の placeholder が fsync の PUT のあとに PUT されてオブジェクトを空にしないようにしている (F1、`flush_order.go`、`docs/kmod-pcache-invariants.md` の F1 / W3)。PUT のあとは、daemon が arena へ書き直して admit し直す処理が `flush_loop.go` の末尾にある (mode の分岐はなく、pcache モードで実際に効くかは未確認)。
+fsync は専用の queue (`s3fs_flush_wait_queue`) と blocking の `POP_FLUSH_WAIT` で、ticker の遅れと coalescer の debounce を通らない。close の分と同じ ino の `handleFlush` は直列にし、`.create` の 0 byte の placeholder が fsync の PUT のあとに PUT されてオブジェクトを空にしないようにしている (F1、`flush_order.go`、`docs/kmod-pcache-invariants.md` の F1 / W3)。**PUT のあとの arena への書き直し (コードで確認、2026-11-05):** `handleFlush` (`flush_loop.go`) は、全体の PUT が成功すると、`--arena-metadata-only` かどうかに関係なく、書いた中身を arena にコピーして `ADMIT_ARENA` で admit し直す (`AdmitContent` + `replaceAdmit`)。省かれるのは `--partial-modify` で処理済みの flush (`dropAdmitIno` で arena の古い分を捨てる) と、`progs == nil` のときだけ。
+- **書いた直後の read を支える (コードの読み、実機では未確認):** `SIGNAL_FLUSH` が成功したとき kmod が行うのは chunk の `populated` を立てることだけで、PCACHE の admit entry は入れ直さない。dirty だった fd は PCACHE entry を持たないので、flush 後の `.read_folio` (page cache に folio がないとき) は、PCACHE の判定を外れ、**fd が dirty / flushing でなければ arena の admit entry を GUP で読む** (`aops_read.inc.c`、`file_ops.inc.c` の `admit_snapshot`)。daemon の書き直しがなければ、この read は S3 への upcall になる。コメントの意図もそうで、「古い prewarm ではなく、書いたばかりの中身を返すため」(`flush_loop.go`)。
+- **コスト:** 書いたファイルの大きさ分の memcpy と arena の消費。arena は 128 MiB (`s3fs_arena` の `max_entries` 32768 ページ) で、足りないと `AdmitContent` が `ErrCacheFull` を返す。**PUT は成功しているのに `[flush] admit content: …` をログに出し、`flush_errors_total` (help は "PUT failures") を増やす。**
+- 計測への影響は未計測 (新規の 100 MiB の fsync で、100 MiB の arena コピーが入っている。`benchmark-results.md` §18.48 の B に含まれている)。改善案は backlog AC-82。
 
 E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/journal/backlog-archive.md J-05` 参照)。
 

@@ -64,9 +64,10 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 
 ## 6. write
 
+- flush の PUT が成功すると、daemon は中身を arena にもコピーして admit し直す (mode の分岐なし。`docs/design/component-communication.md` §4、backlog AC-82)。flush 後の fd は PCACHE entry を持たないので (kmod は `SIGNAL_FLUSH` で chunk の `populated` を立てるだけ)、書いた直後の read はこの arena のコピーを GUP で読む。arena のコピーがなければ S3 への upcall になる。代償は、arena (128 MiB) の消費と、`ErrCacheFull` のときに PUT が成功していても `flush_errors_total` が増えること。
 - write は fd の chunk に書き、fd を dirty にする。dirty / flushing の fd には PCACHE entry を入れない (AC-57)。close / fsync で flush event を積み、daemon が `READ_DIRTY` で読んで PUT する (`docs/design/component-communication.md` §4)。
 - S3 にある既存ファイルへの最初の変更の前に、変更で残る部分を読み込む (AC-50、`s3fs_fd_load_for_modify`)。open は中身を読まないので、これがないと読んでいない範囲が 0 で PUT される。
-- `--partial-modify` (既定 off、S3 のみ) のときは、変更のない chunk を読まずに remote として記録し、flush は multipart + `UploadPartCopy` で運ぶ (AC-51、`docs/design/ac51-partial-modify.md`、ioctl `DIRTY_LAYOUT` / `READ_DIRTY_RANGE`)。
+- `--partial-modify` (既定 on、S3 のみ。2026-11-03 の issue #35 から既定が on。`--partial-modify=false` で off) のときは、変更のない chunk を読まずに remote として記録し、flush は multipart + `UploadPartCopy` で運ぶ (AC-51、`docs/design/ac51-partial-modify.md`、ioctl `DIRTY_LAYOUT` / `READ_DIRTY_RANGE`)。
 
 ## 7. 性能 (ローカル MinIO、`docs/journal/benchmark-results.md`)
 
