@@ -40,7 +40,7 @@ seed() {
 	mc rm --recursive --force "local/$S3_BUCKET" >/dev/null 2>&1 || true
 	mc mb --ignore-existing "local/$S3_BUCKET" >/dev/null
 	local k
-	for k in keep.txt keep2.txt gone.txt src.txt del.txt r1.txt; do
+	for k in keep.txt keep2.txt gone.txt src.txt del.txt r1.txt w1.txt x1.txt; do
 		printf 'content-of-%s\n' "$k" | docker exec -i "$MINIO_CONTAINER" mc pipe "local/$S3_BUCKET/$k" >/dev/null
 	done
 }
@@ -92,6 +92,16 @@ def fsync_rename_reuse_name():                   # same, but the new file is fsy
     os.write(fd, b'new-u1'); os.fsync(fd); os.close(fd)
     time.sleep(settle * 2)
     return rd('u2.txt') + ' | ' + rd('u1.txt') + ' | s3: ' + ' '.join(sorted(k for k in s3keys() if k.startswith('u')))
+def unlink_sync_lookup():                        # AC-85: the old name must stay gone across a sync
+    wr('v1.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, b'v1'); time.sleep(settle)
+    os.unlink(p('v1.txt')); time.sleep(settle * 2)       # the daemon deleted it; syncs ran
+    return 'stat:' + ('exists' if os.path.exists(p('v1.txt')) else 'absent') + ' listed:' + str('v1.txt' in os.listdir(mp))
+def rename_sync_lookup():                        # AC-85: synced file, renamed, then syncs
+    os.rename(p('w1.txt'), p('w2.txt')); time.sleep(settle * 2)
+    return rd('w2.txt') + ' | old:' + ('exists' if os.path.exists(p('w1.txt')) else 'absent') + ' listed:' + ','.join(sorted(n for n in os.listdir(mp) if n.startswith('w')))
+def rename_back():                               # AC-85: mv a c; mv c a
+    os.rename(p('x1.txt'), p('x2.txt')); os.rename(p('x2.txt'), p('x1.txt')); time.sleep(settle * 2)
+    return rd('x1.txt') + ' | x2:' + ('exists' if os.path.exists(p('x2.txt')) else 'absent')
 def s3keys():
     out = subprocess.run(['docker', 'exec', ct, 'mc', 'ls', 'local/%s/' % bucket], capture_output=True, text=True).stdout
     return [l.split()[-1] for l in out.splitlines() if l.strip()]
@@ -99,6 +109,9 @@ op('create_rename_quick',     create_rename_quick)
 op('rename_then_reuse_name',  rename_then_reuse_name)
 op('local_rename_reuse_name', local_rename_reuse_name)
 op('fsync_rename_reuse_name', fsync_rename_reuse_name)
+op('unlink_sync_lookup',      unlink_sync_lookup)
+op('rename_sync_lookup',      rename_sync_lookup)
+op('rename_back',             rename_back)
 # Another client deletes / creates a key behind the mount's back.
 mc('rm', 'local/%s/gone.txt' % bucket)
 op('ext_delete_open',      lambda: rd('gone.txt'))
@@ -109,27 +122,33 @@ op('ext_create_open',      lambda: rd('ext.txt'))
 PY
 }
 
-declare -A res
-for be in fuse-raw ebpf-pcache; do
+# s3fs-ebpf runs twice: --sync-every=0 (the entry table changes only when the test says so)
+# and --sync-every=1s (syncs happen between the operations, AC-85); fuse once.
+SYNCS=${PARITY_SYNCS:-"0 1s"}
+run_one() { # <backend> <sync-every> <out.tsv>
 	seed
-	if [ "$be" = ebpf-pcache ]; then export BENCH_OPEN_CHECK=${PARITY_OPEN_CHECK:-1}; else export BENCH_OPEN_CHECK=0; fi
-	bench_up "$be" "$OUT/daemon-$be.log" --sync-every=0
+	if [ "$1" = ebpf-pcache ]; then export BENCH_OPEN_CHECK=${PARITY_OPEN_CHECK:-1}; else export BENCH_OPEN_CHECK=0; fi
+	bench_up "$1" "$OUT/daemon-$1-$2.log" --sync-every="$2"
 	sleep 3
-	run_ops "$BENCH_MP" "$OUT/$be.tsv"
+	run_ops "$BENCH_MP" "$3"
 	bench_down
-done
+}
+run_one fuse-raw 0 "$OUT/fuse-raw.tsv"
+for sync in $SYNCS; do run_one ebpf-pcache "$sync" "$OUT/ebpf-pcache-sync$sync.tsv"; done
 
 overall=PASS
-echo "op: fuse-raw vs ebpf-pcache (open_check=${PARITY_OPEN_CHECK:-1})"
-while IFS=$'\t' read -r name f; do
-	e=$(awk -F'\t' -v n="$name" '$1==n{print $2}' "$OUT/ebpf-pcache.tsv")
-	if [ "$f" = "$e" ]; then
-		if [ -n "${KNOWN_DIFF[$name]:-}" ]; then echo "$name: same ($f) — WARN: KNOWN_DIFF entry no longer needed"; else echo "$name: same ($f)"; fi
-	elif [ -n "${KNOWN_DIFF[$name]:-}" ]; then
-		echo "$name: DIFF fuse=$f ebpf=$e — known: ${KNOWN_DIFF[$name]}"
-	else
-		echo "$name: DIFF fuse=$f ebpf=$e — UNEXPECTED"; overall=FAIL
-	fi
-done < "$OUT/fuse-raw.tsv"
+for sync in $SYNCS; do
+	echo "== op: fuse-raw vs ebpf-pcache (open_check=${PARITY_OPEN_CHECK:-1}, --sync-every=$sync)"
+	while IFS=$'\t' read -r name f; do
+		e=$(awk -F'\t' -v n="$name" '$1==n{print $2}' "$OUT/ebpf-pcache-sync$sync.tsv")
+		if [ "$f" = "$e" ]; then
+			if [ -n "${KNOWN_DIFF[$name]:-}" ] && [ "$sync" = 0 ]; then echo "$name: same ($f) — WARN: KNOWN_DIFF entry no longer needed"; else echo "$name: same ($f)"; fi
+		elif [ -n "${KNOWN_DIFF[$name]:-}" ]; then
+			echo "$name: DIFF fuse=$f ebpf=$e — known: ${KNOWN_DIFF[$name]}"
+		else
+			echo "$name: DIFF fuse=$f ebpf=$e — UNEXPECTED"; overall=FAIL
+		fi
+	done < "$OUT/fuse-raw.tsv"
+done
 printf 'RESULT name=%s status=%s\n' "$TEST_NAME" "$overall"
 [[ "$overall" == PASS ]]

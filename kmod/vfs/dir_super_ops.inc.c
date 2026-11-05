@@ -144,6 +144,7 @@ static int s3fs_ebpf_create(struct mnt_idmap *idmap, struct inode *dir,
 	le->ino         = ino;
 	le->parent_ino  = dir->i_ino; /* G-01: remember which dir this was created in */
 	le->mode        = S_IFREG | (mode & 0777);
+	le->seq         = S3FS_SEQ_PENDING;	/* AC-85: set once the flush event has its seq */
 	le->name_len    = nlen;
 	memcpy(le->name, dentry->d_name.name, nlen);
 	list_add_tail(&le->link, &s3fs_local_entries);
@@ -173,7 +174,18 @@ static int s3fs_ebpf_create(struct mnt_idmap *idmap, struct inode *dir,
 	 * file was created under a subdirectory. Coalescable — a
 	 * subsequent write's release/fsync would supersede this
 	 * placeholder without a network hit. */
-	flush_enqueue(ino, dir->i_ino, 0, le->name, nlen, 0);
+	{
+		u64 seq = flush_enqueue(ino, dir->i_ino, 0, le->name, nlen, 0);
+
+		/* le may already be gone (promoted / unlinked) by now: look it up. */
+		mutex_lock(&s3fs_entries_mtx);
+		list_for_each_entry(le, &s3fs_local_entries, link)
+			if (le->ino == ino) {
+				le->seq = seq;
+				break;
+			}
+		mutex_unlock(&s3fs_entries_mtx);
+	}
 	return 0;
 }
 
@@ -212,16 +224,38 @@ static bool emit_one_entry(struct dir_context *ctx, unsigned long want_parent,
 		u32 first, cnt;
 
 		dyn_children(want_parent, &first, &cnt);
-		matched = cnt;
-		if (idx < cnt) {
-			const struct s3fs_entry_dyn *e =
-				&s3fs_dyn_entries[s3fs_dyn_idx->order[first + idx]];
+		if (list_empty(&s3fs_hidden_entries)) {
+			matched = cnt;
+			if (idx < cnt) {
+				const struct s3fs_entry_dyn *e =
+					&s3fs_dyn_entries[s3fs_dyn_idx->order[first + idx]];
 
-			ino      = e->ino;
-			dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
-			name_len = e->name_len;
-			memcpy(name, e->name, name_len);
-			ok = true;
+				ino      = e->ino;
+				dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
+				name_len = e->name_len;
+				memcpy(name, e->name, name_len);
+				ok = true;
+			}
+		} else {
+			/* AC-85: skip entries a rename / unlink hid; the index counts
+			 * only the visible ones (a scan per call while tombstones exist,
+			 * which is until the daemon catches up and a sync drops them). */
+			u32 j;
+
+			for (j = 0; j < cnt; j++) {
+				const struct s3fs_entry_dyn *e =
+					&s3fs_dyn_entries[s3fs_dyn_idx->order[first + j]];
+
+				if (dyn_entry_hidden_locked(e))
+					continue;
+				if (matched++ != idx)
+					continue;
+				ino      = e->ino;
+				dt       = S_ISDIR(e->mode) ? DT_DIR : DT_REG;
+				name_len = e->name_len;
+				memcpy(name, e->name, name_len);
+				ok = true;
+			}
 		}
 	} else if (want_parent == (unsigned long)S3FS_ROOT_INO) {
 		size_t i;
@@ -373,11 +407,15 @@ static void admit_drop_ino_locked(u64 ino)
  * local entries drop immediately, dyn entries only disappear on the
  * next sync round (S3 LIST no longer returns the deleted key).
  */
+static void entry_forget(unsigned long parent, const char *name, size_t len,
+			 unsigned long ino, u64 seq);
+
 static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
 {
 	struct inode *inode = d_inode(dentry);
 	size_t name_len = dentry->d_name.len;
 	char name[S3FS_SYNC_NAME_MAX + 1];
+	u64 seq;
 
 	if (!inode)
 		return -ENOENT;
@@ -390,12 +428,13 @@ static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
 	 * (OOM) still lets us drop the local FS view; the file stays
 	 * on S3 until user retries or next daemon delete-drain.
 	 * G-01: pass dir->i_ino so daemon rebuilds "<dir>/<name>". */
-	delete_enqueue(inode->i_ino, dir->i_ino, name, name_len);
+	seq = delete_enqueue(inode->i_ino, dir->i_ino, name, name_len);
 
 	/* Local-side cleanup. Local entry lookup is now parent-aware
 	 * (G-01) so a sibling with the same basename under a different
-	 * parent isn't accidentally scrubbed. */
-	local_entry_remove(dir->i_ino, name, name_len);
+	 * parent isn't accidentally scrubbed.  AC-85: an S3-derived (dyn) entry
+	 * cannot be removed until the next sync, so it is tombstoned. */
+	entry_forget(dir->i_ino, name, name_len, inode->i_ino, seq);
 	admit_drop_ino_locked(inode->i_ino);
 
 	/* Drop link count so drop_inode fires evict_inode. */
@@ -406,16 +445,82 @@ static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
 }
 
 /*
- * Rename a local entry's name in place. Returns true on success.
- * old/new parent inos scope the match so a sibling with the same
- * basename under a different parent doesn't accidentally get renamed
- * (F-02). new_parent may differ from old_parent for cross-dir rename.
+ * AC-85: hide (parent, name, ino) from lookup / readdir until the daemon has
+ * applied operation `seq` to S3 and a sync no longer lists it.  s3fs_entries_mtx
+ * held; `h` is preallocated by the caller (consumed here, or freed if a
+ * tombstone for the same entry already exists with a seq at least as late).
  */
-static bool local_entry_rename(unsigned long old_parent,
-			       const char *old_name, size_t old_len,
-			       unsigned long new_parent,
-			       const char *new_name, size_t new_len)
+static void hidden_add_locked(struct s3fs_hidden_entry *h, unsigned long parent,
+			      const char *name, size_t len, unsigned long ino, u64 seq)
 {
+	struct s3fs_hidden_entry *o;
+
+	list_for_each_entry(o, &s3fs_hidden_entries, link)
+		if (o->ino == ino && norm_parent(o->parent_ino) == norm_parent(parent) &&
+		    o->name_len == len && memcmp(o->name, name, len) == 0) {
+			if (o->seq < seq)
+				o->seq = seq;	/* the later operation decides when it may go */
+			kfree(h);
+			return;
+		}
+	h->ino = ino;
+	h->parent_ino = norm_parent(parent);
+	h->seq = seq;
+	h->name_len = len;
+	memcpy(h->name, name, len);
+	list_add_tail(&h->link, &s3fs_hidden_entries);
+	s3fs_hidden_nr++;
+}
+
+/* s3fs_entries_mtx held: (parent, name, ino) is a name that holds ino again
+ * (mv a c; mv c a): an older tombstone for it must not hide it. */
+static void hidden_revive_locked(unsigned long parent, const char *name,
+				 size_t len, unsigned long ino)
+{
+	struct s3fs_hidden_entry *h, *tmp;
+
+	list_for_each_entry_safe(h, tmp, &s3fs_hidden_entries, link)
+		if (h->ino == ino && norm_parent(h->parent_ino) == norm_parent(parent) &&
+		    h->name_len == len && memcmp(h->name, name, len) == 0) {
+			list_del(&h->link);
+			s3fs_hidden_nr--;
+			kfree(h);
+		}
+}
+
+/*
+ * unlink / the overwritten target of a rename: drop the local entry for
+ * (parent, name), and tombstone (parent, name, ino) so the dyn entry (or one a
+ * sync lists before the daemon deletes the object) stays invisible.
+ */
+static void entry_forget(unsigned long parent, const char *name, size_t len,
+			 unsigned long ino, u64 seq)
+{
+	struct s3fs_hidden_entry *h = kzalloc(sizeof(*h), GFP_KERNEL);
+
+	local_entry_remove(parent, name, len);
+	if (!h)
+		return;	/* OOM: the old behaviour (the dcache hides it until a sync) */
+	mutex_lock(&s3fs_entries_mtx);
+	hidden_add_locked(h, parent, name, len, ino, seq);
+	mutex_unlock(&s3fs_entries_mtx);
+}
+
+/*
+ * AC-85: the new name of a renamed file becomes a local entry (renamed in place
+ * if it already was one), and the old name is tombstoned, because an S3-derived
+ * (dyn) entry stays under the old name until the next sync.  The new local entry
+ * carries the rename event's seq: a sync promotes it (drops it, the listing then
+ * has the new name) only once the daemon reports that event applied.  Cross-dir
+ * rename: old / new parent may differ.
+ */
+static void entry_rename(unsigned long old_parent, const char *old_name,
+			 size_t old_len, unsigned long new_parent,
+			 const char *new_name, size_t new_len,
+			 struct inode *inode, u64 seq)
+{
+	struct s3fs_local_entry *fresh = kzalloc(sizeof(*fresh), GFP_KERNEL);
+	struct s3fs_hidden_entry *h = kzalloc(sizeof(*h), GFP_KERNEL);
 	struct s3fs_local_entry *le;
 	unsigned long want_old = norm_parent(old_parent);
 	bool renamed = false;
@@ -429,11 +534,27 @@ static bool local_entry_rename(unsigned long old_parent,
 		memcpy(le->name, new_name, new_len);
 		le->name_len   = new_len;
 		le->parent_ino = norm_parent(new_parent);
+		le->seq        = seq;
 		renamed = true;
 		break;
 	}
+	if (!renamed && fresh) {
+		fresh->ino        = inode->i_ino;
+		fresh->parent_ino = norm_parent(new_parent);
+		fresh->mode       = inode->i_mode;
+		fresh->size       = i_size_read(inode);
+		fresh->seq        = seq;
+		fresh->name_len   = new_len;
+		memcpy(fresh->name, new_name, new_len);
+		list_add_tail(&fresh->link, &s3fs_local_entries);
+		s3fs_local_nr++;
+		fresh = NULL;
+	}
+	hidden_revive_locked(new_parent, new_name, new_len, inode->i_ino);
+	if (h)
+		hidden_add_locked(h, old_parent, old_name, old_len, inode->i_ino, seq);
 	mutex_unlock(&s3fs_entries_mtx);
-	return renamed;
+	kfree(fresh);
 }
 
 /*
@@ -453,6 +574,7 @@ static int s3fs_ebpf_rename(struct mnt_idmap *idmap,
 	size_t new_len = new_dentry->d_name.len;
 	char old_name[S3FS_SYNC_NAME_MAX + 1];
 	char new_name[S3FS_SYNC_NAME_MAX + 1];
+	u64 seq;
 
 	if (flags & ~RENAME_NOREPLACE)
 		return -EINVAL; /* no RENAME_EXCHANGE / RENAME_WHITEOUT */
@@ -467,15 +589,18 @@ static int s3fs_ebpf_rename(struct mnt_idmap *idmap,
 	/* G-01: cross-dir rename now works. Daemon translates each
 	 * parent_ino to a full path prefix and issues a single
 	 * CopyObject(<old_dir>/old_name → <new_dir>/new_name) + Delete. */
-	rename_enqueue(inode->i_ino, old_dir->i_ino, new_dir->i_ino,
-		       old_name, old_len, new_name, new_len);
+	seq = rename_enqueue(inode->i_ino, old_dir->i_ino, new_dir->i_ino,
+			     old_name, old_len, new_name, new_len);
 
-	/* Local-side: if the file lives in the local list, update its
-	 * name + parent so lookups under new_dir succeed immediately.
-	 * Dyn entries wait for the next sync to refresh — VFS-side
-	 * rename below still makes the new name lookupable via dcache. */
-	local_entry_rename(old_dir->i_ino, old_name, old_len,
-			   new_dir->i_ino, new_name, new_len);
+	/* An existing target is overwritten: hide it like an unlink. */
+	if (d_really_is_positive(new_dentry))
+		entry_forget(new_dir->i_ino, new_name, new_len,
+			     d_inode(new_dentry)->i_ino, seq);
+
+	/* Local-side (AC-85): the new name is a local entry from now on, the old
+	 * name is tombstoned (see entry_rename). */
+	entry_rename(old_dir->i_ino, old_name, old_len,
+		     new_dir->i_ino, new_name, new_len, inode, seq);
 
 	inode_set_ctime_current(inode);
 	return 0;

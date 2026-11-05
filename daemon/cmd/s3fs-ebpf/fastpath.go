@@ -516,7 +516,7 @@ func runFastpath(args []string) int {
 		// browsing the mount without daemon) doesn't see the stale
 		// snapshot from this session. Mirrors the clearAdmits defer.
 		defer func() {
-			if err := syncEntriesIoctl(*dev, nil); err != nil {
+			if err := syncEntriesIoctl(*dev, nil, appliedSeq()); err != nil {
 				fmt.Fprintf(os.Stderr, "[sync clear] %v\n", err)
 			}
 		}()

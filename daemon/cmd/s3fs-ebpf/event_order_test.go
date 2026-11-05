@@ -8,6 +8,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// resetFlushTracking forgets the flushes drainOrdered tracked: the fake handlers
+// here never run handleFlush, which is what untracks them in the daemon.
+func resetFlushTracking(t *testing.T) {
+	t.Helper()
+	flushInFlight.mu.Lock()
+	flushInFlight.m = nil
+	flushInFlight.mu.Unlock()
+	t.Cleanup(func() {
+		flushInFlight.mu.Lock()
+		flushInFlight.m = nil
+		flushInFlight.mu.Unlock()
+	})
+}
+
 // queues is a fake kmod: three FIFO queues whose events carry kmod's seq.
 type queues struct {
 	flush  []flushEvent
@@ -57,6 +71,7 @@ func (q *queues) ops(log *[]string) orderedOps {
 }
 
 func TestDrainOrderedFollowsSeq(t *testing.T) {
+	resetFlushTracking(t)
 	// Model counterexample 2: create b (flush #1), rename b->c (#2): flush first.
 	// Counterexample 3: rename a->b (#3), create a (flush #4): rename first.
 	q := &queues{
@@ -76,6 +91,7 @@ func TestDrainOrderedFollowsSeq(t *testing.T) {
 // with a smaller seq than a held one must still go first: that is what polling
 // the empty slots again after every pop guarantees.
 func TestDrainOrderedLateOlderEvent(t *testing.T) {
+	resetFlushTracking(t)
 	q := &queues{flush: []flushEvent{{Seq: 2}}}
 	done := false
 	q.onPop = func() {
@@ -96,6 +112,7 @@ func TestDrainOrderedLateOlderEvent(t *testing.T) {
 }
 
 func TestDrainOrderedPopErrorStops(t *testing.T) {
+	resetFlushTracking(t)
 	var log []string
 	ops := (&queues{flush: []flushEvent{{Seq: 1}}}).ops(&log)
 	ops.popRename = func(*renameEvent) error { return errors.New("ioctl broke") }
@@ -106,6 +123,7 @@ func TestDrainOrderedPopErrorStops(t *testing.T) {
 }
 
 func TestDrainOrderedStop(t *testing.T) {
+	resetFlushTracking(t)
 	q := &queues{flush: []flushEvent{{Seq: 1}, {Seq: 2}, {Seq: 3}}}
 	var log []string
 	ops := q.ops(&log)
@@ -120,6 +138,7 @@ func TestDrainOrderedStop(t *testing.T) {
 // PUTs, run(5) must have handled the rename queued before it (seq 3) — and
 // must not touch the events queued after it, which stay held for the next run.
 func TestOrderedDrainRunLimitHoldsNewerEvents(t *testing.T) {
+	resetFlushTracking(t)
 	q := &queues{
 		rename: []renameEvent{{Seq: 3}, {Seq: 8}},
 		flush:  []flushEvent{{Seq: 2}, {Seq: 6}},
@@ -135,5 +154,37 @@ func TestOrderedDrainRunLimitHoldsNewerEvents(t *testing.T) {
 	want := []string{"flush#2", "rename#3", "flush#6", "rename#8"}
 	if fmt.Sprint(log) != fmt.Sprint(want) {
 		t.Errorf("after the full run %v, want %v", log, want)
+	}
+}
+
+// appliedSeq is what a sync tells kmod (AC-85): the last event handed on, but
+// never past a flush whose PUT has not finished (a parked flush is not in S3).
+func TestAppliedSeqStopsBeforeUnfinishedFlush(t *testing.T) {
+	resetFlushTracking(t)
+	d := newOrderedDrain(orderedOps{})
+	ordDrain.Store(d)
+	t.Cleanup(func() { ordDrain.Store(nil) })
+
+	if got := appliedSeq(); got != 0 {
+		t.Fatalf("nothing handled: appliedSeq = %d, want 0", got)
+	}
+	d.noteHandled(20)
+	if got := appliedSeq(); got != 20 {
+		t.Fatalf("appliedSeq = %d, want 20", got)
+	}
+	trackFlush(7, 12) // flush #12 parked in the coalescer
+	trackFlush(8, 15)
+	trackFlush(7, 18) // a later event for the same ino keeps the earliest seq
+	if got := appliedSeq(); got != 11 {
+		t.Errorf("with flush #12 unfinished: appliedSeq = %d, want 11", got)
+	}
+	untrackFlush(7) // its PUT finished (it covers #12 and #18)
+	if got := appliedSeq(); got != 14 {
+		t.Errorf("with flush #15 unfinished: appliedSeq = %d, want 14", got)
+	}
+	untrackFlush(8)
+	d.noteHandled(9) // never goes backwards
+	if got := appliedSeq(); got != 20 {
+		t.Errorf("appliedSeq = %d, want 20", got)
 	}
 }

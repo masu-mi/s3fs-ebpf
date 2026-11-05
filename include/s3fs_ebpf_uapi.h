@@ -196,6 +196,16 @@ struct s3fs_sync_entries {
 	__u32 count;
 	__u32 _pad;
 	__u64 entries; /* user pointer to array of s3fs_sync_entry */
+	/*
+	 * AC-85: every flush / rename / delete event with seq <= applied_seq had
+	 * been applied to S3 before the daemon listed the bucket for this sync, so
+	 * the listing reflects it. kmod drops a tombstone (an entry hidden by
+	 * rename / unlink) and promotes a local entry (made by create / rename)
+	 * only when the listing agrees AND the operation's seq is <= applied_seq:
+	 * a listing taken earlier still shows the old state of S3.
+	 * See docs/design/kmod-entry-table-state-machine.md.
+	 */
+	__u64 applied_seq;
 };
 
 #define S3FS_IOC_SYNC_ENTRIES \

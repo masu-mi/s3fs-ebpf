@@ -46,11 +46,12 @@ type orderedOps struct {
 // run(its seq) first, so a rename or delete queued before it is done before its
 // PUT, never after.
 type orderedDrain struct {
-	mu  sync.Mutex
-	ops orderedOps
-	hf  *flushEvent
-	hd  *deleteEvent
-	hr  *renameEvent
+	handled atomic.Uint64 // seq of the last event passed to the handlers
+	mu      sync.Mutex
+	ops     orderedOps
+	hf      *flushEvent
+	hd      *deleteEvent
+	hr      *renameEvent
 }
 
 const noSeqLimit = ^uint64(0)
@@ -133,15 +134,19 @@ func (d *orderedDrain) runWith(ops orderedOps, limit uint64) {
 		case sf <= sd && sf <= sr:
 			ev := d.hf
 			d.hf = nil
+			trackFlush(ev.Ino, ev.Seq)
 			ops.flush(ev)
+			d.noteHandled(ev.Seq)
 		case sr <= sd:
 			ev := d.hr
 			d.hr = nil
 			ops.rename(ev)
+			d.noteHandled(ev.Seq)
 		default:
 			ev := d.hd
 			d.hd = nil
 			ops.delete(ev)
+			d.noteHandled(ev.Seq)
 		}
 		if ops.stop != nil && ops.stop() {
 			return
@@ -157,4 +162,64 @@ func min3(a, b, c uint64) uint64 {
 		a = c
 	}
 	return a
+}
+
+func (d *orderedDrain) noteHandled(seq uint64) {
+	for {
+		old := d.handled.Load()
+		if seq <= old || d.handled.CompareAndSwap(old, seq) {
+			return
+		}
+	}
+}
+
+// flushInFlight: ino -> the smallest seq of a flush event that was handed on
+// (parked in the coalescer, or being PUT) and whose PUT has not finished. A
+// parked flush is not applied to S3 yet, although the drain has "handled" it.
+var flushInFlight struct {
+	mu sync.Mutex
+	m  map[uint64]uint64
+}
+
+func trackFlush(ino, seq uint64) {
+	flushInFlight.mu.Lock()
+	defer flushInFlight.mu.Unlock()
+	if flushInFlight.m == nil {
+		flushInFlight.m = map[uint64]uint64{}
+	}
+	if old, ok := flushInFlight.m[ino]; !ok || seq < old {
+		flushInFlight.m[ino] = seq
+	}
+}
+
+// untrackFlush is called when handleFlush for ino returns. The event it handled
+// is the latest for the ino; every earlier one (dropped by the coalescer, or
+// covered by an fsync's PUT) is covered by that PUT.
+func untrackFlush(ino uint64) {
+	flushInFlight.mu.Lock()
+	delete(flushInFlight.m, ino)
+	flushInFlight.mu.Unlock()
+}
+
+// appliedSeq returns W: every flush / rename / delete event with seq <= W has
+// been applied to S3 (AC-85). kmod's sync uses it to decide when a tombstone or
+// a local entry may go (docs/design/kmod-entry-table-state-machine.md).
+//
+// The drain handles events in seq order, so all events <= the last handled one
+// have been handed on, and any not yet popped have a larger seq. Renames and
+// deletes are synchronous; a flush only counts once its PUT has finished.
+func appliedSeq() uint64 {
+	d := ordDrain.Load()
+	if d == nil {
+		return 0
+	}
+	w := d.handled.Load()
+	flushInFlight.mu.Lock()
+	for _, s := range flushInFlight.m {
+		if s > 0 && s-1 < w {
+			w = s - 1
+		}
+	}
+	flushInFlight.mu.Unlock()
+	return w
 }

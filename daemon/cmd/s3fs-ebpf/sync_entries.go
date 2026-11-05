@@ -19,16 +19,18 @@ import (
 
 // s3fsIocSyncEntries encodes _IOW(0xE3, 0x04, struct s3fs_sync_entries).
 
-// syncEntriesIoctl pushes `entries` to kmod via S3FS_IOC_SYNC_ENTRIES.
+// syncEntriesIoctl pushes `entries` to kmod via S3FS_IOC_SYNC_ENTRIES. `appliedSeq`:
+// every flush / rename / delete event with seq <= it was applied to S3 before the
+// listing was taken (appliedSeq).
 // Passing an empty slice tells kmod to restore its bootstrap table.
-func syncEntriesIoctl(devPath string, entries []syncEntry) error {
+func syncEntriesIoctl(devPath string, entries []syncEntry, appliedSeq uint64) error {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", devPath, err)
 	}
 	defer f.Close()
 
-	arg := syncEntriesArg{Count: uint32(len(entries))}
+	arg := syncEntriesArg{Count: uint32(len(entries)), AppliedSeq: appliedSeq}
 	if len(entries) > 0 {
 		arg.Entries = uint64(uintptr(unsafe.Pointer(&entries[0])))
 	}
@@ -95,6 +97,10 @@ func syncEntriesOnce(ctx context.Context, devPath string, s3c objstore.Backend) 
 		return fpebpf.Snapshot(), nil
 	}
 	seedInoAllocator()
+	// AC-85: events with seq <= applied are in S3 before the listing starts, so
+	// the listing reflects them; kmod uses it to drop tombstones / promote local
+	// entries only when that is true.
+	applied := appliedSeq()
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	fresh, err := buildEntriesFromS3(timedCtx, s3c)
@@ -103,7 +109,7 @@ func syncEntriesOnce(ctx context.Context, devPath string, s3c objstore.Backend) 
 		return nil, fmt.Errorf("list: %w", err)
 	}
 	payload := entriesToSyncPayload(fresh)
-	if err := syncEntriesIoctl(devPath, payload); err != nil {
+	if err := syncEntriesIoctl(devPath, payload, applied); err != nil {
 		metrics.Global.SyncErrors.Add(1)
 		return nil, err
 	}

@@ -222,16 +222,18 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 	return 0;
 }
 
-static void flush_enqueue(u64 ino, u64 parent_ino, u64 size,
+/* Returns the event's seq (0 if nothing was queued). */
+static u64 flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 			  const char *name, size_t name_len, u32 flags)
 {
 	struct s3fs_flush_item *f;
+	u64 seq;
 
 	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
-		return;
+		return 0;
 	f = kzalloc(sizeof(*f), GFP_KERNEL);
 	if (!f)
-		return;
+		return 0;
 	f->ino = ino;
 	f->parent_ino = parent_ino;
 	f->size = size;
@@ -259,6 +261,7 @@ static void flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 		}
 		spin_lock(&s3fs_evseq_lock);
 		f->seq = ++s3fs_evseq;
+		seq = f->seq;
 		spin_lock(&s3fs_flush_wait_lock);
 		list_add_tail(&f->link, &s3fs_flush_wait_queue);
 		spin_unlock(&s3fs_flush_wait_lock);
@@ -267,11 +270,13 @@ static void flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 	} else {
 		spin_lock(&s3fs_evseq_lock);
 		f->seq = ++s3fs_evseq;
+		seq = f->seq;
 		spin_lock(&s3fs_flush_lock);
 		list_add_tail(&f->link, &s3fs_flush_queue);
 		spin_unlock(&s3fs_flush_lock);
 		spin_unlock(&s3fs_evseq_lock);
 	}
+	return seq;
 }
 
 /* Pop one item into *out; returns true if queue had something.

@@ -79,9 +79,9 @@ Flushed の間、`mirror` はこの ino を知らない (`local` だけが知る
 | 2 作成直後の rename で旧名の key (AC-84) | kmod が全イベントに通し番号 `seq` を付け、daemon が seq 順に 1 本のループで処理 (`orderedDrain`)。rename / delete の前に coalescer の保留中の flush を全部出す (`FireAll`) | `create_rename_quick`: 修正前 S3 は `q1.txt` → 修正後 `q2.txt` |
 | 3 rename 後の同名作成でデータ損失 (AC-84) | 同上。fsync (WAIT) の flush も PUT の前に `orderedBefore(seq)` で自分より前のイベントを処理する | `fsync_rename_reuse_name`: 修正前 ENOENT → 修正後 s3fs-fuse と一致 |
 
-モデルが予測したとおり、AC-82 を直すと、これまで EIO に隠れていた旧名の open (AC-85) が露出した。
+モデルが予測したとおり、AC-82 を直すと、これまで EIO に隠れていた旧名の open (AC-85) が露出した。AC-85 は `docs/design/kmod-entry-table-state-machine.md` (tombstone) で直した。
 
 ## 6. 起票
 
 - AC-82 ✅、AC-84 ✅。
-- AC-85: rename / unlink した S3 由来の entry の旧名が次の sync まで残る (kmod)。次はこれ。状態遷移図と TLA+ のモデルを先に書く。
+- AC-85 ✅: rename / unlink した S3 由来の entry の旧名が次の sync まで残る (kmod)。tombstone で直した (`docs/design/kmod-entry-table-state-machine.md`)。

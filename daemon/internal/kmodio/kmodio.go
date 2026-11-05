@@ -148,9 +148,10 @@ type SyncEntry struct {
 
 // SyncEntriesArg mirrors `struct s3fs_sync_entries`.
 type SyncEntriesArg struct {
-	Count   uint32
-	_pad    uint32
-	Entries uint64
+	Count      uint32
+	_pad       uint32
+	Entries    uint64
+	AppliedSeq uint64 // AC-85: events with seq <= AppliedSeq are applied to S3
 }
 
 // ProbeKvbaseArg mirrors `struct s3fs_probe_kvbase` in

@@ -219,7 +219,7 @@ static long s3fs_dev_sync_entries(void __user *uarg)
 		return -EFAULT;
 
 	if (hdr.count == 0)
-		return s3fs_ebpf_entries_replace(NULL, 0);
+		return s3fs_ebpf_entries_replace_applied(NULL, 0, hdr.applied_seq);
 
 	/* Lookups go through hash indexes (AC-55), so the cap bounds memory only
 	 * (~0.3 KB per entry, held twice while the ioctl copies); 4096 was
@@ -261,7 +261,7 @@ static long s3fs_dev_sync_entries(void __user *uarg)
 	}
 
 	/* Hand ownership over on success. */
-	err = s3fs_ebpf_entries_replace(kbuf, hdr.count);
+	err = s3fs_ebpf_entries_replace_applied(kbuf, hdr.count, hdr.applied_seq);
 	if (err)
 		goto out_free_kbuf;
 

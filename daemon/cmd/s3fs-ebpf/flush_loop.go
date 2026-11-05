@@ -391,6 +391,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, ev *flushEvent) {
 	metrics.Global.FlushEvents.Add(1)
+	defer untrackFlush(ev.Ino) // AC-85: this PUT (and every older event it covers) is done
 	// Time the full flush service path (readDirty + S3 Put +
 	// arena admit refresh). Defer covers every return branch so
 	// the histogram reflects Put-failure retries and no-backend

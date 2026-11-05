@@ -27,25 +27,29 @@ struct s3fs_delete_item {
 static LIST_HEAD(s3fs_delete_queue);
 static DEFINE_SPINLOCK(s3fs_delete_lock);
 
-static void delete_enqueue(u64 ino, u64 parent_ino, const char *name, size_t name_len)
+/* Returns the event's seq (0 if nothing was queued). */
+static u64 delete_enqueue(u64 ino, u64 parent_ino, const char *name, size_t name_len)
 {
 	struct s3fs_delete_item *d;
+	u64 seq;
 
 	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
-		return;
+		return 0;
 	d = kzalloc(sizeof(*d), GFP_KERNEL);
 	if (!d)
-		return;
+		return 0;
 	d->ino = ino;
 	d->parent_ino = parent_ino;
 	d->name_len = name_len;
 	memcpy(d->name, name, name_len);
 	spin_lock(&s3fs_evseq_lock);
 	d->seq = ++s3fs_evseq;
+	seq = d->seq;
 	spin_lock(&s3fs_delete_lock);
 	list_add_tail(&d->link, &s3fs_delete_queue);
 	spin_unlock(&s3fs_delete_lock);
 	spin_unlock(&s3fs_evseq_lock);
+	return seq;
 }
 
 static bool delete_dequeue(struct s3fs_delete_item *out)
@@ -114,19 +118,21 @@ struct s3fs_rename_item {
 static LIST_HEAD(s3fs_rename_queue);
 static DEFINE_SPINLOCK(s3fs_rename_lock);
 
-static void rename_enqueue(u64 ino,
+/* Returns the event's seq (0 if nothing was queued). */
+static u64 rename_enqueue(u64 ino,
 			   u64 old_parent_ino, u64 new_parent_ino,
 			   const char *old_name, size_t old_len,
 			   const char *new_name, size_t new_len)
 {
 	struct s3fs_rename_item *r;
+	u64 seq;
 
 	if (old_len == 0 || old_len > S3FS_SYNC_NAME_MAX ||
 	    new_len == 0 || new_len > S3FS_SYNC_NAME_MAX)
-		return;
+		return 0;
 	r = kzalloc(sizeof(*r), GFP_KERNEL);
 	if (!r)
-		return;
+		return 0;
 	r->ino = ino;
 	r->old_parent_ino = old_parent_ino;
 	r->new_parent_ino = new_parent_ino;
@@ -136,10 +142,12 @@ static void rename_enqueue(u64 ino,
 	memcpy(r->new_name, new_name, new_len);
 	spin_lock(&s3fs_evseq_lock);
 	r->seq = ++s3fs_evseq;
+	seq = r->seq;
 	spin_lock(&s3fs_rename_lock);
 	list_add_tail(&r->link, &s3fs_rename_queue);
 	spin_unlock(&s3fs_rename_lock);
 	spin_unlock(&s3fs_evseq_lock);
+	return seq;
 }
 
 static bool rename_dequeue(struct s3fs_rename_item *out)
