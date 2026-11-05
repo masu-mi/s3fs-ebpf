@@ -80,11 +80,25 @@ def create_rename_quick():                       # model counterexample 2
 def rename_then_reuse_name():                    # model counterexample 3
     os.rename(p('r1.txt'), p('r2.txt')); wr('r1.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, b'new-r1')
     time.sleep(settle * 2); return rd('r2.txt') + ' | ' + rd('r1.txt')
+def local_rename_reuse_name():                   # model counterexample 3, on a file kmod created itself
+    wr('t1.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, b'old-t1'); time.sleep(settle)   # flushed: S3 has t1.txt
+    os.rename(p('t1.txt'), p('t2.txt')); wr('t1.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, b'new-t1')
+    time.sleep(settle * 2)
+    return rd('t2.txt') + ' | ' + rd('t1.txt') + ' | s3: ' + ' '.join(sorted(k for k in s3keys() if k.startswith('t')))
+def fsync_rename_reuse_name():                   # same, but the new file is fsync'ed: that flush is not debounced
+    wr('u1.txt', os.O_WRONLY | os.O_CREAT | os.O_EXCL, b'old-u1'); time.sleep(settle)
+    os.rename(p('u1.txt'), p('u2.txt'))
+    fd = os.open(p('u1.txt'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    os.write(fd, b'new-u1'); os.fsync(fd); os.close(fd)
+    time.sleep(settle * 2)
+    return rd('u2.txt') + ' | ' + rd('u1.txt') + ' | s3: ' + ' '.join(sorted(k for k in s3keys() if k.startswith('u')))
 def s3keys():
     out = subprocess.run(['docker', 'exec', ct, 'mc', 'ls', 'local/%s/' % bucket], capture_output=True, text=True).stdout
     return [l.split()[-1] for l in out.splitlines() if l.strip()]
 op('create_rename_quick',     create_rename_quick)
 op('rename_then_reuse_name',  rename_then_reuse_name)
+op('local_rename_reuse_name', local_rename_reuse_name)
+op('fsync_rename_reuse_name', fsync_rename_reuse_name)
 # Another client deletes / creates a key behind the mount's back.
 mc('rm', 'local/%s/gone.txt' % bucket)
 op('ext_delete_open',      lambda: rd('gone.txt'))

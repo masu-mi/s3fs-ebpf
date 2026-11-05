@@ -54,7 +54,7 @@ Flushed の間、`mirror` はこの ino を知らない (`local` だけが知る
 反例 (最短):
 1. **mirror が作成を学ばない** (`ReadOK`、3 状態): `Create("b")` → `DaemonFlush`。flush した ino は `local` にあるが `mirror` にない。→ `RecordKeys` で直る。
 2. **作成直後の rename で S3 の key が旧名になる** (`QuiescentConsistent`、5 状態): `Create("b")` → `Rename("b","c")` → `DaemonRename` (元 key が S3 にないので dropped) → `DaemonFlush` (旧名 b に PUT)。→ `Serialized` で直る。**実機で再現した** (`test-parity` の `create_rename_quick`: s3fs-fuse は `q2.txt`、s3fs-ebpf は `q1.txt`)。
-3. **rename の直後に同じ名前で作ると、内容が入れ替わる** (`OpenOK`、5 状態): `Rename("a","b")` → `Create("a")` → `DaemonFlush` (旧 ino の object `a` を上書き) → `DaemonRename` (新しい内容を `b` に移して `a` を消す)。ino ごとの順序づけでは防げない (ino が違う)。→ `Serialized` で直る。**実機では再現しなかった**: 別のバグ (rename 直後の旧名での作成が EEXIST、kmod が旧名を空けていない) が覆い隠している (`rename_then_reuse_name`)。その EEXIST を直すと、このデータ損失が表に出る。
+3. **rename の直後に同じ名前で作ると、内容が入れ替わる** (`OpenOK`、5 状態): `Rename("a","b")` → `Create("a")` → `DaemonFlush` (旧 ino の object `a` を上書き) → `DaemonRename` (新しい内容を `b` に移して `a` を消す)。ino ごとの順序づけでは防げない (ino が違う)。→ `Serialized` で直る。**synced なファイルでは実機で再現できない**: 別のバグ (rename 直後の旧名での作成が EEXIST、kmod が S3 由来の entry を旧名のまま残す、AC-85) が先に失敗させる。kmod 自身が作ったファイル (local entry は rename で即座に更新される) では、**fsync した新ファイルの flush が debounce なしで先に PUT する**ため再現した (`fsync_rename_reuse_name`: 修正前は ENOENT でデータ損失)。
 
 ## 4. 実装との対応と、モデルの限界
 
@@ -69,8 +69,19 @@ Flushed の間、`mirror` はこの ino を知らない (`local` だけが知る
 
 含めていない: fsync の WAIT 経路 (即時 PUT)、dirty / flushing の fd、外部クライアントの更新、unlink、タイミング (ticker の間隔)、複数ファイルの同時 rename。**モデルが通っても実装が正しいとは言えない**。反例は実機で確かめ (反例 2 は再現、3 は別のバグに隠れた)、修正は実装の回帰試験 (`make test-parity`) でも確かめる。
 
-## 5. 起票
+## 5. 修正と結果 (2026-11-05)
 
-- AC-82: rename 後の open が EIO / 作成した ino を mirror が学ばない (反例 1 を追記)。
-- AC-84: flush と rename の処理順が保証されない (反例 2、3)。
-- AC-85: rename 直後の旧名での作成が EEXIST。
+実装は `keys-serialized` (`RecordKeys` と `Serialized`)。
+
+| 反例 | 修正 | 実機 (`make test-parity`) |
+|---|---|---|
+| 1 mirror が作成を学ばない (AC-82) | `handleFlush` / `handleRename` が `fpebpf.RecordKey` で mirror を更新 (open_check 用の `localKeys` は mirror に一本化) | `rename_open_new`: 修正前 EIO → 修正後 s3fs-fuse と一致 |
+| 2 作成直後の rename で旧名の key (AC-84) | kmod が全イベントに通し番号 `seq` を付け、daemon が seq 順に 1 本のループで処理 (`orderedDrain`)。rename / delete の前に coalescer の保留中の flush を全部出す (`FireAll`) | `create_rename_quick`: 修正前 S3 は `q1.txt` → 修正後 `q2.txt` |
+| 3 rename 後の同名作成でデータ損失 (AC-84) | 同上。fsync (WAIT) の flush も PUT の前に `orderedBefore(seq)` で自分より前のイベントを処理する | `fsync_rename_reuse_name`: 修正前 ENOENT → 修正後 s3fs-fuse と一致 |
+
+モデルが予測したとおり、AC-82 を直すと、これまで EIO に隠れていた旧名の open (AC-85) が露出した。
+
+## 6. 起票
+
+- AC-82 ✅、AC-84 ✅。
+- AC-85: rename / unlink した S3 由来の entry の旧名が次の sync まで残る (kmod)。次はこれ。状態遷移図と TLA+ のモデルを先に書く。

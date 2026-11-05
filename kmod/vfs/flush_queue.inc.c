@@ -10,11 +10,19 @@
  * inos that were minted locally by .create and haven't hit the ino
  * allocator's S3Key map yet.
  */
+/* AC-84: one order for the flush, rename and delete queues.  `seq` is taken
+ * under s3fs_evseq_lock together with the list_add, so an event with a smaller
+ * seq is always already queued when one with a larger seq can be popped.  The
+ * lock is outer to the three queue locks (it is held while they are taken). */
+static DEFINE_SPINLOCK(s3fs_evseq_lock);
+static u64 s3fs_evseq;
+
 struct s3fs_flush_item {
 	struct list_head link;
 	u64 ino;
 	u64 parent_ino; /* G-01: dir the file lives under, for daemon full-path resolution */
 	u64 size;
+	u64 seq;
 	u32 name_len;
 	u32 flags;  /* S3FS_FLUSH_FLAG_* (E-03) */
 	char name[S3FS_SYNC_NAME_MAX + 1];
@@ -249,14 +257,20 @@ static void flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 			list_del(&q->link);
 			kfree(q);
 		}
+		spin_lock(&s3fs_evseq_lock);
+		f->seq = ++s3fs_evseq;
 		spin_lock(&s3fs_flush_wait_lock);
 		list_add_tail(&f->link, &s3fs_flush_wait_queue);
 		spin_unlock(&s3fs_flush_wait_lock);
+		spin_unlock(&s3fs_evseq_lock);
 		wake_up_interruptible(&s3fs_flush_wait_wq);
 	} else {
+		spin_lock(&s3fs_evseq_lock);
+		f->seq = ++s3fs_evseq;
 		spin_lock(&s3fs_flush_lock);
 		list_add_tail(&f->link, &s3fs_flush_queue);
 		spin_unlock(&s3fs_flush_lock);
+		spin_unlock(&s3fs_evseq_lock);
 	}
 }
 
@@ -319,6 +333,7 @@ int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
 	out->ino        = item.ino;
 	out->parent_ino = item.parent_ino;
 	out->size       = item.size;
+	out->seq        = item.seq;
 	out->name_len   = item.name_len;
 	out->flags      = item.flags;
 	memcpy(out->name, item.name, item.name_len);
@@ -365,6 +380,7 @@ again:
 	out->ino        = f->ino;
 	out->parent_ino = f->parent_ino;
 	out->size       = f->size;
+	out->seq        = f->seq;
 	out->name_len   = f->name_len;
 	out->flags      = f->flags;
 	memcpy(out->name, f->name, f->name_len);

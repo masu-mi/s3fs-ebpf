@@ -60,6 +60,7 @@ type FlushEvent struct {
 	Ino       uint64
 	ParentIno uint64 // G-01: dir the file lives under, for full-key reconstruction
 	Size      uint64
+	Seq       uint64 // AC-84: kmod-wide event order (flush / rename / delete)
 	NameLen   uint32
 	Flags     uint32
 	Name      [SyncNameMax + 1]byte
@@ -98,6 +99,7 @@ type DrainEvictionsArg struct {
 type DeleteEvent struct {
 	Ino       uint64
 	ParentIno uint64 // G-01
+	Seq       uint64 // AC-84
 	NameLen   uint32
 	_pad      uint32
 	Name      [SyncNameMax + 1]byte
@@ -110,6 +112,7 @@ type RenameEvent struct {
 	Ino          uint64
 	OldParentIno uint64 // G-01
 	NewParentIno uint64 // G-01
+	Seq          uint64 // AC-84
 	OldNameLen   uint32
 	NewNameLen   uint32
 	OldName      [SyncNameMax + 1]byte

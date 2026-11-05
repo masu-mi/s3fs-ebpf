@@ -155,6 +155,9 @@ func runFlushWaitLoop(ctx context.Context, devPath string,
 			fmt.Fprintf(os.Stderr, "[flush-wait] pop_wait: %v\n", err)
 			return
 		}
+		// AC-84: a rename / delete / flush that kmod queued before this fsync
+		// is done before its PUT (it could otherwise overwrite or move it).
+		orderedBefore(ev.Seq)
 		// Whatever is parked in the coalescer for this ino was popped
 		// before this event and is covered by its PUT: drop it, and make
 		// one already firing stand aside (flush_order.go).
@@ -247,7 +250,9 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 	coal := newCoalescer(int(f.Fd()), devPath, progs, s3c,
 		200*time.Millisecond)
 	setFlushCoalescer(coal)
-	defer func() { setFlushCoalescer(nil); coal.Shutdown() }()
+	drain := newOrderedDrain(flushQueueOps(ctx, int(f.Fd()), devPath, progs, s3c, coal))
+	ordDrain.Store(drain)
+	defer func() { ordDrain.Store(nil); setFlushCoalescer(nil); coal.Shutdown() }()
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -260,11 +265,11 @@ func runFlushLoop(ctx context.Context, devPath string, progs *fpebpf.Programs,
 			// SIGINT durably PUTs the last write instead of dropping
 			// it on the floor. Bounded so a stuck S3 doesn't hang
 			// shutdown forever.
-			drainFlushOnShutdown(int(f.Fd()), devPath, progs, s3c,
+			drainFlushOnShutdown(drain, int(f.Fd()), devPath, progs, s3c,
 				shutdownDrainBudget)
 			return
 		case <-t.C:
-			drainFlushQueue(ctx, int(f.Fd()), devPath, progs, s3c, coal)
+			drain.run(noSeqLimit)
 		}
 	}
 }
@@ -279,67 +284,75 @@ var shutdownDrainBudget = 10 * time.Second
 // background ctx so a canceled parent doesn't short-circuit the PUTs
 // we are actively trying to complete. coal.Shutdown() (deferred by
 // the caller) drains the debounce layer after this returns.
-func drainFlushOnShutdown(devFd int, devPath string, progs *fpebpf.Programs,
+func drainFlushOnShutdown(d *orderedDrain, devFd int, devPath string, progs *fpebpf.Programs,
 	s3c objstore.Backend, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	ctx := context.Background()
 	drained := 0
-	for {
-		var ev flushEvent
-		if err := popFlush(devFd, &ev); err != nil {
-			if errors.Is(err, unix.EAGAIN) {
-				break // queue empty
-			}
-			fmt.Fprintf(os.Stderr, "[flush] shutdown pop: %v\n", err)
-			return
-		}
-		// Drive events synchronously on the shutdown path so we
-		// don't just re-enqueue into the coalescer's debounce timer
-		// and then exit before it fires. handleFlush issues the PUT
-		// (and signal_flush for WAIT events) in-line.
-		handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
-		drained++
-		if time.Now().After(deadline) {
-			fmt.Fprintf(os.Stderr,
-				"[flush] shutdown drain hit %s budget with events remaining — some writes may not be durable\n",
-				budget)
-			return
-		}
+	timedOut := false
+	// Drive events synchronously on the shutdown path so we don't just
+	// re-enqueue into the coalescer's debounce timer and then exit before it
+	// fires. handleFlush issues the PUT (and signal_flush for WAIT events)
+	// in-line; the order is still kmod's (drainOrdered).
+	d.runWith(orderedOps{
+		popFlush:  func(ev *flushEvent) error { return popFlush(devFd, ev) },
+		popDelete: func(ev *deleteEvent) error { return popDelete(devFd, ev) },
+		popRename: func(ev *renameEvent) error { return popRename(devFd, ev) },
+		flush:     func(ev *flushEvent) { handleFlush(ctx, devFd, devPath, progs, s3c, ev); drained++ },
+		delete:    func(ev *deleteEvent) { handleDelete(ctx, s3c, ev); drained++ },
+		rename:    func(ev *renameEvent) { handleRename(ctx, s3c, ev); drained++ },
+		stop: func() bool {
+			timedOut = time.Now().After(deadline)
+			return timedOut
+		},
+	}, noSeqLimit)
+	if timedOut {
+		fmt.Fprintf(os.Stderr,
+			"[flush] shutdown drain hit %s budget with events remaining — some writes may not be durable\n",
+			budget)
+		return
 	}
 	if drained > 0 {
-		fmt.Fprintf(os.Stderr, "[flush] shutdown drained %d event(s) from kmod queue\n", drained)
+		fmt.Fprintf(os.Stderr, "[flush] shutdown drained %d event(s) from kmod queues\n", drained)
 	}
 }
 
-func drainFlushQueue(ctx context.Context, devFd int, devPath string,
-	progs *fpebpf.Programs, s3c objstore.Backend, coal *coalescer) {
-	for {
-		var ev flushEvent
-		if err := popFlush(devFd, &ev); err != nil {
-			if errors.Is(err, unix.EAGAIN) {
+// flushQueueOps: flush events go through the debounce coalescer (fsync's WAIT
+// ones straight to the PUT); a rename or delete first waits for every flush
+// event older than it to reach S3, because it acts on the keys those PUT.
+func flushQueueOps(ctx context.Context, devFd int, devPath string,
+	progs *fpebpf.Programs, s3c objstore.Backend, coal *coalescer) orderedOps {
+	barrier := func() {
+		if coal != nil {
+			coal.FireAll(ctx)
+		}
+	}
+	return orderedOps{
+		popFlush:  func(ev *flushEvent) error { return popFlush(devFd, ev) },
+		popDelete: func(ev *deleteEvent) error { return popDelete(devFd, ev) },
+		popRename: func(ev *renameEvent) error { return popRename(devFd, ev) },
+		flush: func(ev *flushEvent) {
+			// fsync-triggered (WAIT flag): fire straight through so the
+			// blocked caller returns as soon as PUT completes. All other
+			// events go through the debounce coalescer.
+			if ev.Flags&flushFlagWait != 0 || coal == nil {
+				// Drop any earlier debounced event for this ino so a
+				// stale close-event's PUT can't fire after ours and
+				// overwrite the fresh bytes.
+				if coal != nil {
+					flushOrd.noteWait(ev.Ino)
+					coal.CancelIno(ev.Ino)
+				}
+				flushOrd.runWait(ev.Ino, func() {
+					handleFlush(ctx, devFd, devPath, progs, s3c, ev)
+				})
 				return
 			}
-			fmt.Fprintf(os.Stderr, "[flush] pop: %v\n", err)
-			return
-		}
-		// fsync-triggered (WAIT flag): fire straight through so the
-		// blocked caller returns as soon as PUT completes. All other
-		// events go through the debounce coalescer.
-		if ev.Flags&flushFlagWait != 0 || coal == nil {
-			// Drop any earlier debounced event for this ino so a
-			// stale close-event's PUT can't fire after ours and
-			// overwrite the fresh bytes.
-			if coal != nil {
-				flushOrd.noteWait(ev.Ino)
-				coal.CancelIno(ev.Ino)
-			}
-			flushOrd.runWait(ev.Ino, func() {
-				handleFlush(ctx, devFd, devPath, progs, s3c, &ev)
-			})
-			continue
-		}
-		flushOrd.noteParked(ev.Ino)
-		coal.Submit(ctx, &ev)
+			flushOrd.noteParked(ev.Ino)
+			coal.Submit(ctx, ev)
+		},
+		delete: func(ev *deleteEvent) { barrier(); handleDelete(ctx, s3c, ev) },
+		rename: func(ev *renameEvent) { barrier(); handleRename(ctx, s3c, ev) },
 	}
 }
 
@@ -400,7 +413,9 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	name := string(ev.Name[:ev.NameLen])
 
 	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
-	noteLocalKey(ev.Ino, s3key) // open_check: the mirror learns this key only at the next sync
+	// AC-82: the mirror learns a created file (or its new name) only at the next
+	// sync; read misses and open_check look the key up there.
+	fpebpf.RecordKey(ev.Ino, ev.ParentIno, name, s3key, ev.Size)
 
 	if s3c == nil {
 		fmt.Printf("[flush] drop ino=%d name=%s (no S3 backend)\n",

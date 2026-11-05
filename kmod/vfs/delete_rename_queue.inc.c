@@ -19,6 +19,7 @@ struct s3fs_delete_item {
 	struct list_head link;
 	u64 ino;
 	u64 parent_ino; /* G-01 */
+	u64 seq;        /* AC-84 */
 	u32 name_len;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 };
@@ -39,9 +40,12 @@ static void delete_enqueue(u64 ino, u64 parent_ino, const char *name, size_t nam
 	d->parent_ino = parent_ino;
 	d->name_len = name_len;
 	memcpy(d->name, name, name_len);
+	spin_lock(&s3fs_evseq_lock);
+	d->seq = ++s3fs_evseq;
 	spin_lock(&s3fs_delete_lock);
 	list_add_tail(&d->link, &s3fs_delete_queue);
 	spin_unlock(&s3fs_delete_lock);
+	spin_unlock(&s3fs_evseq_lock);
 }
 
 static bool delete_dequeue(struct s3fs_delete_item *out)
@@ -83,6 +87,7 @@ int s3fs_ebpf_delete_pop(struct s3fs_delete_event *out)
 	memset(out, 0, sizeof(*out));
 	out->ino        = item.ino;
 	out->parent_ino = item.parent_ino;
+	out->seq        = item.seq;
 	out->name_len   = item.name_len;
 	memcpy(out->name, item.name, item.name_len);
 	out->name[item.name_len] = '\0';
@@ -99,6 +104,7 @@ struct s3fs_rename_item {
 	u64 ino;
 	u64 old_parent_ino; /* G-01 */
 	u64 new_parent_ino; /* G-01 */
+	u64 seq;            /* AC-84 */
 	u32 old_name_len;
 	u32 new_name_len;
 	char old_name[S3FS_SYNC_NAME_MAX + 1];
@@ -128,9 +134,12 @@ static void rename_enqueue(u64 ino,
 	r->new_name_len = new_len;
 	memcpy(r->old_name, old_name, old_len);
 	memcpy(r->new_name, new_name, new_len);
+	spin_lock(&s3fs_evseq_lock);
+	r->seq = ++s3fs_evseq;
 	spin_lock(&s3fs_rename_lock);
 	list_add_tail(&r->link, &s3fs_rename_queue);
 	spin_unlock(&s3fs_rename_lock);
+	spin_unlock(&s3fs_evseq_lock);
 }
 
 static bool rename_dequeue(struct s3fs_rename_item *out)
@@ -173,6 +182,7 @@ int s3fs_ebpf_rename_pop(struct s3fs_rename_event *out)
 	out->ino            = item.ino;
 	out->old_parent_ino = item.old_parent_ino;
 	out->new_parent_ino = item.new_parent_ino;
+	out->seq            = item.seq;
 	out->old_name_len   = item.old_name_len;
 	out->new_name_len   = item.new_name_len;
 	memcpy(out->old_name, item.old_name, item.old_name_len);

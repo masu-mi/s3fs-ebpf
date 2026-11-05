@@ -95,3 +95,25 @@ func SetSizeByIno(ino, size uint64) {
 		}
 	}
 }
+
+// RecordKey makes the mirror agree with a key the daemon just wrote or moved:
+// a flush of a file created since the last sync, or a rename. The mirror is
+// otherwise only refreshed by a sync, so until then a read miss (which looks
+// the ino up here) found no entry, or the key from before a rename (AC-82).
+// An ino the mirror does not know becomes a regular-file entry with the given
+// parent, name, key and size; a known one keeps its mode and flags and gets the
+// new parent, name and key.
+func RecordKey(ino, parentIno uint64, name, key string, size uint64) {
+	entriesMu.Lock()
+	defer entriesMu.Unlock()
+	for i := range entries {
+		if entries[i].Ino == ino {
+			entries[i].ParentIno = parentIno
+			entries[i].Name = name
+			entries[i].S3Key = key
+			return
+		}
+	}
+	entries = append(entries, Entry{Ino: ino, ParentIno: parentIno, Name: name,
+		S3Key: key, Mode: 0o100644, Fallback: size})
+}

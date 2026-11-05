@@ -224,10 +224,23 @@ struct s3fs_sync_entries {
  */
 #define S3FS_FLUSH_FLAG_WAIT 0x1U
 
+/*
+ * AC-84: flush, rename and delete events carry one kmod-wide, strictly
+ * increasing `seq`, assigned under the same lock that queues the event, so
+ * once the daemon has popped an event with seq S from one queue, every event
+ * with a smaller seq is already visible in its own queue.  The daemon merges
+ * the three queues by seq and handles them in that order; with independent
+ * loops a rename can overtake the flush of a file created just before it (S3
+ * then holds the old name), or a flush of a re-created name can overtake the
+ * rename of the old file (the old object is overwritten, then moved).
+ * See docs/design/file-lifecycle-state-machine.md.
+ */
+
 struct s3fs_flush_event {
 	__u64 ino;
 	__u64 parent_ino; /* G-01: dir the file lives under. 0 == root. */
 	__u64 size;      /* current buffer size at enqueue time */
+	__u64 seq;       /* AC-84: kmod-wide event order (flush / rename / delete) */
 	__u32 name_len;
 	__u32 flags;     /* S3FS_FLUSH_FLAG_* (E-03) */
 	char  name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
@@ -357,6 +370,7 @@ struct s3fs_drain_evictions {
 struct s3fs_delete_event {
 	__u64 ino;
 	__u64 parent_ino; /* G-01: dir the file lived under. 0 == root. */
+	__u64 seq;        /* AC-84: kmod-wide event order */
 	__u32 name_len;
 	__u32 _pad;
 	char  name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
@@ -377,6 +391,7 @@ struct s3fs_rename_event {
 	__u64 ino;
 	__u64 old_parent_ino; /* G-01: source dir. 0 == root. */
 	__u64 new_parent_ino; /* G-01: destination dir. Equal to old_parent for in-place rename. */
+	__u64 seq;            /* AC-84: kmod-wide event order */
 	__u32 old_name_len;
 	__u32 new_name_len;
 	char  old_name[S3FS_SYNC_NAME_MAX + 1];
