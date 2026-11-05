@@ -40,26 +40,6 @@ struct s3fs_stat {
 	__u32 gid;
 };
 
-/* Slow-path event pushed via BPF_MAP_TYPE_RINGBUF to the Go daemon.
- *
- * Week 2 intentionally omits the resolved path: reconstructing it in a
- * BPF program requires a bounded d_path()-style walk, which we defer to
- * Week 3 once the kernel module owns the inode table and can hand us a
- * stable key. For now the daemon looks up ino against its own S3-key
- * index.
- */
-struct s3fs_miss_event {
-	__u64 ino;
-	__u32 op;               /* see enum s3fs_miss_op */
-	__u32 _pad;
-};
-
-enum s3fs_miss_op {
-	S3FS_OP_GETATTR = 0,
-	S3FS_OP_LOOKUP  = 1,
-	S3FS_OP_READ    = 2,
-};
-
 /* Per-CPU counter slots (indices into s3fs_counters map). */
 enum s3fs_stat_slot {
 	S3FS_STAT_FAST_HITS             = 0,

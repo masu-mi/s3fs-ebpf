@@ -24,7 +24,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 | **T6** | daemon → BPF map | mmap (arena bytes 書込) / `bpf(BPF_MAP_UPDATE_ELEM)` (inode_index 書込) | arena 書込は syscall なし。inode_index は cilium/ebpf 経由 | admit ごと | μs | `daemon/internal/ebpf/loader.go` `AdmitContent` / `WarmCache` |
 | **T7** | daemon → kmod | **ioctl on `/dev/s3fs_ebpf`** (15 種類、下表) | table push、waiter wake、queue pop、stats read | miss/flush ごと | μs | `daemon/cmd/s3fs-ebpf/{admit_arena,flush_loop,delete_loop,sync_entries}.go` |
 | **T8** | kmod → daemon (event) | miscdev **`read(2)` blocking** on `/dev/s3fs_ebpf` | read-miss event stream (`s3fs_read_miss_event`) | miss ごと | μs (blocking) | `runReadMissLoop` in admit_arena.go |
-| **T9** | BPF → daemon (event) | **`BPF_MAP_TYPE_RINGBUF`** (`s3fs_events`) | fentry-side slow-path miss event | fentry miss ごと | μs | `bpf/s3fs_fastpath.bpf.c` `s3fs_events` map、daemon 側 `ringbuf.Reader` |
+| **T9** | ~~BPF → daemon (event)~~ | ~~`BPF_MAP_TYPE_RINGBUF` (`s3fs_events`)~~ | **削除済み (2026-11-05)**。fentry の miss event を daemon が処理するのは root の ino=1 の warm だけだった | — | — | — |
 | **T10** | daemon ↔ backend | HTTP (minio-go / cloud.google.com/go/storage) | S3/GCS GET/PUT/DELETE/COPY/HEAD/LIST | miss + flush ごと | ms | `daemon/internal/{s3,gcs}/client.go` |
 | **T11** | scraper → daemon | HTTP `GET /metrics` / `/healthz` / `POST /policy/{reload,eval}` | 観測 + 運用 API | 5s (scrape) / 手動 | ms | `daemon/internal/metrics/exporter.go` |
 
@@ -59,7 +59,6 @@ ioctl のほかに、daemon は起動時に kmod の module param (`/sys/module/
 | `s3fs_arena` | `BPF_MAP_TYPE_ARENA` | daemon (mmap 経由) | BPF prog + kmod (GUP over user_vm) | 実データ blob 領域 |
 | `s3fs_inode_index` | `BPF_MAP_TYPE_HASH` | daemon (WarmCache) | fentry BPF | ino → arena_offset (stub) |
 | `s3fs_counters` | `PERCPU_ARRAY` | fentry BPF | daemon (sample) | fast/slow hit counter |
-| `s3fs_events` | `BPF_MAP_TYPE_RINGBUF` | fentry BPF | daemon (ringbuf.Reader) | slow-path miss event stream (T9) |
 | `policy_stats` | `PERCPU_ARRAY` | policy BPF | daemon (sample) | policy 発火回数 |
 | `freq2bit_counter` / `s3fifo3_state` / `sieve_visited` / ... | 各 policy 固有 | policy BPF | policy BPF (self) | policy 内部 state |
 
@@ -87,7 +86,6 @@ flowchart LR
           Arena[(s3fs_arena<br/>ARENA)]
           Idx[(s3fs_inode_index<br/>HASH)]
           Ctr[(s3fs_counters<br/>PERCPU_ARRAY)]
-          Ring[(s3fs_events<br/>RINGBUF)]
         end
       end
     end
@@ -118,7 +116,6 @@ flowchart LR
     %% T5
     Fentry <-.->|"T5: bpf_map helper"| Idx
     Fentry -.->|"T5: increment"| Ctr
-    Fentry ==>|"T5: reserve+submit<br/>(event)"| Ring
     Policy <-.-> Idx
     %% arena bytes (T6 side write, kmod side GUP)
     Fops -.->|"pin_user_pages_remote<br/>+ kmap + copy_to_user"| Arena
@@ -136,8 +133,6 @@ flowchart LR
     Miscdev -.- AdmitTbl
     %% T8 miscdev read (kmod → daemon)
     Miscdev ==>|"T8: blocking read(2)<br/>s3fs_read_miss_event (event)"| MissLoop
-    %% T9 BPF ringbuf (BPF → daemon)
-    Ring ==>|"T9: ringbuf.Reader (event)<br/>処理するのは ino=1 だけ"| SyncLoop
     %% T10 backend
     MissLoop -->|"T10: HTTP GET/<br/>GetRange"| Objstore
     FlushLoop -->|"T10: HTTP PUT"| Objstore
@@ -151,7 +146,7 @@ flowchart LR
 
 矢印は意味で 3 種類に分けている。
 
-- **太線 `==>` : イベント・データの流れ** (miss の通知、ringbuf の event、`read(2)` で運ばれる `s3fs_read_miss_event`)
+- **太線 `==>` : イベント・データの流れ** (miss の通知、`read(2)` で運ばれる `s3fs_read_miss_event`)
 - **実線 `-->` : 呼び出し** (syscall、fop の dispatch、KFunc / ioctl / HTTP の呼び出し)
 - **点線 `-.->` / `-.-` : 参照** (map や表の読み書き、arena の mmap と GUP。呼び出しは起こさない)
 - ID (T1..T11) は上表と対応
@@ -208,7 +203,7 @@ sequenceDiagram
 | kmod が読む | fd の chunk 表 (page cache 経由) | `pin_user_pages_remote` + `kmap` + `copy_to_user` (GUP) |
 | 起こす | `SIGNAL_ADMIT` | `SIGNAL_ADMIT` |
 
-**BPF の ringbuf (T9) は別物** (2026-11-05 訂正): fentry が「`s3fs_inode_index` にない ino を見た」ときに `s3fs_miss_event {ino, op}` を出す。daemon が処理するのは root ino=1 の warm だけで、それ以外の ino は何もしない (`prewarm_arena.go` の `warmFromS3`)。kmod は ringbuf を見ず、read の miss の完了は T8 + T7 だけで決まる。以前の図は T9 を T8 と並走させていたが、並走して補い合う関係ではない。
+**BPF の ringbuf (T9) は削除した** (2026-11-05): fentry の miss event を daemon が処理するのは root ino=1 の warm だけで、kmod は ringbuf を見ず、read の miss の完了は T8 + T7 だけで決まっていた。
 
 `docs/design/read-path-design.md §3` の当初見積 210 LOC が実測 480 LOC になった理由の 1 つがこの 3-段 upcall pattern (kmod → miscdev の queue → daemon が S3 → ioctl で起こす) の実装コスト (`docs/dev-notes/lessons-learned.md §2.3`)。
 
@@ -278,16 +273,15 @@ fsync は専用の queue (`s3fs_flush_wait_queue`) と blocking の `POP_FLUSH_W
 
 E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/journal/backlog-archive.md J-05` 参照)。
 
-**§4 の `s3fs_flush_event` が §3 の ringbuf と別 transport になっている理由**: kmod C context (`.release` / `.fsync` → `s3fs_ebpf_flush_pop` = `kmod/vfs_ops.c:1338`) の producer なので、BPF prog 専用の `bpf_ringbuf_reserve/submit` は使えない (`bpf_ringbuf_output` は kmod 側から呼べるが、以下 2 要件が満たせない):
+**§4 の `s3fs_flush_event` が (削除済みの) BPF の ringbuf と別 transport になっている理由**: kmod C context (`.release` / `.fsync` → `s3fs_ebpf_flush_pop` = `kmod/vfs_ops.c:1338`) の producer なので、BPF prog 専用の `bpf_ringbuf_reserve/submit` は使えない (`bpf_ringbuf_output` は kmod 側から呼べるが、以下 2 要件が満たせない):
 
 1. **PUT 失敗時の再登録** — daemon が `ioctl MARK_DIRTY` を送ると kmod は自 queue に再 enqueue できる (`kmod/s3fs_ebpf_dev.c` MARK_DIRTY handler)。ringbuf は fire-and-forget なので再登録経路が daemon 側自前になり複雑化する
 2. **fsync waiter の対称 wake path** — `SIGNAL_FLUSH` ioctl で kmod の `pending->done` を `complete()` する。BPF ringbuf は消費側 (daemon) の read 完了を kmod 側から観測する API がない
 
-### 4.1 event transport 対応表 (T7/T8/T9 の使い分け)
+### 4.1 event transport 対応表 (T7/T8 の使い分け)
 
 | producer | consumer | transport | 対応 event | 選定理由 |
 |---|---|---|---|---|
-| fentry BPF (getattr / read_iter) | daemon | ringbuf (T9) | `s3fs_miss_event` | BPF prog から書ける helper が公式に存在。daemon が処理するのは root ino=1 だけ |
 | kmod `.read_folio` / `.open` (`open_check`) | daemon | miscdev `read(2)` (T8) | `s3fs_read_miss_event` (flags に `OPEN_CHECK`) | read の miss と同じ待ち手の形 (`s3fs_pending`) |
 | kmod `.read_folio` | daemon | miscdev `read(2)` blocking (T8) | `s3fs_read_miss_event` | 単発 event の blocking read で自然に back-pressure |
 | kmod `.release` | daemon | miscdev `ioctl POP_FLUSH` (T7、100 ms) | `s3fs_flush_event` | 再登録 (MARK_DIRTY) と waiter wake (SIGNAL_FLUSH) の対称 API が必要 |
@@ -296,7 +290,7 @@ E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が�
 | kmod `.rename` | daemon | miscdev `ioctl POP_RENAME` (T7) | rename event | 同上 |
 | policy BPF vote | daemon | `evict_log` + `ioctl DRAIN_EVICTIONS` (T7) | evicted ino[] | admit_replace 内 synchronous vote 結果の batch drain (§6-b) |
 
-**統一の余地**: fentry ringbuf を廃止して T8 の miscdev read に相乗り (root ino=1 の warm 起動を kmod 側 hook に移動) するか、逆に flush/delete/rename queue を BPF ringbuf に寄せて MARK_DIRTY / SIGNAL_* 用の別 miscdev を細く残す、が候補。前者は BPF prog `s3fs_fastpath.bpf.c` の `s3fs_events` map を消せて map 数が減る利点、後者は syscall 数が減る利点。優先度は現状低 (Path C 全体で S3 Get 5-30ms 支配、transport overhead は 0.02% 未満 — §7 の議論と同じ trade-off)。
+**統一の余地**: flush / delete / rename の queue を 1 本の message queue に寄せる案は [`redesign-v2-simplify.md`](redesign-v2-simplify.md)。
 
 ---
 

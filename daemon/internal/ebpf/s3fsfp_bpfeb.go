@@ -31,7 +31,6 @@ type s3fsfpS3fsInoSlot struct {
 const (
 	s3fsfpMapS3fsArena           = "s3fs_arena"
 	s3fsfpMapS3fsCounters        = "s3fs_counters"
-	s3fsfpMapS3fsEvents          = "s3fs_events"
 	s3fsfpMapS3fsInoSlots        = "s3fs_ino_slots"
 	s3fsfpMapS3fsInodeIndex      = "s3fs_inode_index"
 	s3fsfpProgS3fsArenaPrealloc  = "s3fs_arena_prealloc"
@@ -96,7 +95,6 @@ type s3fsfpProgramSpecs struct {
 type s3fsfpMapSpecs struct {
 	S3fsArena      *ebpf.MapSpec `ebpf:"s3fs_arena"`
 	S3fsCounters   *ebpf.MapSpec `ebpf:"s3fs_counters"`
-	S3fsEvents     *ebpf.MapSpec `ebpf:"s3fs_events"`
 	S3fsInoSlots   *ebpf.MapSpec `ebpf:"s3fs_ino_slots"`
 	S3fsInodeIndex *ebpf.MapSpec `ebpf:"s3fs_inode_index"`
 }
@@ -129,7 +127,6 @@ func (o *s3fsfpObjects) Close() error {
 type s3fsfpMaps struct {
 	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
 	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
-	S3fsEvents     *ebpf.Map `ebpf:"s3fs_events"`
 	S3fsInoSlots   *ebpf.Map `ebpf:"s3fs_ino_slots"`
 	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
 }
@@ -138,7 +135,6 @@ func (m *s3fsfpMaps) Close() error {
 	return _S3fsfpClose(
 		m.S3fsArena,
 		m.S3fsCounters,
-		m.S3fsEvents,
 		m.S3fsInoSlots,
 		m.S3fsInodeIndex,
 	)

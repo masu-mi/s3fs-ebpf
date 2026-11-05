@@ -35,8 +35,8 @@ const usage = `Usage: s3fs-ebpf <command> [options]
 Commands:
   mount        Mount an S3 bucket via the s3fs_ebpf VFS
   unmount      Unmount a previously mounted target
-  fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, stream
-               ringbuf miss events, sync S3, serve arena content
+  fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, serve
+               read misses, flush, sync S3, arena content
   stats        Print fast/slow path counters
   policy       Hot-reload the cache policy blob
   hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
