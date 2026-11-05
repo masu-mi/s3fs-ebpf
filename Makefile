@@ -65,7 +65,7 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
+.PHONY: test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
@@ -337,6 +337,9 @@ test-daemon-cov: ## go test with coverage -> coverage/daemon.out
 ## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
 check-invariants: ## Static checks on kmod/vfs_ops.c (+ kmod/vfs/) and the bench seeds (no root)
 	@$(SCRIPTS_DIR)/check-kmod-invariants.sh
+
+spec-check: ## Exhaustive check of the v2 redesign spec models (docs/design/v2-spec, python3 only, no root)
+	@python3 -B docs/design/v2-spec/run.py
 
 test-policy-conformance: kmod daemon ## Live pick_victim policies vs their simulators, per access (issue #22)
 	@$(SCRIPTS_DIR)/test-policy-conformance.sh
