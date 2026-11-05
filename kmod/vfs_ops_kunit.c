@@ -680,7 +680,7 @@ static void s3k_miss_queue_fifo(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_read_miss_dequeue(&ev, true), (ssize_t)-EAGAIN);
 	for (i = 0; i < 3; i++)
 		KUNIT_ASSERT_EQ(test, miss_enqueue(S3K_INO_BASE + i, i * 4096,
-						   (size_t)U32_MAX + 5, i), 0);
+						   (size_t)U32_MAX + 5, i, NULL), 0);
 	for (i = 0; i < 3; i++) {
 		KUNIT_ASSERT_EQ(test, s3fs_read_miss_dequeue(&ev, true),
 				(ssize_t)sizeof(ev));

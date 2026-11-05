@@ -19,7 +19,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 | **T1** | app → VFS | syscall (`open` / `read` / `write` / `stat` / `unlink` / `rename` / `fsync`) | ユーザ操作の入口 | 常時 | μs | Linux VFS |
 | **T2** | VFS → kmod | file/inode/address_space/super_operations fop dispatch | mount 経由の全操作 | 常時 | μs | `kmod/vfs_ops.c` |
 | **T3** | kmod → BPF (policy) | struct_ops vtable dispatch | admit / evict / pressure / hit hook、さらに insert / size / remove / pick_victim (AC-58 / AC-66) | 各 admit_replace | μs | `kmod/policy_struct_ops.c` (vtable) |
-| **T4** | BPF → kmod | KFunc call | `admit_count` / `softcap` / `capacity_bytes` / `evictions_total` / `time_ns` / `ino_size`。fentry からは `policy_hit` (page cache hit を `on_hit` に渡す) | policy 判定内 | ns | `kmod/tree_traversal.c` KFunc set |
+| **T4** | BPF → kmod | KFunc call | `admit_count` / `softcap` / `capacity_bytes` / `evictions_total` / `time_ns` / `ino_size` | policy 判定内 | ns | `kmod/tree_traversal.c` KFunc set |
 | **T5** | kmod ↔ BPF map | `bpf_map_lookup/update_elem` (helper), 一部は kmod 側からも書く | inode_index / counters / arena / policy 個別 map | fentry 発火ごと | ns | `bpf/s3fs_fastpath.bpf.c` maps |
 | **T6** | daemon → BPF map | mmap (arena bytes 書込) / `bpf(BPF_MAP_UPDATE_ELEM)` (inode_index 書込) | arena 書込は syscall なし。inode_index は cilium/ebpf 経由 | admit ごと | μs | `daemon/internal/ebpf/loader.go` `AdmitContent` / `WarmCache` |
 | **T7** | daemon → kmod | **ioctl on `/dev/s3fs_ebpf`** (15 種類、下表) | table push、waiter wake、queue pop、stats read | miss/flush ごと | μs | `daemon/cmd/s3fs-ebpf/{admit_arena,flush_loop,delete_loop,sync_entries}.go` |

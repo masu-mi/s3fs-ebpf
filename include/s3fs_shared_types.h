@@ -45,49 +45,8 @@ enum s3fs_stat_slot {
 	S3FS_STAT_FAST_HITS             = 0,
 	S3FS_STAT_SLOW_MISSES           = 1,
 	S3FS_STAT_UNKNOWN_FS            = 2,
-	S3FS_STAT_READ_ITER_HITS        = 3, /* generic_file_read_iter: ino in index (all reads) */
-	S3FS_STAT_READ_ITER_MISSES      = 4, /* generic_file_read_iter: ino not in index */
-	S3FS_STAT_READ_ITER_HITS_POS0   = 5, /* read_iter hit where ki_pos==0 (first read per open); Y-06 */
 	S3FS_STAT_SLOT_MAX,
 };
-
-/*
- * AC-47: per-CPU, direct-mapped slot of what the read_iter fentry knows
- * about one inode.  The hook runs on every read of the file system (and
- * the s_magic filter on every generic_file_read_iter in the system), so
- * its per-read cost is the main gap to FUSE in the 64-job read bench; one
- * array index replaces the two hash lookups (access pattern, inode_index)
- * and a kfunc call per read.
- *
- * Slot = s3fs_slot_index(ino).  A slot belongs to `ino`; a read of another
- * inode that maps to it takes the slot over and starts from zero (the
- * pattern of the evicted inode is lost — it is an approximate signal).
- * The daemon reads the slots of all CPUs and merges those owned by the
- * inode (ReadAccessPattern).
- */
-#define S3FS_SLOT_BITS	10
-#define S3FS_SLOT_COUNT	(1u << S3FS_SLOT_BITS)
-
-/* The slot holds a cached "ino is in s3fs_inode_index" answer. */
-#define S3FS_SLOT_IN_INDEX	0x1u
-
-struct s3fs_ino_slot {
-	__u64 ino;           /* owner; 0 = empty */
-	__u64 last_end_pos;  /* end offset of the previous read (pos + len) */
-	__u64 total_bytes;   /* cumulative bytes requested via read_iter */
-	__u64 last_policy_tick;/* jiffies when on_hit was last forwarded to the policy */
-	__u32 seq_count;     /* number of sequential reads observed */
-	__u32 rand_count;    /* number of random reads observed */
-	__u32 reads;         /* read_iter calls since the slot was claimed */
-	__u32 flags;         /* S3FS_SLOT_* */
-};
-
-/* Slot of an inode.  Must stay identical to slotIndex in
- * daemon/internal/ebpf/loader.go. */
-static inline __u32 s3fs_slot_index(__u64 ino)
-{
-	return (__u32)((ino * 0x9E3779B97F4A7C15ULL) >> (64 - S3FS_SLOT_BITS));
-}
 
 /* Magic identifying an s3fs_ebpf super_block. Kept in sync with
  * kmod/vfs_ops.c so the BPF fentry hook can filter by it. */

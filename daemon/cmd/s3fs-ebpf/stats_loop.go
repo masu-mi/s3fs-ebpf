@@ -91,10 +91,10 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 						metrics.Global.AdmitInvalidations.Store(vals[2])
 					}
 					if len(vals) >= 4 {
-						metrics.Global.GupCallsTotal.Store(vals[3])
+						metrics.Global.ReadIterHits.Store(vals[3])
 					}
 					if len(vals) >= 5 {
-						metrics.Global.GupNsTotal.Store(vals[4])
+						metrics.Global.ReadIterHitsPos0.Store(vals[4])
 					}
 					if len(vals) >= 6 {
 						metrics.Global.UpcallRetryExhausted.Store(vals[5])
@@ -189,12 +189,7 @@ func printCounters(progs *fpebpf.Programs, label string) {
 	metrics.Global.FastPathHits.Store(c[fpebpf.StatFastHits])
 	metrics.Global.SlowPathMisses.Store(c[fpebpf.StatSlowMisses])
 	metrics.Global.UnknownFS.Store(c[fpebpf.StatUnknownFS])
-	metrics.Global.ReadIterHits.Store(c[fpebpf.StatReadIterHits])
-	metrics.Global.ReadIterMisses.Store(c[fpebpf.StatReadIterMisses])
-	metrics.Global.ReadIterHitsPos0.Store(c[fpebpf.StatReadIterHitsPos0])
-	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d read_iter_hits=%d read_iter_misses=%d iter_pos0=%d\n",
+	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d\n",
 		label,
-		c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS],
-		c[fpebpf.StatReadIterHits], c[fpebpf.StatReadIterMisses],
-		c[fpebpf.StatReadIterHitsPos0])
+		c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS])
 }

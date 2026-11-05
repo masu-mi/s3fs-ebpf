@@ -287,7 +287,7 @@ retry:
 				}
 				mutex_unlock(&fd->lock);
 			}
-			err = miss_enqueue(inode->i_ino, mpos, mcount, mflags);
+			err = miss_enqueue(inode->i_ino, mpos, mcount, mflags, fd);
 			if (err == 0) {
 				remaining = wait_for_completion_interruptible_timeout(
 					&p->done, S3FS_UPCALL_WAIT_JIFFIES);
@@ -350,7 +350,11 @@ static ssize_t s3fs_ebpf_splice_read(struct file *in, loff_t *ppos,
 				     struct pipe_inode_info *pipe, size_t len,
 				     unsigned int flags)
 {
-	s3fs_hit_count(in, file_inode(in));
+	{
+		struct kiocb kio = { .ki_pos = *ppos };
+
+		s3fs_hit_count(&kio, len, in, file_inode(in));
+	}
 	return filemap_splice_read(in, ppos, pipe, len, flags);
 }
 
@@ -361,7 +365,7 @@ static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct file *file = iocb->ki_filp;
 
-	s3fs_hit_count(file, file_inode(file));
+	s3fs_hit_count(iocb, iov_iter_count(to), file, file_inode(file));
 	return generic_file_read_iter(iocb, to);
 }
 
@@ -679,7 +683,7 @@ static int s3fs_open_verify(struct inode *inode)
 	p = pending_get_or_create(inode->i_ino, S3FS_OPEN_CHECK_KEY);
 	if (!p)
 		return -ENOMEM;
-	err = miss_enqueue(inode->i_ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK);
+	err = miss_enqueue(inode->i_ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK, NULL);
 	if (err) {
 		pending_put(p);
 		return err;

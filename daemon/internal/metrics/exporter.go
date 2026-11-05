@@ -92,8 +92,6 @@ type Counters struct {
 	// latency from s3fs_arena_copy_to_iter. Sourced from
 	// S3FS_IOC_STATS[3]/[4]. bench-ab-arena-vs-pagecache.sh reads
 	// these to compute mean GUP ns/call without bpftrace.
-	GupCallsTotal atomic.Uint64 // counter
-	GupNsTotal    atomic.Uint64 // counter
 
 	// T4: .read_folio calls that exhausted S3FS_UPCALL_MAX_RETRIES with
 	// the daemon alive (capacity eviction won every retry window).
@@ -125,11 +123,10 @@ type Counters struct {
 	// Issue #22: hit_accum. S3FS_IOC_STATS[14].
 	HitsReplayed atomic.Uint64 // counter
 
-	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
-	// reads where the ino was already in inode_index (prewarm hit);
+	// R-01: kmod .read_iter counters (IOC_STATS slots 3 / 4). ReadIterHits counts
+	// every .read_iter call;
 	// ReadIterMisses counts reads where the ino was unknown.
 	ReadIterHits   atomic.Uint64 // counter
-	ReadIterMisses atomic.Uint64 // counter
 	// Y-06: subset of ReadIterHits where ki_pos==0 (first read per
 	// file open). ReadIterHits/ReadIterHitsPos0 ≈ 2 confirms the
 	// data+EOF double-fire that inflated rate_total before Y-01.
@@ -257,9 +254,6 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_admit_invalidations_total", "Page-cache invalidations by admit_replace for new or moved admit ranges (unchanged ranges keep their page cache).", "counter", Global.AdmitInvalidations.Load()},
 
 		// AB-01: GUP latency diagnostics from s3fs_arena_copy_to_iter.
-		// gup_calls_total / gup_ns_total → mean ns/call. 0 when arena_bypass=1.
-		{"s3fs_ebpf_gup_calls_total", "AB-01: pin_user_pages_remote calls in s3fs_arena_copy_to_iter (1 per page per arena read).", "counter", Global.GupCallsTotal.Load()},
-		{"s3fs_ebpf_gup_ns_total", "AB-01: accumulated pin_user_pages_remote latency in nanoseconds. Divide by gup_calls_total for mean ns/call.", "counter", Global.GupNsTotal.Load()},
 
 		// T4: capacity-pressure -EIO distinguisher. Non-zero means eviction
 		// outpaced the retry loop (capacity=1 chunk + many readers). Incremented
@@ -275,9 +269,8 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_policy_hits_replayed_total", "Issue #22: accesses counted in the kmod .read_iter (hit_accum=1) and replayed into the policy's on_hit from admit_replace, before the hit_replay_max cut. 0 when hit_accum=0.", "counter", Global.HitsReplayed.Load()},
 		{"s3fs_ebpf_reset_skipped_total", "M1: fd->buf frees deferred because buf_readers > 0 (U8/U10).", "counter", Global.ResetSkipped.Load()},
 
-		// R-01: fentry/generic_file_read_iter access-pattern observer.
+		// R-01: kmod .read_iter counters.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},
-		{"s3fs_ebpf_read_iter_misses_total", "generic_file_read_iter calls where ino was unknown.", "counter", Global.ReadIterMisses.Load()},
 		// Y-06: pos==0 subset. hits_total / pos0_hits_total ≈ 2 confirms data+EOF double-fire.
 		{"s3fs_ebpf_read_iter_pos0_hits_total", "read_iter hits where ki_pos==0 (first read per open); ≈ N_ACCESS in bench. Y-06 diagnostic.", "counter", Global.ReadIterHitsPos0.Load()},
 	}

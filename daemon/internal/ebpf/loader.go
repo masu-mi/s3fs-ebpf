@@ -19,10 +19,7 @@ const (
 	StatFastHits         uint32 = 0
 	StatSlowMisses       uint32 = 1
 	StatUnknownFS        uint32 = 2
-	StatReadIterHits     uint32 = 3
-	StatReadIterMisses   uint32 = 4
-	StatReadIterHitsPos0 uint32 = 5 // Y-06: read_iter hit where ki_pos==0 (first read per open)
-	StatSlotMax          uint32 = 6
+	StatSlotMax          uint32 = 3
 )
 
 // TestArgs mirrors `struct s3fs_test_args` in include/s3fs_shared_types.h.
@@ -47,7 +44,6 @@ type TestArgs struct {
 type runtimeObjs struct {
 	// Programs.
 	S3fsFpGetattr     *ebpf.Program `ebpf:"s3fs_fp_getattr"`
-	S3fsFpReadIter    *ebpf.Program `ebpf:"s3fs_fp_read_iter"`
 	S3fsTestShared    *ebpf.Program `ebpf:"s3fs_test_shared"`
 	S3fsArenaPrealloc *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 
@@ -55,13 +51,12 @@ type runtimeObjs struct {
 	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
 	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
 	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
-	S3fsInoSlots   *ebpf.Map `ebpf:"s3fs_ino_slots"`
 }
 
 func (o *runtimeObjs) Close() error {
 	return _S3fsfpClose(
-		o.S3fsFpGetattr, o.S3fsFpReadIter, o.S3fsTestShared, o.S3fsArenaPrealloc,
-		o.S3fsArena, o.S3fsCounters, o.S3fsInodeIndex, o.S3fsInoSlots,
+		o.S3fsFpGetattr, o.S3fsTestShared, o.S3fsArenaPrealloc,
+		o.S3fsArena, o.S3fsCounters, o.S3fsInodeIndex,
 	)
 }
 
@@ -164,18 +159,6 @@ func (p *Programs) AttachFentry() (link.Link, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attach fentry/vfs_getattr: %w", err)
-	}
-	return l, nil
-}
-
-// AttachFentryReadIter attaches the fentry/generic_file_read_iter observer
-// (R-01). The returned link.Link must be Close()d during teardown.
-func (p *Programs) AttachFentryReadIter() (link.Link, error) {
-	l, err := link.AttachTracing(link.TracingOptions{
-		Program: p.Objs.S3fsFpReadIter,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("attach fentry/generic_file_read_iter: %w", err)
 	}
 	return l, nil
 }

@@ -24,6 +24,20 @@ type readMissEvent struct {
 	Offset int64
 	Count  uint32
 	Flags  uint32
+	// SeqCount / RandCount: the file's read pattern so far, counted by the
+	// kmod in .read_iter (what the read_iter fentry used to keep in a BPF map).
+	SeqCount  uint32
+	RandCount uint32
+}
+
+// seqRatio returns the fraction of sequential reads [0, 1]; 0 when no read
+// has been counted.
+func (ev readMissEvent) seqRatio() float64 {
+	total := uint64(ev.SeqCount) + uint64(ev.RandCount)
+	if total == 0 {
+		return 0
+	}
+	return float64(ev.SeqCount) / float64(total)
 }
 
 // missFlagForWrite mirrors S3FS_MISS_FLAG_FOR_WRITE (AC-50): kmod is about
@@ -245,7 +259,7 @@ func runReadMissLoop(ctx context.Context, devPath string,
 
 	sem := make(chan struct{}, readMissWorkers)
 
-	var buf [24]byte // sizeof(readMissEvent)
+	var buf [32]byte // sizeof(struct s3fs_read_miss_event)
 	for {
 		n, err := f.Read(buf[:])
 		if err != nil {
@@ -254,7 +268,7 @@ func runReadMissLoop(ctx context.Context, devPath string,
 			}
 			return
 		}
-		if n < 24 {
+		if n < len(buf) {
 			fmt.Fprintf(os.Stderr, "[upcall] short read: %d bytes\n", n)
 			continue
 		}
@@ -263,6 +277,8 @@ func runReadMissLoop(ctx context.Context, devPath string,
 			Offset: int64(binary.LittleEndian.Uint64(buf[8:16])),
 			Count:  binary.LittleEndian.Uint32(buf[16:20]),
 			Flags:  binary.LittleEndian.Uint32(buf[20:24]),
+			SeqCount:  binary.LittleEndian.Uint32(buf[24:28]),
+			RandCount: binary.LittleEndian.Uint32(buf[28:32]),
 		}
 		fmt.Printf("[upcall] miss ino=%d offset=%d count=%d\n",
 			ev.Ino, ev.Offset, ev.Count)
@@ -283,11 +299,10 @@ const (
 	partialAdmitThreshold = 4 * 1024 * 1024
 	partialAdmitChunk     = 4 * 1024 * 1024
 
-	// seqAdmitRatioThreshold — minimum SeqRatio (from s3fs_read_pattern_map)
+	// seqAdmitRatioThreshold — minimum sequential-read ratio (from the miss event)
 	// above which a large-file miss is promoted to a full-file GET.
-	// R-01: fentry/generic_file_read_iter populates the map before kmod's
-	// .read_folio blocks, so by the time the goroutine runs the ratio often
-	// already reflects the sequential access character.
+	// R-01: kmod's .read_iter counts the reads before .read_folio blocks, so
+	// the ratio in the miss event already reflects the access character.
 	seqAdmitRatioThreshold = 0.70
 )
 
@@ -375,12 +390,12 @@ func handleReadMiss(ctx context.Context, devPath string,
 	var err error
 	isLarge := fullSize > 0 && fullSize > partialAdmitThreshold
 	useFullAdmit := !isLarge // small files always use full admit
-	if !useFullAdmit && patternAwareAdmitEnabled && progs != nil &&
+	if !useFullAdmit && patternAwareAdmitEnabled &&
 		!fullAdmitExceedsCapacity(fullSize) {
-		if pat, ok := progs.ReadAccessPattern(ev.Ino); ok && pat.SeqRatio() >= seqAdmitRatioThreshold {
+		if ev.SeqCount+ev.RandCount > 0 && ev.seqRatio() >= seqAdmitRatioThreshold {
 			useFullAdmit = true
 			fmt.Printf("[upcall] ino=%d %s seq_ratio=%.2f PROMOTE_SIGNAL=pattern-aware full admit (%d bytes)\n",
-				ev.Ino, entry.Name, pat.SeqRatio(), fullSize)
+				ev.Ino, entry.Name, ev.seqRatio(), fullSize)
 		}
 	}
 	if useFullAdmit && isLarge {
