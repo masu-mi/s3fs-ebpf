@@ -45,7 +45,11 @@ scripts/tlc.sh specs/tla/X.tla specs/tla/X.base.P.cfg    # 1 つ (反例のト�
 make test-spec                                           # 全部、EXPECT と照合
 ```
 
-`scripts/tlc.sh` は使い捨てコンテナ (ネットワークなし、spec は read-only、`--user` はホストの uid、sha256 固定の `tla2tools.jar` を `~/.cache/s3fs-ebpf/tlc` に取得)。ホストに Java は要らない。`specs/tla/*/*.cfg` (教材) も `--all` に入る。
+`scripts/tlc.sh` は使い捨てコンテナ (ネットワークなし、spec は read-only、sha256 固定の `tla2tools.jar` を `~/.cache/s3fs-ebpf/tlc` に取得)。ホストに Java は要らない。`specs/tla/*/*.cfg` (教材) も `--all` に入る。
+
+- runtime は podman → docker → nerdctl のうち**そのイメージを持っているもの**、なければ最初に見つかったもの (`TLC_RUNTIME=docker` で固定)。イメージが無ければ run が pull する。
+- コンテナが書くファイルをホストが消せるように、docker には `--user <uid>:<gid>` を付ける。**rootless podman には付けない** (sub-uid に割り当てられて、呼び出し元のディレクトリに書けない。コンテナ内の root が既に呼び出し元)。
+- `make test-spec` は**ネットワークとコンテナ runtime が要る**ので、`test-regression` には入れない。CI は別ジョブ (`.github/workflows/test.yml` の `spec`)。
 
 ## 6. 反例を読む
 
@@ -69,3 +73,7 @@ make test-spec                                           # 全部、EXPECT と�
 - 通った → 範囲 (名前の数、`MaxQ`) の中だけ。モデルに入れていないもの (fsync の WAIT 経路、外部クライアント、タイミング) を設計文書に書く。
 - TLC は `/spec` に書けない (read-only)。`-noGenerateSpecTE` で trace spec の生成を止めている。コンテナを root で動かすと、ホストが消せない一時ファイルができる (`--user`)。
 - 実行時間は小さいモデルで秒単位。数分かかるなら定数を下げる。長く走らせるときは完了ファイルで待つ。
+- **CI で初めて動かす script は、新品の環境で一度流してから push する**: キャッシュ (`TLC_CACHE=$(mktemp -d)`) もイメージ (`docker rmi`) も無い状態、docker と podman の両方。手元はイメージもジャーもあるので、「無いとき」の経路は一度も通っていない。`spec` ジョブは、これを怠って 2 回落ちた。
+- **`set -e` と `$(for ...; done)`**: ループの最後のコマンドが失敗 (`image inspect` で「イメージ無し」) すると、コマンド置換が失敗して代入で script が**無言で**終わる (出力なし、終了コード 1)。選択ループには `|| true` を付ける。CI のログに何も出ていないときは、まず代入の失敗を疑う。
+- 通らなかった設計案も変種として残す (`always` / `absent` / `applied-listed` のように)。棄却の記録になり、`EXPECT: violated` で「この設計は壊れる」ことを回帰として持てる。最初の案はたいてい 1 つか 2 つ穴がある (AC-85 では 3 つ: sync で全部消す / listing に無ければ消す / 昇格が即時)。反例の最後の状態を読んで、足りない規則 (取り消し、「適用済み」の目印) を足す。
+- 修正で隠れていた症状が出る (AC-82 を直すと旧名の open が見えた、AC-85)。モデルの反例のうち、実機で再現しなかったものは「別のバグが隠している」と書いて起票する。
