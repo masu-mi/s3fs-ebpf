@@ -22,6 +22,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
+| [`design/daemon-kmod-messaging.md`](design/daemon-kmod-messaging.md) | 全員 | daemon と kmod の間でどんなメッセージがどのキューを通るか、基本イベントごとの流れ (上の全景の次に) |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 
 ---
@@ -40,7 +41,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/related-works.md`](user/related-works.md) | ExtFUSE / RFUSE / Mountpoint との位置付け |
 | [`user/retrospective-and-reuse.md`](user/retrospective-and-reuse.md) | 振り返り: 失敗だったか (うまくいったこと / いかなかったこと)、再利用できる資産、Rust での再実装 / FUSE・fuse-bpf への貢献 / upstream 貢献の現実性と優先順位 (2026-10-22) |
 | [`user/learning-guide.md`](user/learning-guide.md) | 学習ガイド: 技術要素 (eBPF の基本 / VFS / FUSE / bpf_arena / KFunc / struct_ops / Go + cilium/ebpf / キャッシュ / KUnit / lockdep / kCFI / 閉じた MinIO) ごとに、この repo の該当 doc・入門記事 (日本語を優先)・一次資料を並べた。読む順つき (2026-11-03) |
-| [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 58 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表 |
+| [`user/meetup-qa.md`](user/meetup-qa.md) | meetup の想定問答 (FAQ) 58 問 (全体の設計 / arena と KFunc / struct_ops の vtable と運用 / フックの負担 / FUSE・mount-s3 との比較 / 計測の妥当性 / FS としての振る舞い / 開発と検証 / 振り返り)。冒頭に一言回答の早見表。数字は §18.48〜18.52 までの計測を反映 (open の倍率は S3 を確認しない条件、durable write は 1.3〜1.5 倍) |
 
 ---
 
@@ -51,12 +52,14 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/ebpf-features-guide.md`](design/ebpf-features-guide.md) | 採用した eBPF 機能 (fentry / arena / ringbuf / per-CPU / LRU hash / struct_ops / KFunc / fmod_ret / CO-RE / `bpf_loop` / `__arena`) ごとの用途・有用性・制限・落とし穴、カーネル版・ディストリ別の制約表 (2026-10-11 作成。cilium/ebpf の課題は `dev-notes/cilium-ebpf-arena-and-struct-ops.md` が新しい) |
 | [`design/design.md`](design/design.md) | 統合設計書 (initial pitch, §0 で現状との相違メモ付き) |
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
+| [`design/daemon-kmod-messaging.md`](design/daemon-kmod-messaging.md) | daemon と kmod の間のメッセージの見取り図 (図つき): 3 本の通り道 (`read(2)` の push / ioctl の pull / ioctl の応答)、基本イベント 10 種 (read の miss / 変更前の読み込み / open の確認 / close / fsync / unlink / rename / sync / evict / stats) ごとの積む側・キュー・処理する側・完了の知らせ、kmod の中のキューと pending の構造、BPF ringbuf の位置づけ、daemon 不在時の動き |
 | [`design/dev-s3fs-ebpf-protocol.md`](design/dev-s3fs-ebpf-protocol.md) | `/dev/s3fs_ebpf` の miss イベント (`read(2)`) と 16 個の ioctl の構造体・フィールド・戻り値 |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
 | [`design/pcache-mode.md`](design/pcache-mode.md) | pcache モード (`--arena-metadata-only`) の全体像: arena モードとの違い、chunk の表、read / eviction / write の流れ、性能と残課題 |
 | [`design/pcache-chunk-table.md`](design/pcache-chunk-table.md) | pcache の chunk 表 (`fd->chunks[]`) のレイアウト: 構造体、4 MiB の番地の対応、chunk の状態、admit entry と容量の関係 |
 | [`design/cache-algorithms.md`](design/cache-algorithms.md) | LRU / SIEVE / S3-FIFO / W-TinyLFU の図つきの早見と、この PoC での実装の形 |
+| [`design/policy-bpf-maps.md`](design/policy-bpf-maps.md) | キャッシュアルゴリズム (LRU / SIEVE / S3-FIFO / W-TinyLFU の pick_victim 型と、旧 score 型 10 種) ごとの BPF map の使い方を、フック (kmod のどこから呼ばれるか) と指標 (`policy_stats`、hit rate、フックのコスト) に対応させた図つきの資料。矢印は「イベント・データの流れ / 呼び出し / 参照」を線種で分けて描いた |
 | [`design/disk-cache-range.md`](design/disk-cache-range.md) | daemon の disk cache (`--cache-dir`) の対象サイズ。4 MiB 以下は object 全体、超える object は chunk (key, offset, size) 単位で、ETag を照合して使う (AC-75) |
 | [`design/backing-file-tier.md`](design/backing-file-tier.md) | 案 (未実装・未計測): pcache の下にローカル FS の backing file へ素通しする段 (warm) を足し、メモリの上限を緩める設計。fuse-bpf / FUSE passthrough と同じ形。将来の検証項目 8 つ |
 | [`design/ac51-partial-modify.md`](design/ac51-partial-modify.md) | AC-51: 既存の大きいオブジェクトの途中の書き換えを multipart + server-side copy にする設計 (実装済み、`--partial-modify`、既定 off) |
@@ -73,6 +76,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/kmod-daemon-shared-memory.md`](design/kmod-daemon-shared-memory.md) | kmod と daemon の共有メモリ (miscdev の `.mmap`): 仕組み、arena との違い、この実装で使う場合の候補と注意。未実装・未計測 |
 | [`design/admit-and-softcap.md`](design/admit-and-softcap.md) | admit / softcap の実際の挙動、キャッシュアルゴリズムとしての問題点 (容量上限なし等)、page cache との役割分担と改善項目 |
 | [`design/policy-engine-design.md`](design/policy-engine-design.md) | 4 layer (CEL + built-in eBPF + user eBPF + KFunc) architecture の設計 |
+| [`design/bpf-arena-use-cases.md`](design/bpf-arena-use-cases.md) | bpf_arena の向く用途と向かない用途の指針 (英語。容量の実質上限、判断の基準) |
 | [`design/policy-attach-comparison.md`](design/policy-attach-comparison.md) | fmod_ret vs struct_ops の attach 方式比較 |
 | [`design/trace-harness.md`](design/trace-harness.md) | P-04 ms-scale offline policy simulator |
 | [`design/g01-subdir-plan.md`](design/g01-subdir-plan.md) | G-01/F-02 subdir 対応 + basename 衝突の実装計画 (実装済) |

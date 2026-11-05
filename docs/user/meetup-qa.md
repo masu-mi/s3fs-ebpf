@@ -1,6 +1,19 @@
 # meetup の想定問答 (2026-10-13〜10-21)
 
-meetup 発表 (アウトライン `docs/user/meetup-ebpf-outline.md` は削除済みで git の履歴に残る) の質疑応答に備えた問答集。準備中に実際に出た質問と、聴衆 (eBPF に関心があり、カーネルモジュール・FS・性能試験に詳しい人) から出そうな質問をまとめた。回答のあとで分かったことがある項目には「その後」を付けた。根拠は benchmark-results の § 番号 (§18.27 など)、backlog の ID (AC-58 など)、コードの位置で示す。試していないこと、知識からの説明にとどまることは、その旨を書いた。
+meetup 発表の質疑応答に備えた問答集。準備中に実際に出た質問と、聴衆 (eBPF に関心があり、カーネルモジュール・FS・性能試験に詳しい人) から出そうな質問をまとめた。
+
+- **読み方:** 先頭の「目次と一言回答」で番号を引き、本文で根拠を見る。各回答は「太字の結論 → 根拠」の順。
+- **根拠の書き方:** benchmark-results の § 番号 (§18.27 など)、backlog の ID (AC-58 など)、コードの位置。試していないこと、知識からの説明にとどまることは、その旨を書いた。
+- **「その後」:** 回答したあとで分かったことがある項目に付けた。数字が変わったものは本文を直してある。
+- **最終更新 2026-11-05。** 2026-11-04 までの計測 (§18.48〜18.52) を反映した。とくに次の 2 点で、以前の発表用の数字が変わっている。
+  - 新規ファイルの durable write の「1.37 倍」は、fsync が PUT の完了前に返っていた不具合の分を含んでいた (Q39)。
+  - open+read+close の「172 倍」は、s3fs-ebpf の open が S3 の存在確認をしない設計の値。確認する条件 (`open_check=1`) では約 1.2 倍 (Q33、Q42)。
+- **未確認・未反映の点 (2026-11-05):**
+  - Q16〜Q29 の policy の hit rate は 2026-10 の旧い構成の値で、§18.48 の H (`--arena-metadata-only`、47〜50%) とは構成が違う。差の原因 (構成か別の要因か) は切り分けていない。
+  - Q41 の mount-s3 の数字は 2026-10 の測定のままで、§18.48 の 6 構成には含まれていない (再測定していない)。
+  - Q36 の AC-76 の効果は `docs/dev-notes/ac75-ac76-lessons.md` の値の転記で、`make test-lockdep` は未了。Q37 の AC-75 / AC-76 後の kmod 経由の再測定も未了。
+  - 全体として、コードや数字は文書とのつき合わせで直したもので、この更新で実機を動かして測り直してはいない。
+- 発表のアウトライン (`docs/user/meetup-ebpf-outline.md`) とスライドの参照は、アウトラインの削除に合わせて外した。必要なら git の履歴を見る。
 
 ---
 
@@ -69,21 +82,21 @@ meetup 発表 (アウトライン `docs/user/meetup-ebpf-outline.md` は削除�
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q33 | 勝てる場面と使いどころ | open と fsync が速い FS。小さいファイルを大量に開く用途 |
+| Q33 | 勝てる場面と使いどころ | 小さいファイルの大量 open と ls が速い。durable write は 1〜10 MiB で 1.3〜1.5 倍。open の 170 倍は S3 を確認しない条件 |
 | Q34 | FUSE に勝つために残っていたこと | 律速は large folio ではなく read の fentry だった |
 | Q35 | ロックを RCU にしていれば | 勝てなかった。ロックなしの判定でも変わらなかった |
-| Q36 | large folio を有効にすれば | 試していない。64 jobs の説明としては外れた |
+| Q36 | large folio を有効にすれば | 大きい cold read には効いた (AC-76)。64 jobs の説明としては外れた |
 | Q37 | 大きいファイルの cold read で負ける理由 | 最後はホストのメモリ回収待ち |
 | Q38 | pcache の prewarm と 10 MiB 前後の遅さ | prewarm は使える (AC-67)。10 MiB 前後は arena でも chunk でも縮まない |
-| Q39 | durable write が 1.37 倍速い理由 | 分解していない。write で daemon を通らない構造と推測 |
+| Q39 | durable write の速さ | 1 / 10 MiB で 1.3〜1.5 倍、100 MiB は差なし。以前の 1.37 倍は fsync の不具合の分を含んでいた |
 | Q40 | S3 へのリクエストは減るか | 一覧と stat は減る。GET は同じ。LIST が定期的に出る |
-| Q41 | mount-s3 と比べると | open を繰り返すと速い。cold は同じくらい。機能の範囲が違う |
+| Q41 | mount-s3 と比べると | cold は同じくらい。warm の cat は速い。open の倍率は S3 を確認しない条件の値。機能の範囲が違う |
 
 **7. 計測の妥当性**
 
 | # | 質問 | 一言で |
 |---|---|---|
-| Q42 | 172 倍は公平か | s3fs-fuse との比で、FUSE の上限ではない |
+| Q42 | 170 倍は公平か | 公平ではない。S3 を確認する条件では約 1.2 倍 (§18.52)。s3fs-fuse との比でもある |
 | Q43 | 64 jobs × 1 byte の fio の意味 | 現実ではなく、固定費と取り合いを最大に見せる試験 |
 | Q44 | 計測環境と信頼性 | KVM 1 台、ローカルの MinIO、回数は少ない。比で見る |
 
@@ -92,7 +105,7 @@ meetup 発表 (アウトライン `docs/user/meetup-ebpf-outline.md` は削除�
 | # | 質問 | 一言で |
 |---|---|---|
 | Q45 | daemon が落ちたら | ハングはしない。miss の read と fsync は失敗、queue は失われる |
-| Q46 | 他のクライアントの上書きは見えるか | 削除は見えるが、上書きはすぐには見えない |
+| Q46 | 他のクライアントの上書きは見えるか | 削除は次の sync で見えるが、上書きはすぐには見えない。open は S3 に確認しない (既定) |
 | Q47 | mmap、O_DIRECT、ディレクトリ操作 | 読む mmap は可。共有書き込み mmap と O_DIRECT は不可 |
 | Q48 | 1 ディレクトリに大量のファイル | 10 万個まで件数に比例。上限は 26 万件 |
 | Q49 | メモリの制限と memcg | 既定は無制限。chunk は memcg に課金されない |
@@ -165,7 +178,7 @@ meetup 発表 (アウトライン `docs/user/meetup-ebpf-outline.md` は削除�
 **S3 に当てはめたときの違い**
 - **ローカルのファイルが要る:** fuse-bpf の素通しの相手は下位のローカル FS。S3 のオブジェクトにはローカルのファイルがないので、daemon が先にディスクキャッシュへ落としてから backing にすることになる。これは fuse-cache (s3fs-fuse の `use_cache`) を速くする手段で、中身をメモリに持つ s3fs-ebpf とは置き場所が違う。初回の読み込み (cold) はどちらも S3 の GET が支配する (Q37)。
 - **open の往復も消せる:** passthrough と違い、fuse-bpf は open や lookup、getattr も backing に素通しできる。なので、ローカルのディスクキャッシュに載ったファイルなら、open+read+close で daemon に行かない構成が作れるはず。そうなれば、この PoC の「open が速い」(Q33、Q42) という差の大部分は fuse-bpf でも出せる。計測はしていない。
-- **カーネルに足すものの重さ:** fuse-bpf は upstream の FUSE を拡張する形なので、FS を 1 つ書く必要がない。この PoC は kmod の VFS 実装 (約 5000 行) と、その race のバグ (Q51) を自分で抱えている。逆に、kmod があるので page cache や chunk の扱いを自由に決められ、struct_ops の vtable (`pick_victim` など) を自分で設計できた。
+- **カーネルに足すものの重さ:** fuse-bpf は upstream の FUSE を拡張する形なので、FS を 1 つ書く必要がない。この PoC は kmod の VFS 実装 (約 6000 行) と、その race のバグ (Q51) を自分で抱えている。逆に、kmod があるので page cache や chunk の扱いを自由に決められ、struct_ops の vtable (`pick_victim` など) を自分で設計できた。
 - **BPF の使い道:** fuse-bpf の BPF は「どの操作をどこで処理するか」の振り分け役で、キャッシュの判断はしない (追い出すのは下位 FS と page cache、つまりカーネル)。この PoC の BPF は、キャッシュの追い出しのアルゴリズムを差し替えるのが主な役目。両者は排他ではなく、fuse-bpf の上でもキャッシュのポリシーを別の struct_ops で差し込む設計はありうる。
 
 **発表での言い方:** 「hit のときに daemon へ行かない、という狙いは fuse-bpf と同じ。fuse-bpf はローカルの下位 FS への素通しと操作ごとの filter でそれを実現し、FUSE のまま upstream を目指している。この PoC は自前の FS とメモリ上のキャッシュで実現し、BPF をキャッシュのポリシーに使った。S3 のようにローカルのファイルがないバックエンドで、メモリだけで hit を返したいときがこの PoC の形」。
@@ -227,7 +240,7 @@ meetup 発表 (アウトライン `docs/user/meetup-ebpf-outline.md` は削除�
 | 容量 | arena の大きさ | `capacity_bytes` (既定は無制限) で chunk を数える |
 | 弱み | 毎回の GUP。並列 read が伸びなかった (AA-03) | 読んだ page を残すので、大きいファイルを続けて読むとメモリ回収を待つ (§18.39)。pin などの不変条件が増えて複雑 (`docs/kmod-pcache-invariants.md`) |
 
-切り替えた理由は、失敗談の「誰から見ると何に見えるか」の 3 行目。arena は BPF とユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない。スライド: 付録の next の 1 (page cache に戻す)。
+切り替えた理由: arena は BPF とユーザー空間の共有には向くが、kmod の hot path から毎回読む場所には向かない。
 
 フラグ名の `--arena-metadata-only` は実態と合っていない。AB の検討では「arena を admit メタデータだけに縮退する」案だったが、実装ではメタデータも arena に置かなかった (Q55)。
 
@@ -244,7 +257,7 @@ meetup 発表 (アウトライン `docs/user/meetup-ebpf-outline.md` は削除�
 | メモリの回収 | chunk は memcg に課金されず、shrinker もない (Q49) | page cache はカーネルが普通に回収する |
 
 - **page cache から返る read は、どちらでも同じ。** 差が出るのは page cache から落ちた後だけ。
-- **open の往復は置き場所と別の話。** s3fs-fuse は `use_cache` + `kernel_cache` でも open+read+close に 524.6 µs かかる。flush / release で daemon に行くため (Q42)。s3fs-ebpf は 3.05 µs。fuse-bpf のように open もローカル FS に素通しできれば、ディスクキャッシュでもこの差の大部分は縮むはず (Q3、未計測)。
+- **open の往復は置き場所と別の話。** s3fs-fuse は `use_cache` + `kernel_cache` でも open+read+close に約 520 µs かかる。open のたびの S3 への HEAD と、FUSE の往復 (flush / release) のため (Q42)。s3fs-ebpf は既定で 3.05 µs だが、これは open で S3 に聞かない値で、聞く条件 (`open_check=1`) では約 425 µs (Q42)。fuse-bpf のように open もローカル FS に素通しできれば、ディスクキャッシュでもこの差の大部分は縮むはず (Q3、未計測)。
 - **中身が 2 か所に載る:** pcache は chunk と page cache の両方に載るので、最大 2 倍のメモリを使う。大きいファイルを続けて読むと、ホストのメモリ回収待ちが出た (Q37)。
 - **cold read:** 初回はどちらも S3 の GET が支配する。ディスクへの書き込みは余分なコストになる。s3fs-ebpf でも、daemon の `--cache-dir` への同期の書き込みが cold read を遅くしていたので、非同期にした (AC-52)。
 - **s3fs-ebpf も 2 段になっている:** chunk になければ daemon のディスクキャッシュ (`--cache-dir`、ETag とサイズで検証、AC-40) を見て、そこにもなければ S3 に行く。pcache は、その上に置いたメモリの段。
@@ -288,8 +301,6 @@ GUP を避ける構成:
 
 未確認: BPF のコールバックを引数に取る kfunc を外部モジュールが定義できるか。
 
-スライド: 付録の arena-loop。
-
 ### Q10. kmod で kern_vm が使えない理由は。なぜ BPF では kern_vm に変換できるのか。BPF のフックに入る前に仮想メモリのマッピングが変わっているのか
 
 **マッピングは変わっていない。arena は作成時から同じ物理ページを 2 か所にマップしていて、BPF は最初から kernel 側のアドレスを使っている。** 以下はカーネル v6.12 のソースで確認した。
@@ -305,7 +316,7 @@ kmod が使えない理由:
 2. **未割り当てのページで oops になる。** 普通のカーネル C には BPF のような例外テーブルがない。
 3. **解放と競合する。** `bpf_arena_free_pages` は kern_vm のマップを外してからページを解放する (arena.c:525-535)。
 
-read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena-map、next の 4 (カーネルに欲しいもの)。
+read 経路が GUP を使う決め手は 2 と 3。
 
 ### Q11. verifier は arena から読んだポインタの中身を追わない (scalar 扱い)。壊れたポインタをたどっても大丈夫なのか
 
@@ -318,7 +329,7 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 
 ### Q12. GUP を read のたびにせず、admit のときに 1 回 pin して `struct page` を持っておけば、arena モードでも速かったのでは
 
-**毎回の GUP は消えるはず。ただし試していない。** 発表準備の時点で案として挙げた (発表アウトライン §7 の 4、削除済み) が、pcache モードに移ったので実装しなかった。
+**毎回の GUP は消えるはず。ただし試していない。** 発表準備の時点で案として挙げたが、pcache モードに移ったので実装しなかった。
 
 この案で残る問題 (コードとカーネルの仕組みからの推測):
 - **解放との整合:** arena のページは BPF 側の `bpf_arena_free_pages` やユーザー空間からも解放できる。kmod が pin していると物理ページは残るが、arena の同じ番地には別のページが入りうるので、kmod は古い中身を読み続ける。evict と arena の解放のたびに kmod に unpin を知らせる仕組みが要る。
@@ -340,15 +351,13 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 **上限があるのは、verifier が load の時点で「必ず終わる」ことを示す必要があるから。** KFunc が長く回せるのは sleepable だからだけではない。終わる保証を verifier ではなく kmod が引き受けているから。
 
 - 上限がかかっているのは helper ではなく、BPF のコード (ループの本体) の方。BPF は softirq や tracepoint の中など、sleep できず CPU を譲れない文脈でも動く。止まらないループは CPU を握ったままになり、RCU stall や watchdog を起こす。
-- そのため上限はどれにもある。`bpf_loop` は 2^23 回 (約 840 万回)。`bpf_for` も同じ。`can_loop` (may_goto) は 6.14 までが約 840 万回、6.15 以降の x86-64 (arm64 は 6.18 以降) は 250 ms (発表アウトライン `docs/user/meetup-ebpf-outline.md` の追加調査、6.18 で確認。アウトラインは削除済みで git の履歴に残る)。
+- そのため上限はどれにもある。`bpf_loop` は 2^23 回 (約 840 万回)。`bpf_for` も同じ。`can_loop` (may_goto) は 6.14 までが約 840 万回、6.15 以降の x86-64 (arm64 は 6.18 以降) は 250 ms (6.18 で確認)。
 - **sleepable は必要条件だが、十分条件ではない。** sleepable な BPF プログラムは標準にもある (`SEC("syscall")`、`fentry.s`、`lsm.s`)。その中で `bpf_loop` などを使っても、予算は同じで伸びない。ループの途中で CPU を譲って回り続ける標準の helper や kfunc は、知る限りない (知識からの説明。6.12 のソースでは確かめていない)。
 - この PoC の walk (`s3fs_kfunc_arena_list_walk`) が長く回せるのは、次の 2 つが揃っているから。
   1. 本体が C で、終わる保証を自分で作っている。`max_nodes` (最大 2^24) を超えたら `-ELOOP`、kill されたら `-EINTR`。
   2. `KF_SLEEPABLE` で、SYSCALL 型の sleepable なプログラムからしか呼ばせていない。1024 個ごとに `cond_resched` を挟める。
 - **終わる保証は、データ構造を把握していることに頼らない方がよい。** arena は BPF からも daemon からも書けるので、中身は壊れているかもしれず、循環しているかもしれない。walk はデータを信用しない。回数の上限とシグナルで止まり、番地は `copy_from_user` で読むので不正な番地は `-EFAULT` になる (Q13)。「この構造なら必ず終わる」に頼ると、データが壊れたときにカーネルが止まる。
 - sleep できない文脈の KFunc でもループは書ける。その場合は、普通のカーネルコードと同じく短い上限を付ける。
-
-スライド: 付録の loop-why。
 
 ### Q15. データの中身に関係なく止まればよいなら、bpf_loop で十分ではないか。この PoC の KFunc の walk は汎用か。キャッシュアルゴリズムと結合しているか
 
@@ -374,8 +383,6 @@ read 経路が GUP を使う決め手は 2 と 3。スライド: 付録の arena
 | arena の読み方 | JIT が kern_vm に変換して直接ロード | `copy_from_user` (遅い) |
 | 打ち切り | 回数か時間の予算 | `max_nodes` とシグナル。`cond_resched` を挟めるので長く回せる |
 | 安定性 | helper は UAPI | kfunc はカーネルの版で変わりうる。新しい機能は helper ではなく kfunc で足す方針 (知識からの説明) |
-
-スライド: 付録の loop-why、KFunc の採用基準 (adopt-kfunc)。
 
 ---
 
@@ -498,7 +505,7 @@ vtable の形とアルゴリズム、hit rate とその限界。
 
 **この vtable ではできない。kmod が `rcu_read_lock()` の中から呼ぶため。**
 
-- 最初の版は全部の policy が `SEC("struct_ops.s/...")` (sleepable) になっていて、`CONFIG_DEBUG_ATOMIC_SLEEP` のカーネルで splat が出た。`SEC("struct_ops/...")` に直した (発表アウトラインの 2026-10-05 のレビュー。削除済みで git の履歴に残る)。
+- 最初の版は全部の policy が `SEC("struct_ops.s/...")` (sleepable) になっていて、`CONFIG_DEBUG_ATOMIC_SLEEP` のカーネルで splat が出た。`SEC("struct_ops/...")` に直した (2026-10-05 のレビュー)。
 - 6.9 以降は sleepable な struct_ops の member を作れるが、vtable の定義と kmod の呼び出し側 (RCU の外で呼ぶ) の両方を変える必要がある (`docs/dev-notes/ebpf-ecosystem-gaps.md` §3)。
 - sleep する KFunc (`KF_SLEEPABLE`) は、呼ぶ側のプログラムも sleepable でなければならない。この PoC の arena walk の KFunc は `SEC("syscall")` から呼んでいる。
 - S3 のような blocking I/O はポリシーに入れず、miss のときの upcall (kmod → `/dev/s3fs_ebpf` → daemon → ioctl で起こす) に任せた。ポリシーは eviction の lock の下で呼ばれるので、そこで待つのは筋が悪い。
@@ -531,8 +538,6 @@ vtable の形とアルゴリズム、hit rate とその限界。
 - fmod_ret (tracing link) は `BPF_LINK_UPDATE` に対応しないので、新旧が同時に走る間がある (Q23、`docs/design/policy-attach-comparison.md` §1.3)。
 - 引き継ぐ方法として考えられるのは、map を pin しておき、新しいプログラムを load するときに同じ map を渡すこと (cilium/ebpf の `MapReplacements`)。同じポリシーの版上げなら使えるが、SIEVE と LRU のように状態の形が違うポリシーの間では意味がない。試していない。
 - 引き継がないことの利点もある。古いポリシーの状態が新しいポリシーの判断を汚さないので、入れ替えの効果を比べやすい。
-
-スライド: so-swap。
 
 ### Q28. 誰でも BPF のポリシーを差し込めるのか。権限とセキュリティは
 
@@ -599,7 +604,7 @@ hot path に置いた fentry の負担と、その測り方。
 - microbench の stat は s3fs-ebpf 1.38 µs、s3fs-fuse 1.39 µs (§0、2026-09-22)。fio の並列 stat も 3 つのマウントでほぼ同じで、4 jobs あたりで約 23M IOPS の共通の上限に当たる (§10.3)。
 - s3fs-ebpf の getattr は `simple_getattr`。daemon が付けた `fentry/vfs_getattr_nosec` (`bpf/s3fs_fastpath.bpf.c` の `s3fs_fp_getattr`) は、hit / miss を数え、miss なら ringbuf で daemon に知らせるだけ。
 - このフックはまだ `BPF_CORE_READ` (probe_read) で引数をたどっている。read のフックで直した (Q30) のと同じ書き換えが効くはず。stat の並列 bench で差が出ていないので後回しにしている。
-- 差が出るのは stat ではなく open のある操作 (Q42)。`ls -l` の cold が 11 倍速いのは、HEAD を投げずに kmod の一覧から返すため (Q40)。
+- 差が出るのは stat ではなく open のある操作 (Q42)。`ls -l` の cold が約 50 倍速いのは (§18.48)、HEAD を投げずに kmod の一覧から返すため (Q40)。
 
 ---
 
@@ -609,25 +614,30 @@ hot path に置いた fentry の負担と、その測り方。
 
 ### Q33. ベンチ結果では FUSE に負けているが、勝てるポイントや用例を再整理したい
 
-**「read が速い FS」ではなく「open と fsync が速い FS」。** FUSE は 1 回の open+read+close で /dev/fuse を 4 往復するが、s3fs-ebpf は miss のときだけ upcall する。
+**勝てるのは「小さいファイルを大量に開く・一覧する」場面と、1〜10 MiB の durable write。** read 自体が速い FS ではない。open の倍率が大きく見える主因は、FUSE が 1 回の open+read+close で /dev/fuse を何往復もするのに対し、s3fs-ebpf は miss のときだけ upcall することにある。ただし、その倍率の一部は「s3fs-ebpf の open が S3 の存在確認をしない」ことから来ている (下の注)。
 
-pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
+6 構成で測り直した数字 (§18.48、2026-11-03、ローカル MinIO。表の倍率は s3fs-fuse の時間 ÷ s3fs-ebpf の時間):
 
-| 場面 | 結果 |
-|---|---|
-| open+read+close (キャッシュなし同士) | 3.3× (※ s3fs-ebpf の open が S3 に HEAD しない分を含む。`open_check=1` で HEAD すると約 1.7×、§18.51) |
-| open+read+close (キャッシュあり同士) | 172× |
-| 4 KiB × 10,000 個の cat (2 回目) | 93× (fuse-cache 比 32×) |
-| 4 KiB × 10,000 個の `ls -l` (初回) | 11× |
-| 新規ファイルの durable write 1〜100 MiB | 1.35〜1.37× |
+| 場面 | 結果 | 注 |
+|---|---|---|
+| open+read+close (キャッシュなし同士、fuse-raw 対 ebpf-nocache) | 3.17× | `open_check=1` (open で HEAD する) だと 1.72× (§18.51) |
+| open+read+close (キャッシュあり同士、fuse-cache 対 ebpf-pcache) | 180× | `open_check=1` だと約 1.2× (§18.52) |
+| 4 KiB × 10,000 個の `ls -l` (cold) | 約 49〜50× | kmod の一覧から返し、S3 に行かない (Q40) |
+| 4 KiB × 10,000 個の cat (warm、fuse-cache 対 ebpf-pcache) | 39× | fuse-diskcache 対 pcachedrop は 34× |
+| 4 KiB × 10,000 個の cat (cold) | 約 3× | どちらも GET が支配。回数は同じ |
+| 新規ファイルの durable write | 1 MiB 1.45×、10 MiB 1.28×、100 MiB 0.97× (nocache) | Q39。100 MiB は差なし |
+| warm の SQLite OLTP / ベクトル検索 (fuse-cache 対 ebpf-pcache) | 0.97× / 1.01× | page cache のヒットで終わるので差がつかない |
 
-向く使い方: 小さいファイルを大量に開く (学習データ、ログの走査)、短命なプロセスが多い (バッチ、CI)、新しいファイルに書いて fsync する (チェックポイント)、キャッシュの判断をワークロードごとに変えたい (機能の差)。
+**注: open の倍率は S3 を確認しない設計の値。** s3fs-fuse は open のたびに HEAD する。s3fs-ebpf は既定では lookup も open も kmod の表だけで答え、S3 に聞かない (kmod の module param `open_check`、既定 0)。S3 に聞く条件に揃えると、時間のほぼ全部が HEAD の往復になり、キャッシュあり同士の差は約 170× から約 1.2× に縮む (Q42)。
 
-負けていた場面と、その後の修正 (§18.34-18.39):
-- 既存の大きいオブジェクトの途中の書き換え: 100 MiB で 0.41× → AC-51 (`--partial-modify`、server-side copy) で fuse-raw と互角。16 MiB 未満は 0.61× のまま。
-- 大きいファイルの cold read: 300 MiB で 0.34× → AC-52 で、毎回キャッシュを空にすれば 1.26×。続けて読むとホストのメモリ回収待ちで 0.80×。
+向く使い方: 小さいファイルを大量に開く・一覧する (学習データ、ログの走査。ただし open で S3 の存在確認が要らない場合)、短命なプロセスが多い (バッチ、CI)、新しいファイルに書いて fsync する (チェックポイント。1〜10 MiB)、キャッシュの判断をワークロードごとに変えたい (機能の差)。
 
-スライド: perf、perf-lose、fs-usecases。
+負けている場面 (§18.48):
+- 既存オブジェクトの途中への 4 KiB 書き換え: 10 MiB で 0.66〜0.68×。1 MiB は 1.15×。100 MiB は `--partial-modify` (既定で有効、server-side copy) で fuse と互角 (AC-51、§18.36)。
+- 大きいファイルの cold read: 300 MiB で ebpf-nocache 0.74×、ebpf-pcache 対 fuse-cache は 1.27×。10 MiB は同等 (Q37)。run 間の揺れが大きい。
+- 64 jobs の並列 read (bs=1): 0.94〜1.02× (Q34)。
+
+以前の値: §18.27〜18.32 では open+read+close 3.3× / 172×、新規 write 1.35〜1.37× と書いていた。前者は open_check の前、後者は fsync の不具合の分を含んでいた (Q39)。
 
 ### Q34. FUSE に勝つためには、どういう検証と変更が残っているか (2026-10-16 時点)
 
@@ -645,8 +655,6 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 3. **GUP と rwlock (並列の主因ではない)。** AA-03 の arena 経路にあったが、どちらを外しても 64 jobs は 0.63〜0.64× のまま (§14、§15)。大きいファイルの latency には効く。
 4. **1 job の「103% → 89% で逆転負け」は計測の誤り。** 「前」の 103% は U-05 (計測ごとの `drop_caches=1`) の前の run だった。同じ条件では 92.5% → 89% で、AA-03 の前から負けていた。1 job の差 (read 1 回あたり約 50 ns) は固定費で、AA-03 の前は fentry と on_hit、後は GUP と rwlock と見ている (1 job の A/B はなく推定)。
 
-スライド: fail-found、fail-factors、hook-tips。
-
 ### Q35. admit 表のロックを RCU にしていれば、64 jobs で勝てたのでは
 
 **勝てなかった。hit の判定をロックなしにしても変わらなかった。**
@@ -658,12 +666,12 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 
 ### Q36. large folio を有効にすれば、大きい read は速くなるのでは
 
-**試していない。64 jobs の差の説明としては外れた。**
+**大きいファイルの cold な順次 read には効いた (AC-76)。ただし 64 jobs の差の説明としては外れた。**
 
-- kmod は `mapping_set_large_folios` を呼んでおらず、`.read_folio` は 4 KiB の folio を 1 枚ずつ埋める。
-- 「FUSE は large folio を使うので速い」という仮説は、計測カーネル 6.12 では FUSE 側も order 0 (100 MiB で 25,600 枚ずつ) だったので外れた (§18.16 の T5)。64 jobs の fio は 18 B のファイルなので、どの FS でも folio は 1 枚。
-- 大きいファイルの順次 read では、folio を大きくすると folio ごとの処理 (lock、参照カウント、`.read_folio` の呼び出し) が減るので効く可能性はある。ただし 100 MiB の warm read はすでに fuse-cache より速い (9.5 / 10.5 ms)。
-- pcache の chunk は 4 MiB なので、large folio にしても chunk の境界をまたがない大きさに収める必要がある。
+- **AC-76 で有効にした:** kmod の module param `read_large_folios` (既定 on、`kmod/vfs/aops_read.inc.c`) が on のとき、`mapping_set_large_folios` と `.readahead` で chunk 表から large folio を埋める。以前は専用の bdi がなく (`noop_backing_dev_info`、`ra_pages == 0`)、readahead が一度も呼ばれず、4 KiB の folio ごとに `.read_folio` が入っていた。
+- **効果** (`ebpf-pcachedrop`、chunk 表からの read、`docs/dev-notes/ac75-ac76-lessons.md`): 4 MiB が 1.09 → 0.74 ms、64 MiB が 21.5 → 16.1 ms。readahead だけ (4 KiB の folio のまま) では変わらなかった (64 MiB: 21.5 → 24.5 ms)。page cache から返る場合は 0.29 / 6.8 ms で、まだ遠い。支配的なのは page cache を捨てて入れ直す費用 (folio の確保と挿入 約 22%、memcpy 約 14%、`copy_to_user` 約 12%)。
+- **64 jobs の fio には関係しない:** 「FUSE は large folio を使うので速い」という仮説は、計測カーネル 6.12 では FUSE 側も order 0 だったので外れた (§18.16 の T5)。64 jobs の fio は 18 B のファイルなので、どの FS でも folio は 1 枚。
+- 注意点: hit の計上が folio 単位なので、large folio では `folio_hits` が減る。pcache の chunk は 4 MiB なので、large folio は chunk の境界をまたがない大きさに収める必要がある。lockdep 付きカーネルでの `make test-lockdep` は未了。
 
 ### Q37. 大きいファイルの cold read で FUSE に負けるのはなぜか
 
@@ -676,6 +684,7 @@ pcache モードで測り直した数字 (§18.27-18.32、ローカル MinIO):
 - 毎回 `drop_caches` してから読むと、300 MiB で fuse-raw の 1.26 倍速い。続けて読むと 0.80 倍。
 - 設計の問題として残っているのは、容量の既定が無制限でホストのメモリを見ないこと、4 並列の populate が短時間に大きく確保すること (§18.39.1)。
 - まだ確かめていないこと: ext4 で同じ読み方をしたときに同じ遅くなり方をするか。回収されたページのうち pcache と MinIO の内訳。
+- その後 (§18.48、2026-11-03、n=10): 6 構成で測り直すと、300 MiB の cold read は ebpf-nocache 0.74×、ebpf-pcache 対 fuse-cache 1.27×、ebpf-pcachedrop 対 fuse-diskcache 1.44×。100 MiB は 0.78× / 1.15× / 1.17×、10 MiB は同等。上の 1.26× / 0.80× とは条件が違い (disk cache の有無と構成の組み方)、300 MiB は run 間の揺れが大きい。chunk 表からの read は AC-75 (4 MiB 超の object の disk cache) と AC-76 (large folio、Q36) で改善した (kmod 経由の再測定は未了)。
 
 ### Q38. pcache モードでも prewarm を使えるか。10 MiB 以下が遅いのは、arena に載せるか chunk サイズの工夫で速くできるか (2026-10-21 時点)
 
@@ -692,18 +701,17 @@ prewarm:
 | cold read 10 MiB | 19.2 ms | 20.5 ms (0.94×) | S3 の GET |
 | 既存 10 MiB の途中に 4 KiB + fsync | 51.5 ms | 70.6〜84.2 ms | 変更前の全体 GET (AC-50) + 全体 PUT |
 
-- **arena に載せても速くならない。** どちらも S3 との転送が律速で、arena が効くのはデータがメモリに載った後。そこは pcache で 172× (§18.27)。arena から kmod が読むと GUP が増えるだけ (Q55)。
+- **arena に載せても速くならない。** どちらも S3 との転送が律速で、arena が効くのはデータがメモリに載った後。そこは pcache で大きく縮む (open+read+close 約 170×、S3 を確認しない条件、§18.27、Q42)。arena から kmod が読むと GUP が増えるだけ (Q55)。
 - **chunk サイズの工夫も効果は小さい見込み。** `--partial-modify` は 16 MiB 未満では全体を読み書きする。しきい値を下げても、S3 の multipart は最後以外の part が 5 MiB 以上という制約があり、10 MiB (4 + 4 + 2 MiB の chunk) ではほぼ全体を運ぶうえ、往復が 3〜4 回増える。8 MiB にした計測はしていない。chunk の大きさ (4 MiB) は `S3FS_PCACHE_CHUNK_SHIFT` で、pin や pending の単位でもあるので、変えるなら回帰テスト一式をやり直す必要がある。
 - **prewarm で効く見込み。** 中身が先に chunk にあれば、cold read は warm (page cache) になり、途中の書き換えも AC-50 の読み込みが要らず PUT だけになる (推定 50 ms 前後)。どちらも実測していない。prewarm の読みは起動時に払うので、起動から最初の read までに時間があるワークロード向け。
 
-### Q39. durable write (新規ファイル + fsync) で FUSE より 1.37 倍速いのはなぜか
+### Q39. durable write (新規ファイル + fsync) は FUSE より速いのか。なぜか
 
-**内訳は分解していない。** 以下は構造からの推測。
+**1 MiB と 10 MiB は 1.3〜1.5 倍速い。100 MiB は差がない。** 以前の発表用の数字「1.37 倍」は、fsync が S3 への PUT の完了前に返っていた分を含んでいたので使わない。内訳は分解していないので、理由は構造からの推測。
 
-- 数字: 1 / 10 / 100 MiB で fuse-raw の 1.37 / 1.35 / 1.37 倍 (§18.28)。S3 のオブジェクトの sha256 は一致。
-- s3fs-ebpf の write は kmod の chunk に書くだけで、daemon は通らない。fsync で daemon が `READ_DIRTY` で中身を読み、PUT して完了を知らせる (Q47、`posix-and-practical-notes.md` E-01)。
-- s3fs-fuse は write のたびに /dev/fuse を往復し、daemon 側のバッファに溜めてから PUT する (と理解している)。100 MiB だと write の往復の回数が効く可能性がある。
-- 既存ファイルの上書きでは差がもっと大きかった (1.3〜1.7 倍、§8.3)。新規ファイルでは s3fs-fuse も create + 1 回の PUT で済むので差が小さい (§18.28 の注)。
+- 数字 (§18.48、n=10、fsync が返るまでの時間、fuse-raw 対 ebpf-nocache / fuse-cache 対 ebpf-pcache): 1 MiB 1.45× / 1.46×、10 MiB 1.28× / 1.31×、100 MiB 0.97× / 1.04×。S3 のオブジェクトの sha256 は全構成で一致。
+- **訂正の経緯:** 測り直しで、新規の大きいファイルの fsync が早く返り、遅れて来た 0 byte の PUT でオブジェクトが空になる不具合を見つけた。`.create` が積む 0 byte のプレースホルダの flush event が coalescer に残り、fsync の PUT のあとで発火していた。修正 (`daemon/cmd/s3fs-ebpf/flush_order.go`、AC-70 / AC-71) の前は、100 MiB で fsync が早く返ったのが 12 回中 9 回。「100 MiB で 1.37 倍」はその値だった。1 / 10 MiB の差は修正の前後で変わらない (§18.48)。回帰テストは `make test-fsync-large-new-file`。
+- 小さいサイズで速い理由 (推測): s3fs-ebpf の write は kmod の chunk に書くだけで、daemon は通らない。fsync で daemon が `READ_DIRTY` で中身を読み、PUT して完了を知らせる (Q47、`posix-and-practical-notes.md` E-01)。s3fs-fuse は write のたびに /dev/fuse を往復する。100 MiB では PUT の時間が支配的になり、この差が埋もれる。
 - close では PUT を待たないので、fsync なしの「書いて閉じる」はさらに速い (§8.3 の non-durable 列)。ただしそれは比べ方として公平ではない (Q42)。
 
 ### Q40. S3 へのリクエストは減るのか (費用の面)
@@ -711,17 +719,17 @@ prewarm:
 **一覧と stat は減る。中身の GET は同じ。一覧の LIST は定期的に出る。**
 
 - `ls -l` (10,000 個、cold): s3fs-fuse は HEAD を 10,000 回投げる。s3fs-ebpf は起動時と `--sync-every` ごとの LIST の結果 (kmod の表) から返すので、S3 に行かない (§18.31)。
-- 中身の初回の読み込み (cold cat) は、どちらも 1 ファイルに 1 回 GET する。cold cat 10,000 個は 2.7 倍速いが、GET の回数は同じ。
+- 中身の初回の読み込み (cold cat) は、どちらも 1 ファイルに 1 回 GET する。cold cat 10,000 個は約 3 倍速いが (§18.48)、GET の回数は同じ。
 - 代わりに、既定で 30 秒ごとに LIST する。10 万個のバケットなら LIST の 1 ページが 1000 件として約 100 リクエストを 30 秒ごとに出す。`--sync-every=0` で止められるが、他のクライアントの追加と削除が見えなくなる (Q46)。
 - 大きいオブジェクトの途中の書き換えは、`--partial-modify` で変更のない部分を `UploadPartCopy` (server-side copy) で運ぶので、転送量が減る (Q33)。
 
 ### Q41. Mountpoint for Amazon S3 (mount-s3) と比べるとどうか
 
-**open を繰り返す読み方では速い。cold の小さいファイルは同じくらい。機能の範囲は違う。** 同じホスト・同じ MinIO で測った (`--cache` 付き)。
+**cold の小さいファイルは同じくらい。warm の cat と `ls -l` は速い。open+read+close の大きな倍率は、S3 を確認しない条件の値。機能の範囲は違う。** 同じホスト・同じ MinIO で測った (`--cache` 付き、2026-10-11〜10-17)。mount-s3 は §18.48 の 6 構成に含めておらず、再測定していない。
 
 | 場面 | mount-s3 | s3fs-ebpf |
 |---|---:|---:|
-| open+read+close (キャッシュあり、p50) | 103.8 µs | 3.05 µs (34 倍速い) |
+| open+read+close (キャッシュあり、p50) | 103.8 µs | 3.05 µs (34 倍速い。S3 を確認しない条件) |
 | 小さいファイル 10,000 個を cat (cold) | 7.7 s | 6.9 s (ほぼ同じ) |
 | 小さいファイル 10,000 個を cat (warm) | 1.43 s | 0.20 s (7.3 倍速い) |
 | 小さいファイル 10,000 個を `ls -l` (cold) | 1.90 s | 0.27 s |
@@ -729,6 +737,7 @@ prewarm:
 (§18.27、§18.31。cold read の大きいファイルは AC-52 の前の数字しかないので並べない)
 
 - mount-s3 は FUSE なので、hit でも open / read の往復が残る。それでも s3fs-fuse の約 5 倍速い (Q42)。
+- **open の 34 倍について:** s3fs-ebpf の 3.05 µs は open で S3 に聞かない既定の値。mount-s3 が open で S3 に何をするかはここでは確かめていない。`open_check=1` で揃えた s3fs-ebpf は約 420 µs で、この表の mount-s3 (103.8 µs) より遅くなりうる (Q42)。
 - 機能: mount-s3 は既存オブジェクトの途中の書き換えをしない (読み込みと新規の順次書き込みが中心。公式の制限で、この PoC では確かめていない)。s3fs-ebpf は途中の書き換えと fsync で待つ書き込みができる。一方、mount-s3 は本番で使われている実装で、PoC と同じ土俵ではない。
 
 ---
@@ -737,15 +746,29 @@ prewarm:
 
 倍率の比べ方、試験の意味、環境の限界。
 
-### Q42. open+read+close の 172 倍は公平か。FUSE でも往復を減らせるのではないか
+### Q42. open+read+close の 170 倍は公平か。FUSE でも往復を減らせるのではないか
 
-**比べた相手は s3fs-fuse の実装で、FUSE の上限ではない。** 倍率は「1 回の open+read+close で daemon に行く回数の差」から来ている。
+**公平ではない。2 つの差が混ざっている。** (1) s3fs-ebpf は hit のとき daemon に行かず、FUSE は何往復もする (構造の差)。(2) s3fs-fuse は open のたびに S3 へ HEAD を投げ、s3fs-ebpf の open は S3 に何も聞かない (正確さの差)。(2) を揃えると差は約 1.2 倍まで縮む。
 
-- s3fs-fuse (キャッシュなし) は 1 回で /dev/fuse を約 4 往復する (read_iter 2、flush 1、release 1、§11.2)。1 往復あたり約 423 µs。s3fs-ebpf は hit なら 0 往復。
-- キャッシュありの s3fs-fuse (`use_cache` + `kernel_cache`) でも 524.6 µs かかるので、read 以外の往復 (flush / release) が残っていると考えている。内訳は測っていない。
-- FUSE には往復を減らす手段がある。open に ENOSYS を返すと以後の open を送らない `FUSE_NO_OPEN_SUPPORT`、flush に ENOSYS を返すと以後の flush を送らない、`entry_timeout` / `attr_timeout` を長くするなど。これらを使う FUSE の実装なら差はかなり縮むはずだが、試していない。
-- 実際に、mount-s3 (`--cache`) は同じ計測で 103.8 µs で、fuse-cache の約 5 倍速い (§18.27)。s3fs-ebpf はその 34 倍速い。
-- 言えること: 「FUSE ではなく、s3fs-fuse より」の倍率であること。構造の差として確かに残るのは、hit のときにユーザー空間のプロセスを一度も起こさないこと。
+**S3 に聞く条件に揃えた値** (§18.51、§18.52、A、3 回、ローカル MinIO。ebpf 側は kmod の `open_check=1`、open で HEAD する):
+
+| 組 | fuse p50 | ebpf `open_check=0` (既定) | ebpf `open_check=1` | 倍率 (`=0` → `=1`) |
+|---|---:|---:|---:|---|
+| キャッシュなし (fuse-raw 対 ebpf-nocache) | 約 1.7 ms | 537 µs | 977 µs | 3.16× → **1.72×** |
+| page cache (fuse-cache 対 ebpf-pcache) | 506–517 µs | 3.0 µs | 425 µs | 約 170× → **約 1.2×** |
+| disk cache / chunk 表 (fuse-diskcache 対 ebpf-pcachedrop) | 536 µs | 3.8 µs | 423 µs | 約 140× → **約 1.27×** |
+
+- 1000 回の open+read+close あたり、s3fs-fuse は silo へ HEAD を 1001〜1002 回投げる (キャッシュありでも `kernel_cache` や `max_stat_cache_size` では省けない)。ebpf は `open_check=0` で 0 回、`=1` で約 1010 回。ローカルの silo で HEAD 1 往復が約 420〜440 µs で、時間のほぼ全部がこれ。遠い S3 では HEAD の割合がさらに大きくなる。
+- `open_check=0` が既定なのは、cache hit の open が S3 の往復を払わないようにするため。その代わり、sync のあとに S3 から消えたキーでも open は成功し、エラーは最初の read まで出ない (page cache にあれば出ない)。O_CREAT でない open が存在を確かめないのは、FUSE FS としては不完全 (Q46)。
+- 速くできる余地は HEAD の頻度にある。3 µs (確認なし) が上限、425 µs (毎回) が下限で、間 (確認結果を一定時間または ETag で再利用する) は未実装・未測定。
+
+**構造の差 (往復の数):**
+- s3fs-fuse (キャッシュなし) は 1 回で /dev/fuse を約 4 往復する (read_iter 2、flush 1、release 1、§11.2)。s3fs-ebpf は hit なら 0 往復。
+- キャッシュありの s3fs-fuse でも 520 µs 前後かかる。HEAD と FUSE の往復の合計で、内訳は測っていない。
+- FUSE には往復を減らす手段がある。open に ENOSYS を返すと以後の open を送らない `FUSE_NO_OPEN_SUPPORT`、flush に ENOSYS を返すと以後の flush を送らない、`entry_timeout` / `attr_timeout` を長くするなど。これらを使う FUSE の実装なら差は縮むはずだが、試していない。
+- mount-s3 (`--cache`) は同じ計測で 103.8 µs で、fuse-cache の約 5 倍速い (§11.2、§18.27)。
+
+**言えること:** 「s3fs-fuse が open ごとに S3 を確認する条件では、約 170 倍ではなく約 1.2 倍」。構造の差として確かに残るのは、hit のときにユーザー空間のプロセスを一度も起こさないこと。小さいファイル 10,000 個の cat の warm 39× (§18.48) は、同じ open の差を多く含むので、同様に読む。
 
 ### Q43. 64 jobs で 1 byte ずつ 18 B のファイルを読む fio は、現実のワークロードを表しているか
 
@@ -763,7 +786,7 @@ prewarm:
 - ネットワーク遅延がないので、S3 往復の差は小さく見え、miss のコストは実際の S3 よりずっと小さい。実際の S3 ではまだ測っていない。
 - 回数: microbench は 5000 iters の p50、fio は各条件 3 回、cold read は n=5〜10、小さいファイル 10,000 個は 1 回 (§18.31)。
 - run 間のばらつきは約 2% (gate の許容幅の根拠、`read-iter-hook-overhead.md` §6)。絶対値は run ごとに動くので、同じ run の中の比で見る。
-- 計測を無効にした例が多数ある (bench のバグ、修正前のビルド、ホストのメモリ回収)。`docs/journal/history.md` §4.4 に一覧がある。
+- 計測を無効にした例が多数ある (bench のバグ、修正前のビルド、ホストのメモリ回収)。直近では、MinIO に `mc admin trace` が残っていて S3 を伴う項目が 25〜30% 遅くなった run を、すべて取り直した (§18.48)。`docs/journal/history.md` §4.4 に一覧がある。
 - 分かっていない: CPU の周波数固定や、ノイズの多い隣人の影響の切り分けはしていない。
 
 ---
@@ -796,6 +819,7 @@ prewarm:
 - daemon のディスクキャッシュは ETag とサイズを照合する (AC-40、`docs/journal/history.md` §4.1)。
 - 書き込みの競合は「最後に PUT した者が勝つ」。途中の書き換え (`--partial-modify`) は ETag で copy 元を固定し、変わっていたら全体を PUT し直す (`docs/design/ac51-partial-modify.md`)。
 - close-to-open の一貫性 (NFS のような) も保証しない。
+- open は既定では S3 に聞かない。sync のあとに消えたキーでも open は成功し、エラーは最初の read まで出ない。kmod の `open_check=1` にすると open で HEAD して 404 を返せる。代わりに open が S3 の往復を払う (Q42、§18.51)。
 
 ### Q47. mmap、O_DIRECT、ディレクトリ操作、ハードリンクは使えるか
 
@@ -917,7 +941,7 @@ arena を使った意義、適用範囲、本番との距離、これから。
 
 **性能の面で意義がなかった根拠**
 
-- **初期の大きな倍率は arena の手柄ではなかった。** arena モードで出した open+read+close の約 169 倍 (fuse-cache 比、§7.5) は、中身を arena に置かない pcache モードでも 172 倍 (§18.27) で同じ水準になった。小さいファイル 10,000 個の warm cat 93 倍 (§18.31) も open で upcall しないことが効いている。キャッシュなし同士の 3.3 倍も pcache モードの数字。
+- **初期の大きな倍率は arena の手柄ではなかった。** arena モードで出した open+read+close の約 169 倍 (fuse-cache 比、§7.5) は、中身を arena に置かない pcache モードでも 172 倍 (§18.27) で同じ水準になった (どちらも open で S3 を確認しない条件の値、Q42)。小さいファイル 10,000 個の warm cat 93 倍 (§18.31、再測定 39〜34×、§18.48) も open で upcall しないことが効いている。キャッシュなし同士の 3.3 倍 (再測定 3.17×、S3 を確認すると 1.72×) も pcache モードの数字。
 - **kmod から見た arena は「daemon のユーザーメモリ」だった。** arena の「ゼロコピー」は BPF とユーザー空間の間の話で、kmod は kern_vm を正規には使えない (Q10、`dev-notes/ebpf-ecosystem-gaps.md` A1〜A3)。read のたびに GUP が要り、1 回約 1.7 µs、1 MiB のファイルでは 1 回の `read()` で約 442 µs になった (§13.1)。1 MiB の cat は page cache 経路の方が速かった (§13.2)。
 - **容量が固定だった。** arena は 128 MiB (BPF 側でコンパイル時に固定) で、100 MiB のオブジェクトが 1 つ入ると他が admit できなかった (§18.2)。大きいファイルのために chunk と range の admit を足し、それが AC-48 / AC-49 のバグを生んだ。
 - **pcache モードに移っても性能は落ちなかった。** 64 jobs の read IOPS、100 MiB の cat、microbench、write はどれも arena モードと同じか少し良い (§14、§16、§17)。hit rate も下がらなかった (§16.2)。
@@ -947,8 +971,6 @@ arena を使った意義、適用範囲、本番との距離、これから。
 - arena は、BPF のポリシーと daemon が共有する状態に使う。例: `pick_victim` の FIFO / ghost queue のような、ポインタを含むデータ構造 (いまは ARRAY map の添字で表している)、アプリのヒントの表 (Q19)、ヒストグラムなどの統計。daemon が syscall なしで読み書きでき、arena の利点がそのまま出る。ただし、このやり方での arena の効果はまだ測っていない。
 - arena モードを既定から外すか、arena モードそのものを消すかは決めていない (`docs/design/pcache-mode.md` §9)。
 
-スライド: arena-who、失敗談 (AA-03)、usecases。
-
 ### Q56. struct_ops と arena の適切な用例は
 
 **判断は struct_ops に、共有する状態は arena に。**
@@ -956,14 +978,12 @@ arena を使った意義、適用範囲、本番との距離、これから。
 - **struct_ops:** カーネルが判断を問い合わせる点と、アルゴリズムの判断単位が一致するときに向く。例は sched_ext (次に走らせるタスクを選ぶ)、TCP 輻輳制御 (`tcp_congestion_ops`)、HID-BPF。s3fs なら「どれを追い出すか」を聞く vtable (後の `pick_victim`)。
 - **bpf_arena:** BPF とユーザー空間が、ポインタを含むデータ構造を syscall なしで共有したいときに向く。例は sched_ext のタスクごとの状態、BPF 側のリスト・木・ハッシュ。s3fs の今の read 経路 (pcache モード) は arena を使っていない。中身は page cache と kmod の chunk 表、admit のメタデータは kmod の admit hash、policy の状態は普通の BPF map に置いている。arena が活きるのは、BPF の状態をユーザー空間が syscall なしで頻繁に読み書きする場面で、今の backlog にそういう項目はない (Q55)。
 
-スライド: usecases。
-
 ### Q57. 本番で使えるか。使うなら何が足りないか
 
 **使えない。Linux 6.12 で、この 3 つの機能で FS を組めるかを試す PoC。** 足りないものは分かっている範囲で次のとおり。
 
 - **daemon が落ちたときの耐性:** close 後の PUT、unlink、rename の queue がメモリだけ (Q45、backlog H-01)。
-- **一貫性:** 他のクライアントによる上書きを検知しない (Q46)。
+- **一貫性:** 他のクライアントによる上書きを検知しない。open が S3 の存在確認をしない (`open_check` は既定 off、Q42、Q46)。
 - **メモリ:** pcache の容量は既定で無制限で、chunk は memcg に課金されない (Q49)。
 - **書き込み:** 書き込み可能な共有 mmap が S3 に届かない、O_DIRECT がない (Q47)。
 - **検証:** 実際の S3 での計測がない (Q44)。lockdep 付きカーネルでの検証は 2026-10-28 に通った (AC-42、`make test-regression` と evict-race の範囲)。

@@ -3,6 +3,7 @@
 kmod と daemon は miscdevice `/dev/s3fs_ebpf` でやり取りする。この doc は、そこを流れるメッセージの種類と各フィールドの意味をまとめる。定義の正本は `include/s3fs_ebpf_uapi.h`、kmod 側の受け口は `kmod/s3fs_ebpf_dev.c` の `s3fs_dev_ioctl` / `s3fs_dev_read` / `s3fs_dev_poll`。
 
 **関連 doc**:
+- [`daemon-kmod-messaging.md`](daemon-kmod-messaging.md) — イベント (miss / flush / fsync / unlink / rename / sync / evict) ごとの図と、kmod の中のキューの構造。この doc は構造体の定義、あちらはイベントの流れ
 - [`component-communication.md`](component-communication.md) — 全通信路 (T1〜T11) の一覧。ここは T7 (ioctl) と T8 (miss の `read(2)`) の詳細
 - [`read-path-design.md`](read-path-design.md) — miss から populate までの設計
 - [`pcache-mode.md`](pcache-mode.md) — `POPULATE_PAGES` を使う pcache モード
@@ -47,9 +48,11 @@ struct s3fs_read_miss_event {
 |---|---|
 | `0` | 普通の read の miss。daemon は取得して populate (pcache) か admit (arena) し、`SIGNAL_ADMIT` で起こす |
 | `S3FS_MISS_FLAG_FOR_WRITE` (0x1) | read ではなく変更 (write、truncate) の前の読み込み (AC-50)。daemon は `offset` を含む 4 MiB の chunk を `POPULATE_PAGES` で入れて `SIGNAL_ADMIT` する。arena モードでも arena には入れない |
+| `S3FS_MISS_FLAG_OPEN_CHECK` (0x4) | read ではなく、`open(2)` (O_CREAT なし) が S3 に存在を確かめる要求。kmod の module param `open_check=1` のときだけ送る (既定 0)。daemon は HEAD して `SIGNAL_ADMIT` の `err` に 0 / `-ENOENT` (404) / `-EIO` を入れる。何も populate しない。pending の `chunk_offset` は all ones (`S3FS_OPEN_CHECK_KEY`) |
 | `S3FS_MISS_FLAG_PINNED` (0x2) | fd の中身が、固定した ETag のオブジェクトに依存している (dirty、flush 中、remote chunk を持つ)。オブジェクトが変わっていたら衝突として扱う。付いていなければ daemon は古い pin を捨てて Stat し直してよい (AC-51) |
 
 - `read(2)` のバッファが `sizeof(struct s3fs_read_miss_event)` (24 B) より小さいと `-EINVAL`。1 回の `read` で 1 件だけ返す。
+- `FOR_WRITE` / `PINNED` / `OPEN_CHECK` は排他ではなく、`flags` の bit。`PINNED` は元の event に付く修飾。
 - queue は kmod の中のリスト (`s3fs_miss_events`) で、件数の上限はない。
 - 待っている側 (kmod の read) は `(ino, chunk_offset)` ごとの pending に `wait_for_completion` で寝ている。同じ chunk を待つ reader は 1 つの completion を共有する。
 

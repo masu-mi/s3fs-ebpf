@@ -64,13 +64,14 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 
 ## 6. write
 
+- flush の PUT が成功すると、daemon は中身を arena にもコピーして admit し直す (mode の分岐なし。`docs/design/component-communication.md` §4、backlog AC-82)。flush 後の fd は PCACHE entry を持たないので (kmod は `SIGNAL_FLUSH` で chunk の `populated` を立てるだけ)、書いた直後の read はこの arena のコピーを GUP で読む。arena のコピーがなければ S3 への upcall になる。代償は、arena (128 MiB) の消費と、`ErrCacheFull` のときに PUT が成功していても `flush_errors_total` が増えること。
 - write は fd の chunk に書き、fd を dirty にする。dirty / flushing の fd には PCACHE entry を入れない (AC-57)。close / fsync で flush event を積み、daemon が `READ_DIRTY` で読んで PUT する (`docs/design/component-communication.md` §4)。
 - S3 にある既存ファイルへの最初の変更の前に、変更で残る部分を読み込む (AC-50、`s3fs_fd_load_for_modify`)。open は中身を読まないので、これがないと読んでいない範囲が 0 で PUT される。
-- `--partial-modify` (既定 off、S3 のみ) のときは、変更のない chunk を読まずに remote として記録し、flush は multipart + `UploadPartCopy` で運ぶ (AC-51、`docs/design/ac51-partial-modify.md`、ioctl `DIRTY_LAYOUT` / `READ_DIRTY_RANGE`)。
+- `--partial-modify` (既定 on、S3 のみ。2026-11-03 の issue #35 から既定が on。`--partial-modify=false` で off) のときは、変更のない chunk を読まずに remote として記録し、flush は multipart + `UploadPartCopy` で運ぶ (AC-51、`docs/design/ac51-partial-modify.md`、ioctl `DIRTY_LAYOUT` / `READ_DIRTY_RANGE`)。
 
 ## 7. 性能 (ローカル MinIO、`docs/journal/benchmark-results.md`)
 
-- open+read+close は fuse-cache の 172 倍、小さいファイル 10,000 個の warm cat は 93 倍 (§18.26〜18.32)。
+- open+read+close は fuse-cache の 172 倍、小さいファイル 10,000 個の warm cat は 93 倍 (§18.26〜18.32)。前者は open で S3 を確認しない条件の値で、確認する条件 (`open_check=1`) では約 1.2 倍 (§18.52)。再測定は §18.48 (180× / 39×)。
 - AB-07 の gate (`4329711`、§18.43): 64 jobs psync read は fuse-raw 比 0.983 (フックなしの pcache は fuse-raw 以上)、100 MiB の cat は fuse-cache より速い (14.7 ms 対 17.1 ms)、microbench は arena モードより速い。
 - 負けている所: 大きいファイルの cold read (300 MiB で fuse-raw の中央値 0.80×、§18.37〜18.39)。既存オブジェクトの途中書き換えは `--partial-modify` で fuse-raw 並み (§18.36)。
 - hit rate は §18.43 で 29〜35%。prewarm がメタデータだけになったので、§18.1 の 52〜54% とは条件が違う。並べないこと。

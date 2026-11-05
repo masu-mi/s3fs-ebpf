@@ -17,7 +17,7 @@
 
 | 成果 | 根拠 |
 |---|---|
-| 速さの源を特定した。hit のときに daemon へ行かない (open も upcall しない) 構造そのものが効いている | open+read+close は fuse-cache の 172 倍 (§18.27)、小さいファイル 1 万個の warm cat は 93 倍 (§18.31)。arena を使わない pcache モードでも同じ水準 (Q55) |
+| 速さの源を特定した。hit のときに daemon へ行かない (open も upcall しない) 構造そのものが効いている | open+read+close は fuse-cache の 172 倍 (§18.27)、小さいファイル 1 万個の warm cat は 93 倍 (§18.31)。arena を使わない pcache モードでも同じ水準 (Q55)。ただし 172 倍は open で S3 を確認しない条件の値で、確認する条件 (`open_check=1`) では約 1.2 倍 (§18.52、`meetup-qa.md` Q42) |
 | struct_ops の vtable の形についての知見。score を返すだけの vtable では順序が伝わらず、BPF 版の hit rate が simulator より低くなる。victim を BPF に選ばせる `pick_victim` にすると改善する | Q16〜Q18。pick_victim 版で旧版より 2〜7 ポイント高い (Q20) |
 | 本当の律速を perf と A/B で特定した。64 jobs の並列 read の劣後は、自分で付けた `fentry/generic_file_read_iter` の負担 (約 19%) だった | Q34、§18.16、`docs/design/read-iter-hook-overhead.md` |
 | 自前の VFS の race を、不変条件の文書化、修正前に FAIL するテスト、KUnit で止めた | `docs/kmod-pcache-invariants.md`、Q51、`docs/journal/history.md` §4〜§5 |
@@ -80,7 +80,7 @@
 ### 4.4 FUSE / fuse-bpf / FUSE passthrough に貢献する
 
 - **一番筋がよい。** この PoC の構造の仮説 (hit なら open も daemon に送らない) は、FUSE の側で実現する方が「自前の VFS を抱えない」ので筋がよい (Q3)。持ち込めるのは次のもの。
-  - open / lookup / getattr の往復が、小さいファイルを大量に開く用途でどれだけ効くかの実測 (172 倍、93 倍、3.3 倍。条件は §18.27、§18.31)。
+  - open / lookup / getattr の往復が、小さいファイルを大量に開く用途でどれだけ効くかの実測 (172 倍、93 倍、3.3 倍。条件は §18.27、§18.31。open の倍率は S3 を確認しない条件の値で、確認すると 1.2〜1.7 倍、§18.51〜18.52)。
   - backing file の段の設計 (`docs/design/backing-file-tier.md`)。FUSE passthrough (6.9) は read / write を素通しするが、open の往復は残る (Q2)。
   - eviction を struct_ops で差し替える形と、vtable の形の知見 (Q16〜Q20)。fuse-bpf の BPF は経路の振り分け役で、キャッシュの判断はしない (Q4)。
 - **入り方:** fuse-bpf は upstream に入っていない (Q3。2024 年以降の状況は未確認)。いきなりパッチを送るより、fsdevel / bpf の ML の議論に計測データ付きで参加する、FUSE passthrough + ローカルのディスクキャッシュで同じベンチを取って比べる、のが入口。
