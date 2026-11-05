@@ -3,7 +3,7 @@
 # psync, bs=1 reads of one small file (hello.txt), time_based RUNTIME s, REPS runs per
 # backend.  Same fio line as bench-ab-pcache.sh measure_fio_iops, but the full
 # `--output-format=json` is kept so another run can be compared later.
-# Backends: fuse-raw, fuse-cache, ebpf-arena, ebpf-pcache, ebpf-pcache-nohook.
+# Backends: fuse-raw, fuse-cache, ebpf-pcache, ebpf-pcache-nohook.
 set -euo pipefail
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$TOPDIR/scripts/lib/bench.sh"
@@ -48,11 +48,11 @@ BACKENDS=${BACKENDS:-$BENCH_BACKENDS_ALL}
 	echo "backends: $BACKENDS"; echo "ebpf-pcache: --arena-metadata-only; nohook adds --no-read-iter-hook --pattern-aware-admit=false; arena = neither"
 } >"$OUT/environment.txt"
 
-# BACKENDS: the six configurations of issue #35 by default; the old ebpf-arena /
-# ebpf-pcache-nohook variants stay available by name.
+# BACKENDS: the configurations of issue #35 by default; the ebpf-pcache-nohook
+# variant stays available by name.
 for b in $BACKENDS; do
 	case $b in
-	ebpf-arena|ebpf-pcache-nohook) ;;   # handled by ebpf_run below
+	ebpf-pcache-nohook) ;;   # handled by ebpf_run below
 	*) bench_up "$b" "$OUT/daemon-$b.log" --sample-every=2s --sync-every=60s --softcap=8 --cache-capacity=0
 	   [ "$BENCH_KIND" = ebpf ] && sleep "$SETTLE"
 	   fio_runs "$b" "$BENCH_MP"; bench_down ;;
@@ -60,7 +60,6 @@ for b in $BACKENDS; do
 done
 for b in $BACKENDS; do
 	case $b in
-	ebpf-arena) ebpf_run ebpf-arena ;;
 	ebpf-pcache-nohook) ebpf_run ebpf-pcache-nohook --arena-metadata-only --no-read-iter-hook --pattern-aware-admit=false ;;
 	esac
 done

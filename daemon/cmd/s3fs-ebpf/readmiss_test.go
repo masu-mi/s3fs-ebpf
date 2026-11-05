@@ -47,11 +47,11 @@ type upcall struct {
 }
 
 // fakeUpcall swaps the ioctls and the capacity lookup, and restores them.
-func fakeUpcall(t *testing.T, pcache bool) *upcall {
+func fakeUpcall(t *testing.T) *upcall {
 	t.Helper()
 	u := &upcall{}
 	origPop, origSig, origFlags := populatePagesFn, signalAdmitFn, signalAdmitFlagsFn
-	origCap, origMode := capacityBytesFn, arenaMetadataOnlyEnabled
+	origCap := capacityBytesFn
 	populatePagesFn = func(_ string, _ uint64, off int64, data []byte) error {
 		u.populated = append(u.populated, struct {
 			off int64
@@ -68,10 +68,9 @@ func fakeUpcall(t *testing.T, pcache bool) *upcall {
 		return u.verifyResult
 	}
 	capacityBytesFn = func() (int64, bool) { return 0, true }
-	arenaMetadataOnlyEnabled = pcache
 	t.Cleanup(func() {
 		populatePagesFn, signalAdmitFn, signalAdmitFlagsFn = origPop, origSig, origFlags
-		capacityBytesFn, arenaMetadataOnlyEnabled = origCap, origMode
+		capacityBytesFn = origCap
 	})
 	return u
 }
@@ -84,7 +83,7 @@ func withEntry(t *testing.T, e fpebpf.Entry) {
 }
 
 func TestReadMissUnknownInoSignalsENOENT(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 1})
 	handleReadMiss(context.Background(), "/dev/x", nil, &getBackend{}, readMissEvent{Ino: 424242})
 	if len(u.signals) != 1 || u.signals[0] != -2 {
@@ -93,7 +92,7 @@ func TestReadMissUnknownInoSignalsENOENT(t *testing.T) {
 }
 
 func TestReadMissNoBackendSignalsENODATA(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 801, Name: "f", S3Key: "f", Fallback: 10})
 	handleReadMiss(context.Background(), "/dev/x", nil, nil, readMissEvent{Ino: 801})
 	if len(u.signals) != 1 || u.signals[0] != -61 {
@@ -104,7 +103,7 @@ func TestReadMissNoBackendSignalsENODATA(t *testing.T) {
 // A small file is fetched whole and populated at offset 0; the waiter is woken
 // by the verifying signal, with no plain error signal.
 func TestReadMissPcacheSmallFile(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 802, Name: "small", S3Key: "small", Fallback: 5})
 	b := &getBackend{objects: map[string][]byte{"small": []byte("hello")}}
 	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 802})
@@ -123,7 +122,7 @@ func TestReadMissPcacheSmallFile(t *testing.T) {
 // A large file is fetched chunk by chunk: the 4 MiB-aligned chunk holding the
 // miss offset, populated at that offset.
 func TestReadMissPcacheLargeFileFetchesOneChunk(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	size := 3*partialAdmitChunk + 1000
 	withEntry(t, fpebpf.Entry{Ino: 803, Name: "big", S3Key: "big", Fallback: uint64(size)})
 	b := &getBackend{objects: map[string][]byte{"big": make([]byte, size)}}
@@ -149,7 +148,7 @@ func TestReadMissPcacheLargeFileFetchesOneChunk(t *testing.T) {
 // A body bigger than one populate call is split into 4 MiB pieces (the kmod
 // limits each ioctl).
 func TestReadMissPcacheSplitsLargeBody(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	// Small by the entry's size, but the object is 2.5 chunks: Get returns it all.
 	withEntry(t, fpebpf.Entry{Ino: 804, Name: "grown", S3Key: "grown", Fallback: 10})
 	n := 2*partialAdmitChunk + partialAdmitChunk/2
@@ -161,7 +160,7 @@ func TestReadMissPcacheSplitsLargeBody(t *testing.T) {
 }
 
 func TestReadMissGetErrorSignalsEIO(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 805, Name: "e", S3Key: "e", Fallback: 5})
 	handleReadMiss(context.Background(), "/dev/x", nil, &getBackend{err: errors.New("s3 down")}, readMissEvent{Ino: 805})
 	if len(u.signals) != 1 || u.signals[0] != -5 || len(u.populated) != 0 {
@@ -170,7 +169,7 @@ func TestReadMissGetErrorSignalsEIO(t *testing.T) {
 }
 
 func TestReadMissPopulateErrorSignalsEIO(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	u.populateErr = errors.New("ioctl failed")
 	withEntry(t, fpebpf.Entry{Ino: 806, Name: "p", S3Key: "p", Fallback: 5})
 	b := &getBackend{objects: map[string][]byte{"p": []byte("12345")}}
@@ -184,7 +183,7 @@ func TestReadMissPopulateErrorSignalsEIO(t *testing.T) {
 // the handler populates again, at most signalVerifyRetries times, and then
 // wakes the reader anyway rather than hanging it.
 func TestReadMissRepopulatesThenGivesUp(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	u.verifyResult = unix.EAGAIN
 	withEntry(t, fpebpf.Entry{Ino: 807, Name: "r", S3Key: "r", Fallback: 5})
 	b := &getBackend{objects: map[string][]byte{"r": []byte("12345")}}
@@ -198,7 +197,7 @@ func TestReadMissRepopulatesThenGivesUp(t *testing.T) {
 }
 
 func TestLoadForWrite(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 808, Name: "w", S3Key: "w", Fallback: 100})
 	b := &getBackend{objects: map[string][]byte{"w": make([]byte, 100)}}
 
@@ -253,7 +252,7 @@ func (s *statBackend) Stat(_ context.Context, key string) (objstore.ObjectMeta, 
 }
 
 func TestOpenCheck(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 909, Name: "o", S3Key: "o", Fallback: 10})
 	b := &statBackend{present: map[string]bool{"o": true}}
 	ev := readMissEvent{Ino: 909, Flags: missFlagOpenCheck}
@@ -290,7 +289,7 @@ func TestOpenCheck(t *testing.T) {
 // next sync: the open check must HEAD the key it wrote, not fail "unknown ino"
 // and not HEAD the key from before a rename.
 func TestOpenCheckLocalKeys(t *testing.T) {
-	u := fakeUpcall(t, true)
+	u := fakeUpcall(t)
 	t.Cleanup(func() { localKeys.Delete(uint64(910)); localKeys.Delete(uint64(911)) })
 	b := &statBackend{present: map[string]bool{"dir/new.txt": true, "after": true}}
 

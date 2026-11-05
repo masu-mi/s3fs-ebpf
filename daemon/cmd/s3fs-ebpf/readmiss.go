@@ -68,6 +68,32 @@ func openCheckKeyFor(ino uint64) (name, key string, ok bool) {
 	return "", "", false
 }
 
+// entryForMiss resolves the entry a read miss / load-for-write is about.  The
+// entry mirror knows what the last sync listed; a file this daemon created
+// (flush) or renamed since then is only in localKeys, and its size comes from
+// S3.  Without that fallback a file written through the mount and evicted
+// from the inode cache before the next sync could not be read back: the miss
+// was answered ENOENT.  Used to be hidden by the post-flush arena copy.
+func entryForMiss(ctx context.Context, s3c objstore.Backend, ino uint64) *fpebpf.Entry {
+	if e := fpebpf.LookupByIno(ino); e != nil {
+		return e
+	}
+	v, ok := localKeys.Load(ino)
+	if !ok {
+		return nil
+	}
+	key := v.(string)
+	e := &fpebpf.Entry{Ino: ino, Name: path.Base(key), S3Key: key, Mode: 0o100644}
+	if s3c != nil {
+		if meta, err := s3c.Stat(ctx, key); err == nil {
+			e.Fallback = uint64(meta.Size)
+		} else {
+			fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s stat: %v\n", ino, key, err)
+		}
+	}
+	return e
+}
+
 // handleOpenCheck HEADs the object behind ev.Ino and signals the open's
 // waiter: 0 if it exists, -ENOENT if S3 says 404 (or the ino is unknown),
 // -EIO for any other failure. It is not a read miss, so it is neither counted
@@ -113,7 +139,7 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, code)
 	}
-	entry := fpebpf.LookupByIno(ev.Ino)
+	entry := entryForMiss(ctx, s3c, ev.Ino)
 	if entry == nil {
 		fail(-2 /* -ENOENT */, "unknown ino")
 		return
@@ -271,9 +297,6 @@ const (
 // run, so a file larger than the capacity would only be populated to be
 // evicted again; such files keep the chunk-by-chunk admit.
 func fullAdmitExceedsCapacity(fullSize int64) bool {
-	if !arenaMetadataOnlyEnabled {
-		return false
-	}
 	c, ok := capacityBytesFn()
 	return ok && c > 0 && fullSize > c
 }
@@ -313,7 +336,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	// the correct per-chunk pending entry.
 	missChunkOffset := (ev.Offset / partialAdmitChunk) * partialAdmitChunk
 
-	entry := fpebpf.LookupByIno(ev.Ino)
+	entry := entryForMiss(ctx, s3c, ev.Ino)
 	if entry == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d unknown — signaling ENOENT\n", ev.Ino)
 		metrics.Global.ReadMissErrors.Add(1)
@@ -330,7 +353,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	// AC-68: after this miss is served, read ahead the next siblings the
 	// prefetch_next policy asks for. Only the first chunk's miss counts,
 	// so a large file triggers it once per load, not once per chunk.
-	if missChunkOffset == 0 && arenaMetadataOnlyEnabled {
+	if missChunkOffset == 0 {
 		defer maybePrefetchSiblings(ev.Ino)
 	}
 
@@ -360,7 +383,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 				ev.Ino, entry.Name, pat.SeqRatio(), fullSize)
 		}
 	}
-	if useFullAdmit && isLarge && arenaMetadataOnlyEnabled {
+	if useFullAdmit && isLarge {
 		// AC-52 step 3: parallel range GETs, populated and signalled per chunk.
 		serveChunkLoad(ctx, devPath, s3c, ev, entry.S3Key, entry.Name, fullSize, missChunkOffset)
 		return
@@ -383,89 +406,49 @@ func handleReadMiss(ctx context.Context, devPath string,
 		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 		return
 	}
-	// AB-04: when --arena-metadata-only, bypass BPF arena and send data
-	// directly to kmod's page cache via POPULATE_PAGES ioctl.
+	// Send the data to kmod's chunk table (and page cache) via the
+	// POPULATE_PAGES ioctl.
 	// The kmod limits each call to S3FS_POPULATE_MAX_SIZE (64 MiB), so split
 	// body into partialAdmitChunk-sized pieces; full-admit bodies (seq promote)
 	// can be arbitrarily large.
-	if arenaMetadataOnlyEnabled {
-		for attempt := 0; ; attempt++ {
-			off := chunkOffset
-			rem := body
-			for len(rem) > 0 {
-				n := len(rem)
-				if n > partialAdmitChunk {
-					n = partialAdmitChunk
-				}
-				if err := populatePagesFn(devPath, ev.Ino, off, rem[:n]); err != nil {
-					fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
-					metrics.Global.ReadMissErrors.Add(1)
-					_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
-					return
-				}
-				off += int64(n)
-				rem = rem[n:]
+	for attempt := 0; ; attempt++ {
+		off := chunkOffset
+		rem := body
+		for len(rem) > 0 {
+			n := len(rem)
+			if n > partialAdmitChunk {
+				n = partialAdmitChunk
 			}
-			fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
-				ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-			// AC-45 C2: enforce capacity while this miss is still pending.
-			enforceCapacityAfterPopulate(devPath)
-			// AC-45: kmod wakes the waiter only if the chunk is still
-			// cached.  Concurrent handlers for one ino and the capacity
-			// pass can evict what we just populated; populate again
-			// (bounded) instead of waking the reader with nothing to read.
-			err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0,
-				s3fsSignalVerifyPopulated)
-			if !errors.Is(err, unix.EAGAIN) {
-				return // woken, or nobody is waiting (ENOENT)
-			}
-			if attempt >= signalVerifyRetries {
-				// Give up verifying: wake the waiter so its own retry /
-				// fallback path takes over rather than hanging.
-				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			if err := populatePagesFn(devPath, ev.Ino, off, rem[:n]); err != nil {
+				fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
+				metrics.Global.ReadMissErrors.Add(1)
+				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 				return
 			}
-			metrics.Global.ReadMissRepopulates.Add(1)
+			off += int64(n)
+			rem = rem[n:]
 		}
-	}
-
-	// Arena path (default).
-	off, err := progs.AdmitContent(body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit content: %v\n", ev.Ino, err)
-		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -12 /* -ENOMEM */)
-		return
-	}
-	uaddr := progs.Arena().BaseAddr() + off
-	updateArenaHighWater(off, len(body))
-
-	// AC-49: replace only the ranges this admit overlaps — a chunk admit
-	// must not evict the ino's other chunks.
-	if err := replaceAdmitRange(devPath, admitEntry{
-		Ino:    ev.Ino,
-		Uaddr:  uaddr,
-		Size:   uint64(len(body)),
-		Offset: uint64(chunkOffset),
-	}, progs); err != nil {
-		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit arena: %v\n", ev.Ino, err)
-		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
-		return
-	}
-	if chunkOffset > 0 {
-		fmt.Printf("[upcall] ino=%d %s admitted range [%d,%d) (partial)\n",
+		fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
 			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-	} else {
-		fmt.Printf("[upcall] ino=%d %s admitted %d bytes\n",
-			ev.Ino, entry.Name, len(body))
+		// AC-45 C2: enforce capacity while this miss is still pending.
+		enforceCapacityAfterPopulate(devPath)
+		// AC-45: kmod wakes the waiter only if the chunk is still
+		// cached.  Concurrent handlers for one ino and the capacity
+		// pass can evict what we just populated; populate again
+		// (bounded) instead of waking the reader with nothing to read.
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0,
+			s3fsSignalVerifyPopulated)
+		if !errors.Is(err, unix.EAGAIN) {
+			return // woken, or nobody is waiting (ENOENT)
+		}
+		if attempt >= signalVerifyRetries {
+			// Give up verifying: wake the waiter so its own retry /
+			// fallback path takes over rather than hanging.
+			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			return
+		}
+		metrics.Global.ReadMissRepopulates.Add(1)
 	}
-	_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
 }
 
 // -- AA-04: sequential read-ahead prefetch --------------------------------
-
-// arenaMetadataOnlyEnabled switches the miss handler to use
-// S3FS_IOC_POPULATE_PAGES instead of AdmitContent + admitArena.
-// Set once by main from the --arena-metadata-only flag.
-var arenaMetadataOnlyEnabled bool

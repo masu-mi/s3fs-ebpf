@@ -132,12 +132,6 @@ module_param_named(partial_modify_min, s3fs_partial_modify_min, ullong, 0644);
 MODULE_PARM_DESC(partial_modify_min,
 	"AC-51: smallest object size (bytes) that uses partial_modify (default 16 MiB)");
 
-/* AB-02: bench-only bypass — skip arena fast path, always use page cache. */
-bool s3fs_arena_bypass __read_mostly;
-module_param_named(arena_bypass, s3fs_arena_bypass, bool, 0644);
-MODULE_PARM_DESC(arena_bypass,
-	"AB-02: skip arena fast path in .read_iter; use generic_file_read_iter for all reads (bench only, default off)");
-
 /* Cumulative count of admit entries removed by policy_ops eviction
  * votes. Exposed via S3FS_IOC_STATS so the daemon can mirror it into
  * the Prometheus endpoint. Monotonically increasing counter. */

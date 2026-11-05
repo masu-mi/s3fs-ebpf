@@ -13,8 +13,8 @@ Usage: s3fs-ebpf <command> [options]
 Commands:
   mount        Mount an S3 bucket via the s3fs_ebpf VFS
   unmount      Unmount a previously mounted target
-  fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, stream
-               ringbuf miss events, sync S3, serve arena content
+  fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, serve
+               read misses, flush, sync S3, arena content
   stats        Print fast/slow path counters
   policy       Hot-reload the cache policy blob
   hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
@@ -108,6 +108,7 @@ Targets:
     test-daemon-cov               go test with coverage -> coverage/daemon.out
   Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
     check-invariants              Static checks on kmod/vfs_ops.c (+ kmod/vfs/) and the bench seeds (no root)
+    spec-check                    Exhaustive check of the v2 redesign spec models (docs/design/v2-spec, python3 only, no root)
     test-policy-conformance       Live pick_victim policies vs their simulators, per access (issue #22)
     test-sync-keeps-cache         An unchanged bucket sync must not drop the cache (issue #22)
     test-boot-kernel              scripts/boot-kernel.sh picks the right grub entry (fixture + dry-run, no root)
@@ -124,7 +125,6 @@ Targets:
     test-pcache-prewarm-none      AC-43: reads work in pcache mode when prewarm admits nothing
     test-pcache-prewarm           AC-67: --pcache-prewarm makes the first read of a selected file a page-cache hit
     test-prefetch-next            AC-68: prefetch_next reads the next sibling files ahead after a miss
-    test-arena-partial-readback   AC-48: arena chunk admits keep i_size (random-first + parallel reads, sha256)
     test-pcache-capacity-noeval   AC-45: capacity_bytes bounds fd->buf without any policy eval (full reads, 4 x 9 MiB)
     test-pcache-capacity-seq      AC-45: a file larger than capacity_bytes read front to back stays within capacity (40 MiB vs 12 MiB)
     test-policy-reload            issue #35: reload = one BPF_LINK_UPDATE; reads never fail; non-struct_ops refused (400)
@@ -132,9 +132,10 @@ Targets:
     test-policy-data-members      struct_ops data members (flags / name) + validate: accepted, refused (EINVAL), carried by a hot swap
     test-pcache-drop              pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
     test-write-existing-nopm      AC-50: same as test-write-existing with --partial-modify=false (whole-object GET + PUT path)
-    test-write-existing           AC-50: write/truncate/append on an unread existing object keeps the rest (pcache + arena)
+    test-write-existing           AC-50: write/truncate/append on an unread existing object keeps the rest
     test-write-partial            AC-51: partial_modify end to end (multipart + server-side copy, 412 fallback)
     test-write-existing-capacity  AC-50: write/truncate on an existing object bigger than capacity, under read pressure (shed/evict race)
+    test-open-check               open_check=1: open(2) without O_CREAT HEADs S3 and fails ENOENT for a key deleted after the last sync
     test-fsync-new-file           a new file written + fsync'ed is not truncated by the create placeholder flush
     test-pattern-aware-admit      R-01/AC-47: the fentry's access pattern still drives full-file promotion (seq, random, parallel, off)
     test-pick-victim-stale        AC-64: an ino that left the admit set does not stay in the policy's own list (pick_victim -> on_remove)

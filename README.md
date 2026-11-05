@@ -14,7 +14,7 @@ Linux 6.12 LTS の eBPF 機能 (**`bpf_arena`**、**KFunc**、**struct_ops**) �
   ┌──────────────────────────────────────────────┐
   │ kmod: VFS (s3fs_ebpf) + KFunc                │
   │  eBPF: struct_ops policy vtable (+ fentry)   │
-  │  bpf_arena / page cache にあれば即応答       │
+  │  kmod の chunk 表 / page cache にあれば即応答 │
   └──────────────┬──────────────────┬────────────┘
                  │ hit              │ miss
                  ▼                  ▼
@@ -37,7 +37,7 @@ Linux 6.12 LTS の eBPF 機能 (**`bpf_arena`**、**KFunc**、**struct_ops**) �
 - 技術要素 (bpf_arena / struct_ops / KFunc / KUnit / lockdep / kCFI / 閉じた MinIO など) を入門記事と一次資料から学ぶ: [`docs/user/learning-guide.md`](docs/user/learning-guide.md)。doc 全体の地図は [`docs/INDEX.md`](docs/INDEX.md)
 - 全体の通信路 (VFS / kmod / BPF / daemon / backend): [`docs/design/component-communication.md`](docs/design/component-communication.md)
 - policy engine: [`docs/design/policy-engine-design.md`](docs/design/policy-engine-design.md)
-- pcache モード (`--arena-metadata-only`): [`docs/design/pcache-mode.md`](docs/design/pcache-mode.md)
+- pcache モード (ファイルの中身を kmod の chunk 表と page cache に置く。唯一のモード): [`docs/design/pcache-mode.md`](docs/design/pcache-mode.md)
 - KFunc が要る理由 (verifier 拒否デモ): [`docs/journal/early-walkthroughs.md`](docs/journal/early-walkthroughs.md#verifier-拒否デモ-verifier-demo)
 - ExtFUSE / RFUSE との比較: [`docs/user/related-works.md`](docs/user/related-works.md)
 

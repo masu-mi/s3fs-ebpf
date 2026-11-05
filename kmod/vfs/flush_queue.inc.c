@@ -179,6 +179,37 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 							if (fd->chunks[ci].p &&
 							    !fd->chunks[ci].remote)
 								fd->chunks[ci].populated = true;
+						/* AC-82: the fd is clean and holds what
+						 * was just PUT; give it PCACHE entries
+						 * so a read right after the write is
+						 * served from the chunks (the daemon
+						 * no longer re-admits the bytes into the
+						 * arena).  One entry per run of populated
+						 * chunks, under fd->lock like populate
+						 * (R1: every chunk in an entry's range is
+						 * allocated; a hole or a remote chunk
+						 * ends the run). */
+						for (ci = 0; ci <= last_ci &&
+						     ci < fd->nr_chunks; ) {
+							u32 first;
+
+							if (!fd->chunks[ci].p ||
+							    !fd->chunks[ci].populated) {
+								ci++;
+								continue;
+							}
+							first = ci;
+							while (ci <= last_ci &&
+							       ci < fd->nr_chunks &&
+							       fd->chunks[ci].p &&
+							       fd->chunks[ci].populated)
+								ci++;
+							(void)admit_insert_pcache(ino,
+								(u64)first << S3FS_PCACHE_CHUNK_SHIFT,
+								min_t(u64, fd->size,
+								      (u64)ci << S3FS_PCACHE_CHUNK_SHIFT) -
+								((u64)first << S3FS_PCACHE_CHUNK_SHIFT));
+						}
 						/* AC-51: the object now equals
 						 * the fd, so a remote chunk is
 						 * just a chunk we do not hold. */

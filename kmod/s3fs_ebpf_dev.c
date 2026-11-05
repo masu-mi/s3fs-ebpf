@@ -50,6 +50,11 @@ static long s3fs_dev_admit_arena(void __user *uarg)
 
 	if (hdr.count > 4096)
 		return -E2BIG;
+	/* The file content lives in the kmod's chunk table; arena ranges
+	 * (uaddr) are no longer served.  count == 0 stays: it records the
+	 * daemon's mm (arms the upcall path) and runs an admit_replace pass. */
+	if (hdr.count != 0)
+		return -EINVAL;
 
 	mm = get_task_mm(current);
 	if (!mm)

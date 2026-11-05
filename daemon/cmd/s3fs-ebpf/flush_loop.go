@@ -378,8 +378,7 @@ func handleFlush(ctx context.Context, devFd int, devPath string,
 func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	progs *fpebpf.Programs, s3c objstore.Backend, ev *flushEvent) {
 	metrics.Global.FlushEvents.Add(1)
-	// Time the full flush service path (readDirty + S3 Put +
-	// arena admit refresh). Defer covers every return branch so
+	// Time the full flush service path (readDirty + S3 Put). Defer covers every return branch so
 	// the histogram reflects Put-failure retries and no-backend
 	// drops, not just the success path — matches the symmetric
 	// handleReadMiss timing added in 32eea25.
@@ -429,8 +428,6 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 			registerIno(s3key, ev.Ino)
 			metrics.Global.FlushBytes.Add(uint64(sent))
 			fmt.Printf("[flush] ino=%d s3://%s put %d bytes (%d sent, rest copied)\n", ev.Ino, s3key, size, sent)
-			// An arena admit of the old content would keep serving it.
-			dropAdmitIno(devPath, ev.Ino, progs)
 			fpebpf.SetSizeByIno(ev.Ino, uint64(size))
 			return
 		}
@@ -470,30 +467,12 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	metrics.Global.FlushBytes.Add(uint64(len(buf)))
 	fmt.Printf("[flush] ino=%d s3://%s put %d bytes\n",
 		ev.Ino, s3key, len(buf))
+	// The entry mirror keeps the pre-write size until the next sync; a read
+	// that misses after the file was evicted (shrunk, appended, ...) must use
+	// the size just written (the partial path above does the same).
+	fpebpf.SetSizeByIno(ev.Ino, uint64(len(buf)))
 
-	// Refresh admit so subsequent .read_folio serves the freshly
-	// written bytes instead of the stale prewarm content.
-	// replaceAdmit drops the prior admit for this ino (returning
-	// its arena bytes to the D-02 free-list) before pushing, so a
-	// PUT-heavy workload doesn't leak arena or bloat kmod's admit
-	// hash with dead duplicates.
-	if progs == nil {
-		return
-	}
-	off, err := progs.AdmitContent(buf)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[flush] ino=%d admit content: %v\n",
-			ev.Ino, err)
-		metrics.Global.FlushErrors.Add(1)
-		return
-	}
-	updateArenaHighWater(off, len(buf))
-	if err := replaceAdmit(devPath, admitEntry{
-		Ino:   ev.Ino,
-		Uaddr: progs.Arena().BaseAddr() + off,
-		Size:  uint64(len(buf)),
-	}, progs); err != nil {
-		fmt.Fprintf(os.Stderr, "[flush] ino=%d admit arena: %v\n",
-			ev.Ino, err)
-	}
+	// No re-admit here: after a successful signal_flush the kmod keeps the
+	// chunks it just PUT (clean, populated) and admits them itself, so a read
+	// right after the write is served from the fd (AC-82).
 }

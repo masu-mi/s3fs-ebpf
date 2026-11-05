@@ -1,6 +1,6 @@
 # pcache モード — ファイルの中身を kmod の chunk と page cache に置く
 
-2026-10-18。`--arena-metadata-only` で有効になる read / write の方式の全体像。2026-10-13 以降の計測と修正はこのモードで行っている (既定は今も arena モード)。ロック順や不変条件の細部は `docs/kmod-pcache-invariants.md` が正本で、ここでは繰り返さない。経緯は `docs/journal/history.md` §2.5〜§2.9。
+2026-10-18。`--arena-metadata-only` で有効になる read / write の方式の全体像。2026-10-13 以降の計測と修正はこのモードで行っている (既定は今も arena モード)。**2026-11-05: arena モード (中身を `bpf_arena` に置き kmod が GUP で読む方式) は削除した。pcache が唯一のモードで、`--arena-metadata-only` は何もしない旧フラグとして受け付けるだけ** (`redesign-v2-simplify.md` Phase 2)。以下の §1〜§2 は移行の経緯と比較の記録。ロック順や不変条件の細部は `docs/kmod-pcache-invariants.md` が正本で、ここでは繰り返さない。経緯は `docs/journal/history.md` §2.5〜§2.9。
 
 ## 1. なぜ移ったか
 
@@ -8,7 +8,7 @@ arena モードでは、ファイルの中身を `bpf_arena` (daemon と BPF の
 
 そこで中身を kernel 側に置き、2 回目以降の read を普通の page cache で返すことにした (AB-04〜、`ecf3990`)。arena には中身もメタデータも置かない (フラグ名の `--arena-metadata-only` とは違う。admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない)。
 
-## 2. 2 つのモードの違い
+## 2. arena モードとの違い (arena モードは削除済み)
 
 | | arena モード (既定) | pcache モード (`--arena-metadata-only`) |
 |---|---|---|
@@ -64,7 +64,7 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 
 ## 6. write
 
-- flush の PUT が成功すると、daemon は中身を arena にもコピーして admit し直す (mode の分岐なし。`docs/design/component-communication.md` §4、backlog AC-82)。flush 後の fd は PCACHE entry を持たないので (kmod は `SIGNAL_FLUSH` で chunk の `populated` を立てるだけ)、書いた直後の read はこの arena のコピーを GUP で読む。arena のコピーがなければ S3 への upcall になる。代償は、arena (128 MiB) の消費と、`ErrCacheFull` のときに PUT が成功していても `flush_errors_total` が増えること。
+- flush の PUT が成功すると、kmod は `SIGNAL_FLUSH` で、fd が持つ (clean になった) chunk を `populated` にし、**populated な chunk の連続した範囲ごとに PCACHE entry を入れる** (AC-82、`fd->lock` の下、R1)。書いた直後の read は chunk から返り、S3 への upcall も arena のコピーも要らない。以前は daemon が中身を arena にコピーして `ADMIT_ARENA` で admit し直していた (arena の消費と、満杯のときの `flush_errors_total` の誤計上があった)。
 - write は fd の chunk に書き、fd を dirty にする。dirty / flushing の fd には PCACHE entry を入れない (AC-57)。close / fsync で flush event を積み、daemon が `READ_DIRTY` で読んで PUT する (`docs/design/component-communication.md` §4)。
 - S3 にある既存ファイルへの最初の変更の前に、変更で残る部分を読み込む (AC-50、`s3fs_fd_load_for_modify`)。open は中身を読まないので、これがないと読んでいない範囲が 0 で PUT される。
 - `--partial-modify` (既定 on、S3 のみ。2026-11-03 の issue #35 から既定が on。`--partial-modify=false` で off) のときは、変更のない chunk を読まずに remote として記録し、flush は multipart + `UploadPartCopy` で運ぶ (AC-51、`docs/design/ac51-partial-modify.md`、ioctl `DIRTY_LAYOUT` / `READ_DIRTY_RANGE`)。

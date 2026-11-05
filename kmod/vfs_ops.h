@@ -129,7 +129,6 @@ extern unsigned long long s3fs_capacity_bytes;
  * and always falls through to generic_file_read_iter (page-cache path).
  * Allows bench-ab-arena-vs-pagecache.sh to compare arena vs page-cache
  * latency under identical conditions without remounting. */
-extern bool s3fs_arena_bypass;
 
 /* AB-01: cumulative GUP (pin_user_pages_remote) call count and total
  * latency in nanoseconds. Exported via IOC_STATS slots 3/4 so the

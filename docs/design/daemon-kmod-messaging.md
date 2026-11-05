@@ -287,10 +287,11 @@ BPF map を daemon が書く経路は、policy の差し替え (`BPF_LINK_UPDATE
 
 ---
 
-## 8. arena モードとの差
+## 8. arena モード (削除済み)
 
-| | pcache モード (`--arena-metadata-only`) | arena モード (既定) |
-|---|---|---|
+2026-11-05 (v2 Phase 2) に arena モードを削除した。中身の受け渡しは `POPULATE_PAGES` だけで、`ADMIT_ARENA` は `count == 0` 以外を `-EINVAL` で断る。E2〜E10 は変わらない。
+
+---|---|---|
 | E1 の「中身を渡す」 | `POPULATE_PAGES` (ioctl でバッファを渡す) | daemon が arena に mmap で書き、`ADMIT_ARENA` で番地を登録 |
 | admit 表の `uaddr` | 0 (`S3FS_ADMIT_FLAG_PCACHE`) | daemon の arena 上の番地 |
 | 起こす | `SIGNAL_ADMIT` | `SIGNAL_ADMIT` |
@@ -323,8 +324,7 @@ daemon の正常終了では `SYNC_ENTRIES (count=0)` と `ADMIT_ARENA (count=0)
 - 実機での動作 (特に §4 の `VERIFY_POPULATED` の再 populate、§5 の fsync と close の順序)。回帰テスト (`make test-regression`) は走らせていない。
 - §4.2 の `PINNED` を「修飾」と書いたのは uapi のコメントと daemon 側の扱いからの解釈で、kmod 側の全呼び出し元は追っていない。
 - §4 の worker が全部使われているときの back-pressure (`read` が止まり kmod のキューが伸びる) はコードの読み。キューが実際にどこまで伸びるかは未計測。
-- **arena モード**の E1 (§8) は、今回の読みでは追い直していない (差の表は `readmiss.go` の分岐からの要約)。
-- flush の PUT のあと daemon が arena へ書き直す処理は、mode に関係なく走る。書いた直後の read が arena から返る (GUP) ことはコードの読みで、実機での確認と影響の計測は未了 (`component-communication.md` §4、backlog AC-82)。
+- flush の PUT のあとの read (AC-82): kmod が `SIGNAL_FLUSH` の成功で PCACHE entry を入れ直す。コードを読んで書いたもので、`make test-regression` は通るが、書いた直後の read の遅延と GET 数は未計測。
 - E8 の約 30 秒は `--sync-every` の既定。他のループの周期はコード内の定数で、設定からは変えられないと見ているが、全部の呼び出しは追っていない。
 
 ## 11. 変えるとき

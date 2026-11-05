@@ -9,9 +9,10 @@
 - `admit_evict_ino` は `admit_drop_all_ranges` (admits write_lock) を解放した後に `s3fs_evict_page_cache` → `s3fs_file_data_reset` (fd->lock → admits write_lock) を呼ぶ。
 
 ## R1 不変条件
+(2026-11-05: arena モードを削除した。admit hash に入る entry は PCACHE だけになり、`ADMIT_ARENA` は `count == 0` (daemon の mm を記録して upcall を有効にし、`admit_replace` の pass を走らせる) 以外を `-EINVAL` で断る。`.read_iter` は常に `generic_file_read_iter`。)
 - **ino の PCACHE admit entry が hash にあれば、その範囲の各 chunk は確保済み (`chunks[ci].p != NULL`)。** `populated` は別で、T2 が chunk ごとに見る (部分的にしか埋まっていない chunk も entry の範囲に入りうる)。(AC-45 C1 より前は「`fd->buf != NULL`」。fd の中身は連続した 1 本の buf ではなく 4 MiB の chunk の表になった。)
 - 例外: `setattr` の縮小 (truncate) は切った先の chunk を free するので、dirty の間は entry の下に chunk がないことがある。chunk へのアクセスはすべて `p != NULL` を確認するので、読むと upcall に戻るだけで壊れない。
-- 保守する側: `s3fs_ebpf_populate_pages` は copy と chunk の `populated` フラグのセットに続けて、`fd->lock` を保持したまま `admit_insert_pcache` を呼ぶ。`s3fs_file_data_reset` は `fd->lock` 下で残っている PCACHE entry を再 evict してから chunk を free する (drop と reset の間に populate が挟まるケースへの対策)。
+- 保守する側: `s3fs_ebpf_populate_pages` は copy と chunk の `populated` フラグのセットに続けて、`fd->lock` を保持したまま `admit_insert_pcache` を呼ぶ。`s3fs_ebpf_signal_flush` も、flush の PUT が成功して fd が clean になったとき (AC-82)、`fd->lock` を保持したまま、populated な chunk の連続した範囲ごとに `admit_insert_pcache` を呼ぶ (hole と remote の chunk は範囲を切る。entry の範囲の chunk は確保済み)。`s3fs_file_data_reset` は `fd->lock` 下で残っている PCACHE entry を再 evict してから chunk を free する (drop と reset の間に populate が挟まるケースへの対策)。
 - S1: R1 が成り立つのは `fd->lock` 下だけ。`fc_pcache_check` (lockless) から `s3fs_folio_fill_from_kmalloc` が lock を取るまでに `s3fs_admit_gen` が進んでいたら、entry を read_lock で再検証する。`gen == 0` は検証なしの fallback を意味する。
 - T5: populate が chunk に `populated` を立てるのは、範囲が chunk の先頭から始まり、chunk の終端か eof まで届くときだけ (`s3fs_populate_fills_chunk`)。chunk の途中から始まる範囲は、eof まで届いても立てない (以前は最後の chunk だけこの確認がなく、取得していない前半を 0 として返していた)。daemon の populate は chunk 境界から始まるので、通常の経路では変わらない。
 - T2: `gen != 0` のときも `gen == 0` のときも、確保済みの chunk に `populated` フラグが立っていることを要求する (未取得の chunk の 0 を返さないため)。フラグは chunk ごとにあるので、256 MiB を超えるファイルも同じ判定になる (旧: `ci >= 64` は R1 だけに頼っていた)。dirty/flushing のときは見ない (T1): 確保されていない chunk は hole で、0 として読める。`fd->size` より後ろも 0 (truncate が read と競合したとき)。
@@ -43,7 +44,7 @@
 ## reset の条件 (`s3fs_file_data_reset`)
 - 呼ばれる経路: `admit_evict_ino` の中で、`admit_drop_all_ranges` が PCACHE entry を落としたと報告したとき (S4: 判定は write_lock 内で atomic に行う) だけ。
 - `fd->lock` 下で `!dirty && !flushing` のとき、この ino の PCACHE entry を全部落とし (1 件でも消したら `s3fs_admit_gen++`)、**`readers == 0` の chunk だけを free** する (C3)。pin された chunk が 1 つでも残れば `fd->size` と table を保ち (`s3fs_reset_skipped++`)、1 つも残らなければ table を free して `size = 0`。
-- AC-41: 容量判定 (`live_bytes`) は arena entry のサイズ + pcache ino ごとの `fd->cap` (`s3fs_ino_buf_bytes`、ino 単位で 1 回)。`fd->cap` は確保済み chunk の `cap` の合計。admit 済み chunk のサイズではない。evict 後は before/after の `fd->cap` 差分を解放量として引く (skip_reset なら 0)。
+- AC-41: 容量判定 (`live_bytes`) は pcache ino ごとの `fd->cap` (`s3fs_ino_buf_bytes`、ino 単位で 1 回)。`fd->cap` は確保済み chunk の `cap` の合計。admit 済み chunk のサイズではない。evict 後は before/after の `fd->cap` 差分を解放量として引く (skip_reset なら 0)。
 - AC-45 (C1): fd の中身は 4 MiB の chunk の表 (`fd->chunks[]`、`S3FS_CHUNK_SIZE`)。populate は、足りない chunk を `min(4 MiB, max(終端, i_size) - chunk 先頭)` ちょうどで確保する (AC-41: 46 B のファイルは 46 B。AC-46 の倍々と全体の memcpy はなくなり、触った chunk の分だけ確保する)。write は chunk の中で倍々 (最小 4 KiB、上限 4 MiB) に伸ばす (非 pcache の dirty ファイルは最大で 2 倍まで確保する)。確保済み chunk のうち fd->size 以降のバイトは 0 (縮小は境界 chunk の後半を 0 にして、後ろの chunk を free)。setattr の拡張は chunk を確保しない (hole、dirty の間は 0 として読める)。`populated` は signal_flush でも確保済み chunk にだけ立つ (hole は次の read で取り直す)。chunk の上限は `S3FS_MAX_CHUNKS` (1 TiB)、超えたら -EFBIG。
 - M1/M2: `fd->cap` を変える箇所は `s3fs_fd_chunk_ensure` と `s3fs_fd_chunk_free` の 2 つだけで、そこで `s3fs_fd_buf_bytes` も同じだけ増減する (file_data_new / write / populate / reset / free / truncate はすべてこの 2 つを経由する)。`s3fs_ebpf_fd_buf_audit` (STATS[12/13]) が全 inode を走査した合計と突き合わせる (I/O が止まっていれば gauge == walk)。走査は `s_inode_list_lock` → `i_lock` だけを取り、admits_lock とは入れ子にしない。
 - dirty / flushing のときは何もしない。pin で残った chunk は、reader が unpin したあと、次に evict されたときに回収される (entry を入れ直しているので capacity の計算に入る)。inode の `i_size` はクリアしない (Q1)。
@@ -52,7 +53,7 @@
 ## 既存ファイルへの最初の変更 (AC-50)
 - `open(2)` は中身を読み込まず、flush は fd の全体を PUT する。だから **clean → dirty の最初の変更** (write / truncate) の前に、変更で残る部分を fd に読み込む (`s3fs_fd_load_for_modify`)。そうしないと、途中への上書きはオブジェクトを書いた範囲まで切り詰め、縮小は 0 を作り、`: > f` は S3 に届かなかった。
 - 読み込む範囲: `[0, min(need_end, i_size))` のうち populated でない chunk。ただし呼び出し側が全部上書きする chunk (write の範囲に丸ごと入る chunk) は読まない。write は `need_end = i_size`、縮小は新しいサイズ、拡張は元のサイズ、0 への truncate は何も読まない。
-- 読み込みの upcall は `S3FS_MISS_FLAG_FOR_WRITE` 付きの miss event。daemon は arena モードでも POPULATE_PAGES で chunk を fd に入れ、`S3FS_SIGNAL_VERIFY_POPULATED` 付きで signal する。待つ側は read_folio と同じく、**先に chunk を pin してから pending を作る**。daemon がいない、または chunk を取れないときは **-EIO で変更を断る** (取れない部分を残したまま flush すると、オブジェクトを壊すため)。
+- 読み込みの upcall は `S3FS_MISS_FLAG_FOR_WRITE` 付きの miss event。daemon は POPULATE_PAGES で chunk を fd に入れ、`S3FS_SIGNAL_VERIFY_POPULATED` 付きで signal する。待つ側は read_folio と同じく、**先に chunk を pin してから pending を作る**。daemon がいない、または chunk を取れないときは **-EIO で変更を断る** (取れない部分を残したまま flush すると、オブジェクトを壊すため)。
 - clean な fd の論理サイズは `i_size` (S3 のサイズ)。`fd->size` は取得済みの範囲しか表さない。最初の変更で `fd->size = max(fd->size, i_size)` にしてから適用する。setattr は、サイズが変わるとき (`new_size != 現在のサイズ`) は必ず dirty にする (0 への truncate も PUT される)。
 - すでに dirty / flushing の fd は内容を持っているので、読み込まない。
 - **pin は書き込みが dirty にするまで持ち続ける**: `s3fs_fd_load_for_modify` は必要な chunk を最初にまとめて pin し (`struct s3fs_mpin`)、読み込みが終わっても unpin せずに返す。write / setattr は `fd->lock` 下で `s3fs_fd_modify_ready_locked` を確かめ、通ったらその lock を離さずに `s3fs_mpin_release_locked` → 適用 → dirty。足りなければ lock を離して読み込みからやり直す (最大 `S3FS_LOAD_MAX_TRIES`)。pin が無いと shed / reset が chunk を free し、穴が 0 のまま flush される。capacity より大きいファイルの変更では、必要な chunk を全部持つので一時的に capacity を超える (書き込み用 buffer なので許容)。
