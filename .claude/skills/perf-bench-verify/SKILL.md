@@ -17,6 +17,9 @@ description: s3fs-ebpf の性能試験 (A〜H と層ごとのレイテンシ) �
 4. kmod の module param が既定: `nocache=0`、`pcache_drop=0` (rmmod で戻る)。`partial_modify` は daemon が起動のたびに書く。
 5. build が今の作業ツリー: `make all` (clang-20、`scripts/doctor.sh` が全 OK)。`git rev-parse HEAD` と `git status` を記録する (未 commit なら「HEAD + 作業ツリー」と書く)。
 6. **測定中に `scripts/` と `scripts/lib/` を編集しない**: bash はスクリプトを読みながら実行する。編集するなら `.new` に書いて `mv` し、`bash -n` を通す。測定が使う `bin/s3fs-ebpf` も作り直さない。
+7. **測定中に他の重い処理を流さない**: `go test ./...` (`internal/s3` は約 20 秒)、`make`、別の bench、`docker` の大きい操作。流した run の値は「環境が揺れた」と書くことになり、後から切り分けられない (§18.50 の seed 43)。
+8. **新しい script は本番の前に短く 1 回流す**: ログや出力のパスの間違いは、値が 0 や空で返ってから気づくことになる (GET の数え直しで、ログのパスの誤りが状態を壊した)。`bash -n` では見つからない。
+9. **終了を待つときは `pgrep -f` を使わない**: パターンが待っているシェル自身の command line に一致して終わらない。完了ファイル (`DONE`) か保存した PID で待つ。バックグラウンドの待機は 30 分で止まるので、長い run は完了ファイルを書く script にする。
 
 ## 1. 実行
 
@@ -55,6 +58,9 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 
 数字を書く前に、次を全部見る。
 
+- **同じ仕事を比べているか (比を書く前に必ず)**: 速度比 (「構造差 3.2×」など) は、双方が同じ仕事をしたときだけ意味がある。silo の `minio_s3_requests_total{api="getobject"}` と `{api="headobject"}`、daemon の `s3fs_ebpf_read_miss_upcalls_total` を、**構成ごとに同じ N 回の操作で数えて表にする** (cluster metrics は 12 秒の settle が要る)。片方が 0 でもう片方が 1 往復/操作なら、速い理由は設計ではなく省いた仕事かもしれない。経験: s3fs-fuse は open ごとに HEAD する (1000 回で HEAD 1002、キャッシュありでも 1001) が、s3fs-ebpf は entry table だけで open を完了していた。3.2× の約半分はこの HEAD の分で、HEAD を払うと 1.72× になった (`br §18.51`)。GET だけ数えていたので見えなかった。
+- **振る舞いが同じか**: 速度比を出す構成の組は、`make test-parity` (s3fs-fuse と s3fs-ebpf に同じ操作列を流し、結果か errno を比べる) の既知の差 (`scripts/lib/parity-known-diff.sh`) を確認する。**既知の差が速度に効く操作 (open の存在確認、rename、外部の更新の検知) は、その差を書かずに比を headline にしない**。新しい比較の操作を足したら、`test-parity.sh` にも同じ操作を足す。
+- **不自然に大きい比は設計漏れを疑う**: 2× を超える「構造差」は、まず「相手がしていて自分がしていない仕事」を探す (HEAD、flush、fsync、権限・存在・更新の確認)。
 - **正しさの検査が全部 PASS か**: D の sha256 (全 object)、B の verify (全 object)、E の cat の sha256、`dd` の rc、`WARN ... never completed`。B は fsync の直後に HEAD で `Content-Length` を見る (`wait_object`)。fsync が PUT の完了前に返ると「早く返った回数」が出る。0 でなければバグ。
 - **対照項目が前回と合うか**: page cache だけで終わる項目 (A の ebpf-pcache ≈ 3 µs、F、G の warm) は前回と ±5% で合うはず。**S3 を伴う項目だけが 25% 以上ずれ、対照が動かないときは、コードではなくホスト / MinIO の異常を疑う** (0. の 1 と 2 を再確認)。fuse 側と ebpf 側が同じ向きに動いているなら環境、片側だけなら変更のせい。
 - **MinIO の GET 数はキャッシュされる**: cluster metrics は数秒キャッシュされるので、run の直後に取った増分は次の行にずれる (`bench-layer-latency.sh` は snapshot の前後に `MINIO_METRICS_SETTLE`=12 秒待つ)。待たない値は「桁が合うか」の確認にだけ使う。
