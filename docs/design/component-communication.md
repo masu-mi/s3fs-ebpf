@@ -3,6 +3,7 @@
 s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マップ + userspace daemon + object backend (S3/GCS)** の 5 層構成。各層の間には性質の違う通信路が計 11 種類あり、路ごとに transport / 頻度 / latency 要件が異なる。この doc はそれを 1 か所に列挙し、mermaid.js で図式化する。
 
 **関連 doc**:
+- [`daemon-kmod-messaging.md`](daemon-kmod-messaging.md) — daemon と kmod の間のメッセージを、イベント (miss / flush / fsync / unlink / rename / sync / evict) とデータ構造 (キュー、pending) で整理した図つきの見取り図。**まずここ**
 - [`read-path-design.md`](read-path-design.md) — Path A/B/C 通信の設計理由
 - [`policy-engine-design.md`](policy-engine-design.md) — 4-layer policy dispatch (Layer 1 CEL / Layer 2 fmod_ret / Layer 3 user eBPF / Layer 4 KFunc)
 - [`policy-attach-comparison.md`](policy-attach-comparison.md) — fmod_ret vs struct_ops
@@ -198,7 +199,7 @@ sequenceDiagram
 
 `docs/design/read-path-design.md §3` の当初見積 210 LOC が実測 480 LOC になった理由の 1 つがこの 3-段 upcall pattern の実装コスト (`docs/dev-notes/lessons-learned.md §2.3`)。
 
-**§3 の T8 (miscdev read) と T9 (ringbuf) が並走する理由**: 同じ「miss 通知」に見えるが producer が違う。T9 は fentry BPF (`bpf/s3fs_fastpath.bpf.c:183` `bpf_ringbuf_submit`) から stat/lookup 側 miss を出すもので、`bpf_ringbuf_reserve/submit` は BPF prog 用 helper なので transport も BPF map (ringbuf) 一択。T8 は kmod C context の `.read_folio` (`kmod/vfs_ops.c:728`) から read syscall 側 miss を出すもので、`{ino, offset, count}` の range 情報を持つ。両者は現状「stat 経路の warm 起動」と「data 経路の range fetch」で用途分担している。統一の是非は §4 末尾の transport 対応表を参照。
+**§3 の T8 (miscdev read) と T9 (ringbuf) について (2026-11-05 訂正)**: 上の図は T9 が read の miss と並走するように描いているが、現行のコードでは daemon が T9 の event で実際にやるのは root ino=1 の warm だけで、それ以外の ino は no-op (`prewarm_arena.go` の `warmFromS3`)。kmod は ringbuf を見ず、read の miss の完了は T8 + T7 (`POPULATE_PAGES` / `SIGNAL_ADMIT`) だけで決まる。pcache モードでは中身を arena に書かず `POPULATE_PAGES` で渡す。現行の流れは [`daemon-kmod-messaging.md`](daemon-kmod-messaging.md) §4。以下は T8 と T9 の違いの説明(当時の記述)。同じ「miss 通知」に見えるが producer が違う。T9 は fentry BPF (`bpf/s3fs_fastpath.bpf.c:183` `bpf_ringbuf_submit`) から stat/lookup 側 miss を出すもので、`bpf_ringbuf_reserve/submit` は BPF prog 用 helper なので transport も BPF map (ringbuf) 一択。T8 は kmod C context の `.read_folio` (`kmod/vfs_ops.c:728`) から read syscall 側 miss を出すもので、`{ino, offset, count}` の range 情報を持つ。両者は現状「stat 経路の warm 起動」と「data 経路の range fetch」で用途分担している。統一の是非は §4 末尾の transport 対応表を参照。
 
 ---
 

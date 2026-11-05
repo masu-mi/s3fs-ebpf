@@ -22,6 +22,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
+| [`design/daemon-kmod-messaging.md`](design/daemon-kmod-messaging.md) | 全員 | daemon と kmod の間でどんなメッセージがどのキューを通るか、基本イベントごとの流れ (上の全景の次に) |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 
 ---
@@ -51,6 +52,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`design/ebpf-features-guide.md`](design/ebpf-features-guide.md) | 採用した eBPF 機能 (fentry / arena / ringbuf / per-CPU / LRU hash / struct_ops / KFunc / fmod_ret / CO-RE / `bpf_loop` / `__arena`) ごとの用途・有用性・制限・落とし穴、カーネル版・ディストリ別の制約表 (2026-10-11 作成。cilium/ebpf の課題は `dev-notes/cilium-ebpf-arena-and-struct-ops.md` が新しい) |
 | [`design/design.md`](design/design.md) | 統合設計書 (initial pitch, §0 で現状との相違メモ付き) |
 | [`design/component-communication.md`](design/component-communication.md) | 5 層 11 通信路 (T1-T11) の transport / 頻度 / latency / コード位置 + mermaid 図 |
+| [`design/daemon-kmod-messaging.md`](design/daemon-kmod-messaging.md) | daemon と kmod の間のメッセージの見取り図 (図つき): 3 本の通り道 (`read(2)` の push / ioctl の pull / ioctl の応答)、基本イベント 10 種 (read の miss / 変更前の読み込み / open の確認 / close / fsync / unlink / rename / sync / evict / stats) ごとの積む側・キュー・処理する側・完了の知らせ、kmod の中のキューと pending の構造、BPF ringbuf の位置づけ、daemon 不在時の動き |
 | [`design/dev-s3fs-ebpf-protocol.md`](design/dev-s3fs-ebpf-protocol.md) | `/dev/s3fs_ebpf` の miss イベント (`read(2)`) と 16 個の ioctl の構造体・フィールド・戻り値 |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | (kmod 実装者向け) pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 | [`design/read-path-design.md`](design/read-path-design.md) | Path A/A′/B/C の design 比較、A′ 断念の記録 |
