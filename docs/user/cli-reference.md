@@ -14,7 +14,7 @@ Commands:
   mount        Mount an S3 bucket via the s3fs_ebpf VFS
   unmount      Unmount a previously mounted target
   fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, serve
-               read misses, flush, sync S3, arena content
+               read misses, flush, sync S3
   stats        Print fast/slow path counters
   policy       Hot-reload the cache policy blob
   hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
