@@ -150,15 +150,6 @@ type SyncEntriesArg struct {
 	Entries uint64
 }
 
-// ProbeKvbaseArg mirrors `struct s3fs_probe_kvbase` in
-// include/s3fs_ebpf_uapi.h. Layout is fixed by the kmod's ioctl handler.
-type ProbeKvbaseArg struct {
-	ArenaFD   uint32
-	_pad      uint32
-	OutKvbase uint64
-	OutSize   uint64
-}
-
 // ioctl numbers: _IO{R,W,WR}(0xE3, nr, type).
 const (
 	IocPopulatePages  = (1 << 30) | (uint32(unsafe.Sizeof(PopulatePagesArg{})) << 16) | (0xE3 << 8) | 0x0E
@@ -176,5 +167,4 @@ const (
 	IocDirtyLayout    = (3 << 30) | (uint32(unsafe.Sizeof(DirtyLayoutArg{})) << 16) | (0xE3 << 8) | 0x0F
 	IocReadDirtyRange = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyRangeArg{})) << 16) | (0xE3 << 8) | 0x10
 	IocSyncEntries    = (1 << 30) | (uint32(unsafe.Sizeof(SyncEntriesArg{})) << 16) | (0xE3 << 8) | 0x04
-	IocProbeKvbase    = (3 << 30) | (uint32(unsafe.Sizeof(ProbeKvbaseArg{})) << 16) | (0xE3 << 8) | 0x01
 )

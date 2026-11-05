@@ -16,7 +16,6 @@ func TestStructSizesMatchUAPI(t *testing.T) {
 		got  uintptr
 		want uintptr
 	}{
-		{"s3fs_probe_kvbase", unsafe.Sizeof(ProbeKvbaseArg{}), 24},
 		{"s3fs_admit_entry", unsafe.Sizeof(AdmitEntry{}), 32},
 		{"s3fs_admit_arena", unsafe.Sizeof(AdmitArenaArg{}), 16},
 		{"s3fs_signal_admit", unsafe.Sizeof(SignalAdmitArg{}), 24},
@@ -45,7 +44,6 @@ func TestIoctlNumbersMatchUAPI(t *testing.T) {
 		got  uint32
 		want uint32
 	}{
-		{"PROBE_KVBASE", IocProbeKvbase, 0xc018e301},
 		{"ADMIT_ARENA", IocAdmitArena, 0x4010e302},
 		{"SIGNAL_ADMIT", IocSignalAdmit, 0x4018e303},
 		{"SYNC_ENTRIES", IocSyncEntries, 0x4010e304},
