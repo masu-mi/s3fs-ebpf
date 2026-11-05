@@ -2,6 +2,8 @@
 
 この PoC が struct_ops の policy として持つ 4 つのアルゴリズムの、動きの説明。どれも「キャッシュが一杯のとき、どれを追い出すか」を決める。実装は `bpf/policy_*_pick_ops.bpf.c` (`pick_victim` を持つ AC-58 の vtable、[`ac58-pick-victim.md`](ac58-pick-victim.md))、W-TinyLFU の設計は [`wtinylfu-pick-plan.md`](wtinylfu-pick-plan.md)。
 
+各アルゴリズムが BPF map をどう使うか (map の形、フックごとの読み書き、指標との対応) は [`policy-bpf-maps.md`](policy-bpf-maps.md) に図つきでまとめた。
+
 kmod から見た呼び出しは共通で、次の 4 つ。
 
 | member | いつ呼ばれるか | policy がすること |

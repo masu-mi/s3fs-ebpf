@@ -10,49 +10,52 @@ daemon と kmod の通信は、ほとんどが 1 つのデバイス `/dev/s3fs_e
 
 ```mermaid
 flowchart LR
-    subgraph K["kmod (s3fs_ebpf)"]
+    FS["kmod の FS 操作<br/>.read_folio / .release / .fsync<br/>.unlink / .rename / .create"]
+
+    subgraph Q["kmod: キュー"]
       direction TB
-      subgraph Q["kmod の中のキューと表 (spinlock で保護)"]
-        ME[("s3fs_miss_events<br/>FIFO list<br/>+ s3fs_miss_wq")]
-        PD[("s3fs_pending<br/>hash 16 bucket<br/>(ino, chunk) → completion")]
-        FQ[("s3fs_flush_queue<br/>FIFO list")]
-        FW[("s3fs_flush_wait_queue<br/>FIFO list<br/>+ s3fs_flush_wait_wq")]
-        FP[("s3fs_flush_pending<br/>hash 16 bucket<br/>ino → completion")]
-        DQ[("s3fs_delete_queue<br/>s3fs_rename_queue<br/>FIFO list")]
-        EL[("s3fs_evict_log<br/>配列 512 件<br/>+ overflow カウンタ")]
-      end
-      subgraph T["表 (daemon が置き換える / 満たす)"]
-        EN[("entry 表<br/>(parent_ino, name) → ino<br/>= ディレクトリの内容")]
-        CH[("fd の chunk 表<br/>4 MiB × n<br/>= ファイルの中身")]
-        AD[("admit 表<br/>ino → 範囲, PCACHE flag")]
-      end
-      DEV["/dev/s3fs_ebpf<br/>read / poll / ioctl"]
+      ME[("s3fs_miss_events<br/>FIFO + s3fs_miss_wq")]
+      FQ[("s3fs_flush_queue<br/>FIFO")]
+      FW[("s3fs_flush_wait_queue<br/>FIFO + s3fs_flush_wait_wq")]
+      DQ[("s3fs_delete_queue<br/>s3fs_rename_queue<br/>FIFO")]
+      EL[("s3fs_evict_log<br/>配列 512 件")]
     end
 
-    subgraph D["daemon (Go)"]
+    DEV["/dev/s3fs_ebpf<br/>read / poll / ioctl"]
+
+    D["daemon (Go)<br/>runReadMissLoop (worker 16)<br/>runFlushLoop / runFlushWaitLoop<br/>runDeleteLoop / runRenameLoop (100 ms)<br/>runSyncLoop (30 s)<br/>drainEvictionsLoop (2 s)"]
+
+    subgraph T["kmod: 表と待ち手"]
       direction TB
-      RM["runReadMissLoop<br/>(worker 16)"]
-      FL["runFlushLoop<br/>(100 ms)"]
-      FWL["runFlushWaitLoop<br/>(blocking)"]
-      DL["runDeleteLoop / runRenameLoop<br/>(100 ms)"]
-      SY["runSyncLoop<br/>(30 s)"]
-      EV["drainEvictionsLoop (2 s)<br/>runStatsLoop (5 s)"]
+      EN[("entry 表<br/>ディレクトリの内容")]
+      CH[("fd の chunk 表<br/>ファイルの中身")]
+      PD[("s3fs_pending<br/>(ino, chunk) → completion")]
+      FP[("s3fs_flush_pending<br/>ino → completion")]
     end
 
-    ME -->|"① read(2): 1 件 = 24 B"| DEV
-    DEV --> RM
-    FQ -->|"② ioctl POP_FLUSH"| DEV
-    FW -->|"② ioctl POP_FLUSH_WAIT"| DEV
-    DQ -->|"② ioctl POP_DELETE / POP_RENAME"| DEV
-    EL -->|"② ioctl DRAIN_EVICTIONS"| DEV
-    DEV --> FL & FWL & DL & EV
-
-    RM -->|"③ ioctl POPULATE_PAGES"| CH
-    RM -->|"③ ioctl SIGNAL_ADMIT"| PD
-    FWL -->|"③ ioctl SIGNAL_FLUSH"| FP
-    FL -->|"③ ioctl SIGNAL_FLUSH / MARK_DIRTY / READ_DIRTY"| FP
-    SY -->|"③ ioctl SYNC_ENTRIES"| EN
+    FS -->|"呼び出し: enqueue"| Q
+    FS -.->|"参照: 表と chunk を読む<br/>completion で待つ"| T
+    ME ==>|"① event: read(2) 24 B"| DEV
+    FQ ==>|"② event: POP_FLUSH"| DEV
+    FW ==>|"② event: POP_FLUSH_WAIT"| DEV
+    DQ ==>|"② event: POP_DELETE / POP_RENAME"| DEV
+    EL ==>|"② data: DRAIN_EVICTIONS"| DEV
+    DEV ==> D
+    D -->|"③ 呼び出し: SYNC_ENTRIES"| EN
+    D -->|"③ 呼び出し: POPULATE_PAGES"| CH
+    D -->|"③ 呼び出し: SIGNAL_ADMIT"| PD
+    D -->|"③ 呼び出し: SIGNAL_FLUSH / MARK_DIRTY"| FP
+    PD ==>|"complete: 待ち手が起きる"| FS
+    FP ==>|"complete: 待ち手が起きる"| FS
 ```
+
+**矢印の凡例** (この doc の全フローチャートで共通。シーケンス図は `->>` が呼び出し・操作、`-->>` が戻り・イベント・データ):
+
+| 矢印 | 意味 | 例 |
+|---|---|---|
+| `==>` 太線 | **イベント・データの流れ** (中身が運ばれる、または待ち手が起きる) | miss の event、`POP_*` で取り出す item、`complete` による起床 |
+| `-->` 実線 | **呼び出し** (関数・フック・ioctl を起動する) | FS 操作が enqueue を呼ぶ、daemon が ioctl を叩く |
+| `-.->` 点線 | **参照** (状態や map を読む / 書く。起動はしない) | FS 操作が chunk 表を読む |
 
 | 番号 | 方向 | 仕組み | 性質 |
 |---|---|---|---|
