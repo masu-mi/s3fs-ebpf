@@ -58,6 +58,7 @@
 ## 結果を疑うときの見方
 
 - **対照項目**: page cache だけで終わる項目 (A の ebpf-pcache、F、G の warm) は環境が変わっても動かない。S3 を伴う項目だけが 25% 以上動いたら、ホスト / MinIO を疑う。過去の事例: `mc admin trace` が MinIO のコンテナ内に残り、全 S3 項目が 25〜75% 遅くなって `test-policy-conformance` も落ちた (issue #35)。
-- **構成の判定**: upcall 数と MinIO の GET 数が狙った層と合うか (行ごとに。folio hit は sample 間隔遅れなので使わない)。
+- **構成の判定**: upcall 数と MinIO の GET 数と HEAD 数が狙った層と合うか (行ごとに。folio hit は sample 間隔遅れなので使わない)。
+- **同じ仕事か**: 速度比は双方が同じ仕事をしたときだけ意味がある。s3fs-fuse は open ごとに HEAD するので、s3fs-ebpf も `open_check=1` で HEAD すると nocache の比は 3.2× から 1.7×、キャッシュあり同士は約 170× から約 1.2× になる (`br §18.51` `§18.52`)。振る舞いの差は `make test-parity` (s3fs-fuse との差分テスト、既知の差は `scripts/lib/parity-known-diff.sh`) で見る。
 - **正しさ**: sha256 (D / B / E)、B の「fsync が早く返った」回数が 0。
 - 詳しい検証項目は `.claude/skills/perf-bench-verify/SKILL.md` の 4。

@@ -94,3 +94,49 @@ func TestShutdownFlushesPendingEvents(t *testing.T) {
 		t.Errorf("Shutdown flushed %d events, want 2", len(got))
 	}
 }
+
+// FireAll is the barrier a rename or delete takes (AC-84): everything parked in
+// the debounce window goes out now, oldest kmod seq first, without waiting for
+// the window.
+func TestFireAllHandlesParkedEventsInSeqOrder(t *testing.T) {
+	r := &recorder{}
+	c := New(time.Hour, r.handle) // the window would never expire in this test
+	ctx := context.Background()
+	c.Submit(ctx, &kmodio.FlushEvent{Ino: 7, Seq: 9})
+	c.Submit(ctx, &kmodio.FlushEvent{Ino: 5, Seq: 3})
+	c.Submit(ctx, &kmodio.FlushEvent{Ino: 6, Seq: 5})
+	c.Submit(ctx, &kmodio.FlushEvent{Ino: 5, Seq: 11}) // same ino: the latest event wins
+
+	c.FireAll(ctx)
+
+	got := r.get()
+	if len(got) != 3 || got[0].Ino != 6 || got[1].Ino != 7 || got[2].Ino != 5 {
+		t.Fatalf("handled %+v, want inos 6 (seq 5), 7 (seq 9), 5 (seq 11)", got)
+	}
+	c.FireAll(ctx) // nothing parked any more
+	if len(r.get()) != 3 {
+		t.Errorf("a second FireAll handled something: %+v", r.get())
+	}
+}
+
+// FireMatching is the barrier of a rename / delete (AC-84): only the parked
+// events it could conflict with go out; the others keep their debounce window.
+func TestFireMatchingLeavesOthersParked(t *testing.T) {
+	r := &recorder{}
+	c := New(time.Hour, r.handle)
+	ctx := context.Background()
+	c.Submit(ctx, &kmodio.FlushEvent{Ino: 5, Seq: 3})
+	c.Submit(ctx, &kmodio.FlushEvent{Ino: 6, Seq: 5})
+	c.Submit(ctx, &kmodio.FlushEvent{Ino: 7, Seq: 9})
+
+	c.FireMatching(ctx, func(ev *kmodio.FlushEvent) bool { return ev.Ino != 6 })
+
+	got := r.get()
+	if len(got) != 2 || got[0].Ino != 5 || got[1].Ino != 7 {
+		t.Fatalf("handled %+v, want inos 5 then 7", got)
+	}
+	c.FireAll(ctx) // the one left behind is still parked
+	if got := r.get(); len(got) != 3 || got[2].Ino != 6 {
+		t.Errorf("after FireAll %+v, want ino 6 last", got)
+	}
+}

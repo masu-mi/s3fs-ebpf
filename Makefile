@@ -72,7 +72,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
         lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
-        test-write-existing-nopm test-open-check test-fsync-large-new-file test-pcache-drop test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
+        test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
         test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
         clean
@@ -352,7 +352,7 @@ test-splice-hits: kmod daemon ## sendfile / splice reads are counted as hits (hi
 	@echo "==> test-splice-hits"
 	@$(SCRIPTS_DIR)/test-splice-hits.sh
 
-test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-open-check test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
+test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-open-check test-parity test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -445,6 +445,14 @@ test-write-existing-capacity: kmod daemon ## AC-50: write/truncate on an existin
 test-open-check: kmod daemon ## open_check=1: open(2) without O_CREAT HEADs S3 and fails ENOENT for a key deleted after the last sync
 	@echo "==> test-open-check"
 	@sudo $(SCRIPTS_DIR)/test-open-check.sh
+
+test-spec: ## TLA+ models (specs/tla) with TLC in a throwaway container: every variant gives the result its cfg expects
+	@echo "==> test-spec"
+	@$(SCRIPTS_DIR)/tlc.sh --all
+
+test-parity: kmod daemon ## differential test: the same operations on s3fs-fuse and s3fs-ebpf give the same result (known gaps listed in scripts/lib/parity-known-diff.sh)
+	@echo "==> test-parity"
+	@sudo $(SCRIPTS_DIR)/test-parity.sh
 
 test-fsync-new-file: kmod daemon ## a new file written + fsync'ed is not truncated by the create placeholder flush
 	@echo "==> test-fsync-new-file"

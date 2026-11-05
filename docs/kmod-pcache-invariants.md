@@ -5,6 +5,7 @@
 ## ロック順 (外 → 内)
 (lockdep 付きカーネルで確認済み、2026-10-28: `make test-lockdep` が `test-regression` と evict-race で報告 0 件。`docs/dev-notes/lockdep-kernel.md`)
 - `fd->lock` (mutex, per-inode `s3fs_file_data`) → `s3fs_admits_lock` (rwlock)。逆順で取るパスは存在しない (R1 はこれに依存)。
+- `s3fs_evseq_lock` (spinlock) は flush / delete / rename の 3 つのキューの lock の**外側**: イベントの `seq` の採番と、キューへの `list_add` を同じ lock の下で行う (AC-84)。その中で取ってよいのは `s3fs_flush_lock` / `s3fs_flush_wait_lock` / `s3fs_delete_lock` / `s3fs_rename_lock` だけ。daemon は「seq S のイベントを pop したら、S より小さい seq のイベントはもう各キューに見えている」ことに依存して 3 つのキューを seq 順にマージする (`event_order.go`)。
 - `s3fs_pending_lock` / `s3fs_miss_lock` / `s3fs_flush_*_lock` / `s3fs_flush_pins_lock` は spinlock で末端 (`flush_pins_lock` は fd->lock 下で取る)。保持中に `fd->lock` や `s3fs_admits_lock` を取らない。
 - `admit_evict_ino` は `admit_drop_all_ranges` (admits write_lock) を解放した後に `s3fs_evict_page_cache` → `s3fs_file_data_reset` (fd->lock → admits write_lock) を呼ぶ。
 
@@ -111,3 +112,10 @@
 - 設計は `docs/design/ac58-pick-victim.md`。vtable の `on_insert` / `on_remove` / `pick_victim` は、**vtable が `pick_victim` を持つときだけ**、`s3fs_ebpf_admit_replace` の eviction block が `s3fs_policy_evict_lock` (mutex) を取って呼ぶ。この mutex は `fd->lock` / `s3fs_admits_lock` より外側 (admit_replace は他のロックを持たずに入る)。mutex の中で `admit_evict_ino` (fd->lock → admits write_lock) を呼ぶ。
 - 容量超過のとき、まず `pick_victim` が返した ino を (`cand[]` にあり、未試行なら) `s3fs_capacity_evict_one` で処理する。`cand[]` にない ino が返ったら (別の経路で evict 済み)、`on_remove` を呼んで聞き直す (AC-64)。0 / 試行済みが返ったら、残りは score 順 (`on_evict` + tiebreak) に戻る。pending 中の ino は丸ごとは evict せず shed になる (AC-45 C3 のまま)。`on_remove` を呼ぶのは、丸ごと evict したときと、上の聞き直しのときだけ。
 - AC-66: `on_size(ino, bytes)` は Phase 1 で `on_insert` の直後に、同じ mutex の中で呼ぶ (`capacity_bytes > 0` のときだけ)。bytes は live_bytes と同じ数え方 (arena は entry の合計、pcache は `s3fs_ino_buf_bytes`)。`s3fs_ino_buf_bytes` は `ilookup` + `READ_ONCE(fd->cap)` で fd->lock を取らない。
+
+## entry 表: local / dyn / tombstone (AC-85)
+- 設計と TLA+: `docs/design/kmod-entry-table-state-machine.md`、`specs/tla/KmodEntries.tla`。lookup は local → dyn の順。dyn の entry が `s3fs_hidden_entries` の (親, 名前, ino) に一致するなら見えない (`dyn_entry_hidden_locked`)。readdir も同じ (tombstone があるときだけ、可視の dyn entry を数え直す)。
+- `s3fs_hidden_entries` / `s3fs_local_entries` / dyn 表は **`s3fs_entries_mtx` の下**。tombstone を作るのは unlink と rename (`entry_forget` / `entry_rename`)。local entry を作るのは create と、rename の新しい名前。どちらも**作った操作のイベントの `seq`** を持つ (イベントが積まれるまでは `S3FS_SEQ_PENDING` = U64_MAX)。
+- sync (`s3fs_ebpf_entries_replace_applied(entries, count, applied_seq)`) は、`seq <= applied_seq` の local entry だけを昇格 (listing に同じ (親, 名前, ino) があれば削除) し、`seq <= applied_seq` で listing にもう無い tombstone だけを消す。`applied_seq` は daemon が listing の**前**に測る (それ以下のイベントは S3 に適用済み): kmod の現在のイベント番号 (`S3FS_IOC_STATS` の slot 15、`s3fs_ebpf_event_seq()`) を読み、その番号までのキュー済みイベントを全部処理して (`appliedSeqFor`)、PUT 中の flush の手前で止める。kmod の番号は daemon の再起動をまたいで続くので、再起動後も残った local entry / tombstone を昇格・削除できる。0 を渡す古い daemon は、何も昇格・削除しない (安全側)。readdir は、listing に同じ (名前, ino) がある local entry を出さない (昇格を待つ間の重複を避ける)。イベントが積まれなかった (`seq == 0`) unlink は tombstone を作らない (S3 に object が残るので、消えない tombstone になる)。
+- 同じ (名前, ino) に rename で戻したら、その tombstone は取り消す (`mv a c; mv c a`)。上書きされる rename の target は unlink と同じく `entry_forget`。
+- unload で `local_entries_drain` が tombstone も解放する。

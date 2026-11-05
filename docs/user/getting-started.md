@@ -109,7 +109,7 @@ make unmount
 
 - **policy を差し替える**: daemon を `--policy-bpf=builtin:policy_sieve_pick_ops` などで起動し、走行中に `curl -X POST localhost:9600/policy/reload -d builtin:policy_lru_pick_ops` で替える (`--metrics-token` を付けた場合は `-H "Authorization: Bearer $S3FS_METRICS_TOKEN"`)。差し替えは struct_ops の `BPF_LINK_UPDATE` 1 回だけで、dmesg に `policy struct_ops updated (hot swap)` が出る。struct_ops でない `.bpf.o` (fentry / fmod_ret) は拒否され (HTTP 400)、`BPF_LINK_UPDATE` が失敗したときは古い policy が残る。
 - **既存の大きいオブジェクトの途中書き換え**: `--partial-modify` は既定で有効 (S3 のみ。server-side copy のない backend では無視してログを出す)。`--partial-modify=false` で全体 GET + PUT (AC-50) に戻る。16 MiB (`partial_modify_min`) 未満は全体を読み書きする。
-- **ベンチ用の kmod の module param** (`/sys/module/s3fs_kfunc/parameters/`): `nocache=1` は open のたびに page cache と admit を捨てる (FUSE の `kernel_cache` なしに近い)、`pcache_drop=1` は page cache だけ捨てて chunk 表と policy を残す。どちらも測定用で、rmmod で戻る (`nocache` が優先)。
+- **ベンチ用の kmod の module param** (`/sys/module/s3fs_kfunc/parameters/`): `nocache=1` は open のたびに page cache と admit を捨てる (FUSE の `kernel_cache` なしに近い)、`pcache_drop=1` は page cache だけ捨てて chunk 表と policy を残す。どちらも測定用で、rmmod で戻る (`nocache` が優先)。`open_check=1` は測定用ではなく振る舞いの切り替えで、O_CREAT なしの open が S3 に HEAD して存在を確認する (404 は `ENOENT`、既定 0)。
 
 > `./s3fs-ebpf.sh mount` と `s3fs-ebpf mount` / `unmount` サブコマンドは初期の骨組みのままで、
 > マウントもデーモンの起動もしない。

@@ -101,12 +101,39 @@ struct s3fs_local_entry {
 	unsigned long parent_ino; /* G-01: dir the file was .create'd under */
 	umode_t mode;
 	u64 size;   /* W2: last i_size seen at evict_inode (0 until then) */
+	u64 seq;    /* AC-85: seq of the flush / rename event that made it; promoted
+		     * only once the daemon reports it applied (0 = nothing queued) */
 	u32 name_len;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 };
 
 static LIST_HEAD(s3fs_local_entries);
 static size_t s3fs_local_nr;
+
+/* seq of a local entry / tombstone whose event is not queued yet. */
+#define S3FS_SEQ_PENDING	U64_MAX
+
+/*
+ * AC-85: an S3-derived (dyn) entry that rename / unlink removed.  The dyn table
+ * only changes at a sync, and a sync can list the object before the daemon has
+ * renamed / deleted it, so lookup and readdir skip a dyn entry that matches
+ * (parent, name, ino) here.  It is dropped by a sync only when the listing no
+ * longer has the entry AND the daemon had applied the operation (seq <=
+ * applied_seq); a re-created (name, ino) by rename revives the name.  Also made
+ * for a removed local entry, whose object a sync may list before the daemon
+ * deletes it.  Protected by s3fs_entries_mtx.
+ */
+struct s3fs_hidden_entry {
+	struct list_head link;
+	unsigned long ino;
+	unsigned long parent_ino;
+	u64 seq;
+	u32 name_len;
+	char name[S3FS_SYNC_NAME_MAX + 1];
+};
+
+static LIST_HEAD(s3fs_hidden_entries);
+static size_t s3fs_hidden_nr;
 
 /* .create allocates from this range so ino doesn't collide with the
  * daemon's ino allocator (starts at 100). The daemon registers the
@@ -207,6 +234,22 @@ static struct s3fs_dyn_index *dyn_index_build(const struct s3fs_entry_dyn *e,
 	return ix;
 }
 
+/* s3fs_entries_mtx held: is the dyn entry `e` hidden by a tombstone? */
+static bool dyn_entry_hidden_locked(const struct s3fs_entry_dyn *e)
+{
+	struct s3fs_hidden_entry *h;
+
+	if (list_empty(&s3fs_hidden_entries))
+		return false;
+	list_for_each_entry(h, &s3fs_hidden_entries, link)
+		if (h->ino == e->ino &&
+		    norm_parent(h->parent_ino) == norm_parent(e->parent_ino) &&
+		    h->name_len == e->name_len &&
+		    memcmp(h->name, e->name, e->name_len) == 0)
+			return true;
+	return false;
+}
+
 /* s3fs_entries_mtx held, s3fs_dyn_entries non-NULL. */
 static const struct s3fs_entry_dyn *dyn_find_name(unsigned long parent,
 						  const char *name, size_t len)
@@ -288,6 +331,8 @@ static bool resolve_entry_by_name(unsigned long parent_ino,
 		const struct s3fs_entry_dyn *e =
 			dyn_find_name(want_parent, name, name_len);
 
+		if (e && dyn_entry_hidden_locked(e))
+			e = NULL;	/* AC-85: renamed away / unlinked, S3 not caught up yet */
 		if (e) {
 			out->ino = e->ino;
 			out->parent_ino = norm_parent(e->parent_ino);

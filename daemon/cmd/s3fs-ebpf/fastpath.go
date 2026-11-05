@@ -516,7 +516,7 @@ func runFastpath(args []string) int {
 		// browsing the mount without daemon) doesn't see the stale
 		// snapshot from this session. Mirrors the clearAdmits defer.
 		defer func() {
-			if err := syncEntriesIoctl(*dev, nil); err != nil {
+			if err := syncEntriesIoctl(*dev, nil, appliedSeq()); err != nil {
 				fmt.Fprintf(os.Stderr, "[sync clear] %v\n", err)
 			}
 		}()
@@ -626,11 +626,9 @@ func runFastpath(args []string) int {
 	// S-08: blocking goroutine for fsync-triggered (WAIT-flagged) flush
 	// events — eliminates the up-to-100 ms ticker latency for fsync.
 	go runFlushWaitLoop(ctx, *dev, progs, s3c)
-	// E-02: drain kmod delete queue and issue S3 DELETE for each.
-	// Runs on the same interval as flush; symmetric shape.
-	go runDeleteLoop(ctx, *dev, s3c, 100*time.Millisecond)
-	// E-02: drain rename queue (CopyObject + Delete server-side).
-	go runRenameLoop(ctx, *dev, s3c, 100*time.Millisecond)
+	// E-02 / AC-84: kmod's delete and rename queues are drained by
+	// runFlushLoop too (drainOrdered), so the three kinds of event are
+	// handled in the order kmod queued them.
 
 	// Layer 2/3 policy program stats sampler. Reads the loaded BPF
 	// program's policy_stats map every N and mirrors into the

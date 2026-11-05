@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
-	"sync"
 	"time"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
@@ -42,32 +40,6 @@ const missFlagOpenCheck = 0x4
 // check (all ones as a u64; a read's chunk offsets are 4 MiB multiples).
 const openCheckKey int64 = -1 // uint64(openCheckKey) is all ones
 
-// localKeys remembers the S3 key of every ino this daemon created (flush) or
-// renamed. The entry mirror only learns them at the next sync, but an open
-// check for such a file must HEAD the key the daemon wrote, not "unknown ino"
-// (ENOENT) or the key before the rename. It is not cleared by a sync (a flush
-// racing the listing would otherwise lose its key); one small entry per file
-// this daemon wrote, and a later sync keeps ino <-> key stable.
-var localKeys sync.Map // ino (uint64) -> S3 key (string)
-
-func noteLocalKey(ino uint64, key string) {
-	if key != "" {
-		localKeys.Store(ino, key)
-	}
-}
-
-// openCheckKeyFor returns the key to HEAD for ino.
-func openCheckKeyFor(ino uint64) (name, key string, ok bool) {
-	if v, hit := localKeys.Load(ino); hit {
-		k := v.(string)
-		return path.Base(k), k, true
-	}
-	if e := fpebpf.LookupByIno(ino); e != nil {
-		return e.Name, e.S3Key, true
-	}
-	return "", "", false
-}
-
 // handleOpenCheck HEADs the object behind ev.Ino and signals the open's
 // waiter: 0 if it exists, -ENOENT if S3 says 404 (or the ino is unknown),
 // -EIO for any other failure. It is not a read miss, so it is neither counted
@@ -75,8 +47,8 @@ func openCheckKeyFor(ino uint64) (name, key string, ok bool) {
 func handleOpenCheck(ctx context.Context, devPath string, s3c objstore.Backend, ev readMissEvent) {
 	metrics.Global.OpenChecks.Add(1)
 	signal := func(code int32) { _ = signalAdmitFn(devPath, ev.Ino, openCheckKey, code) }
-	name, key, ok := openCheckKeyFor(ev.Ino)
-	if !ok {
+	entry := fpebpf.LookupByIno(ev.Ino)
+	if entry == nil {
 		metrics.Global.OpenCheckMissing.Add(1)
 		signal(-2 /* -ENOENT */)
 		return
@@ -85,14 +57,14 @@ func handleOpenCheck(ctx context.Context, devPath string, s3c objstore.Backend, 
 		signal(-61 /* -ENODATA */)
 		return
 	}
-	if _, err := s3c.Stat(ctx, key); err != nil {
+	if _, err := s3c.Stat(ctx, entry.S3Key); err != nil {
 		if errors.Is(err, objstore.ErrNotFound) {
 			metrics.Global.OpenCheckMissing.Add(1)
-			fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: not in S3 — ENOENT\n", ev.Ino, name)
+			fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: not in S3 — ENOENT\n", ev.Ino, entry.Name)
 			signal(-2)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: %v\n", ev.Ino, name, err)
+		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: %v\n", ev.Ino, entry.Name, err)
 		metrics.Global.ReadMissErrors.Add(1)
 		signal(-5 /* -EIO */)
 		return

@@ -219,7 +219,7 @@ static long s3fs_dev_sync_entries(void __user *uarg)
 		return -EFAULT;
 
 	if (hdr.count == 0)
-		return s3fs_ebpf_entries_replace(NULL, 0);
+		return s3fs_ebpf_entries_replace_applied(NULL, 0, hdr.applied_seq);
 
 	/* Lookups go through hash indexes (AC-55), so the cap bounds memory only
 	 * (~0.3 KB per entry, held twice while the ioctl copies); 4096 was
@@ -261,7 +261,7 @@ static long s3fs_dev_sync_entries(void __user *uarg)
 	}
 
 	/* Hand ownership over on success. */
-	err = s3fs_ebpf_entries_replace(kbuf, hdr.count);
+	err = s3fs_ebpf_entries_replace_applied(kbuf, hdr.count, hdr.applied_seq);
 	if (err)
 		goto out_free_kbuf;
 
@@ -494,6 +494,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 			s3fs_ebpf_fd_buf_audit(&st.values[12], &st.values[13]);
 		if (st.count > 14)
 			st.values[14] = (u64)atomic_long_read(&s3fs_hits_replayed_total);
+		if (st.count > 15)
+			st.values[15] = s3fs_ebpf_event_seq();
 		st.filled = st.count;
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;
