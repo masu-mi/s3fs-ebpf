@@ -1,7 +1,6 @@
 package ebpf
 
 import (
-	"sort"
 	"testing"
 )
 
@@ -68,22 +67,5 @@ func TestSetSizeByIno(t *testing.T) {
 	}
 	if got := LookupByIno(7).Fallback; got != 1 {
 		t.Errorf("size of ino 7 = %d, want 1 (untouched)", got)
-	}
-}
-
-func TestWarmCacheBookkeeping(t *testing.T) {
-	p := &Programs{cacheKnown: map[uint64]uint64{10: 0, 11: stubSize}}
-	if !p.IsWarmed(10) || p.IsWarmed(12) {
-		t.Error("IsWarmed does not follow cacheKnown")
-	}
-	got := p.KnownInos()
-	sort.Slice(got, func(i, j int) bool { return got[i] < got[j] })
-	if len(got) != 2 || got[0] != 10 || got[1] != 11 {
-		t.Errorf("KnownInos = %v, want [10 11]", got)
-	}
-	// An ino that is already warm returns its offset without touching the
-	// arena or the BPF map (both nil here).
-	if off, err := p.WarmCache(InodeStub{Ino: 11}); err != nil || off != stubSize {
-		t.Errorf("WarmCache(known) = %d, %v; want %d, nil", off, err, stubSize)
 	}
 }

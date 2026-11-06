@@ -85,7 +85,7 @@ func withEntry(t *testing.T, e fpebpf.Entry) {
 func TestReadMissUnknownInoSignalsENOENT(t *testing.T) {
 	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 1})
-	handleReadMiss(context.Background(), "/dev/x", nil, &getBackend{}, readMissEvent{Ino: 424242})
+	handleReadMiss(context.Background(), "/dev/x", &getBackend{}, readMissEvent{Ino: 424242})
 	if len(u.signals) != 1 || u.signals[0] != -2 {
 		t.Errorf("signals %v, want [-2]", u.signals)
 	}
@@ -94,7 +94,7 @@ func TestReadMissUnknownInoSignalsENOENT(t *testing.T) {
 func TestReadMissNoBackendSignalsENODATA(t *testing.T) {
 	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 801, Name: "f", S3Key: "f", Fallback: 10})
-	handleReadMiss(context.Background(), "/dev/x", nil, nil, readMissEvent{Ino: 801})
+	handleReadMiss(context.Background(), "/dev/x", nil, readMissEvent{Ino: 801})
 	if len(u.signals) != 1 || u.signals[0] != -61 {
 		t.Errorf("signals %v, want [-61]", u.signals)
 	}
@@ -106,7 +106,7 @@ func TestReadMissPcacheSmallFile(t *testing.T) {
 	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 802, Name: "small", S3Key: "small", Fallback: 5})
 	b := &getBackend{objects: map[string][]byte{"small": []byte("hello")}}
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 802})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 802})
 
 	if len(b.gets) != 1 || b.gets[0] != "Get small" {
 		t.Errorf("fetched %v, want one whole-object Get", b.gets)
@@ -127,7 +127,7 @@ func TestReadMissPcacheLargeFileFetchesOneChunk(t *testing.T) {
 	withEntry(t, fpebpf.Entry{Ino: 803, Name: "big", S3Key: "big", Fallback: uint64(size)})
 	b := &getBackend{objects: map[string][]byte{"big": make([]byte, size)}}
 	// A miss in the middle of chunk 2.
-	handleReadMiss(context.Background(), "/dev/x", nil, b,
+	handleReadMiss(context.Background(), "/dev/x", b,
 		readMissEvent{Ino: 803, Offset: 2*partialAdmitChunk + 17})
 
 	if len(b.gets) != 1 || b.gets[0] != "GetRange big" {
@@ -138,7 +138,7 @@ func TestReadMissPcacheLargeFileFetchesOneChunk(t *testing.T) {
 	}
 	// The last chunk is cut at the end of the object.
 	u.populated = nil
-	handleReadMiss(context.Background(), "/dev/x", nil, b,
+	handleReadMiss(context.Background(), "/dev/x", b,
 		readMissEvent{Ino: 803, Offset: 3*partialAdmitChunk + 5})
 	if len(u.populated) != 1 || u.populated[0].n != 1000 {
 		t.Errorf("tail chunk populated %+v, want 1000 bytes", u.populated)
@@ -153,7 +153,7 @@ func TestReadMissPcacheSplitsLargeBody(t *testing.T) {
 	withEntry(t, fpebpf.Entry{Ino: 804, Name: "grown", S3Key: "grown", Fallback: 10})
 	n := 2*partialAdmitChunk + partialAdmitChunk/2
 	b := &getBackend{objects: map[string][]byte{"grown": make([]byte, n)}}
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 804})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 804})
 	if len(u.populated) != 3 || u.populated[2].off != 2*partialAdmitChunk || u.populated[2].n != partialAdmitChunk/2 {
 		t.Errorf("populated %+v, want 3 pieces ending with a half chunk at %d", u.populated, 2*partialAdmitChunk)
 	}
@@ -162,7 +162,7 @@ func TestReadMissPcacheSplitsLargeBody(t *testing.T) {
 func TestReadMissGetErrorSignalsEIO(t *testing.T) {
 	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 805, Name: "e", S3Key: "e", Fallback: 5})
-	handleReadMiss(context.Background(), "/dev/x", nil, &getBackend{err: errors.New("s3 down")}, readMissEvent{Ino: 805})
+	handleReadMiss(context.Background(), "/dev/x", &getBackend{err: errors.New("s3 down")}, readMissEvent{Ino: 805})
 	if len(u.signals) != 1 || u.signals[0] != -5 || len(u.populated) != 0 {
 		t.Errorf("signals=%v populated=%v, want [-5] and nothing populated", u.signals, u.populated)
 	}
@@ -173,7 +173,7 @@ func TestReadMissPopulateErrorSignalsEIO(t *testing.T) {
 	u.populateErr = errors.New("ioctl failed")
 	withEntry(t, fpebpf.Entry{Ino: 806, Name: "p", S3Key: "p", Fallback: 5})
 	b := &getBackend{objects: map[string][]byte{"p": []byte("12345")}}
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 806})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 806})
 	if len(u.signals) != 1 || u.signals[0] != -5 || u.verifySignals != 0 {
 		t.Errorf("signals=%v verify=%d, want [-5] and no verify", u.signals, u.verifySignals)
 	}
@@ -187,7 +187,7 @@ func TestReadMissRepopulatesThenGivesUp(t *testing.T) {
 	u.verifyResult = unix.EAGAIN
 	withEntry(t, fpebpf.Entry{Ino: 807, Name: "r", S3Key: "r", Fallback: 5})
 	b := &getBackend{objects: map[string][]byte{"r": []byte("12345")}}
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 807})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 807})
 	if want := signalVerifyRetries + 1; len(u.populated) != want || u.verifySignals != want {
 		t.Errorf("populated %d times, verified %d times, want %d each", len(u.populated), u.verifySignals, want)
 	}
@@ -201,7 +201,7 @@ func TestLoadForWrite(t *testing.T) {
 	withEntry(t, fpebpf.Entry{Ino: 808, Name: "w", S3Key: "w", Fallback: 100})
 	b := &getBackend{objects: map[string][]byte{"w": make([]byte, 100)}}
 
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 808, Flags: missFlagForWrite})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 808, Flags: missFlagForWrite})
 	if len(b.gets) != 1 || b.gets[0] != "GetRange w" || len(u.populated) != 1 || u.populated[0].n != 100 {
 		t.Errorf("gets=%v populated=%+v, want one range GET of the 100-byte object", b.gets, u.populated)
 	}
@@ -209,14 +209,14 @@ func TestLoadForWrite(t *testing.T) {
 	// kmod's i_size may be larger than the (older) entry size: the chunk is
 	// cut at what kmod asked for, so it can become populated.
 	u.populated, b.objects["w"] = nil, make([]byte, 300)
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 808, Count: 300, Flags: missFlagForWrite})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 808, Count: 300, Flags: missFlagForWrite})
 	if len(u.populated) != 1 || u.populated[0].n != 300 {
 		t.Errorf("populated %+v, want 300 bytes (the length kmod asked for)", u.populated)
 	}
 
 	// A chunk entirely past the object is an I/O error, not an empty populate.
 	u.populated, u.signals = nil, nil
-	handleReadMiss(context.Background(), "/dev/x", nil, b,
+	handleReadMiss(context.Background(), "/dev/x", b,
 		readMissEvent{Ino: 808, Offset: 2 * partialAdmitChunk, Flags: missFlagForWrite})
 	if len(u.signals) != 1 || u.signals[0] != -5 || len(u.populated) != 0 {
 		t.Errorf("signals=%v populated=%v, want [-5] and no populate", u.signals, u.populated)
@@ -224,8 +224,8 @@ func TestLoadForWrite(t *testing.T) {
 
 	// Unknown ino / no backend.
 	u.signals = nil
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 999999, Flags: missFlagForWrite})
-	handleReadMiss(context.Background(), "/dev/x", nil, nil, readMissEvent{Ino: 808, Flags: missFlagForWrite})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 999999, Flags: missFlagForWrite})
+	handleReadMiss(context.Background(), "/dev/x", nil, readMissEvent{Ino: 808, Flags: missFlagForWrite})
 	if len(u.signals) != 2 || u.signals[0] != -2 || u.signals[1] != -61 {
 		t.Errorf("signals %v, want [-2 -61]", u.signals)
 	}
@@ -257,29 +257,29 @@ func TestOpenCheck(t *testing.T) {
 	b := &statBackend{present: map[string]bool{"o": true}}
 	ev := readMissEvent{Ino: 909, Flags: missFlagOpenCheck}
 
-	handleReadMiss(context.Background(), "/dev/x", nil, b, ev)
+	handleReadMiss(context.Background(), "/dev/x", b, ev)
 	if len(b.stats) != 1 || len(u.signals) != 1 || u.signals[0] != 0 {
 		t.Errorf("present: stats=%v signals=%v, want one HEAD and [0]", b.stats, u.signals)
 	}
 
 	u.signals = nil
 	delete(b.present, "o") // deleted from S3 after the last sync
-	handleReadMiss(context.Background(), "/dev/x", nil, b, ev)
+	handleReadMiss(context.Background(), "/dev/x", b, ev)
 	if len(u.signals) != 1 || u.signals[0] != -2 {
 		t.Errorf("deleted: signals=%v, want [-2]", u.signals)
 	}
 
 	u.signals = nil
 	b.failErr = errors.New("connection refused")
-	handleReadMiss(context.Background(), "/dev/x", nil, b, ev)
+	handleReadMiss(context.Background(), "/dev/x", b, ev)
 	if len(u.signals) != 1 || u.signals[0] != -5 {
 		t.Errorf("S3 failure: signals=%v, want [-5] (not ENOENT)", u.signals)
 	}
 
 	// Unknown ino / no backend; neither counts as a read-miss upcall.
 	u.signals = nil
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 999999, Flags: missFlagOpenCheck})
-	handleReadMiss(context.Background(), "/dev/x", nil, nil, ev)
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 999999, Flags: missFlagOpenCheck})
+	handleReadMiss(context.Background(), "/dev/x", nil, ev)
 	if len(u.signals) != 2 || u.signals[0] != -2 || u.signals[1] != -61 {
 		t.Errorf("signals %v, want [-2 -61]", u.signals)
 	}
@@ -294,7 +294,7 @@ func TestOpenCheckUsesRecordedKeys(t *testing.T) {
 
 	fpebpf.RecordKey(910, 3, "new.txt", "dir/new.txt", 5, 2) // created and flushed, not in the mirror
 	t.Cleanup(func() { fpebpf.Replace(nil) })
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 910, Flags: missFlagOpenCheck})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 910, Flags: missFlagOpenCheck})
 	if len(b.stats) != 1 || b.stats[0] != "dir/new.txt" || len(u.signals) != 1 || u.signals[0] != 0 {
 		t.Errorf("created: stats=%v signals=%v, want HEAD dir/new.txt and [0]", b.stats, u.signals)
 	}
@@ -302,7 +302,7 @@ func TestOpenCheckUsesRecordedKeys(t *testing.T) {
 	withEntry(t, fpebpf.Entry{Ino: 911, Name: "before", S3Key: "before", Fallback: 1})
 	fpebpf.RecordKey(911, 0, "after", "after", 0, 3) // renamed since the last sync
 	b.stats, u.signals = nil, nil
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 911, Flags: missFlagOpenCheck})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 911, Flags: missFlagOpenCheck})
 	if len(b.stats) != 1 || b.stats[0] != "after" || u.signals[0] != 0 {
 		t.Errorf("renamed: stats=%v signals=%v, want HEAD of the new key and [0]", b.stats, u.signals)
 	}

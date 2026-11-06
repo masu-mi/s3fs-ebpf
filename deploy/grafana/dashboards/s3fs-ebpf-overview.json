@@ -8,37 +8,6 @@
   "liveNow": false,
   "panels": [
     {
-      "id": 1,
-      "title": "Fast Path Hit Ratio",
-      "type": "stat",
-      "description": "fast_hits / (fast_hits + slow_misses) over the last 1 min. Zero on cold start until BPF fentry sees getattr traffic.",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(rate(s3fs_ebpf_fast_path_hits_total[1m])) / clamp_min(sum(rate(s3fs_ebpf_fast_path_hits_total[1m])) + sum(rate(s3fs_ebpf_slow_path_misses_total[1m])), 1)"
-        }
-      ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "red", "value": null },
-              { "color": "orange", "value": 0.5 },
-              { "color": "green", "value": 0.9 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 2,
       "title": "Admits (arena entries)",
       "type": "stat",
@@ -63,52 +32,6 @@
       ],
       "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
-    },
-    {
-      "id": 4,
-      "title": "Arena usage",
-      "type": "gauge",
-      "description": "High-water bytes written by AdmitContent, divided by arena capacity. Grows monotonically until daemon restart — gc は未実装 (lessons §5.4).",
-      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "s3fs_ebpf_arena_used_bytes / clamp_min(s3fs_ebpf_arena_capacity_bytes, 1)"
-        }
-      ],
-      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "showThresholdLabels": false, "showThresholdMarkers": true },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 0.7 },
-              { "color": "red", "value": 0.9 }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 5,
-      "title": "VFS getattr rate — fast vs slow",
-      "type": "timeseries",
-      "description": "Per-second rate of fentry-observed getattr calls, split by admit-hit (fast) and admit-miss (slow). unknown_fs は他 FS の getattr が来た数 (noise の目安)。",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "refId": "A", "expr": "rate(s3fs_ebpf_fast_path_hits_total[1m])",    "legendFormat": "fast" },
-        { "refId": "B", "expr": "rate(s3fs_ebpf_slow_path_misses_total[1m])",  "legendFormat": "slow" },
-        { "refId": "C", "expr": "rate(s3fs_ebpf_unknown_fs_total[1m])",        "legendFormat": "unknown_fs" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
-      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"] } }
     },
     {
       "id": 6,

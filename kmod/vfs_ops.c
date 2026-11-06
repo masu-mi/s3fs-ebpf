@@ -55,8 +55,8 @@
 #include "vfs_ops.h"
 #include "policy_struct_ops.h"
 
-/* S3FS_EBPF_MAGIC lives in the shared header so the BPF fentry hook can
- * filter by super_block::s_magic without a second source of truth. */
+/* S3FS_EBPF_MAGIC lives in the shared header (also used by the daemon-side tools)
+ * so there is one source of truth. */
 #include "s3fs_shared_types.h"
 
 /*

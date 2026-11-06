@@ -9,8 +9,6 @@ import (
 	"sync"
 	"time"
 
-	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
-
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policyprog"
 )
@@ -56,7 +54,7 @@ func samplePolicyStats(ctx context.Context, mu *sync.Mutex, cur **policyprog.Pro
 // single ticker loop (W-03). All three sources are sampled on every
 // tick at the sampleEvery interval. Opening the device fd once
 // (T-03 pattern) is handled inside the loop.
-func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, every time.Duration) {
+func runStatsLoop(ctx context.Context, devPath string, every time.Duration) {
 	// Open the device fd once for kmod-stats ioctls. Failure is
 	// non-fatal (kmod stats will be zero in /metrics) so the daemon
 	// starts even without a real device (tests / offline mode).
@@ -75,10 +73,7 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			// Source 1: BPF per-CPU counter map.
-			printCounters(progs, "sample")
-
-			// Source 2: kmod-side ioctl stats.
+			// kmod-side ioctl stats.
 			if devFd >= 0 {
 				if vals, err := readStatsOn(devFd); err == nil {
 					if len(vals) >= 1 {
@@ -129,21 +124,4 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 
 		}
 	}
-}
-
-func printCounters(progs *fpebpf.Programs, label string) {
-	c, err := progs.ReadCounters()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read counters: %v\n", err)
-		return
-	}
-	// Mirror the BPF-side counters into the metrics endpoint. Store
-	// (not Add) because the BPF map is the source of truth — the
-	// per-CPU aggregate is what we want to expose, not the delta.
-	metrics.Global.FastPathHits.Store(c[fpebpf.StatFastHits])
-	metrics.Global.SlowPathMisses.Store(c[fpebpf.StatSlowMisses])
-	metrics.Global.UnknownFS.Store(c[fpebpf.StatUnknownFS])
-	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d\n",
-		label,
-		c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS])
 }

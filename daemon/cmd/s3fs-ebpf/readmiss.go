@@ -196,7 +196,7 @@ const readMissWorkers = 16
 // readMissWorkers slots. A full semaphore back-pressures new events;
 // kmod's per-ino wait queue serializes them so no event is lost.
 func runReadMissLoop(ctx context.Context, devPath string,
-	progs *fpebpf.Programs, s3c objstore.Backend) {
+	s3c objstore.Backend) {
 	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[upcall] open %s: %v\n", devPath, err)
@@ -245,7 +245,7 @@ func runReadMissLoop(ctx context.Context, devPath string,
 		sem <- struct{}{}
 		go func(ev readMissEvent) {
 			defer func() { <-sem }()
-			handleReadMiss(ctx, devPath, progs, s3c, ev)
+			handleReadMiss(ctx, devPath, s3c, ev)
 		}(ev)
 	}
 }
@@ -286,7 +286,7 @@ var patternAwareAdmitEnabled bool
 var readMissShutdownWarn = 5 * time.Second
 
 func handleReadMiss(ctx context.Context, devPath string,
-	progs *fpebpf.Programs, s3c objstore.Backend, ev readMissEvent) {
+	s3c objstore.Backend, ev readMissEvent) {
 	if ev.Flags&missFlagOpenCheck != 0 {
 		handleOpenCheck(ctx, devPath, s3c, ev)
 		return
