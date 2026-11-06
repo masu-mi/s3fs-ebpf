@@ -2,88 +2,31 @@
 /* admit table (ino -> daemon backing), pcache check, policy hooks, ino evict.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
-/* -- Admit table: ino -> daemon user_vm backing --------------------------- */
+/* -- Capacity / policy state ---------------------------------------------- */
 /*
- * Populated by /dev/s3fs_ebpf's ADMIT_ARENA ioctl once the daemon has
- * written each object's bytes into its arena mmap. .read pins the
- * relevant pages via pin_user_pages_remote against the admitted mm,
- * kmap_local_page's them, and copy_to_user's out of the resulting
- * kernel VA. This routes around 6.12's arena kern_vm having no
- * generic-context fault handler; the daemon's user_vm mapping does
- * have arena_vm_fault, which GUP invokes on any missing PTE.
- */
-struct s3fs_admit {
-	struct hlist_node node;
-	u64 ino;
-	u64 uaddr;   /* daemon user_vm address of the range's bytes (0 in PCACHE mode) */
-	u64 size;    /* range length */
-	u64 offset;  /* file offset where the range starts (D-01) */
-	/* AB-04: S3FS_ADMIT_FLAG_PCACHE set means data is in Linux page cache,
-	 * not in the BPF arena. GUP path is skipped; generic_file_read_iter
-	 * serves reads from page cache directly. */
-	u32 flags;
-};
-
-/*
- * R1 invariant: if a PCACHE entry exists for ino in the hash, then fd->buf
- * for that ino is non-NULL.  Maintained by two rules:
- *   - s3fs_ebpf_populate_pages calls admit_insert_pcache while holding
- *     fd->lock, so no eviction can free fd->buf between the copy and insert.
- *   - s3fs_file_data_reset re-evicts all remaining PCACHE entries for ino
- *     inside fd->lock before freeing fd->buf.
- * Lock order: fd->lock (mutex, outer) → s3fs_admits_lock (rwlock, inner).
- * No path takes s3fs_admits_lock before fd->lock, so no deadlock is possible.
+ * There is no admit table.  What the cache holds is what the inodes' chunk
+ * tables hold (s3fs_file_data.chunks[], `p` and `populated`): a read is a hit
+ * when its chunk is populated, the capacity pass finds its candidates by
+ * walking the superblock's inodes (s3fs_collect_resident) and a whole-ino
+ * eviction frees the idle chunks (s3fs_file_data_reset).  One state, so the
+ * old "an entry implies a chunk" invariant (R1), its lockless fast path and
+ * re-check (S1), the generation counter and the rwlock are gone.
  *
- * S1 corollary: the R1 invariant holds only under fd->lock.  Between
- * fc_pcache_check (lockless fast path) and the moment fill_from_kmalloc
- * takes fd->lock, an eviction + re-populate can run, leaving a stale
- * fd->buf that now covers a different range.  fill_from_kmalloc therefore
- * re-verifies the PCACHE entry's existence inside fd->lock whenever the
- * global admit generation changed since the check.
+ * Lock order: s3fs_policy_evict_lock (outermost, the capacity pass) -> fd->lock.
+ * s3fs_pass_lock and s3fs_flush_pins_lock etc. are leaves.
  */
 
-#define S3FS_ADMIT_HASH_BITS 6
-
-static DEFINE_HASHTABLE(s3fs_admits, S3FS_ADMIT_HASH_BITS);
-/* AA-01: rwlock instead of spinlock so concurrent .read_folio calls on
- * distinct inos can take the read side in parallel. Write side is held
- * only by admit_replace / admit_shutdown (infrequent daemon ioctls). */
-static DEFINE_RWLOCK(s3fs_admits_lock);
-
-/*
- * AB-10: admit generation counter. Incremented (inside write_lock) by every
- * admit table mutation: admit_replace, admit_drop_all_ranges,
- * admit_insert_pcache, admit_shutdown. Per-file caches keyed on the current
- * generation; a stale gen forces one rwlock re-check, after which the cache
- * is refreshed and subsequent reads are lock-free.
- */
-static atomic_t s3fs_admit_gen = ATOMIC_INIT(1);
-
-/*
- * AB-10: per-file admit snapshot cached in file->private_data.
- * Allocated in .open, freed in .release.
- *
- * P1 fix: cache the last confirmed pcache range [off, end) so that
- * the fast path is only taken when pos is within that range.  A
- * prior implementation cached only the bool, causing the fast path
- * to fire for any pos once a pcache entry was found for a different
- * offset on the same fd — leading to zero-reads from the unfilled
- * portion of fd->buf on split (multi-chunk) admits.
- */
+/* Per-open-file state, kept in file->private_data (allocated in .open, freed
+ * in .release). */
 struct s3fs_file_admit_cache {
-	u32  gen;    /* s3fs_admit_gen value when range was last confirmed */
-	bool pcache; /* true = PCACHE admit exists for this ino at [off,end) */
-	u64  off;    /* start of the confirmed pcache range */
-	u64  end;    /* off+size of the confirmed pcache range (exclusive) */
 	unsigned long hit_tick; /* hit_accum: jiffies of the last counted access
 				 * through this struct file; 0 = not counted yet */
 };
 
-/* Running size of the admit hash. Updated in lock-step with hash_add
- * / hash_del calls under s3fs_admits_lock. Exposed to BPF programs
- * via the s3fs_kfunc_admit_count() KFunc so policies can make
- * pressure-aware decisions (see bpf/policy_pressure_ops.bpf.c). */
-atomic_t s3fs_admits_count = ATOMIC_INIT(0);
+/* Number of cached inodes the last capacity pass saw (the candidates).  Read
+ * by BPF policies through the s3fs_kfunc_admit_count() KFunc for
+ * pressure-aware decisions (bpf/policy_pressure_ops.bpf.c). */
+atomic_t s3fs_resident_count = ATOMIC_INIT(0);
 
 /*
  * Eviction limits (S-02). Both are module parameters, writable at
@@ -213,259 +156,9 @@ atomic_long_t s3fs_reset_skipped = ATOMIC_LONG_INIT(0);
  * admit_shutdown (umount / daemon-less module state). */
 static bool s3fs_daemon_armed;
 
-/* Set in fill_super so admit_replace can ilookup() cached inodes, grow
- * their i_size to newly admitted range ends (AC-48) and drop stale page
- * cache. */
+/* Set in fill_super so the capacity pass and eviction can ilookup() cached
+ * inodes and walk the superblock's inodes. */
 static struct super_block *s3fs_active_sb;
-
-/*
- * "Any range" lookup — returns the first admit entry for `ino`.
- * Used by eviction / debugging where the caller doesn't care which
- * specific range covered a particular offset.
- */
-static struct s3fs_admit *admit_lookup_locked(u64 ino)
-{
-	struct s3fs_admit *a;
-
-	hash_for_each_possible(s3fs_admits, a, node, ino)
-		if (a->ino == ino)
-			return a;
-	return NULL;
-}
-
-/*
- * Range-aware lookup (D-01): returns the entry whose [offset,
- * offset+size) covers `pos`. When the daemon admits a whole file as
- * one range (offset=0, size=full_size), this collapses to the
- * legacy behavior. Multiple entries per ino live in the same hash
- * bucket (hash_add uses ino as key); the walk picks the range that
- * matches the read position.
- */
-static struct s3fs_admit *admit_lookup_at_locked(u64 ino, u64 pos)
-{
-	struct s3fs_admit *a;
-
-	hash_for_each_possible(s3fs_admits, a, node, ino) {
-		if (a->ino != ino)
-			continue;
-		if (pos >= a->offset && pos < a->offset + a->size)
-			return a;
-	}
-	return NULL;
-}
-
-/*
- * Drop every admitted range of `ino` (partial admits can register
- * several). Takes the admit lock. Returns how many were dropped.
- */
-/* S4: pcache_out is set to true if at least one PCACHE entry was removed.
- * Callers that don't need the flag pass NULL.
- * AC-41: *bytes sums arena entries only — a pcache ino's memory is its
- * fd->buf (fd->cap), which the capacity loop measures directly. */
-static unsigned int admit_drop_all_ranges(u64 ino, u64 *bytes, bool *pcache_out)
-{
-	struct s3fs_admit *a;
-	struct hlist_node *tmp;
-	unsigned int n = 0;
-	u64 b = 0;
-	bool saw_pcache = false;
-
-	write_lock(&s3fs_admits_lock);
-	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
-		if (a->ino != ino)
-			continue;
-		if (a->flags & S3FS_ADMIT_FLAG_PCACHE)
-			saw_pcache = true;
-		hash_del(&a->node);
-		atomic_dec(&s3fs_admits_count);
-		if (!(a->flags & S3FS_ADMIT_FLAG_PCACHE))
-			b += a->size;
-		kfree(a);
-		n++;
-	}
-	if (n)
-		atomic_inc(&s3fs_admit_gen); /* AB-10: invalidate per-file caches */
-	write_unlock(&s3fs_admits_lock);
-	if (bytes)
-		*bytes = b;
-	if (pcache_out)
-		*pcache_out = saw_pcache;
-	return n;
-}
-
-/*
- * AB-10 / P1: per-file admit cache check.
- *
- * Fast path: if fc->gen matches the current global gen AND
- *   - pcache is false  → no pcache entry for any pos in this ino, OR
- *   - pcache is true   → pos is within the confirmed range [off, end)
- * return the cached result without touching the rwlock.
- *
- * Slow path (stale gen or pos outside cached range): take read_lock,
- * probe the hash for the entry that covers pos, save the range while
- * still under the lock, update the cache, unlock.
- *
- * P1 fix: the prior implementation returned the cached bool for *any*
- * pos once the gen matched, ignoring whether pos was within the
- * confirmed range.  On split admits (one fd, two chunks), a pos in the
- * second chunk would hit the fast path from the first chunk's check,
- * calling s3fs_folio_fill_from_kmalloc on unfilled fd->buf → zeros.
- *
- * fc may be NULL (file->private_data not allocated yet, or readahead
- * path where file == NULL).  In that case we always take the rwlock.
- */
-/* S1: gen_out receives the s3fs_admit_gen value used for the admit-table
- * probe so that fill_from_kmalloc can detect table mutations that occurred
- * in the TOCTOU window between this check and taking fd->lock.  NULL is
- * accepted (read_iter fast path, which goes directly to generic_file_read_iter
- * without calling fill_from_kmalloc). */
-static bool fc_pcache_check(struct s3fs_file_admit_cache *fc, u64 ino, u64 pos,
-			     u32 *gen_out)
-{
-	struct s3fs_admit *a;
-	bool found;
-	u32 cur_gen;
-	u64 a_off = 0, a_end = 0;
-
-	if (fc) {
-		cur_gen = atomic_read(&s3fs_admit_gen);
-		/*
-		 * P4: smp_load_acquire pairs with the smp_store_release on the
-		 * write path below.  The acquire barrier guarantees that, once
-		 * we observe the matching gen, all preceding stores (pcache,
-		 * off, end) are also visible — even on weakly-ordered CPUs
-		 * (ARM, POWER) where plain READ_ONCE would allow the new gen
-		 * to be seen with stale pcache/off/end values.
-		 */
-		if (smp_load_acquire(&fc->gen) == cur_gen) {
-			if (!fc->pcache) {
-				if (gen_out)
-					*gen_out = cur_gen;
-				return false; /* no pcache entry for any pos */
-			}
-			/* pcache=true: fast-path only within the confirmed range */
-			if (pos >= fc->off && pos < fc->end) {
-				if (gen_out)
-					*gen_out = cur_gen;
-				return true;
-			}
-			/* pos outside cached range: fall through to slow path */
-		}
-	}
-
-	/* Slow path: rwlock + read gen atomically with the table. */
-	read_lock(&s3fs_admits_lock);
-	a = admit_lookup_at_locked(ino, pos);
-	found = a && (a->flags & S3FS_ADMIT_FLAG_PCACHE);
-	/* Save range before unlock — a is only valid under the lock. */
-	if (found) {
-		a_off = a->offset;
-		a_end = a->offset + a->size;
-	}
-	cur_gen = atomic_read(&s3fs_admit_gen);
-	read_unlock(&s3fs_admits_lock);
-
-	if (fc) {
-		/* Write off/end/pcache before releasing gen (P4).  Any reader
-		 * that observes the new gen via smp_load_acquire is guaranteed
-		 * to see the updated off/end/pcache. */
-		WRITE_ONCE(fc->off,    a_off);
-		WRITE_ONCE(fc->end,    a_end);
-		WRITE_ONCE(fc->pcache, found);
-		smp_store_release(&fc->gen, cur_gen);
-	}
-	if (gen_out)
-		*gen_out = cur_gen;
-	return found;
-}
-
-/*
- * AB-04 / P3: insert or update a page-cache-mode admit entry (uaddr=0).
- *
- * P3 fix: prior code always hash_add'd a new entry, so repeated
- * POPULATE_PAGES calls for the same (ino, offset) — e.g. on a re-read
- * after admit_replace cleared the entry — accumulated duplicates and
- * inflated s3fs_admits_count without bound.  Now update in-place when
- * the same (ino, offset) already exists.
- */
-static int admit_insert_pcache(u64 ino, u64 offset, u64 size)
-{
-	struct s3fs_admit *a, *existing;
-	bool updated = false;
-
-	a = kzalloc(sizeof(*a), GFP_KERNEL);
-	if (!a)
-		return -ENOMEM;
-	a->ino    = ino;
-	a->uaddr  = 0;
-	a->size   = size;
-	a->offset = offset;
-	a->flags  = S3FS_ADMIT_FLAG_PCACHE;
-
-	write_lock(&s3fs_admits_lock);
-	hash_for_each_possible(s3fs_admits, existing, node, ino) {
-		if (existing->ino == ino &&
-		    existing->offset == offset &&
-		    (existing->flags & S3FS_ADMIT_FLAG_PCACHE)) {
-			if (existing->size != size) {
-				existing->size = size;
-				/* Range changed: stale per-file caches must re-check */
-				atomic_inc(&s3fs_admit_gen);
-			}
-			updated = true;
-			break;
-		}
-	}
-	if (!updated) {
-		hash_add(s3fs_admits, &a->node, ino);
-		atomic_inc(&s3fs_admits_count);
-		atomic_inc(&s3fs_admit_gen);
-	}
-	write_unlock(&s3fs_admits_lock);
-
-	if (updated)
-		kfree(a);
-	return 0;
-}
-
-static void admit_clear_locked(void)
-{
-	struct s3fs_admit *a;
-	struct hlist_node *tmp;
-	unsigned int i;
-
-	hash_for_each_safe(s3fs_admits, i, tmp, a, node) {
-		hash_del(&a->node);
-		kfree(a);
-	}
-	atomic_set(&s3fs_admits_count, 0);
-}
-
-/*
- * Return the admitted size for `ino`, or 0 if the ino is not in the
- * admit hash. Exposed to BPF policy programs via the
- * s3fs_kfunc_ino_size() KFunc (see kmod/tree_traversal.c). Acquires
- * the admit spinlock; safe from any non-IRQ context (BPF struct_ops
- * and tracing programs both qualify — the critical section is a
- * single bucket walk).
- *
- * D-01 note: with range-list admits a single entry no longer
- * necessarily equals full file size. This helper returns the size
- * of _some_ range for the ino; policies that want the full file
- * size should sum ranges (future kfunc) or read sync entries.
- */
-u64 s3fs_admit_size(u64 ino)
-{
-	struct s3fs_admit *a;
-	u64 size = 0;
-
-	read_lock(&s3fs_admits_lock);
-	a = admit_lookup_locked(ino);
-	if (a)
-		size = a->size;
-	read_unlock(&s3fs_admits_lock);
-	return size;
-}
 
 /*
  * Drop the page cache of a policy-evicted ino. Without this an evicted
@@ -498,28 +191,20 @@ static bool pending_exists(u64 ino); /* defined with the upcall machinery */
 
 /* P3 / Q1: defined after struct s3fs_file_data; frees fd->buf for non-dirty
  * inodes so capacity_bytes bounds actual allocations. */
-static void s3fs_file_data_reset(u64 ino);
+static bool s3fs_file_data_reset(u64 ino);
 
-/* Evict every admitted range of `ino`: drop it from the table, report
- * it to the daemon (evict log), drop its page cache, and free its
- * fd->buf (P3/Q1: only for pcache inos; arena inos have no fd->buf).
- *
- * S4: admit_drop_all_ranges reports whether a PCACHE entry was dropped
- * atomically inside its write_lock, eliminating the prior TOCTOU window
- * where populate could insert a PCACHE entry after the old admit_has_pcache
- * check but before admit_drop_all_ranges, causing drop to remove the entry
- * while reset was never called — leaving fd->buf allocated outside the
- * capacity limit. */
+/* Evict the cached content of `ino`: free its idle chunks and drop its page
+ * cache (P3/Q1).  Returns true when something was freed; *freed gets the bytes
+ * (0 here: the caller measures the fd->cap difference).  Dirty / flushing
+ * inodes and chunks a reader has pinned stay (U8). */
 static void s3fs_hit_forget(u64 ino);
 static bool admit_evict_ino(u64 ino, u64 *freed)
 {
-	bool had_pcache = false;
-
-	if (!admit_drop_all_ranges(ino, freed, &had_pcache))
+	if (freed)
+		*freed = 0;
+	if (!s3fs_file_data_reset(ino))
 		return false;
 	s3fs_evict_page_cache(ino);
-	if (had_pcache)
-		s3fs_file_data_reset(ino);
 	/* #22: every whole-ino eviction ends here, so this is the one place
 	 * that resets the per-ino hit state (the next populate starts afresh). */
 	s3fs_hit_forget(ino);

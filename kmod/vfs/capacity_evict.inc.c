@@ -6,6 +6,21 @@
 /* AC-41: defined after struct s3fs_file_data. */
 static u64 s3fs_ino_buf_bytes(u64 ino);
 
+/* A capacity-pass candidate: a clean inode whose chunks the cache holds, and
+ * the bytes it is charged (fd->cap).  Collected by walking the superblock's
+ * inodes (s3fs_collect_resident, defined after struct s3fs_file_data). */
+struct s3fs_resident {
+	u64 ino;
+	u64 bytes;
+};
+static int s3fs_collect_resident(struct s3fs_resident **out);
+
+/* The candidates of the pass in progress, for the KFunc s3fs_kfunc_ino_size
+ * (s3fs_admit_size): valid only while s3fs_policy_evict_lock is held by the
+ * pass, which is the only place a policy hook runs. */
+static const struct s3fs_resident *s3fs_pass_res;
+static int s3fs_pass_nres;
+
 /* Issue #22: hit accumulation; defined after struct s3fs_file_data. */
 struct s3fs_file_data;
 struct s3fs_hit_rec {
@@ -107,10 +122,39 @@ static void s3fs_capacity_evict_one(u64 ino, u64 *live_bytes, u32 *evicted,
 	*live_bytes -= min(freed, *live_bytes);
 }
 
+static int s3fs_resident_cmp(const void *a, const void *b)
+{
+	const struct s3fs_resident *x = a, *y = b;
+
+	return x->ino < y->ino ? -1 : (x->ino > y->ino);
+}
+
+/* The size the cache holds for @ino (its fd->cap), or 0 when it is not a
+ * candidate.  Exposed to BPF policies as the s3fs_kfunc_ino_size() KFunc
+ * (kmod/tree_traversal.c); only meaningful inside a capacity pass, which is
+ * where every policy hook runs - elsewhere it answers 0. */
+u64 s3fs_admit_size(u64 ino)
+{
+	const struct s3fs_resident *r = READ_ONCE(s3fs_pass_res);
+	int lo = 0, hi = READ_ONCE(s3fs_pass_nres) - 1;
+
+	while (r && lo <= hi) {
+		int mid = lo + (hi - lo) / 2;
+
+		if (r[mid].ino == ino)
+			return r[mid].bytes;
+		if (r[mid].ino < ino)
+			lo = mid + 1;
+		else
+			hi = mid - 1;
+	}
+	return 0;
+}
+
 /*
  * The capacity / policy pass (formerly admit_replace, which also swapped the
- * daemon's arena admit list; arena ranges are gone).  Collects the inodes that
- * hold PCACHE entries and, for each: replays the accumulated hits, tells the
+ * daemon's arena admit list; arena ranges are gone).  Collects the cached
+ * inodes (clean, with allocated chunks) and, for each: replays the accumulated hits, tells the
  * policy (on_insert / on_size), takes the votes, and evicts down to
  * capacity_bytes (pick_victim or score order).  Called by the daemon's EVAL
  * ioctl (after a populate, before it wakes the reader; on /policy/eval).
@@ -118,37 +162,16 @@ static void s3fs_capacity_evict_one(u64 ino, u64 *live_bytes, u32 *evicted,
  */
 int s3fs_ebpf_capacity_pass(void)
 {
-	/* P3: pcache entries are the candidates for capacity accounting and
-	 * eviction. */
-	u64 *pcache_inos = NULL;
-	int pcache_remaining = 0;
+	/* The candidates for capacity accounting and eviction. */
+	struct s3fs_resident *res = NULL;
+	int nres = s3fs_collect_resident(&res);
+	int pcache_remaining = nres;	/* unique inodes */
 
-	/* Collect the inos with a PCACHE entry.  GFP_ATOMIC: read_lock is a
-	 * spinlock variant. */
-	{
-		struct s3fs_admit *ea;
-		unsigned int bi;
-
-		read_lock(&s3fs_admits_lock);
-		hash_for_each(s3fs_admits, bi, ea, node)
-			if (ea->flags & S3FS_ADMIT_FLAG_PCACHE)
-				pcache_remaining++;
-		if (pcache_remaining > 0) {
-			pcache_inos = kcalloc(pcache_remaining, sizeof(u64), GFP_ATOMIC);
-			if (pcache_inos) {
-				int pi = 0;
-
-				hash_for_each(s3fs_admits, bi, ea, node)
-					if ((ea->flags & S3FS_ADMIT_FLAG_PCACHE) &&
-					    pi < pcache_remaining)
-						pcache_inos[pi++] = ea->ino;
-				pcache_remaining = pi;
-			} else {
-				pcache_remaining = 0;
-			}
-		}
-		read_unlock(&s3fs_admits_lock);
-	}
+	/* By ino: a deterministic order for the policy, and s3fs_admit_size()
+	 * can binary-search it. */
+	if (nres > 1)
+		sort(res, nres, sizeof(*res), s3fs_resident_cmp, NULL);
+	atomic_set(&s3fs_resident_count, nres);
 
 	/* Policy hook (struct_ops only): the admit set changed. */
 	(void)s3fs_policy_ops_eval_admit(0, 0);
@@ -172,18 +195,9 @@ int s3fs_ebpf_capacity_pass(void)
 		int pi;
 
 		if (cap_bytes) {
-			/* P3/AC-41: charge each pcache ino once, by its fd->buf
-			 * allocation rather than the admitted chunk sizes. */
-			for (pi = 0; pi < pcache_remaining; pi++) {
-				int pj;
-
-				for (pj = 0; pj < pi; pj++) {
-					if (pcache_inos[pj] == pcache_inos[pi])
-						break;
-				}
-				if (pj == pi)
-					live_bytes += s3fs_ino_buf_bytes(pcache_inos[pi]);
-			}
+			/* P3/AC-41: charge each inode by its fd->buf allocation. */
+			for (pi = 0; pi < pcache_remaining; pi++)
+				live_bytes += res[pi].bytes;
 			if (live_bytes > cap_bytes) {
 				cand = kcalloc(total_count, sizeof(*cand), GFP_KERNEL);
 				if (!cand)
@@ -205,21 +219,23 @@ int s3fs_ebpf_capacity_pass(void)
 		 * without a BPF-side lock, so one round holds the evict mutex. */
 		hrec = kcalloc(total_count, sizeof(*hrec), GFP_KERNEL);
 		s3fs_policy_evict_lock();
+		s3fs_pass_res = res;
+		s3fs_pass_nres = nres;
 
 		/* Issue #22: hits on inos the policy already knows are older
 		 * than anything this round inserts, so they go in first; hits
 		 * on new inos follow their on_insert (after the loops). */
 		if (hrec) {
 			for (pi = 0; pi < pcache_remaining; pi++)
-				if (s3fs_policy_trackable(pcache_inos[pi]) &&
-				    s3fs_hit_collect(pcache_inos[pi], &hrec[nhrec]))
+				if (s3fs_policy_trackable(res[pi].ino) &&
+				    s3fs_hit_collect(res[pi].ino, &hrec[nhrec]))
 					nhrec++;
 			s3fs_hit_replay(hrec, nhrec, S3FS_HIT_BEFORE_INSERT, s3fs_hit_signal);
 		}
 
 		/* Phase 1: collect unique inos and call on_evict once each. */
 		for (pi = 0; pi < pcache_remaining; pi++) {
-			u64 ino = pcache_inos[pi];
+			u64 ino = res[pi].ino;
 			u32 j;
 
 			for (j = 0; j < eval_count; j++) {
@@ -241,7 +257,7 @@ int s3fs_ebpf_capacity_pass(void)
 				/* AC-66: charged by fd->cap, as live_bytes. */
 				if (pv && s3fs_policy_trackable(ino))
 					s3fs_policy_track(ino,
-						cap_bytes ? s3fs_ino_buf_bytes(ino) : 0,
+						cap_bytes ? res[pi].bytes : 0,
 						cap_bytes);
 
 				if (so_vote != 0)
@@ -268,7 +284,7 @@ int s3fs_ebpf_capacity_pass(void)
 		/* Phase 2: build cand[] / drive legacy eviction.  In capacity
 		 * mode each ino appears at most once. */
 		for (pi = 0; pi < pcache_remaining; pi++) {
-			u64 ino = pcache_inos[pi];
+			u64 ino = res[pi].ino;
 			int score = 0;
 			u32 j;
 
@@ -351,6 +367,8 @@ int s3fs_ebpf_capacity_pass(void)
 				pr_info_ratelimited("s3fs_ebpf: admit set %llu B still over capacity %llu B (in-flight misses)\n",
 						    live_bytes, cap_bytes);
 		}
+		s3fs_pass_res = NULL;
+		s3fs_pass_nres = 0;
 		s3fs_policy_evict_unlock();
 		if (structops_votes)
 			pr_info("s3fs_ebpf: struct_ops voted evict on %u/%u entries\n",
@@ -364,7 +382,7 @@ int s3fs_ebpf_capacity_pass(void)
 
 
 out_free_pcache:
-	kfree(pcache_inos);
+	kfree(res);
 	return 0;
 }
 
@@ -377,10 +395,6 @@ void s3fs_ebpf_daemon_arm(void)
 
 void s3fs_ebpf_admit_shutdown(void)
 {
-	write_lock(&s3fs_admits_lock);
-	admit_clear_locked();
-	atomic_inc(&s3fs_admit_gen); /* AB-10: shutdown clears all entries */
-	write_unlock(&s3fs_admits_lock);
 	WRITE_ONCE(s3fs_daemon_armed, false);
 
 	/* Same lifecycle: daemon closed / module unloading. Fail any

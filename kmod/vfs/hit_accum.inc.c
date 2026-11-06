@@ -225,10 +225,3 @@ static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool after_insert,
 			hit(recs[i].ino);
 	}
 }
-
-static int s3fs_u64_cmp(const void *a, const void *b)
-{
-	u64 x = *(const u64 *)a, y = *(const u64 *)b;
-
-	return x < y ? -1 : x > y;
-}

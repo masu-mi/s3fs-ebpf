@@ -120,7 +120,7 @@ __bpf_kfunc s64 s3fs_kfunc_arena_list_walk(u64 head_uaddr, u32 max_nodes,
  */
 __bpf_kfunc u32 s3fs_kfunc_admit_count(void)
 {
-	return (u32)atomic_read(&s3fs_admits_count);
+	return (u32)atomic_read(&s3fs_resident_count);
 }
 
 __bpf_kfunc u32 s3fs_kfunc_softcap(void)

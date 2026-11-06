@@ -27,7 +27,7 @@ void s3fs_ebpf_admit_shutdown(void);
 
 /* AB-04: populate the Linux page cache (via fd->buf) for `ino` with `size`
  * bytes of file data from user pointer `data_ptr` at file offset `offset`.
- * Inserts an S3FS_ADMIT_FLAG_PCACHE admit entry so read paths skip the
+ * Marks the chunks populated, so read paths skip the
  * BPF arena / GUP and fall through to generic_file_read_iter. */
 int  s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 			      const void __user *data_ptr);
@@ -109,10 +109,10 @@ extern atomic_long_t s3fs_folio_hits;
 extern atomic_long_t s3fs_hits_replayed_total;
 extern atomic_long_t s3fs_admit_invalidations;
 
-/* Running admit hash size. Read from s3fs_kfunc_admit_count() in
- * tree_traversal.c so BPF policy programs can make pressure-aware
- * decisions. Updated under s3fs_admits_lock write side (rwlock). */
-extern atomic_t s3fs_admits_count;
+/* Number of cached inodes the last capacity pass saw. Read from
+ * s3fs_kfunc_admit_count() in tree_traversal.c so BPF policy programs can make
+ * pressure-aware decisions. */
+extern atomic_t s3fs_resident_count;
 
 /* Default for the `softcap` module parameter (entry count above which
  * eviction votes are applied, legacy mode). Runtime value lives in
@@ -155,8 +155,9 @@ extern atomic_long_t s3fs_reset_skipped;
 /* M2: gauge cross-check (slots 12/13) — see vfs_ops.c. */
 void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache);
 
-/* Per-ino size lookup. Returns 0 when the ino is not admitted.
- * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */
+/* Per-ino size lookup: the bytes the cache holds for the ino (fd->cap), 0 when it
+ * is not a candidate of the capacity pass in progress. Called by
+ * s3fs_kfunc_ino_size(); lock-free, only valid inside a pass. */
 u64 s3fs_admit_size(u64 ino);
 
 /* Drain the ring buffer of policy-evicted inos. `out` holds up to

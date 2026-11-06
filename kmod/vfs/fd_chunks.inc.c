@@ -332,13 +332,12 @@ static bool s3fs_ino_chunk_populated(u64 ino, u64 chunk_offset)
 
 /* AC-45 C3: free the idle chunks of an ino that has a miss in flight.
  *
- * The capacity pass cannot evict such an ino whole (its PCACHE entries and
- * the chunk being populated must survive until the waiting reader is
- * served), but it must not let a file read front to back keep every chunk
- * it has already served.  This frees every chunk no reader waits on
- * (readers == 0; a reader pins before it creates its pending) and drops the
- * PCACHE entries overlapping them first, so R1 holds.  Returns true if
- * anything was freed.  Takes fd->lock; call with no other lock held. */
+ * The capacity pass cannot evict such an ino whole (the chunk being populated
+ * must survive until the waiting reader is served), but it must not let a
+ * file read front to back keep every chunk it has already served.  This
+ * frees every chunk no reader waits on (readers == 0; a reader pins before it
+ * creates its pending).  Returns true if anything was freed.  Takes fd->lock;
+ * call with no other lock held. */
 static bool s3fs_ino_shed_unpinned(u64 ino)
 {
 	struct inode *inode;
@@ -364,26 +363,9 @@ static bool s3fs_ino_shed_unpinned(u64 ino)
 		struct s3fs_chunk *c = &fd->chunks[ci];
 		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
 		u64 ce = cs + S3FS_CHUNK_SIZE;
-		struct s3fs_admit *a;
-		struct hlist_node *tmp;
-		bool removed = false;
 
 		if (!c->p || c->readers)
 			continue;
-		write_lock(&s3fs_admits_lock);
-		hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
-			if (a->ino != ino || !(a->flags & S3FS_ADMIT_FLAG_PCACHE))
-				continue;
-			if (a->offset >= ce || a->offset + a->size <= cs)
-				continue;
-			hash_del(&a->node);
-			kfree(a);
-			atomic_dec(&s3fs_admits_count);
-			removed = true;
-		}
-		if (removed)
-			atomic_inc(&s3fs_admit_gen);
-		write_unlock(&s3fs_admits_lock);
 		s3fs_fd_chunk_free(fd, ci);
 		/* The page cache must not keep serving what capacity dropped
 		 * (cf. s3fs_evict_page_cache; trylock-based, so no deadlock with
@@ -430,7 +412,7 @@ static inline bool s3fs_fd_buf_owned(struct inode *inode)
  * s3fs_file_data_reserve sizes fd->buf to at least the populate end (and,
  * AC-46, up to 2x cap bounded by the file size), so one tail chunk admits
  * 4 MiB but allocates the whole file.  Lockless read —
- * accounting only.  Must be called without s3fs_admits_lock held (iput). */
+ * accounting only.  Call it with no lock held (iput). */
 static u64 s3fs_ino_buf_bytes(u64 ino)
 {
 	struct inode *inode;

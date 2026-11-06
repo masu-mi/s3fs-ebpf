@@ -355,10 +355,9 @@ struct s3fs_rename_event {
  * releases the lock. Subsequent reads via generic_file_read_iter find
  * the data in the page cache without any GUP.
  *
- * After the copy, kmod inserts an admit entry with the
- * S3FS_ADMIT_FLAG_PCACHE flag set (uaddr=0, no daemon mm needed).
- * .read_iter skips the arena fast path and falls through to
- * generic_file_read_iter so the page cache serves the data.
+ * After the copy the chunks are marked populated: a read of them is a hit
+ * (served from the fd by .read_folio into the page cache) and the capacity pass
+ * counts the inode.
  * If the kernel evicts the folios later, .read_folio re-triggers the
  * daemon upcall which calls this ioctl again to re-populate.
  *
@@ -371,9 +370,6 @@ struct s3fs_populate_pages {
 	__u64 size;      /* number of bytes in data */
 	__u64 data_ptr;  /* user pointer to data bytes */
 };
-
-/* AB-04: admit entry flag — data is in page cache, not in BPF arena. */
-#define S3FS_ADMIT_FLAG_PCACHE  (1U << 0)
 
 #define S3FS_IOC_POPULATE_PAGES \
 	_IOW(S3FS_IOC_MAGIC, 0x0E, struct s3fs_populate_pages)
