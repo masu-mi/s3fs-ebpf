@@ -6,7 +6,52 @@
 
 /* .read_iter: count one access for this open file.  The only shared-looking
  * state touched is the struct file's own hit_tick and a per-CPU slot. */
-static void s3fs_hit_count(struct file *file, struct inode *inode)
+/* Slack (bytes) within which two consecutive reads are sequential: covers a
+ * readahead-rounded request, which can start up to a page past the last end. */
+#define S3FS_SEQ_SLACK 4096ULL
+
+static DEFINE_PER_CPU(u64, s3fs_ri_calls);
+static DEFINE_PER_CPU(u64, s3fs_ri_pos0);
+
+u64 s3fs_read_iter_calls(void)
+{
+	u64 sum = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		sum += per_cpu(s3fs_ri_calls, cpu);
+	return sum;
+}
+
+u64 s3fs_read_iter_pos0(void)
+{
+	u64 sum = 0;
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		sum += per_cpu(s3fs_ri_pos0, cpu);
+	return sum;
+}
+
+/* The read pattern of an fd, summed over the CPUs. */
+static void s3fs_fd_read_pattern(struct s3fs_file_data *fd, u32 *seq, u32 *rnd)
+{
+	u64 s = 0, r = 0;
+	int cpu;
+
+	if (fd && fd->hit)
+		for_each_possible_cpu(cpu) {
+			struct s3fs_hit_acc *acc = per_cpu_ptr(fd->hit, cpu);
+
+			s += READ_ONCE(acc->seq_count);
+			r += READ_ONCE(acc->rand_count);
+		}
+	*seq = (u32)min_t(u64, s, U32_MAX);
+	*rnd = (u32)min_t(u64, r, U32_MAX);
+}
+
+static void s3fs_hit_count(struct kiocb *iocb, size_t len, struct file *file,
+			   struct inode *inode)
 {
 	struct s3fs_file_admit_cache *fc = file->private_data;
 	struct s3fs_file_data *fd = inode->i_private;
@@ -16,6 +61,23 @@ static void s3fs_hit_count(struct file *file, struct inode *inode)
 
 	if (!fc || !fd || !fd->hit)
 		return;
+	/* Every read: the access pattern and the .read_iter counters (the
+	 * policy signal below is rate-limited per open file). */
+	preempt_disable();
+	acc = this_cpu_ptr(fd->hit);
+	{
+		u64 pos = (u64)iocb->ki_pos, expected = acc->last_end_pos;
+
+		if (pos <= expected + S3FS_SEQ_SLACK && pos + len > expected)
+			acc->seq_count++;
+		else
+			acc->rand_count++;
+		acc->last_end_pos = pos + len;
+		this_cpu_inc(s3fs_ri_calls);
+		if (pos == 0)
+			this_cpu_inc(s3fs_ri_pos0);
+	}
+	preempt_enable();
 	last = READ_ONCE(fc->hit_tick);
 	rearm = READ_ONCE(s3fs_hit_rearm_jiffies);
 	if (last && (!rearm || now - last < rearm))
@@ -31,14 +93,6 @@ static void s3fs_hit_count(struct file *file, struct inode *inode)
 static void s3fs_hit_signal(u64 ino)
 {
 	(void)s3fs_policy_ops_eval_hit(ino);
-}
-
-/* The direct (pre-#22) on_hit signal. */
-static void s3fs_hit_signal_direct(u64 ino)
-{
-	if (READ_ONCE(s3fs_hit_accum))
-		return;
-	s3fs_hit_signal(ino);
 }
 
 /* fd-level core of s3fs_hit_collect.  Caller holds s3fs_policy_evict_lock
@@ -170,11 +224,4 @@ static void s3fs_hit_replay(struct s3fs_hit_rec *recs, u32 n, bool after_insert,
 		for (k = 0; k < calls; k++)
 			hit(recs[i].ino);
 	}
-}
-
-static int s3fs_u64_cmp(const void *a, const void *b)
-{
-	u64 x = *(const u64 *)a, y = *(const u64 *)b;
-
-	return x < y ? -1 : x > y;
 }

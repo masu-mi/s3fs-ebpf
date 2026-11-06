@@ -16,21 +16,18 @@
 int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc);
 
 /*
- * Admit table API — populated by the /dev/s3fs_ebpf ioctl handler,
- * consumed by the read path. `mm` is the daemon's mm_struct (with a
- * reference held by kmod); entries carry userspace addresses into
- * that mm which .read pins via pin_user_pages_remote. count==0 clears
- * the arena entries; a non-NULL mm still replaces the held mm (AC-43),
- * mm==NULL keeps it. Only admit_shutdown drops the mm ref.
+ * Capacity / policy pass and daemon arming.  s3fs_ebpf_capacity_pass runs the
+ * admit_replace-style pass (hit replay, on_insert / on_size, votes, eviction
+ * down to capacity_bytes); the EVAL ioctl calls it.  Opening /dev/s3fs_ebpf arms
+ * the read-miss upcall; admit_shutdown (umount) disarms it.
  */
-int  s3fs_ebpf_admit_replace(struct mm_struct *mm,
-			     const struct s3fs_admit_entry *entries,
-			     u32 count);
+int  s3fs_ebpf_capacity_pass(void);
+void s3fs_ebpf_daemon_arm(void);
 void s3fs_ebpf_admit_shutdown(void);
 
 /* AB-04: populate the Linux page cache (via fd->buf) for `ino` with `size`
  * bytes of file data from user pointer `data_ptr` at file offset `offset`.
- * Inserts an S3FS_ADMIT_FLAG_PCACHE admit entry so read paths skip the
+ * Marks the chunks populated, so read paths skip the
  * BPF arena / GUP and fall through to generic_file_read_iter. */
 int  s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 			      const void __user *data_ptr);
@@ -110,18 +107,16 @@ extern atomic_long_t s3fs_evictions_total;
  * cache hit ratio. */
 extern atomic_long_t s3fs_folio_hits;
 
-/* Issue #22: hit_accum=1 counts hits in .read_iter (per-CPU, per inode)
- * and replays them into the policy from admit_replace Phase 1; the
- * direct on_hit calls (fentry KFunc, .read_folio) then do nothing.
+/* Issue #22: .read_iter counts hits (per-CPU, per inode) and replays them
+ * into the policy from admit_replace Phase 1.
  * s3fs_hits_replayed_total is IOC_STATS slot 14. */
-extern bool s3fs_hit_accum;
 extern atomic_long_t s3fs_hits_replayed_total;
 extern atomic_long_t s3fs_admit_invalidations;
 
-/* Running admit hash size. Read from s3fs_kfunc_admit_count() in
- * tree_traversal.c so BPF policy programs can make pressure-aware
- * decisions. Updated under s3fs_admits_lock write side (rwlock). */
-extern atomic_t s3fs_admits_count;
+/* Number of cached inodes the last capacity pass saw. Read from
+ * s3fs_kfunc_admit_count() in tree_traversal.c so BPF policy programs can make
+ * pressure-aware decisions. */
+extern atomic_t s3fs_resident_count;
 
 /* Default for the `softcap` module parameter (entry count above which
  * eviction votes are applied, legacy mode). Runtime value lives in
@@ -135,13 +130,12 @@ extern unsigned long long s3fs_capacity_bytes;
  * and always falls through to generic_file_read_iter (page-cache path).
  * Allows bench-ab-arena-vs-pagecache.sh to compare arena vs page-cache
  * latency under identical conditions without remounting. */
-extern bool s3fs_arena_bypass;
 
 /* AB-01: cumulative GUP (pin_user_pages_remote) call count and total
  * latency in nanoseconds. Exported via IOC_STATS slots 3/4 so the
  * bench script can compute mean ns/call without bpftrace. */
-extern atomic_long_t s3fs_gup_calls_total;
-extern atomic_long_t s3fs_gup_ns_total;
+u64 s3fs_read_iter_calls(void);
+u64 s3fs_read_iter_pos0(void);
 
 /* T4: .read_folio calls that exhausted S3FS_UPCALL_MAX_RETRIES with the
  * daemon alive. Exported via IOC_STATS slot 5.  Non-zero means capacity
@@ -165,13 +159,13 @@ extern atomic_long_t s3fs_reset_skipped;
 /* M2: gauge cross-check (slots 12/13) — see vfs_ops.c. */
 void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache);
 
-/* Per-ino size lookup. Returns 0 when the ino is not admitted.
- * Called by s3fs_kfunc_ino_size(). Takes s3fs_admits_lock read side. */
+/* Per-ino size lookup: the bytes the cache holds for the ino (fd->cap), 0 when it
+ * is not a candidate of the capacity pass in progress. Called by
+ * s3fs_kfunc_ino_size(); lock-free, only valid inside a pass. */
 u64 s3fs_admit_size(u64 ino);
 
 /* Drain the ring buffer of policy-evicted inos. `out` holds up to
  * `cap` slots; kmod writes the actual count into *filled and any
  * dropped entries (since last drain) into *overflow. */
-void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow);
 
 #endif /* _S3FS_EBPF_VFS_OPS_H */

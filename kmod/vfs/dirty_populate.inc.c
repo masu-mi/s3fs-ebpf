@@ -332,15 +332,10 @@ int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 				 offset >> PAGE_SHIFT,
 				 (end - 1) >> PAGE_SHIFT);
 
-	/* R1: insert the pcache entry while fd->lock is still held so no
-	 * eviction can free fd->buf between the copy above and the insert
-	 * below.  kzalloc inside admit_insert_pcache runs before write_lock,
-	 * so sleeping with fd->lock (mutex) held is safe. */
-	if (!owned) {	/* a dirty fd is not capacity-managed */
-		err = admit_insert_pcache(ino, offset, size);
-		if (!err)
-			s3fs_hit_set_base(fd);
-	}
+	/* The populated chunks are the cache's only record: the capacity pass finds
+	 * this inode by its allocated chunks, a read hits on `populated`. */
+	if (!owned)	/* a dirty fd is not capacity-managed */
+		s3fs_hit_set_base(fd);
 out_unlock:
 	mutex_unlock(&fd->lock);
 out_iput:

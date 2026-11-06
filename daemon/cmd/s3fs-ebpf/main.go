@@ -15,7 +15,6 @@
 //
 //	dev test-arena    - Week 1 bpf_arena + KFunc round-trip probe
 //	dev verifier-demo - Week 2 verifier rejection demo
-//	dev probe-kvbase  - Week 4 arena ioctl kvbase probe
 //	dev microbench    - tight-loop stat/read latency bench
 //	dev trace-replay  - offline policy hit-rate simulator
 //
@@ -36,8 +35,8 @@ const usage = `Usage: s3fs-ebpf <command> [options]
 Commands:
   mount        Mount an S3 bucket via the s3fs_ebpf VFS
   unmount      Unmount a previously mounted target
-  fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, stream
-               ringbuf miss events, sync S3, serve arena content
+  fastpath     Run the fastpath daemon: attach fentry/vfs_getattr, serve
+               read misses, flush, sync S3
   stats        Print fast/slow path counters
   policy       Hot-reload the cache policy blob
   hash-policy  Print SHA256 for a user policy .bpf.o (for allowlist entries).
@@ -60,9 +59,6 @@ Dev / probe / demo commands:
                 walker and print the verifier's rejection log, then run the
                 same walk through the s3fs_kfunc_arena_list_walk KFunc
                 (needs bpf/kfunc_walk.bpf.o and s3fs_kfunc loaded).
-  probe-kvbase  Week 4 probe: create an arena, ioctl(/dev/s3fs_ebpf,
-                S3FS_IOC_PROBE_KVBASE) to read its kernel-VM base, and compare
-                it against the user-VM base.
   microbench    Tight-loop stat/read latency bench on a target path.
                 Reports min/p50/p95/p99/max (no fork/exec overhead).
   trace-replay  Offline policy simulator (P-04). Feeds a workload trace or a

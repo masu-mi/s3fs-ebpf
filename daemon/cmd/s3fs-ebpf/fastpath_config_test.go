@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -21,30 +20,6 @@ func TestS3fifoGhostCapFor(t *testing.T) {
 	} {
 		if got := s3fifoGhostCapFor(tt.softcap); got != tt.want {
 			t.Errorf("s3fifoGhostCapFor(%d) = %d, want %d", tt.softcap, got, tt.want)
-		}
-	}
-}
-
-func TestFastpathModesValidate(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		m    fastpathModes
-		want string // substring of the error; "" = valid
-	}{
-		{"defaults", fastpathModes{patternAdmit: true}, ""},
-		{"nothing set", fastpathModes{}, ""},
-		{"pattern admit without the hook", fastpathModes{patternAdmit: true, noReadIterHook: true}, "--pattern-aware-admit requires"},
-		{"prefetch-seq without the hook", fastpathModes{prefetchSeq: true, noReadIterHook: true}, "--prefetch-seq-admit requires"},
-		{"hook off alone is fine", fastpathModes{noReadIterHook: true}, ""},
-		{"pcache-prewarm needs pcache mode", fastpathModes{pcachePrewarm: true}, "--pcache-prewarm requires --arena-metadata-only"},
-		{"pcache-prewarm with pcache mode", fastpathModes{pcachePrewarm: true, arenaMetadataOnly: true}, ""},
-	} {
-		err := tt.m.validate()
-		switch {
-		case tt.want == "" && err != nil:
-			t.Errorf("%s: unexpected error %v", tt.name, err)
-		case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
-			t.Errorf("%s: err = %v, want one containing %q", tt.name, err, tt.want)
 		}
 	}
 }

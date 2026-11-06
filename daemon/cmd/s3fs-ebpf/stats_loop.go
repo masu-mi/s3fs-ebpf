@@ -91,10 +91,10 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 						metrics.Global.AdmitInvalidations.Store(vals[2])
 					}
 					if len(vals) >= 4 {
-						metrics.Global.GupCallsTotal.Store(vals[3])
+						metrics.Global.ReadIterHits.Store(vals[3])
 					}
 					if len(vals) >= 5 {
-						metrics.Global.GupNsTotal.Store(vals[4])
+						metrics.Global.ReadIterHitsPos0.Store(vals[4])
 					}
 					if len(vals) >= 6 {
 						metrics.Global.UpcallRetryExhausted.Store(vals[5])
@@ -127,52 +127,6 @@ func runStatsLoop(ctx context.Context, progs *fpebpf.Programs, devPath string, e
 				}
 			}
 
-			// Source 3: arena free-list gauge.
-			if progs != nil {
-				bytes, chunks := progs.ArenaFreeStats()
-				metrics.Global.ArenaFreeBytes.Store(bytes)
-				metrics.Global.ArenaFreeChunks.Store(uint64(chunks))
-			}
-		}
-	}
-}
-
-// drainEvictionsLoop polls S3FS_IOC_DRAIN_EVICTIONS and prunes the
-// daemon-side admit snapshot to match. Without this, daemon re-sends
-// evicted inos on the next admit_replace and kmod evicts them again
-// in a tight loop — visible in Grafana as admits_current staying
-// high while policy_evictions_total climbs monotonically.
-//
-// D-02: `progs` is threaded so dropAdmits can return arena chunks
-// to the free-list (fpebpf.Programs.FreeArenaChunk).
-func drainEvictionsLoop(ctx context.Context, devPath string, progs *fpebpf.Programs, every time.Duration) {
-	// T-03: open once and reuse the fd across ticks instead of
-	// open/close on every 2s poll.
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[evict-drain] open %s: %v\n", devPath, err)
-		return
-	}
-	defer f.Close()
-
-	t := time.NewTicker(every)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			evicted, overflow, err := drainEvictionsOn(int(f.Fd()))
-			if err != nil {
-				continue
-			}
-			if overflow > 0 {
-				fmt.Fprintf(os.Stderr, "[evict-drain] kmod queue overflow=%d (may need larger buffer)\n",
-					overflow)
-			}
-			if n := dropAdmits(evicted, progs); n > 0 {
-				fmt.Printf("[evict-drain] dropped %d admits fed back from kmod\n", n)
-			}
 		}
 	}
 }
@@ -189,25 +143,7 @@ func printCounters(progs *fpebpf.Programs, label string) {
 	metrics.Global.FastPathHits.Store(c[fpebpf.StatFastHits])
 	metrics.Global.SlowPathMisses.Store(c[fpebpf.StatSlowMisses])
 	metrics.Global.UnknownFS.Store(c[fpebpf.StatUnknownFS])
-	metrics.Global.ReadIterHits.Store(c[fpebpf.StatReadIterHits])
-	metrics.Global.ReadIterMisses.Store(c[fpebpf.StatReadIterMisses])
-	metrics.Global.ReadIterHitsPos0.Store(c[fpebpf.StatReadIterHitsPos0])
-	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d read_iter_hits=%d read_iter_misses=%d iter_pos0=%d\n",
+	fmt.Printf("[counters/%s] fast_hits=%d slow_misses=%d unknown_fs=%d\n",
 		label,
-		c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS],
-		c[fpebpf.StatReadIterHits], c[fpebpf.StatReadIterMisses],
-		c[fpebpf.StatReadIterHitsPos0])
-}
-
-func opName(op uint32) string {
-	switch op {
-	case fpebpf.OpGetattr:
-		return "getattr"
-	case fpebpf.OpLookup:
-		return "lookup"
-	case fpebpf.OpRead:
-		return "read"
-	default:
-		return fmt.Sprintf("op#%d", op)
-	}
+		c[fpebpf.StatFastHits], c[fpebpf.StatSlowMisses], c[fpebpf.StatUnknownFS])
 }

@@ -8,44 +8,6 @@
  * before falling back to the compile-time kmalloc buffer. */
 #define S3FS_UPCALL_WAIT_JIFFIES  (2 * HZ)
 
-/*
- * Range-aware admit snapshot (D-01). Finds the admit entry that
- * covers file offset `pos` and returns arena bytes relative to it:
- *
- *   *out_uaddr    daemon user_vm address of `pos` within the range
- *   *out_avail    bytes remaining in the range starting at `pos`
- *
- * Callers pass `pos` as the folio's file offset. On hit, they can
- * read up to `*out_avail` bytes from `*out_uaddr` via GUP. When
- * the daemon still uses whole-file admits (offset=0, size=file_size)
- * this collapses to the legacy behavior (`*out_uaddr = base + pos`,
- * `*out_avail = size - pos`).
- */
-static bool admit_snapshot(u64 ino, u64 pos,
-			   u64 *out_uaddr, u64 *out_avail,
-			   struct mm_struct **out_mm)
-{
-	struct s3fs_admit *a;
-	bool hit = false;
-
-	read_lock(&s3fs_admits_lock);
-	a = admit_lookup_at_locked(ino, pos);
-	/* S10: pcache entries have uaddr=0 — their data lives in fd->buf, not
-	 * the daemon's arena.  Returning true here with uaddr≈0 causes
-	 * fill_from_arena to call GUP on a near-NULL daemon address, which
-	 * silently zero-fills the folio and marks it uptodate, bypassing the
-	 * upcall retry path that would correctly re-populate fd->buf. */
-	if (a && !(a->flags & S3FS_ADMIT_FLAG_PCACHE)) {
-		u64 within = pos - a->offset;
-		*out_uaddr = a->uaddr + within;
-		*out_avail = a->size - within;
-		*out_mm    = s3fs_admitted_mm;
-		hit = true;
-	}
-	read_unlock(&s3fs_admits_lock);
-	return hit;
-}
-
 /* AC-50: attempts per chunk before giving up with -EIO (each waits up to
  * S3FS_UPCALL_WAIT_JIFFIES for the daemon). */
 #define S3FS_LOAD_MAX_TRIES	6
@@ -303,7 +265,6 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 			continue;
 		for (;;) {
 			struct s3fs_pending *p;
-			struct mm_struct *mm;
 			bool have, bound;
 			long rem = 1;
 
@@ -316,10 +277,7 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 			if (have)
 				break;
 
-			read_lock(&s3fs_admits_lock);
-			mm = s3fs_admitted_mm;
-			read_unlock(&s3fs_admits_lock);
-			if (!mm) {
+			if (!READ_ONCE(s3fs_daemon_armed)) {
 				err = -EIO; /* no daemon: cannot fetch the rest */
 				p = NULL;
 			} else {
@@ -334,7 +292,7 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 
 				err = p ? miss_enqueue(inode->i_ino, cs, want,
 						       S3FS_MISS_FLAG_FOR_WRITE |
-						       (bound ? S3FS_MISS_FLAG_PINNED : 0))
+						       (bound ? S3FS_MISS_FLAG_PINNED : 0), NULL)
 					: -ENOMEM;
 			}
 			if (!err) {

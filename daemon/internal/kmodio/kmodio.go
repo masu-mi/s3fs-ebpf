@@ -11,21 +11,7 @@ const (
 	SyncNameMax = 255
 	// StatsMax is the number of counters S3FS_IOC_STATS returns.
 	StatsMax = 16
-	// EvictLogMax is the capacity of one S3FS_IOC_DRAIN_EVICTIONS reply.
-	EvictLogMax = 256
 )
-
-// AdmitEntry mirrors `struct s3fs_admit_entry` in
-// include/s3fs_ebpf_uapi.h. `Uaddr` is the daemon-side user_vm
-// address of the range's bytes. `Offset` is the file offset where
-// the range starts (D-01); Offset=0 & Size=full_file is the
-// whole-file admit (backward-compat default).
-type AdmitEntry struct {
-	Ino    uint64
-	Uaddr  uint64
-	Size   uint64
-	Offset uint64
-}
 
 // AB-04: PopulatePagesArg mirrors `struct s3fs_populate_pages`.
 // The daemon hands S3 data to kmod via this ioctl so kmod can store it
@@ -36,13 +22,6 @@ type PopulatePagesArg struct {
 	Offset  uint64
 	Size    uint64
 	DataPtr uint64 // user pointer to data bytes (unsafe.Pointer value)
-}
-
-// AdmitArenaArg mirrors `struct s3fs_admit_arena`.
-type AdmitArenaArg struct {
-	Count   uint32
-	_pad    uint32
-	Entries uint64
 }
 
 // SignalAdmitArg mirrors `struct s3fs_signal_admit` (U13: added ChunkOffset).
@@ -83,14 +62,6 @@ type StatsArg struct {
 	Count  uint32
 	Filled uint32
 	Values [StatsMax]uint64
-}
-
-type DrainEvictionsArg struct {
-	Cap      uint32
-	Filled   uint32
-	Overflow uint32
-	_pad     uint32
-	Inos     [EvictLogMax]uint64
 }
 
 // DeleteEvent mirrors `struct s3fs_delete_event` (G-01 layout).
@@ -154,25 +125,15 @@ type SyncEntriesArg struct {
 	AppliedSeq uint64 // AC-85: events with seq <= AppliedSeq are applied to S3
 }
 
-// ProbeKvbaseArg mirrors `struct s3fs_probe_kvbase` in
-// include/s3fs_ebpf_uapi.h. Layout is fixed by the kmod's ioctl handler.
-type ProbeKvbaseArg struct {
-	ArenaFD   uint32
-	_pad      uint32
-	OutKvbase uint64
-	OutSize   uint64
-}
-
 // ioctl numbers: _IO{R,W,WR}(0xE3, nr, type).
 const (
 	IocPopulatePages  = (1 << 30) | (uint32(unsafe.Sizeof(PopulatePagesArg{})) << 16) | (0xE3 << 8) | 0x0E
-	IocAdmitArena     = (1 << 30) | (uint32(unsafe.Sizeof(AdmitArenaArg{})) << 16) | (0xE3 << 8) | 0x02
+	IocEval           = (0 << 30) | (0 << 16) | (0xE3 << 8) | 0x02 // _IO(0xE3, 0x02)
 	IocSignalAdmit    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
 	IocPopFlush       = (2 << 30) | (uint32(unsafe.Sizeof(FlushEvent{})) << 16) | (0xE3 << 8) | 0x05
 	IocReadDirty      = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
 	IocMarkDirty      = (1 << 30) | (uint32(unsafe.Sizeof(MarkDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
 	IocStats          = (3 << 30) | (uint32(unsafe.Sizeof(StatsArg{})) << 16) | (0xE3 << 8) | 0x08
-	IocDrainEvictions = (3 << 30) | (uint32(unsafe.Sizeof(DrainEvictionsArg{})) << 16) | (0xE3 << 8) | 0x09
 	IocSignalFlush    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x0A
 	IocPopFlushWait   = (2 << 30) | (uint32(unsafe.Sizeof(FlushEvent{})) << 16) | (0xE3 << 8) | 0x0D
 	IocPopDelete      = (2 << 30) | (uint32(unsafe.Sizeof(DeleteEvent{})) << 16) | (0xE3 << 8) | 0x0B
@@ -180,5 +141,4 @@ const (
 	IocDirtyLayout    = (3 << 30) | (uint32(unsafe.Sizeof(DirtyLayoutArg{})) << 16) | (0xE3 << 8) | 0x0F
 	IocReadDirtyRange = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyRangeArg{})) << 16) | (0xE3 << 8) | 0x10
 	IocSyncEntries    = (1 << 30) | (uint32(unsafe.Sizeof(SyncEntriesArg{})) << 16) | (0xE3 << 8) | 0x04
-	IocProbeKvbase    = (3 << 30) | (uint32(unsafe.Sizeof(ProbeKvbaseArg{})) << 16) | (0xE3 << 8) | 0x01
 )

@@ -30,7 +30,7 @@ make doctor
 make test-lockdep                   # = scripts/test-lockdep.sh
 ```
 
-`make test-lockdep` は `make test-regression` を `hit_accum=1` (既定) と `0` で回し、各回の前に `dmesg -C` して、終わったら dmesg を見る。次のどれかがあれば FAIL。
+`make test-lockdep` は `make test-regression` を回し (2026-11-05 までは `hit_accum` 1 と 0 の 2 回)、各回の前に `dmesg -C` して、終わったら dmesg を見る。次のどれかがあれば FAIL。
 
 - `make` が失敗した (回帰テスト自体の失敗)
 - dmesg に lockdep の報告 (`possible circular locking`、`inconsistent lock state`、`possible recursive locking`、`bad unlock balance` ほか)、`BUG: sleeping function called from invalid context`、`suspicious RCU usage`、oops
@@ -42,7 +42,7 @@ make test-lockdep                   # = scripts/test-lockdep.sh
 
 | 変数 | 意味 |
 |---|---|
-| `MODES="1 0"` | `hit_accum` の値。既定は両方 |
+| `MODES="1"` | 実行回数のラベル。既定は 1 回 (`hit_accum` の module param は削除済み) |
 | `TARGETS="test-regression"` | 回す make target。個別に絞れる (`TARGETS="test-pcache-evict-race test-pick-victim-stale"`) |
 | `KUNIT=1` | 先に KUnit 付きの kmod (`KUNIT=1 make kmod`) をロードして、suite を lockdep の下で動かす。このカーネルは `CONFIG_KUNIT=y` にしてある。**この経路は書いただけで、まだ試していない** |
 | `OUT=/tmp/test-lockdep` | 出力先 |

@@ -22,6 +22,41 @@ type readMissEvent struct {
 	Offset int64
 	Count  uint32
 	Flags  uint32
+	// SeqCount / RandCount: the file's read pattern so far, counted by the
+	// kmod in .read_iter (what the read_iter fentry used to keep in a BPF map).
+	SeqCount  uint32
+	RandCount uint32
+}
+
+// readMissEventSize is sizeof(struct s3fs_read_miss_event): ino, offset,
+// count, flags, seq_count, rand_count.
+const readMissEventSize = 32
+
+// decodeReadMissEvent parses the kmod's event (little endian, as read from
+// /dev/s3fs_ebpf).  A buffer shorter than the struct (a pre-v2 kmod sent 24
+// bytes) is refused.
+func decodeReadMissEvent(buf []byte) (readMissEvent, bool) {
+	if len(buf) < readMissEventSize {
+		return readMissEvent{}, false
+	}
+	return readMissEvent{
+		Ino:       binary.LittleEndian.Uint64(buf[0:8]),
+		Offset:    int64(binary.LittleEndian.Uint64(buf[8:16])),
+		Count:     binary.LittleEndian.Uint32(buf[16:20]),
+		Flags:     binary.LittleEndian.Uint32(buf[20:24]),
+		SeqCount:  binary.LittleEndian.Uint32(buf[24:28]),
+		RandCount: binary.LittleEndian.Uint32(buf[28:32]),
+	}, true
+}
+
+// seqRatio returns the fraction of sequential reads [0, 1]; 0 when no read
+// has been counted.
+func (ev readMissEvent) seqRatio() float64 {
+	total := uint64(ev.SeqCount) + uint64(ev.RandCount)
+	if total == 0 {
+		return 0
+	}
+	return float64(ev.SeqCount) / float64(total)
 }
 
 // missFlagForWrite mirrors S3FS_MISS_FLAG_FOR_WRITE (AC-50): kmod is about
@@ -191,7 +226,7 @@ func runReadMissLoop(ctx context.Context, devPath string,
 
 	sem := make(chan struct{}, readMissWorkers)
 
-	var buf [24]byte // sizeof(readMissEvent)
+	var buf [readMissEventSize]byte
 	for {
 		n, err := f.Read(buf[:])
 		if err != nil {
@@ -200,15 +235,10 @@ func runReadMissLoop(ctx context.Context, devPath string,
 			}
 			return
 		}
-		if n < 24 {
+		ev, ok := decodeReadMissEvent(buf[:n])
+		if !ok {
 			fmt.Fprintf(os.Stderr, "[upcall] short read: %d bytes\n", n)
 			continue
-		}
-		ev := readMissEvent{
-			Ino:    binary.LittleEndian.Uint64(buf[0:8]),
-			Offset: int64(binary.LittleEndian.Uint64(buf[8:16])),
-			Count:  binary.LittleEndian.Uint32(buf[16:20]),
-			Flags:  binary.LittleEndian.Uint32(buf[20:24]),
 		}
 		fmt.Printf("[upcall] miss ino=%d offset=%d count=%d\n",
 			ev.Ino, ev.Offset, ev.Count)
@@ -229,11 +259,10 @@ const (
 	partialAdmitThreshold = 4 * 1024 * 1024
 	partialAdmitChunk     = 4 * 1024 * 1024
 
-	// seqAdmitRatioThreshold — minimum SeqRatio (from s3fs_read_pattern_map)
+	// seqAdmitRatioThreshold — minimum sequential-read ratio (from the miss event)
 	// above which a large-file miss is promoted to a full-file GET.
-	// R-01: fentry/generic_file_read_iter populates the map before kmod's
-	// .read_folio blocks, so by the time the goroutine runs the ratio often
-	// already reflects the sequential access character.
+	// R-01: kmod's .read_iter counts the reads before .read_folio blocks, so
+	// the ratio in the miss event already reflects the access character.
 	seqAdmitRatioThreshold = 0.70
 )
 
@@ -243,9 +272,6 @@ const (
 // run, so a file larger than the capacity would only be populated to be
 // evicted again; such files keep the chunk-by-chunk admit.
 func fullAdmitExceedsCapacity(fullSize int64) bool {
-	if !arenaMetadataOnlyEnabled {
-		return false
-	}
 	c, ok := capacityBytesFn()
 	return ok && c > 0 && fullSize > c
 }
@@ -302,7 +328,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	// AC-68: after this miss is served, read ahead the next siblings the
 	// prefetch_next policy asks for. Only the first chunk's miss counts,
 	// so a large file triggers it once per load, not once per chunk.
-	if missChunkOffset == 0 && arenaMetadataOnlyEnabled {
+	if missChunkOffset == 0 {
 		defer maybePrefetchSiblings(ev.Ino)
 	}
 
@@ -324,15 +350,15 @@ func handleReadMiss(ctx context.Context, devPath string,
 	var err error
 	isLarge := fullSize > 0 && fullSize > partialAdmitThreshold
 	useFullAdmit := !isLarge // small files always use full admit
-	if !useFullAdmit && patternAwareAdmitEnabled && progs != nil &&
+	if !useFullAdmit && patternAwareAdmitEnabled &&
 		!fullAdmitExceedsCapacity(fullSize) {
-		if pat, ok := progs.ReadAccessPattern(ev.Ino); ok && pat.SeqRatio() >= seqAdmitRatioThreshold {
+		if ev.SeqCount+ev.RandCount > 0 && ev.seqRatio() >= seqAdmitRatioThreshold {
 			useFullAdmit = true
 			fmt.Printf("[upcall] ino=%d %s seq_ratio=%.2f PROMOTE_SIGNAL=pattern-aware full admit (%d bytes)\n",
-				ev.Ino, entry.Name, pat.SeqRatio(), fullSize)
+				ev.Ino, entry.Name, ev.seqRatio(), fullSize)
 		}
 	}
-	if useFullAdmit && isLarge && arenaMetadataOnlyEnabled {
+	if useFullAdmit && isLarge {
 		// AC-52 step 3: parallel range GETs, populated and signalled per chunk.
 		serveChunkLoad(ctx, devPath, s3c, ev, entry.S3Key, entry.Name, fullSize, missChunkOffset)
 		return
@@ -355,89 +381,49 @@ func handleReadMiss(ctx context.Context, devPath string,
 		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 		return
 	}
-	// AB-04: when --arena-metadata-only, bypass BPF arena and send data
-	// directly to kmod's page cache via POPULATE_PAGES ioctl.
+	// Send the data to kmod's chunk table (and page cache) via the
+	// POPULATE_PAGES ioctl.
 	// The kmod limits each call to S3FS_POPULATE_MAX_SIZE (64 MiB), so split
 	// body into partialAdmitChunk-sized pieces; full-admit bodies (seq promote)
 	// can be arbitrarily large.
-	if arenaMetadataOnlyEnabled {
-		for attempt := 0; ; attempt++ {
-			off := chunkOffset
-			rem := body
-			for len(rem) > 0 {
-				n := len(rem)
-				if n > partialAdmitChunk {
-					n = partialAdmitChunk
-				}
-				if err := populatePagesFn(devPath, ev.Ino, off, rem[:n]); err != nil {
-					fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
-					metrics.Global.ReadMissErrors.Add(1)
-					_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
-					return
-				}
-				off += int64(n)
-				rem = rem[n:]
+	for attempt := 0; ; attempt++ {
+		off := chunkOffset
+		rem := body
+		for len(rem) > 0 {
+			n := len(rem)
+			if n > partialAdmitChunk {
+				n = partialAdmitChunk
 			}
-			fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
-				ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-			// AC-45 C2: enforce capacity while this miss is still pending.
-			enforceCapacityAfterPopulate(devPath)
-			// AC-45: kmod wakes the waiter only if the chunk is still
-			// cached.  Concurrent handlers for one ino and the capacity
-			// pass can evict what we just populated; populate again
-			// (bounded) instead of waking the reader with nothing to read.
-			err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0,
-				s3fsSignalVerifyPopulated)
-			if !errors.Is(err, unix.EAGAIN) {
-				return // woken, or nobody is waiting (ENOENT)
-			}
-			if attempt >= signalVerifyRetries {
-				// Give up verifying: wake the waiter so its own retry /
-				// fallback path takes over rather than hanging.
-				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			if err := populatePagesFn(devPath, ev.Ino, off, rem[:n]); err != nil {
+				fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
+				metrics.Global.ReadMissErrors.Add(1)
+				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 				return
 			}
-			metrics.Global.ReadMissRepopulates.Add(1)
+			off += int64(n)
+			rem = rem[n:]
 		}
-	}
-
-	// Arena path (default).
-	off, err := progs.AdmitContent(body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit content: %v\n", ev.Ino, err)
-		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -12 /* -ENOMEM */)
-		return
-	}
-	uaddr := progs.Arena().BaseAddr() + off
-	updateArenaHighWater(off, len(body))
-
-	// AC-49: replace only the ranges this admit overlaps — a chunk admit
-	// must not evict the ino's other chunks.
-	if err := replaceAdmitRange(devPath, admitEntry{
-		Ino:    ev.Ino,
-		Uaddr:  uaddr,
-		Size:   uint64(len(body)),
-		Offset: uint64(chunkOffset),
-	}, progs); err != nil {
-		fmt.Fprintf(os.Stderr, "[upcall] ino=%d admit arena: %v\n", ev.Ino, err)
-		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
-		return
-	}
-	if chunkOffset > 0 {
-		fmt.Printf("[upcall] ino=%d %s admitted range [%d,%d) (partial)\n",
+		fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
 			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-	} else {
-		fmt.Printf("[upcall] ino=%d %s admitted %d bytes\n",
-			ev.Ino, entry.Name, len(body))
+		// AC-45 C2: enforce capacity while this miss is still pending.
+		enforceCapacityAfterPopulate(devPath)
+		// AC-45: kmod wakes the waiter only if the chunk is still
+		// cached.  Concurrent handlers for one ino and the capacity
+		// pass can evict what we just populated; populate again
+		// (bounded) instead of waking the reader with nothing to read.
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0,
+			s3fsSignalVerifyPopulated)
+		if !errors.Is(err, unix.EAGAIN) {
+			return // woken, or nobody is waiting (ENOENT)
+		}
+		if attempt >= signalVerifyRetries {
+			// Give up verifying: wake the waiter so its own retry /
+			// fallback path takes over rather than hanging.
+			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			return
+		}
+		metrics.Global.ReadMissRepopulates.Add(1)
 	}
-	_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
 }
 
 // -- AA-04: sequential read-ahead prefetch --------------------------------
-
-// arenaMetadataOnlyEnabled switches the miss handler to use
-// S3FS_IOC_POPULATE_PAGES instead of AdmitContent + admitArena.
-// Set once by main from the --arena-metadata-only flag.
-var arenaMetadataOnlyEnabled bool

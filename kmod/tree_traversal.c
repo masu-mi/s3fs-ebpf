@@ -120,7 +120,7 @@ __bpf_kfunc s64 s3fs_kfunc_arena_list_walk(u64 head_uaddr, u32 max_nodes,
  */
 __bpf_kfunc u32 s3fs_kfunc_admit_count(void)
 {
-	return (u32)atomic_read(&s3fs_admits_count);
+	return (u32)atomic_read(&s3fs_resident_count);
 }
 
 __bpf_kfunc u32 s3fs_kfunc_softcap(void)
@@ -175,32 +175,6 @@ __bpf_kfunc u64 s3fs_kfunc_ino_size(u64 ino)
 	return s3fs_admit_size(ino);
 }
 
-/*
- * S-03: call the active policy's on_hit hook for `ino` from a
- * BPF_PROG_TYPE_TRACING context (e.g. fentry/generic_file_read_iter).
- *
- * fentry/generic_file_read_iter fires on every read — both page-cache
- * hits and arena-fill paths. Calling on_hit here ensures that frequency
- * / recency state in policy programs tracks ALL accesses, not just the
- * subset that fall through to .read_folio (where on_hit already fires
- * via s3fs_policy_ops_eval_hit). When the page IS in the cache,
- * .read_folio is never called, so without this KFunc the policy sees the
- * file as cold even though it is being read repeatedly.
- *
- * Double-dispatch for the arena-hit case (fentry fires before the page
- * cache is populated → .read_folio fires → on_hit called again) is
- * acceptable: all current policies either set a bit (idempotent) or
- * cap-bounded increment a counter.
- */
-__bpf_kfunc int s3fs_kfunc_policy_hit(u64 ino)
-{
-	/* Issue #22: with hit_accum the kmod counts hits in .read_iter and
-	 * replays them from admit_replace; this direct call is a no-op. */
-	if (READ_ONCE(s3fs_hit_accum))
-		return 0;
-	return s3fs_policy_ops_eval_hit(ino);
-}
-
 __bpf_kfunc_end_defs();
 
 /*
@@ -223,7 +197,6 @@ BTF_ID_FLAGS(func, s3fs_kfunc_capacity_bytes)
 BTF_ID_FLAGS(func, s3fs_kfunc_evictions_total)
 BTF_ID_FLAGS(func, s3fs_kfunc_time_ns)
 BTF_ID_FLAGS(func, s3fs_kfunc_ino_size)
-BTF_ID_FLAGS(func, s3fs_kfunc_policy_hit)
 BTF_KFUNCS_END(s3fs_kfunc_ids_tracing)
 
 /* KFuncs callable from BPF_PROG_TYPE_SYSCALL (BPF_PROG_TEST_RUN harness). */

@@ -21,69 +21,22 @@ typedef uint64_t __u64;
 #define S3FS_EBPF_DEV_NAME "s3fs_ebpf"
 #define S3FS_IOC_MAGIC     0xE3
 
-/*
- * S3FS_IOC_PROBE_KVBASE — Week 4 (a) spike.
- *
- * Given a BPF arena map fd, return the kernel-VM base address that the
- * arena's pages are mapped at (arena->kern_vm->addr). Meant only for
- * verifying that the container_of-based extraction works on the running
- * kernel; production paths will admit ino→backing tuples via a separate
- * ioctl once the theory is validated.
- */
-struct s3fs_probe_kvbase {
-	__u32 arena_fd;   /* in:  fd of BPF_MAP_TYPE_ARENA held by daemon */
-	__u32 _pad;
-	__u64 out_kvbase; /* out: kernel-VM start of the arena */
-	__u64 out_size;   /* out: mapped size in bytes (pages * PAGE_SIZE) */
-};
-
-#define S3FS_IOC_PROBE_KVBASE \
-	_IOWR(S3FS_IOC_MAGIC, 0x01, struct s3fs_probe_kvbase)
+/* nr 0x01 was PROBE_KVBASE (a Week 4 spike, removed); do not reuse. */
 
 /*
- * S3FS_IOC_ADMIT_ARENA — register per-ino userspace ranges that back
- * file content.
+ * S3FS_IOC_EVAL — run the kmod's capacity / policy pass now: replay the
+ * accumulated hits into the policy, track new inodes (on_insert / on_size),
+ * take the votes and evict down to capacity_bytes.  The daemon calls it after
+ * the last populate of a miss (before it wakes the reader, so the chunk just
+ * loaded is still pinned) and from POST /policy/eval.  No argument.
  *
- * The daemon writes each object's bytes into its arena mmap, then
- * submits this ioctl to tell kmod: "ino N's content lives at user_vm
- * address `uaddr` for `size` bytes". kmod stores (ino → mm, uaddr,
- * size) in a hash keyed by ino; .read then uses
- * pin_user_pages_remote + kmap_local_page to reach the same physical
- * pages the arena mmap holds and copy_to_user out of them.
- *
- * We use the daemon's user_vm view (not the arena's kernel-VM base)
- * because 6.12's arena kern_vm range has no generic-context fault
- * handler; only BPF programs can service the fault path. GUP over
- * user_vm sidesteps that limitation by going through the daemon's
- * process mm, which does have arena_vm_fault registered.
- *
- * Passing count=0 clears kmod's admission table (used on daemon exit
- * to drop the mm reference cleanly).
+ * (Was S3FS_IOC_ADMIT_ARENA, which registered per-ino userspace ranges for
+ * the arena read path.  The file content lives in the kmod's chunk table;
+ * nr 0x02 now carries this command.  Opening the device arms the read-miss
+ * upcall path.)
  */
-/*
- * `offset` (D-01, added 2026-09): file offset where this range
- * starts. offset==0 & size==file_size means whole-file admit
- * (backward-compat default). Multiple entries per ino are allowed
- * — daemon splits large files into ranges so a 200 MiB blob can
- * be partially admitted into the 128 MiB arena. kmod's admit
- * lookup walks entries at the same hash bucket and picks the range
- * covering the folio pos.
- */
-struct s3fs_admit_entry {
-	__u64 ino;
-	__u64 uaddr;  /* daemon-side user_vm address of the range bytes */
-	__u64 size;   /* range length in bytes */
-	__u64 offset; /* file offset where this range starts */
-};
-
-struct s3fs_admit_arena {
-	__u32 count;   /* in: number of entries; 0 clears the table */
-	__u32 _pad;
-	__u64 entries; /* in: user pointer to array of s3fs_admit_entry */
-};
-
-#define S3FS_IOC_ADMIT_ARENA \
-	_IOW(S3FS_IOC_MAGIC, 0x02, struct s3fs_admit_arena)
+#define S3FS_IOC_EVAL \
+	_IO(S3FS_IOC_MAGIC, 0x02)
 
 /*
  * S3FS_IOC_SIGNAL_ADMIT — wake a pending .read waiter.
@@ -132,6 +85,11 @@ struct s3fs_read_miss_event {
 	__s64 offset; /* where the miss was */
 	__u32 count;  /* bytes requested */
 	__u32 flags;  /* S3FS_MISS_FLAG_* */
+	/* Read access pattern of the file so far (sequential / random reads
+	 * counted in .read_iter, summed over the CPUs); 0 for a miss that is not
+	 * a read (open check, load for write). */
+	__u32 seq_count;
+	__u32 rand_count;
 };
 
 /*
@@ -310,6 +268,10 @@ struct s3fs_mark_dirty {
  *                              _upcalls) for true hit ratio)
  *   [2] s3fs_admit_invalidations — page-cache invalidations by
  *                              admit_replace for new/moved ranges
+ *   [3]  s3fs_read_iter_calls — .read_iter calls (all reads; was the GUP
+ *                              call count)
+ *   [4]  s3fs_read_iter_pos0 — .read_iter calls at ki_pos == 0 (first read
+ *                              per open; was the GUP latency)
  *   [14] s3fs_hits_replayed_total — hit_accum: accesses counted in
  *                              .read_iter and replayed into the policy
  *                              (before the hit_replay_max cut)
@@ -329,29 +291,8 @@ struct s3fs_stats {
 #define S3FS_IOC_STATS \
 	_IOWR(S3FS_IOC_MAGIC, 0x08, struct s3fs_stats)
 
-/*
- * S3FS_IOC_DRAIN_EVICTIONS — pull the list of inos the policy has
- * evicted from the admit hash since the last drain. Daemon polls
- * this periodically to keep its snapshot consistent with kmod's
- * actual hash; without it the daemon re-sends evicted inos on the
- * next admit_replace and kmod evicts them again in a loop.
- *
- * Caller allocates `inos` (up to `cap` slots); kmod writes up to
- * `filled` entries and drops them from its internal queue. Missing
- * entries (queue overflow) surface as `overflow` count so the daemon
- * can degrade gracefully (e.g. do a full-snapshot reconcile).
- */
-#define S3FS_EVICT_LOG_MAX 256
-struct s3fs_drain_evictions {
-	__u32 cap;                              /* in: caller buffer capacity */
-	__u32 filled;                           /* out: entries written to inos[] */
-	__u32 overflow;                         /* out: kmod-side dropped due to queue full since last drain */
-	__u32 _pad;
-	__u64 inos[S3FS_EVICT_LOG_MAX];         /* out: evicted ino list */
-};
-
-#define S3FS_IOC_DRAIN_EVICTIONS \
-	_IOWR(S3FS_IOC_MAGIC, 0x09, struct s3fs_drain_evictions)
+/* nr 0x09 was DRAIN_EVICTIONS (the daemon no longer keeps an admit snapshot
+ * that a kmod eviction could oscillate with); do not reuse. */
 
 /*
  * S3FS_IOC_SIGNAL_FLUSH — wake a pending .fsync waiter (E-01).
@@ -444,10 +385,9 @@ struct s3fs_rename_event {
  * releases the lock. Subsequent reads via generic_file_read_iter find
  * the data in the page cache without any GUP.
  *
- * After the copy, kmod inserts an admit entry with the
- * S3FS_ADMIT_FLAG_PCACHE flag set (uaddr=0, no daemon mm needed).
- * .read_iter skips the arena fast path and falls through to
- * generic_file_read_iter so the page cache serves the data.
+ * After the copy the chunks are marked populated: a read of them is a hit
+ * (served from the fd by .read_folio into the page cache) and the capacity pass
+ * counts the inode.
  * If the kernel evicts the folios later, .read_folio re-triggers the
  * daemon upcall which calls this ioctl again to re-populate.
  *
@@ -460,9 +400,6 @@ struct s3fs_populate_pages {
 	__u64 size;      /* number of bytes in data */
 	__u64 data_ptr;  /* user pointer to data bytes */
 };
-
-/* AB-04: admit entry flag — data is in page cache, not in BPF arena. */
-#define S3FS_ADMIT_FLAG_PCACHE  (1U << 0)
 
 #define S3FS_IOC_POPULATE_PAGES \
 	_IOW(S3FS_IOC_MAGIC, 0x0E, struct s3fs_populate_pages)

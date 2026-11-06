@@ -57,7 +57,7 @@
 | fentry の `policy_hit` KFunc | `hit_accum=0` のときだけ有効 |
 | syscall プログラム 3 本 (`deep_walk_reject` / `arena_prealloc` / `test_shared`) | verifier のデモと arena のテスト用 |
 | policy の struct_ops | **本体**。policy ごとに自分の map を 0〜8 個持つ (`wtinylfu_pick` が 8) |
-| fmod_ret (Layer 2) | `component-communication.md` §5 の図にあるが、kmod に `s3fs_policy_on_*` の anchor が見つからない (grep)。**doc だけに残っている層** |
+| fmod_ret (Layer 2) | `component-communication.md` §5 の図にあるが、kmod に `s3fs_policy_on_*` の anchor が見つからない (grep)。**doc だけに残っていた層** (`component-communication.md` は直した。`policy-attach-comparison.md` は issue #35 で削除済みと明記済み) |
 
 ### 2.3 kmod の表とキュー
 
@@ -406,6 +406,17 @@ FL-4 は **枠を 1 つにまとめる設計に固有の落とし穴**: 今は e
 - daemon の `internal/admit` の中身と、`admit_snapshot` (flush 後の arena の読み) 以外の admit hash の使われ方は全部は追っていない。Phase 3 の最初に `grep` で全呼び出し元を出す。
 - AC-48 / AC-56 の i_size の扱い (§6.3)。
 - 削除される行数の見積もりはしていない (Phase 1 から数える)。
+
+## 9.1 実施状況 (2026-11-05)
+
+- Phase 1: PROBE_KVBASE (#48)、`hit_accum=0` の経路 (#49)、doc の fmod_ret の層 (#50)、ringbuf と ino=1 の warm (#51)。残り: `s3fs_counters` の stub 関連と getattr の fentry (`s3fs_inode_index` が Phase 3 まで要るので Phase 3 と一緒)。
+- Phase 2 (pcache だけにする): arena の読み (kmod の GUP)・書き (daemon の `AdmitContent`、content prewarm、arena の先読み、flush 後の書き直し) を削除し、AC-82 の kmod 側 (`SIGNAL_FLUSH` 成功で PCACHE entry を入れ直す) を入れた。`ADMIT_ARENA` は `count == 0` だけ受ける。`--arena-metadata-only` は何もしない旧フラグ。**`make test-regression` 28 件 PASS**。
+  - arena の書き直しが隠していた既存の穴が 2 つ出たので直した: (1) 新規に作って evict されたファイルの read miss を daemon が `ENOENT` にしていた (entry 表は次の sync まで知らない → `localKeys` + S3 の Stat で解決)、(2) flush の通常 PUT のあと entry 表のサイズが古いまま (縮めた後の全体 admit が EOF を超えた)。
+- Phase 3a: read pattern (seq / rand) を kmod の `.read_iter` で数え、`s3fs_read_miss_event` (24 → 32 B) で daemon に渡す。fentry `generic_file_read_iter`、`s3fs_ino_slots`、KFunc `s3fs_kfunc_policy_hit`、`--no-read-iter-hook` (旧フラグ、no-op) を削除。IOC_STATS の slot 3 / 4 は GUP の数から `.read_iter` の呼び出し数 / 先頭の read 数に転用。`make test-regression` 28 件 PASS。
+- Phase 3b: `ADMIT_ARENA` を引数なしの `EVAL` に置き換え (kmod の容量パス `s3fs_ebpf_capacity_pass` を走らせる)、upcall の有効化は daemon の mm ではなくデバイスの open (`s3fs_daemon_armed`) に。`evict_log` + `DRAIN_EVICTIONS`、daemon の admit 表 (`internal/admit`)、arena の allocator / free-list、AC-48 / AC-56 を削除。ioctl は 13 本。`make test-regression` 28 件 PASS。
+- 単体テスト: Go (`readmiss_v2_test.go`: 事象のデコード、pattern 比、`entryForMiss`、pattern による全体 admit の判定、`evalPass`、flush 後のサイズ更新。意図的に壊して失敗することも確認) と KUnit (read pattern と miss event、flush 成功時の PCACHE entry (AC-82)、容量パス、upcall の有効化)。**KUnit は UML 環境がなく実行していない** (`CONFIG_KUNIT=m` でのコンパイルだけ確認)。
+- Phase 3c: **admit hash を削除** (`resident` という索引も作らない)。hit は chunk の `populated` だけで決まり (`s3fs_folio_fill_from_kmalloc`、read_folio / readahead)、容量パスの候補は `sb->s_inodes` を歩いて「clean で `fd->cap > 0`」の fd を集める (`s3fs_collect_resident`)。R1・S1・`s3fs_admit_gen`・`fc_pcache_check`・per-file cache・`s3fs_admits_lock`・PCACHE entry の入れ直し (populate / signal_flush / probe)・entry の drop (reset / shed / evict_inode / unlink / nocache) がすべてなくなった。`nocache` の `.open` は entry を捨てる代わりに `s3fs_file_data_reset`。ポリシーの KFunc `ino_size` / `admit_count` は、容量パスが集めた候補から答える (パスの外では 0)。代償: 容量パスが O(sb の inode 数) (以前は O(entry 数))。**計測した** (`benchmark-results.md` §18.53): cold inode 10,000 個でパス 1 回が約 51 µs (3b) から約 1.37 ms に、30,000 個で約 4.1 ms になる。主因は並行制御ではなく走査そのもの (約 74 ns/inode × 2 回)。`resident` の索引で戻す。**設計時の `resident` (xarray) より単純になった**: 台帳を作らず、chunk 表が唯一の記録。`make test-regression` 28 件 PASS。
+  - 残り (Phase 3 で消える): `internal/admit` の daemon 側の表と arena の free-list、`s3fs_arena` map と stub、kmod の admit hash の uaddr / mm の扱い。
 
 ## 10. 更新運用
 

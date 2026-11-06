@@ -16,9 +16,6 @@ func TestStructSizesMatchUAPI(t *testing.T) {
 		got  uintptr
 		want uintptr
 	}{
-		{"s3fs_probe_kvbase", unsafe.Sizeof(ProbeKvbaseArg{}), 24},
-		{"s3fs_admit_entry", unsafe.Sizeof(AdmitEntry{}), 32},
-		{"s3fs_admit_arena", unsafe.Sizeof(AdmitArenaArg{}), 16},
 		{"s3fs_signal_admit", unsafe.Sizeof(SignalAdmitArg{}), 24},
 		{"s3fs_sync_entry", unsafe.Sizeof(SyncEntry{}), 288},
 		{"s3fs_sync_entries", unsafe.Sizeof(SyncEntriesArg{}), 24},
@@ -26,7 +23,6 @@ func TestStructSizesMatchUAPI(t *testing.T) {
 		{"s3fs_read_dirty", unsafe.Sizeof(ReadDirtyArg{}), 32},
 		{"s3fs_mark_dirty", unsafe.Sizeof(MarkDirtyArg{}), 8},
 		{"s3fs_stats", unsafe.Sizeof(StatsArg{}), 136},
-		{"s3fs_drain_evictions", unsafe.Sizeof(DrainEvictionsArg{}), 2064},
 		{"s3fs_delete_event", unsafe.Sizeof(DeleteEvent{}), 288},
 		{"s3fs_rename_event", unsafe.Sizeof(RenameEvent{}), 552},
 		{"s3fs_populate_pages", unsafe.Sizeof(PopulatePagesArg{}), 32},
@@ -45,15 +41,13 @@ func TestIoctlNumbersMatchUAPI(t *testing.T) {
 		got  uint32
 		want uint32
 	}{
-		{"PROBE_KVBASE", IocProbeKvbase, 0xc018e301},
-		{"ADMIT_ARENA", IocAdmitArena, 0x4010e302},
+		{"EVAL", IocEval, 0xe302},
 		{"SIGNAL_ADMIT", IocSignalAdmit, 0x4018e303},
 		{"SYNC_ENTRIES", IocSyncEntries, 0x4018e304},
 		{"POP_FLUSH", IocPopFlush, 0x8128e305},
 		{"READ_DIRTY", IocReadDirty, 0xc020e306},
 		{"MARK_DIRTY", IocMarkDirty, 0x4008e307},
 		{"STATS", IocStats, 0xc088e308},
-		{"DRAIN_EVICTIONS", IocDrainEvictions, 0xc810e309},
 		{"SIGNAL_FLUSH", IocSignalFlush, 0x4018e30a},
 		{"POP_DELETE", IocPopDelete, 0x8120e30b},
 		{"POP_RENAME", IocPopRename, 0x8228e30c},

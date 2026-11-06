@@ -8,11 +8,6 @@
  * VFS reads can copy_to_user() directly out of arena pages without a
  * userspace bounce.
  *
- * The kernel exports bpf_map_get(fd) but neither
- * bpf_arena_get_kern_vm_start() nor struct bpf_arena itself. To keep the
- * PoC on a stock 6.12 kernel we mirror the arena layout (recovered from
- * vmlinux BTF) and container_of() back to it. This is fragile across
- * kernel bumps and is called out as such in the Meetup slides.
  */
 
 #include <linux/bpf.h>
@@ -30,140 +25,6 @@
 #include "s3fs_ebpf_dev.h"
 #include "s3fs_ebpf_uapi.h"
 #include "vfs_ops.h"
-
-/*
- * BTF-derived layout of struct bpf_arena on Linux 6.12. The upstream
- * definition lives in kernel/bpf/arena.c and is not exported via any
- * public header; if this struct drifts we lose the container_of() path
- * and readers will silently observe garbage. Guard against the kernel
- * version we actually built against.
- */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 12, 0)
-#error "s3fs_ebpf_dev.c: struct bpf_arena layout is only verified for 6.12+"
-#endif
-
-struct bpf_arena_layout_6_12 {
-	struct bpf_map map;
-	u64 user_vm_start;
-	u64 user_vm_end;
-	struct vm_struct *kern_vm;
-	/* trailing fields (maple_tree, list_head, mutex) omitted — we
-	 * never touch them. sizeof mismatch is fine as long as we only
-	 * read fields at their fixed offsets. */
-};
-
-static struct bpf_map *s3fs_dev_get_arena_map(u32 fd)
-{
-	struct bpf_map *map = bpf_map_get(fd);
-
-	if (IS_ERR(map))
-		return map;
-	if (map->map_type != BPF_MAP_TYPE_ARENA) {
-		bpf_map_put(map);
-		return ERR_PTR(-EINVAL);
-	}
-	return map;
-}
-
-static long s3fs_dev_probe_kvbase(void __user *uarg)
-{
-	struct s3fs_probe_kvbase arg;
-	struct bpf_map *map;
-	struct bpf_arena_layout_6_12 *arena;
-	u64 kbase;
-	u64 size;
-
-	if (copy_from_user(&arg, uarg, sizeof(arg)))
-		return -EFAULT;
-
-	map = s3fs_dev_get_arena_map(arg.arena_fd);
-	if (IS_ERR(map))
-		return PTR_ERR(map);
-
-	arena = container_of(map, struct bpf_arena_layout_6_12, map);
-	if (!arena->kern_vm) {
-		bpf_map_put(map);
-		return -ENODATA;
-	}
-	kbase = (u64)(unsigned long)arena->kern_vm->addr;
-	size  = arena->kern_vm->size;
-
-	bpf_map_put(map);
-
-	arg.out_kvbase = kbase;
-	arg.out_size   = size;
-	if (copy_to_user(uarg, &arg, sizeof(arg)))
-		return -EFAULT;
-
-	pr_info("s3fs_ebpf: probe_kvbase fd=%u user_vm_start=0x%llx kern_vm=0x%llx size=%llu\n",
-		arg.arena_fd, arena->user_vm_start, kbase, size);
-	return 0;
-}
-
-/*
- * S3FS_IOC_ADMIT_ARENA handler.
- *
- * Grab a reference on the caller's mm (daemon's mm — the caller is the
- * ioctl syscall in daemon context), copy the entry array from
- * userspace, hand both off to the vfs-side admit table. count==0
- * clears the arena admits (pcache entries survive) but still hands
- * over the mm: AC-43 — an empty prewarm must arm the upcall path, which
- * is gated on s3fs_admitted_mm. Reference lifecycle: on success the mm
- * reference passes to the admit table (replaced by the next admit,
- * dropped by module unload). On failure we drop it here.
- */
-static long s3fs_dev_admit_arena(void __user *uarg)
-{
-	struct s3fs_admit_arena hdr;
-	struct s3fs_admit_entry *entries = NULL;
-	struct mm_struct *mm = NULL;
-	int err;
-
-	if (copy_from_user(&hdr, uarg, sizeof(hdr)))
-		return -EFAULT;
-
-	if (hdr.count > 4096)
-		return -E2BIG;
-
-	mm = get_task_mm(current);
-	if (!mm)
-		return -ESRCH;
-
-	if (hdr.count == 0) {
-		err = s3fs_ebpf_admit_replace(mm, NULL, 0);
-		if (err)
-			goto out_put_mm;
-		pr_info("s3fs_ebpf: admit cleared mm=%p (daemon)\n", mm);
-		return 0;
-	}
-
-	entries = kcalloc(hdr.count, sizeof(*entries), GFP_KERNEL);
-	if (!entries) {
-		err = -ENOMEM;
-		goto out_put_mm;
-	}
-	if (copy_from_user(entries, (void __user *)(uintptr_t)hdr.entries,
-			   hdr.count * sizeof(*entries))) {
-		err = -EFAULT;
-		goto out_free_entries;
-	}
-
-	/* Hand mm ownership over on success. */
-	err = s3fs_ebpf_admit_replace(mm, entries, hdr.count);
-	if (err)
-		goto out_free_entries;
-
-	pr_info("s3fs_ebpf: admitted %u entries mm=%p (daemon)\n",
-		hdr.count, mm);
-	kfree(entries);
-	return 0;
-
-out_free_entries:
-	kfree(entries);
-out_put_mm:
-	mmput(mm);
-	return err;
-}
 
 /*
  * S3FS_IOC_SIGNAL_ADMIT — daemon → kmod completion signal for a
@@ -427,10 +288,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	void __user *uarg = (void __user *)arg;
 
 	switch (cmd) {
-	case S3FS_IOC_PROBE_KVBASE:
-		return s3fs_dev_probe_kvbase(uarg);
-	case S3FS_IOC_ADMIT_ARENA:
-		return s3fs_dev_admit_arena(uarg);
+	case S3FS_IOC_EVAL:
+		return s3fs_ebpf_capacity_pass();
 	case S3FS_IOC_SIGNAL_ADMIT:
 		return s3fs_dev_signal_admit(uarg);
 	case S3FS_IOC_SIGNAL_FLUSH:
@@ -473,9 +332,9 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		if (st.count > 2)
 			st.values[2] = (u64)atomic_long_read(&s3fs_admit_invalidations);
 		if (st.count > 3)
-			st.values[3] = (u64)atomic_long_read(&s3fs_gup_calls_total);
+			st.values[3] = s3fs_read_iter_calls();
 		if (st.count > 4)
-			st.values[4] = (u64)atomic_long_read(&s3fs_gup_ns_total);
+			st.values[4] = s3fs_read_iter_pos0();
 		if (st.count > 5)
 			st.values[5] = (u64)atomic_long_read(&s3fs_upcall_retry_exhausted);
 		if (st.count > 6)
@@ -500,27 +359,6 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		if (copy_to_user(uarg, &st, sizeof(st)))
 			return -EFAULT;
 		return 0;
-	}
-	case S3FS_IOC_DRAIN_EVICTIONS: {
-		struct s3fs_drain_evictions *req;
-		int err = 0;
-
-		req = kzalloc(sizeof(*req), GFP_KERNEL);
-		if (!req)
-			return -ENOMEM;
-		if (copy_from_user(req, uarg, sizeof(*req))) {
-			err = -EFAULT;
-			goto out_free_req;
-		}
-		if (req->cap > S3FS_EVICT_LOG_MAX)
-			req->cap = S3FS_EVICT_LOG_MAX;
-		s3fs_ebpf_drain_evictions(req->inos, req->cap,
-					  &req->filled, &req->overflow);
-		if (copy_to_user(uarg, req, sizeof(*req)))
-			err = -EFAULT;
-out_free_req:
-		kfree(req);
-		return err;
 	}
 	case S3FS_IOC_POPULATE_PAGES: {
 		struct s3fs_populate_pages req;
@@ -563,8 +401,17 @@ static __poll_t s3fs_dev_poll(struct file *filp, struct poll_table_struct *pt)
 	return s3fs_read_miss_poll(filp, pt);
 }
 
+/* AC-43: opening the device arms the read-miss upcall path (a daemon is
+ * attached); it stays armed until umount (s3fs_ebpf_admit_shutdown). */
+static int s3fs_dev_open(struct inode *inode, struct file *filp)
+{
+	s3fs_ebpf_daemon_arm();
+	return 0;
+}
+
 static const struct file_operations s3fs_ebpf_dev_fops = {
 	.owner		= THIS_MODULE,
+	.open		= s3fs_dev_open,
 	.unlocked_ioctl	= s3fs_dev_ioctl,
 	.compat_ioctl	= s3fs_dev_ioctl,
 	.read		= s3fs_dev_read,

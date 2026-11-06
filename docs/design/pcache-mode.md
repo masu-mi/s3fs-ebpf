@@ -1,6 +1,6 @@
 # pcache モード — ファイルの中身を kmod の chunk と page cache に置く
 
-2026-10-18。`--arena-metadata-only` で有効になる read / write の方式の全体像。2026-10-13 以降の計測と修正はこのモードで行っている (既定は今も arena モード)。ロック順や不変条件の細部は `docs/kmod-pcache-invariants.md` が正本で、ここでは繰り返さない。経緯は `docs/journal/history.md` §2.5〜§2.9。
+2026-10-18。`--arena-metadata-only` で有効になる read / write の方式の全体像。2026-10-13 以降の計測と修正はこのモードで行っている (既定は今も arena モード)。**2026-11-05: arena モード (中身を `bpf_arena` に置き kmod が GUP で読む方式) は削除した。pcache が唯一のモードで、`--arena-metadata-only` は何もしない旧フラグとして受け付けるだけ** (`redesign-v2-simplify.md` Phase 2)。以下の §1〜§2 は移行の経緯と比較の記録。ロック順や不変条件の細部は `docs/kmod-pcache-invariants.md` が正本で、ここでは繰り返さない。経緯は `docs/journal/history.md` §2.5〜§2.9。
 
 ## 1. なぜ移ったか
 
@@ -8,7 +8,7 @@ arena モードでは、ファイルの中身を `bpf_arena` (daemon と BPF の
 
 そこで中身を kernel 側に置き、2 回目以降の read を普通の page cache で返すことにした (AB-04〜、`ecf3990`)。arena には中身もメタデータも置かない (フラグ名の `--arena-metadata-only` とは違う。admit のメタデータは kmod の admit hash、policy の状態は BPF map にある。daemon は arena の map を作って mmap するが、read 経路では使わない)。
 
-## 2. 2 つのモードの違い
+## 2. arena モードとの違い (arena モードは削除済み)
 
 | | arena モード (既定) | pcache モード (`--arena-metadata-only`) |
 |---|---|---|
@@ -30,13 +30,13 @@ chunk 表のレイアウト (構造体、番地の対応、状態、容量の数
 
 ## 4. read
 
-1. `.read_iter`: `fc_pcache_check` が PCACHE entry を見つけたら `generic_file_read_iter` に渡す。page cache に folio があればそこで終わり、kmod も daemon も通らない。
+1. `.read_iter`: 読みの pattern (sequential / random) と hit を数えて、常に `generic_file_read_iter` に渡す。page cache に folio があればそこで終わり、kmod も daemon も通らない。
 2. page cache に folio がないと `.read_folio` が呼ばれる。entry と chunk があり `populated` なら、`s3fs_folio_fill_from_kmalloc` が `fd->lock` 下で chunk から folio にコピーする (S1 の世代確認、T2 の `populated` 確認)。
 3. entry がなければ miss。reader は chunk を pin してから pending を作り (この順が成功 signal の契約の前提)、`/dev/s3fs_ebpf` の `read(2)` で daemon に miss を渡して待つ (Path C と同じ upcall)。
 4. daemon (`handleReadMiss`) は miss を含む 4 MiB の range GET (4 MiB を超える大きいファイル) か全体 GET をして、`POPULATE_PAGES` で kmod に渡す。kmod は chunk にコピーして `populated` を立て、`fd->lock` を持ったまま PCACHE entry を入れる。全体 admit になる大きいファイルは chunk ごとに並列で取り、取れた chunk から populate して signal する (AC-52、`admit_chunkload.go`)。
 5. daemon は `SIGNAL_ADMIT` に `S3FS_SIGNAL_VERIFY_POPULATED` を付けて reader を起こす。chunk がもう evict されていれば kmod は `-EAGAIN` を返し、daemon は populate をやり直す (最大 3 回)。
 
-page cache で返る read も policy に見えるように、`fentry/generic_file_read_iter` が KFunc `s3fs_kfunc_policy_hit` で `on_hit` を呼ぶ (S-03。CPU と ino ごとに jiffy 1 回に間引き、AC-47)。既定の `hit_accum=1` (issue #22) では、この経路と `.read_folio` の `on_hit` は止まり、kmod の `.read_iter` が open したファイルごとに 1 回数えて、`admit_replace` の Phase 1 で evict の前にまとめて反映する (`hit-signal-percpu-accumulation.md`、測定は `journal/benchmark-results.md` §18.44〜18.45)。`hit_accum=0` で上の方式に戻る。
+page cache で返る read も policy に見えるように、kmod の `.read_iter` が open したファイルごとに (jiffy 1 回に間引いて) 数え、`admit_replace` の Phase 1 で evict の前にまとめて `on_hit` に反映する (hit_accum、`hit-signal-percpu-accumulation.md`)。同じ `.read_iter` が、ファイルごとの read の pattern (前の read の終端から 4 KiB 以内なら sequential、それ以外は random) も数え、miss のたびに `s3fs_read_miss_event` の `seq_count` / `rand_count` で daemon に渡す (大きいファイルの全体 admit の判定、R-01)。fentry/generic_file_read_iter と `s3fs_ino_slots` は 2026-11-05 に削除した。
 
 ## 4.1 prewarm (`--pcache-prewarm`、AC-67、既定 off)
 
@@ -46,7 +46,7 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 - マウントは `--pcache-prewarm-mount`、空なら `/proc/self/mounts` の最初の `s3fs_ebpf` (30 秒まで待つ)。
 - `capacity_bytes` が設定されていれば、合計がそれを超える手前で止める (超えた分は読んでもすぐ evict されるだけ)。既定の容量は無制限なので、使うときは `--cache-capacity` を付ける。
 - `--prewarm-on-sync` のとき、sync で増えたファイルも同じように読む。
-- prewarm の読みも `fentry/generic_file_read_iter` を通るので、pattern-aware の判定と policy の `on_hit` に 1 回分入る (普通の最初の read と同じ扱い。`hit_accum=1` では `policy_seen` が偽の最初の反映が捨てられる)。
+- prewarm の読みも kmod の `.read_iter` を通るので、pattern-aware の判定と policy の `on_hit` に 1 回分入る (普通の最初の read と同じ扱い。`hit_accum=1` では `policy_seen` が偽の最初の反映が捨てられる)。
 - 回帰テスト: `make test-pcache-prewarm` (選ばれたファイルの最初の read で upcall が出ないこと、選ばれていないファイルは upcall すること、sha256)。
 
 **兄弟の先読み (`prefetch_next`、AC-68)**: CEL に `prefetch_next: <int>` があると、ファイルの最初の chunk の miss を処理したあとで、そのファイルについて式を評価し、同じディレクトリで名前順に後ろの N 個 (上限 64) を同じ worker のキューに積む (`prefetch_next.go`)。
@@ -58,13 +58,13 @@ prewarm の時点では inode がなく `POPULATE_PAGES` は `-ENOENT` になる
 ## 5. 容量と eviction
 
 - 容量は arena の entry のサイズと、pcache の ino ごとの `fd->cap` (確保済み chunk の合計) で数える (AC-41)。
-- evict は `admit_replace` の中で行う (`docs/design/admit-and-softcap.md`)。pcache の miss は `admit_replace` を通らないので、`--cache-capacity` があるとき daemon は populate の後、signal の前に `admit_replace` をやり直して上限を守る (AC-45 C2)。
+- evict は kmod の容量パス (`s3fs_ebpf_capacity_pass`、旧 `admit_replace`、`docs/design/admit-and-softcap.md`) の中で行う。pcache の miss は `admit_replace` を通らないので、`--cache-capacity` があるとき daemon は populate の後、signal の前に `admit_replace` をやり直して上限を守る (AC-45 C2)。
 - evict は entry を落としてから page cache を落とし、`s3fs_file_data_reset` で chunk を free する。miss が in-flight の ino は丸ごとは evict せず、pin されていない chunk だけを free する (shed、AC-45 C3)。capacity より大きいファイルを順に読んでも、読み終わった chunk は溜まらない。
 - victim の選び方は arena モードと同じ (score 順、または AC-58 の `pick_victim`、`docs/design/ac58-pick-victim.md`)。
 
 ## 6. write
 
-- flush の PUT が成功すると、daemon は中身を arena にもコピーして admit し直す (mode の分岐なし。`docs/design/component-communication.md` §4、backlog AC-82)。flush 後の fd は PCACHE entry を持たないので (kmod は `SIGNAL_FLUSH` で chunk の `populated` を立てるだけ)、書いた直後の read はこの arena のコピーを GUP で読む。arena のコピーがなければ S3 への upcall になる。代償は、arena (128 MiB) の消費と、`ErrCacheFull` のときに PUT が成功していても `flush_errors_total` が増えること。
+- flush の PUT が成功すると、kmod は `SIGNAL_FLUSH` で、fd が持つ (clean になった) chunk を `populated` にし、**populated な chunk の連続した範囲ごとに PCACHE entry を入れる** (AC-82、`fd->lock` の下、R1)。書いた直後の read は chunk から返り、S3 への upcall も arena のコピーも要らない。以前は daemon が中身を arena にコピーして `ADMIT_ARENA` で admit し直していた (arena の消費と、満杯のときの `flush_errors_total` の誤計上があった)。
 - write は fd の chunk に書き、fd を dirty にする。dirty / flushing の fd には PCACHE entry を入れない (AC-57)。close / fsync で flush event を積み、daemon が `READ_DIRTY` で読んで PUT する (`docs/design/component-communication.md` §4)。
 - S3 にある既存ファイルへの最初の変更の前に、変更で残る部分を読み込む (AC-50、`s3fs_fd_load_for_modify`)。open は中身を読まないので、これがないと読んでいない範囲が 0 で PUT される。
 - `--partial-modify` (既定 on、S3 のみ。2026-11-03 の issue #35 から既定が on。`--partial-modify=false` で off) のときは、変更のない chunk を読まずに remote として記録し、flush は multipart + `UploadPartCopy` で運ぶ (AC-51、`docs/design/ac51-partial-modify.md`、ioctl `DIRTY_LAYOUT` / `READ_DIRTY_RANGE`)。

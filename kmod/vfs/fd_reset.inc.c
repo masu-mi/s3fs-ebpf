@@ -3,23 +3,76 @@
  * unit, never compiled on its own. */
 
 
+/* The inodes whose content the cache holds: clean regular files with allocated
+ * chunks (fd->cap > 0).  Walks the superblock's inodes - there is no separate
+ * index to keep in step with the chunk tables (the old admit hash, and R1 / S1
+ * with it, are gone).  *out gets a kmalloc'ed array (caller kfree), the count is
+ * returned; each element carries the bytes fd->cap charges (AC-41).
+ *
+ * Reads fd->cap / dirty / flushing without fd->lock under i_lock (a snapshot: a
+ * write or an evict racing it only makes the pass see the inode one round
+ * early or late).  i_private is read under i_lock because evict frees fd only
+ * after I_FREEING is set, which is checked under the same lock. */
+static int s3fs_collect_resident(struct s3fs_resident **out)
+{
+	struct super_block *sb = s3fs_active_sb;
+	struct s3fs_resident *r;
+	struct inode *inode;
+	int cap, n;
+
+	*out = NULL;
+	if (!sb)
+		return 0;
+	for (;;) {
+		cap = 0;
+		spin_lock(&sb->s_inode_list_lock);
+		list_for_each_entry(inode, &sb->s_inodes, i_sb_list)
+			cap++;
+		spin_unlock(&sb->s_inode_list_lock);
+		if (!cap)
+			return 0;
+		cap += 16;	/* inodes that appear meanwhile */
+		r = kmalloc_array(cap, sizeof(*r), GFP_KERNEL);
+		if (!r)
+			return 0;
+		n = 0;
+		spin_lock(&sb->s_inode_list_lock);
+		list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
+			struct s3fs_file_data *fd;
+
+			spin_lock(&inode->i_lock);
+			if (!(inode->i_state & (I_FREEING | I_WILL_FREE | I_NEW)) &&
+			    S_ISREG(inode->i_mode) && n < cap) {
+				fd = inode->i_private;
+				if (fd && READ_ONCE(fd->cap) > 0 &&
+				    !READ_ONCE(fd->dirty) && !READ_ONCE(fd->flushing)) {
+					r[n].ino = inode->i_ino;
+					r[n].bytes = READ_ONCE(fd->cap);
+					n++;
+				}
+			}
+			spin_unlock(&inode->i_lock);
+		}
+		spin_unlock(&sb->s_inode_list_lock);
+		*out = r;
+		return n;
+	}
+}
+
 /* M2: cross-check for the M1 gauge, exported via IOC_STATS slots 12/13.
  *   *walk   = sum of fd->cap over every live regular inode on the sb.  The
  *             gauge is maintained incrementally, so gauge != walk at rest
  *             means a cap change that skipped the gauge.
- *   *pcache = sum of fd->cap over distinct pcache inos — exactly what the
- *             AC-41 capacity loop charges.  walk - pcache is fd->buf held
- *             by non-pcache inos (written files, skip_reset leftovers).
- * Lockless cap reads, so only meaningful when I/O is quiescent.  The walk
- * holds i_lock while reading i_private: evict frees fd only after
- * I_FREEING is set, which we check under the same lock. */
+ *   *pcache = sum of fd->cap over the capacity candidates (what the AC-41
+ *             capacity loop charges).  walk - pcache is fd->buf held by
+ *             dirty / flushing inodes.
+ * Lockless cap reads, so only meaningful when I/O is quiescent. */
 void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache)
 {
 	struct super_block *sb = s3fs_active_sb;
+	struct s3fs_resident *res;
 	struct inode *inode;
-	struct s3fs_admit *a;
-	unsigned int bkt, n = 0, i;
-	u64 *inos;
+	int n, i;
 
 	*walk = 0;
 	*pcache = 0;
@@ -41,27 +94,10 @@ void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache)
 	}
 	spin_unlock(&sb->s_inode_list_lock);
 
-	read_lock(&s3fs_admits_lock);
-	hash_for_each(s3fs_admits, bkt, a, node)
-		if (a->flags & S3FS_ADMIT_FLAG_PCACHE)
-			n++;
-	inos = n ? kmalloc_array(n, sizeof(*inos), GFP_ATOMIC) : NULL;
-	if (inos) {
-		i = 0;
-		hash_for_each(s3fs_admits, bkt, a, node)
-			if ((a->flags & S3FS_ADMIT_FLAG_PCACHE) && i < n)
-				inos[i++] = a->ino;
-		n = i;
-	}
-	read_unlock(&s3fs_admits_lock);
-	if (!inos)
-		return;
-
-	sort(inos, n, sizeof(*inos), s3fs_u64_cmp, NULL);
+	n = s3fs_collect_resident(&res);
 	for (i = 0; i < n; i++)
-		if (i == 0 || inos[i] != inos[i - 1])
-			*pcache += s3fs_ino_buf_bytes(inos[i]);
-	kfree(inos);
+		*pcache += res[i].bytes;
+	kfree(res);
 }
 
 /* W1: inodes pinned by an outstanding flush.  put_super releases any
@@ -121,25 +157,26 @@ static void s3fs_flush_pins_release_all(void)
 }
 
 /*
- * P3: free the per-inode kmalloc buffer when a pcache entry is evicted.
- * After eviction the page cache is also dropped, so subsequent reads
- * reach .read_folio which re-fetches from S3 and re-populates fd->buf.
- * Dirty inodes are skipped — their buffer holds user-written content
- * pending flush to S3.
+ * P3: free the idle chunks of a clean inode (capacity eviction).  After this
+ * the page cache is dropped too (s3fs_evict_page_cache), so the next read
+ * reaches .read_folio, misses, and the daemon populates it again.  Dirty or
+ * flushing inodes are skipped - their chunks hold user-written content pending
+ * a flush.  A chunk some reader has pinned (U8) stays: it serves that reader
+ * (the retry after the wake finds it populated) and is freed by a later pass.
+ *
+ * Returns true when at least one chunk was freed.
  */
-static void s3fs_file_data_reset(u64 ino)
+static bool s3fs_file_data_reset(u64 ino)
 {
 	struct inode *inode;
 	struct s3fs_file_data *fd;
-	struct s3fs_admit *a;
-	struct hlist_node *tmp;
-	bool removed = false;
+	bool freed_any = false;
 
 	if (!s3fs_active_sb)
-		return;
+		return false;
 	inode = ilookup(s3fs_active_sb, (unsigned long)ino);
 	if (!inode)
-		return;
+		return false;
 	fd = inode->i_private;
 	if (fd) {
 		mutex_lock(&fd->lock);
@@ -147,34 +184,21 @@ static void s3fs_file_data_reset(u64 ino)
 			bool kept = false;
 			u32 ci;
 
-			/* R1: drop every PCACHE entry of this ino, including any
-			 * inserted between admit_drop_all_ranges and this point,
-			 * before freeing chunks: an entry must never outlive the
-			 * chunk it points at.
-			 * Lock order: fd->lock (outer) → s3fs_admits_lock (inner). */
-			write_lock(&s3fs_admits_lock);
-			hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
-				if (a->ino != ino)
-					continue;
-				if (!(a->flags & S3FS_ADMIT_FLAG_PCACHE))
-					continue;
-				hash_del(&a->node);
-				kfree(a);
-				atomic_dec(&s3fs_admits_count);
-				removed = true;
-			}
-			if (removed)
-				atomic_inc(&s3fs_admit_gen);
-			write_unlock(&s3fs_admits_lock);
-			/* U8 (per chunk): a chunk some reader waits on is kept — it
-			 * serves that reader via the data-based fill even though
-			 * its PCACHE entry is gone.  Everything else is freed. */
 			for (ci = 0; ci < fd->nr_chunks; ci++) {
+				/* U8: a reader pins its chunk BEFORE it creates the
+				 * pending, i.e. possibly before the chunk is even
+				 * allocated (p == NULL).  That pin must count: dropping
+				 * the table below would lose it, and the chunk the
+				 * daemon then populates would be unprotected between
+				 * its wake and the reader's re-check. */
 				if (fd->chunks[ci].readers) {
 					kept = true;
 					continue;
 				}
+				if (!fd->chunks[ci].p)
+					continue;
 				s3fs_fd_chunk_free(fd, ci); /* S11: no longer valid */
+				freed_any = true;
 			}
 			if (kept) {
 				atomic_long_inc(&s3fs_reset_skipped);
@@ -182,12 +206,12 @@ static void s3fs_file_data_reset(u64 ino)
 				s3fs_fd_free_all(fd);
 				fd->size = 0;
 			}
-			/* Q1: do NOT clear inode i_size — it reflects the S3 object
+			/* Q1: do NOT clear inode i_size - it reflects the S3 object
 			 * size and must survive eviction so stat(2) and read_iter
 			 * keep returning the correct file size. */
 		}
 		mutex_unlock(&fd->lock);
 	}
 	iput(inode);
+	return freed_any;
 }
-

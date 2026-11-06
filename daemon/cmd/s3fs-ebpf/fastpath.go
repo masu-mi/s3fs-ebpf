@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,14 +23,11 @@ import (
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policy"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policyprog"
-	"github.com/cilium/ebpf/ringbuf"
 )
 
-// runFastpath loads the BPF collection, attaches fentry/vfs_getattr_nosec,
-// and streams miss events + counter samples until SIGINT/SIGTERM. If
-// --s3 is passed, each miss event triggers an S3 metadata fetch and
-// arena/inode_index population, so subsequent stats on the same ino
-// register as fast_hits.
+// runFastpath loads the BPF collection, attaches the fentry programs, runs
+// the kmod service loops (read miss, flush, delete, rename, sync, stats) and
+// samples counters until SIGINT/SIGTERM.
 func runFastpath(args []string) int {
 	fs := flag.NewFlagSet("fastpath", flag.ExitOnError)
 	sampleEvery := fs.Duration("sample-every", 2*time.Second,
@@ -60,28 +56,19 @@ func runFastpath(args []string) int {
 		"AC-51: a write into a large existing object loads only the chunks it touches and flushes the rest with a server-side copy "+
 			"(enabled by default, S3 only — ignored with a log line on backends without server-side copy; "+
 			"--partial-modify=false takes the AC-50 whole-object GET + PUT path; written to the kmod partial_modify parameter on every start)")
-	noReadIterHook := fs.Bool("no-read-iter-hook", false,
-		"[R-01] disable fentry/generic_file_read_iter hook. "+
-			"Use for overhead measurement only; disables read pattern tracking and "+
-			"is incompatible with --pattern-aware-admit.")
+	// Deprecated no-op: the read pattern is counted by the kmod's .read_iter
+	// (there is no fentry/generic_file_read_iter any more).
+	fs.Bool("no-read-iter-hook", false,
+		"[deprecated, no-op] the read pattern is counted in the kmod; there is no read_iter hook to disable")
 	patternAdmit := fs.Bool("pattern-aware-admit", true,
-		"[R-01] use s3fs_read_pattern_map sequential signal to promote large-file "+
-			"read-miss upcalls to full-file GETs, reducing S3 round-trips. "+
-			"Requires fentry/generic_file_read_iter (incompatible with --no-read-iter-hook).")
-	prefetchSeq := fs.Bool("prefetch-seq-admit", false,
-		"[AA-04] proactively pre-admit the next sequential chunk while the current "+
-			"chunk is still being read, reducing cold-miss upcalls for sequential "+
-			"large-file reads. Fires when s3fs_read_pattern_map shows SeqRatio ≥ 0.70 "+
-			"and the read position is within 2 MiB of the admitted range boundary. "+
-			"Requires --pattern-aware-admit (incompatible with --no-read-iter-hook).")
-	arenaMetadataOnly := fs.Bool("arena-metadata-only", false,
-		"[AB-04] store S3 object data in the kernel page cache (via fd->buf) instead of "+
-			"the BPF arena. Reads are served by generic_file_read_iter from the page "+
-			"cache — no GUP per page. Eliminates the 1.7µs/page GUP overhead at the "+
-			"cost of one extra copy on admit. Does not require BPF arena allocation. "+
-			"Prewarm warms metadata only; bodies are fetched on the first read (AC-44).")
+		"[R-01] use the kmod's sequential-read signal (in the miss event) to promote large-file "+
+			"read-miss upcalls to full-file GETs, reducing S3 round-trips.")
+	// Deprecated no-op: the pcache mode (content in the kmod's chunk table and
+	// page cache) is the only mode; the flag is accepted so existing command lines work.
+	fs.Bool("arena-metadata-only", true,
+		"[deprecated, no-op] the kmod chunk table + page cache is the only content store")
 	pcachePrewarm := fs.Bool("pcache-prewarm", false,
-		"[AC-67] with --arena-metadata-only, read each file the prewarm policy selects "+
+		"[AC-67] read each file the prewarm policy selects "+
 			"once through the mount after startup (and after each sync round with "+
 			"--prewarm-on-sync), so its first read is a page-cache hit. Reads use the "+
 			"normal miss path. Stops before capacity_bytes would be exceeded; set "+
@@ -143,17 +130,7 @@ func runFastpath(args []string) int {
 		MapMaxEntries: map[string]uint32{s3fifoGhostMap: s3fifoGhostCap},
 	}
 
-	if err := (fastpathModes{
-		patternAdmit: *patternAdmit, noReadIterHook: *noReadIterHook,
-		prefetchSeq: *prefetchSeq, arenaMetadataOnly: *arenaMetadataOnly,
-		pcachePrewarm: *pcachePrewarm,
-	}).validate(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
 	patternAwareAdmitEnabled = *patternAdmit
-	prefetchSeqEnabled = *prefetchSeq
-	arenaMetadataOnlyEnabled = *arenaMetadataOnly
 	pcachePrewarmEnabled = *pcachePrewarm
 	pcachePrewarmMount = *pcachePrewarmMnt
 
@@ -179,14 +156,9 @@ func runFastpath(args []string) int {
 	if *policyPath != "" {
 		fmt.Printf("[policy] loaded %s\n", *policyPath)
 	}
-	// AC-68: prefetch_next reads siblings through the mount into the
-	// pcache; arena mode has no such path.
+	// AC-68: prefetch_next reads siblings through the mount into the pcache.
 	if pol.HasPrefetchNext() {
-		if arenaMetadataOnlyEnabled {
-			prefetchPolicy = pol
-		} else {
-			fmt.Fprintln(os.Stderr, "[policy] prefetch_next ignored: needs --arena-metadata-only")
-		}
+		prefetchPolicy = pol
 	}
 
 	// Layer 2 / Layer 3 BPF policy program (Week 4 (d)). --policy-bpf
@@ -371,8 +343,8 @@ func runFastpath(args []string) int {
 			fmt.Printf("[policy-bpf] hot-reloaded %s → %s (BPF_LINK_UPDATE)\n", old.Path, newPath)
 			fmt.Fprintf(w, "reloaded to %s (BPF_LINK_UPDATE)\n", newPath)
 		}
-		// POST /policy/eval: force an admit_replace with the current
-		// snapshot so the policy program's on_admit / on_evict fires
+		// POST /policy/eval: run the kmod's capacity / policy pass so the
+		// policy program's on_admit / on_evict fires
 		// another round without needing bucket-side churn. Bench
 		// harnesses use this to drive SIEVE's grace → clear → evict
 		// state machine on a controllable schedule.
@@ -381,12 +353,12 @@ func runFastpath(args []string) int {
 				http.Error(w, "POST only", http.StatusMethodNotAllowed)
 				return
 			}
-			n, err := refreshAdmits(*dev)
+			n, err := evalPass(*dev)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			fmt.Fprintf(w, "re-eval fired with %d admit entries\n", n)
+			fmt.Fprintf(w, "re-eval fired (%d)\n", n)
 		}
 	}
 
@@ -406,7 +378,7 @@ func runFastpath(args []string) int {
 	}
 
 	// V-01: open /dev/s3fs_ebpf once and share the fd across all admit /
-	// signal ioctls. Previously admitArenaIoctl and signalAdmit reopened
+	// signal ioctls. Previously signalAdmit reopened
 	// the device on every call, adding an open/close pair per upcall.
 	devF, err := openSharedDev(*dev)
 	if err != nil {
@@ -424,8 +396,6 @@ func runFastpath(args []string) int {
 		return 1
 	}
 	defer progs.Close()
-	setAdmitProgs(progs)
-	defer setAdmitProgs(nil)
 
 	fentry, err := progs.AttachFentry()
 	if err != nil {
@@ -433,26 +403,6 @@ func runFastpath(args []string) int {
 		return 1
 	}
 	defer fentry.Close()
-
-	if *noReadIterHook {
-		fmt.Println("[fastpath] fentry/generic_file_read_iter disabled (--no-read-iter-hook); read pattern tracking off")
-	} else {
-		readIter, err := progs.AttachFentryReadIter()
-		if err != nil {
-			// Non-fatal: some kernels inline generic_file_read_iter.
-			fmt.Fprintf(os.Stderr, "[warn] attach fentry/generic_file_read_iter: %v (read pattern tracking disabled)\n", err)
-		} else {
-			defer readIter.Close()
-			fmt.Println("[fastpath] attached fentry/generic_file_read_iter; read pattern tracking enabled")
-		}
-	}
-
-	reader, err := ringbuf.NewReader(progs.EventsMap())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ringbuf reader: %v\n", err)
-		return 1
-	}
-	defer reader.Close()
 
 	var s3c objstore.Backend
 	if *enableS3 {
@@ -514,7 +464,7 @@ func runFastpath(args []string) int {
 		// On daemon exit, revert kmod's dyn table to the compile-time
 		// bootstrap so a subsequent daemon restart (or an operator
 		// browsing the mount without daemon) doesn't see the stale
-		// snapshot from this session. Mirrors the clearAdmits defer.
+		// snapshot from this session. 
 		defer func() {
 			if err := syncEntriesIoctl(*dev, nil, appliedSeq()); err != nil {
 				fmt.Fprintf(os.Stderr, "[sync clear] %v\n", err)
@@ -527,42 +477,23 @@ func runFastpath(args []string) int {
 	// S3 we reflect real object metadata (size, mtime) and — the
 	// point of Week 4 (a) — copy the object body into the arena so
 	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
-	initialAdmits := prewarm(context.Background(), progs, s3c, pol)
-	if err := setAdmits(*dev, initialAdmits); err != nil {
-		fmt.Fprintf(os.Stderr, "[admit] %v — kmod fallback (kmalloc scratch) still works\n", err)
-	} else {
-		fmt.Printf("[admit] %d entries via %s\n", len(initialAdmits), *dev)
-		defer func() {
-			if err := clearAdmits(*dev); err != nil {
-				fmt.Fprintf(os.Stderr, "[admit clear] %v\n", err)
-			}
-		}()
+	prewarm(context.Background(), progs, s3c, pol)
+	// Opening the device (above) armed the kmod's upcall path.
+	fmt.Printf("[admit] 0 entries via %s (armed)\n", *dev)
 
-		// Read-miss upcall reader: services `cat` on any admitted
-		// entry with Prewarm=false, or any ino kmod knows about
-		// that daemon hasn't warmed yet.
-		go runReadMissLoop(ctx, *dev, progs, s3c)
-		// AA-04: proactive sequential prefetch — pre-admit the next
-		// chunk of large files while the current chunk is still being
-		// read. No-op unless --prefetch-seq-admit is set.
-		go runSeqPrefetchLoop(ctx, *dev, progs, s3c)
-		// AC-67: the prewarm reads block on upcalls, so start after
-		// runReadMissLoop.
-		if pcachePrewarmEnabled || prefetchPolicy != nil {
-			go runPcachePrewarm(ctx)
-		}
+	// Read-miss upcall reader: services `cat` on any admitted entry with
+	// Prewarm=false, or any ino kmod knows about that daemon hasn't warmed yet.
+	go runReadMissLoop(ctx, *dev, progs, s3c)
+	// AC-67: the prewarm reads block on upcalls, so start after runReadMissLoop.
+	if pcachePrewarmEnabled || prefetchPolicy != nil {
+		go runPcachePrewarm(ctx)
 	}
 
-	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
+	fmt.Printf("[fastpath] Ctrl+C to stop.\n")
 
-	go func() {
-		<-ctx.Done()
-		reader.Close()
-	}()
 	// W-03: one goroutine samples all three stats sources (BPF counters,
 	// kmod ioctl, arena free-list) on a single ticker.
 	go runStatsLoop(ctx, progs, *dev, *sampleEvery)
-	go drainEvictionsLoop(ctx, *dev, progs, 2*time.Second)
 	// Periodic bucket sync: keep kmod's entry table + daemon mirror
 	// aligned with S3 without re-mounting. New keys become visible
 	// via `ls`, deleted keys stop resolving. When admit state is
@@ -572,25 +503,16 @@ func runFastpath(args []string) int {
 	// only warms newly-appeared entries. Seeded from the startup
 	// prewarm output so the first sync round doesn't re-fetch things
 	// we just admitted.
-	prewarmed := make(map[uint64]struct{}, len(initialAdmits))
-	for _, a := range initialAdmits {
-		prewarmed[a.Ino] = struct{}{}
-	}
+	prewarmed := make(map[uint64]struct{})
 	go runSyncLoop(ctx, *dev, s3c, *syncEvery, func(fresh []fpebpf.Entry) {
 		if len(fresh) != lastSyncCount {
 			fmt.Printf("[sync] delta: %d → %d entries\n",
 				lastSyncCount, len(fresh))
 			lastSyncCount = len(fresh)
 		}
-		// Drop admit entries whose ino no longer appears in the fresh
-		// entry set (S3 rm made the key disappear). Without this the
-		// admit hash and arena buffer leak. See A-02 in docs/journal/backlog.md.
 		keep := make(map[uint64]struct{}, len(fresh))
 		for _, e := range fresh {
 			keep[e.Ino] = struct{}{}
-		}
-		if err := pruneAdmitsTo(*dev, keep); err != nil {
-			fmt.Fprintf(os.Stderr, "[admit prune] %v\n", err)
 		}
 		// F-01: prewarm any entry we haven't seen before so the
 		// first cat hits Path A/B. Skips inos gone from the fresh
@@ -608,15 +530,8 @@ func runFastpath(args []string) int {
 			if _, done := prewarmed[entry.Ino]; done {
 				continue
 			}
-			ad, ok := prewarmEntry(ctx, progs, s3c, pol, entry)
+			prewarmEntry(ctx, progs, s3c, pol, entry)
 			prewarmed[entry.Ino] = struct{}{}
-			if !ok {
-				continue
-			}
-			if err := replaceAdmit(*dev, ad, progs); err != nil {
-				fmt.Fprintf(os.Stderr, "[sync prewarm] admit ino=%d: %v\n",
-					entry.Ino, err)
-			}
 		}
 	})
 	// Week 4 (c): drain the kmod write-back queue and PUT bytes to
@@ -641,29 +556,7 @@ func runFastpath(args []string) int {
 		go samplePolicyStats(ctx, &polMu, &polProg, 5*time.Second)
 	}
 
-	for {
-		rec, err := reader.Read()
-		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
-				break
-			}
-			fmt.Fprintf(os.Stderr, "ringbuf read: %v\n", err)
-			continue
-		}
-		if len(rec.RawSample) < 16 {
-			fmt.Fprintf(os.Stderr, "short miss event: %d bytes\n", len(rec.RawSample))
-			continue
-		}
-		ev := fpebpf.MissEvent{
-			Ino: binary.LittleEndian.Uint64(rec.RawSample[0:8]),
-			Op:  binary.LittleEndian.Uint32(rec.RawSample[8:12]),
-			Pad: binary.LittleEndian.Uint32(rec.RawSample[12:16]),
-		}
-		fmt.Printf("[miss] ino=%d op=%s\n", ev.Ino, opName(ev.Op))
-		if s3c != nil {
-			warmFromS3(ctx, progs, s3c, ev)
-		}
-	}
+	<-ctx.Done()
 
 	printCounters(progs, "final")
 	return 0

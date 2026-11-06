@@ -19,25 +19,8 @@ const (
 	StatFastHits         uint32 = 0
 	StatSlowMisses       uint32 = 1
 	StatUnknownFS        uint32 = 2
-	StatReadIterHits     uint32 = 3
-	StatReadIterMisses   uint32 = 4
-	StatReadIterHitsPos0 uint32 = 5 // Y-06: read_iter hit where ki_pos==0 (first read per open)
-	StatSlotMax          uint32 = 6
+	StatSlotMax          uint32 = 3
 )
-
-// MissOp mirrors `enum s3fs_miss_op`.
-const (
-	OpGetattr uint32 = 0
-	OpLookup  uint32 = 1
-	OpRead    uint32 = 2
-)
-
-// MissEvent mirrors `struct s3fs_miss_event`.
-type MissEvent struct {
-	Ino uint64
-	Op  uint32
-	Pad uint32
-}
 
 // TestArgs mirrors `struct s3fs_test_args` in include/s3fs_shared_types.h.
 // Layout MUST stay in sync: Week 2 grew a leading arena_base_uaddr so the
@@ -61,22 +44,19 @@ type TestArgs struct {
 type runtimeObjs struct {
 	// Programs.
 	S3fsFpGetattr     *ebpf.Program `ebpf:"s3fs_fp_getattr"`
-	S3fsFpReadIter    *ebpf.Program `ebpf:"s3fs_fp_read_iter"`
 	S3fsTestShared    *ebpf.Program `ebpf:"s3fs_test_shared"`
 	S3fsArenaPrealloc *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 
 	// Maps.
 	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
 	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
-	S3fsEvents     *ebpf.Map `ebpf:"s3fs_events"`
 	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
-	S3fsInoSlots   *ebpf.Map `ebpf:"s3fs_ino_slots"`
 }
 
 func (o *runtimeObjs) Close() error {
 	return _S3fsfpClose(
-		o.S3fsFpGetattr, o.S3fsFpReadIter, o.S3fsTestShared, o.S3fsArenaPrealloc,
-		o.S3fsArena, o.S3fsCounters, o.S3fsEvents, o.S3fsInodeIndex, o.S3fsInoSlots,
+		o.S3fsFpGetattr, o.S3fsTestShared, o.S3fsArenaPrealloc,
+		o.S3fsArena, o.S3fsCounters, o.S3fsInodeIndex,
 	)
 }
 
@@ -92,20 +72,10 @@ type Programs struct {
 
 	// cache admission state for WarmCache. cacheKnown deduplicates
 	// concurrent misses on the same ino; cacheNextOff is a bump
-	// allocator into the arena.
-	//
-	// D-02: arenaFree is a free-list of {offset, size} chunks that
-	// eviction returns to. AdmitContent searches this list first
-	// (first-fit) before extending cacheNextOff. Turns the arena
-	// from a monotonic high-water buffer into a reusable pool.
-	//
-	// T-05: offsets and sizes use uint64 so the API is safe for arenas
-	// larger than 4 GiB. Current arena is 128 MiB, but keeping the
-	// arithmetic in uint64 prevents silent truncation if the limit grows.
+	// allocator into the arena (stubs only: file content is not kept there).
 	cacheMu      sync.Mutex
 	cacheKnown   map[uint64]uint64
 	cacheNextOff uint64
-	arenaFree    []arenaChunk
 }
 
 // Load pulls the bpf2go collection into the kernel and returns a handle.
@@ -163,9 +133,6 @@ func (p *Programs) Arena() *arena.Arena {
 	return p.arena
 }
 
-// EventsMap returns the ringbuf carrying slow-path miss events.
-func (p *Programs) EventsMap() *ebpf.Map { return p.Objs.S3fsEvents }
-
 // CountersMap returns the per-CPU counter array indexed by StatSlot*.
 func (p *Programs) CountersMap() *ebpf.Map { return p.Objs.S3fsCounters }
 
@@ -182,18 +149,6 @@ func (p *Programs) AttachFentry() (link.Link, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("attach fentry/vfs_getattr: %w", err)
-	}
-	return l, nil
-}
-
-// AttachFentryReadIter attaches the fentry/generic_file_read_iter observer
-// (R-01). The returned link.Link must be Close()d during teardown.
-func (p *Programs) AttachFentryReadIter() (link.Link, error) {
-	l, err := link.AttachTracing(link.TracingOptions{
-		Program: p.Objs.S3fsFpReadIter,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("attach fentry/generic_file_read_iter: %w", err)
 	}
 	return l, nil
 }

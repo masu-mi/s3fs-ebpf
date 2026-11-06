@@ -6,7 +6,7 @@
 # fell back to score order and the ino stayed in the BPF map for good).
 #
 # Flow: 8 small objects, capacity 2 of them, policy sieve_pick_ops (its FIFO is
-# the `idx` map).  Prewarm leaves 2 survivors in the FIFO.  Delete both objects,
+# the `idx` map).  Reading all 8 files leaves 2 survivors in the FIFO.  Delete both objects,
 # wait for a sync, read 3 evicted files back (3 candidates > capacity): the
 # round's pick_victim returns the survivors first.  Neither may be in `idx`.
 #
@@ -64,6 +64,9 @@ ebpf_mount "$MOUNT"
 ebpf_start_daemon "$OUT/daemon.log" --bucket="$S3_BUCKET" \
     --policy-bpf=builtin:policy_sieve_pick_ops --metrics-addr=:9600 \
     --sample-every=2s --sync-every=2s --softcap=64 --cache-capacity=$((2 * FILE_BYTES))
+# The content is not prewarmed any more (pcache): read every file once so each
+# is populated, the capacity pass evicts down to 2 and the policy tracks them.
+for n in "$MOUNT"/stale_*.txt; do cat "$n" >/dev/null 2>&1 || true; done
 for _ in 1 2 3; do curl -s -X POST "$METRICS/policy/eval" >/dev/null; sleep 2; done
 
 mapfile -t survivors < <(idx_inos)

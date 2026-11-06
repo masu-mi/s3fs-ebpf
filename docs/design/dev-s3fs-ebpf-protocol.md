@@ -64,10 +64,9 @@ struct s3fs_read_miss_event {
 
 | nr | 名前 | 方向 | 構造体 | フィールド | 戻り値 |
 |---:|---|---|---|---|---|
+| 0x02 | `EVAL` | →kmod | (なし) | kmod の容量 / policy パスを今走らせる。旧 `ADMIT_ARENA` (arena の範囲の登録) の nr を引き継いだ。デバイスを open すると upcall が有効になる | 0 |
 | 0x0E | `POPULATE_PAGES` | →kmod | `s3fs_populate_pages` | `ino`、`offset` (データの開始位置)、`size` (バイト数)、`data_ptr` (daemon のバッファ) | pcache モード。kmod は fd の chunk 表にコピーし、`S3FS_ADMIT_FLAG_PCACHE` の admit entry を入れる。以降の read は `generic_file_read_iter` が page cache から返す |
 | 0x03 | `SIGNAL_ADMIT` | →kmod | `s3fs_signal_admit` | `ino`、`chunk_offset` (4 MiB 境界、小さいファイルは 0)、`err` (0 = 成功、負の errno は read に返る)、`flags` | 待っている reader がなければ `-ENOENT`。`S3FS_SIGNAL_VERIFY_POPULATED` (0x1) を付けると、chunk が実際に入っているときだけ起こし、なければ `-EAGAIN` (AC-45) |
-| 0x02 | `ADMIT_ARENA` | →kmod | `s3fs_admit_arena` + `s3fs_admit_entry[]` | `count` (0 で表を空に)、`entries` (配列へのポインタ)。各 entry は `ino`、`uaddr` (daemon の arena mmap 上の番地)、`size`、`offset` (ファイル上の開始位置。1 つの ino に複数可) | arena モード。表の置き換え。kmod は read のときに `uaddr` を GUP で読む |
-| 0x01 | `PROBE_KVBASE` | ↔kmod | `s3fs_probe_kvbase` | in: `arena_fd`。out: `out_kvbase` (arena の kern_vm の先頭)、`out_size` | 起動時の確認用 (Week 4 の spike) |
 
 ### 3.2 ディレクトリの内容
 
@@ -94,7 +93,6 @@ struct s3fs_read_miss_event {
 | nr | 名前 | 方向 | 構造体 | フィールド | 備考 |
 |---:|---|---|---|---|---|
 | 0x08 | `STATS` | ↔kmod | `s3fs_stats` | in: `count` (確保した slot 数、最大 16)。out: `filled`、`values[]`。slot は [0] evictions_total、[1] folio_hits、[2] admit_invalidations。番号は足すだけで振り直さない | 5 秒ごと |
-| 0x09 | `DRAIN_EVICTIONS` | ↔kmod | `s3fs_drain_evictions` | in: `cap`。out: `filled`、`overflow` (queue があふれて捨てた件数)、`inos[256]` | policy が追い出した ino を受け取る。`overflow` が 0 でなければ daemon は表を丸ごと合わせ直す。2 秒ごと |
 
 ## 4. miss 1 回の流れ (pcache モード)
 

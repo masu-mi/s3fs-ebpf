@@ -1,6 +1,6 @@
 # hit の信号を per-CPU で集計し、evict の前に policy へ反映する (issue #22)
 
-状態: **実装済み (2026-10-27)。module param `hit_accum` で切り替え、**既定は 1** (2026-10-27 に既定化。0 で従来の方式)。`make test-regression` は 0 / 1 とも PASS、§5.2〜§5.5 を測った (§8、`benchmark-results.md` §18.44)。測定の途中で、bench の capacity のずれと、hit_accum と無関係な 2 つの不具合 (in-flight の miss の `on_insert`、S3-FIFO の ghost の下限) を見つけて直した。hit rate への上乗せは小さい。既定化の根拠は §6 と §9。**
+状態: **実装済み (2026-10-27)。※ 2026-11-05 に `hit_accum` の module param と `hit_accum=0` の経路を削除した (常にこの方式)。以下の「切り替え」「A/B」「従来」の記述は当時のもの。** module param `hit_accum` で切り替え、**既定は 1** (2026-10-27 に既定化。0 で従来の方式)。`make test-regression` は 0 / 1 とも PASS、§5.2〜§5.5 を測った (§8、`benchmark-results.md` §18.44)。測定の途中で、bench の capacity のずれと、hit_accum と無関係な 2 つの不具合 (in-flight の miss の `on_insert`、S3-FIFO の ghost の下限) を見つけて直した。hit rate への上乗せは小さい。既定化の根拠は §6 と §9。**
 コードの位置は `51e9e50` から実装後の `kmod/vfs_ops.c` に合わせている。issue の原文 (問題の整理、採らなかった案を含む) は GitHub issue #22。ここには実装した形と、実装で決めたことだけを書く。
 
 ## 1. 何を直すか

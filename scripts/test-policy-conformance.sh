@@ -16,7 +16,7 @@
 #   scripts/test-policy-conformance.sh                    # all four policies
 #   POLICIES="s3fifo_pick_ops" scripts/test-policy-conformance.sh
 #
-# Thresholds come from the fixed build (seed 42, hit_accum=1, SYNC_EVERY=3600s,
+# Thresholds come from the fixed build (seed 42, SYNC_EVERY=3600s,
 # deterministic, with rare outliers): hit gap <= 0.5 pt for every policy (the faults above gave 4.2 pt for
 # the ghost bound, 5.3 pt for the in-flight on_insert, ~6 pt for both).  The differing
 # share is a ceiling just above what the build shows: lru 1.8 %, sieve 0 %,
@@ -32,10 +32,6 @@ SEED=${SEED:-42}
 SOFTCAP=${SOFTCAP:-8}
 N_ACCESS=${N_ACCESS:-2000}
 HIT_TOL_PT=${HIT_TOL_PT:-3.0}
-# The simulators see every access; the old direct on_hit signal drops some
-# (one per jiffy per CPU and ino), so the comparison is meaningful only with
-# hit_accum=1.  CONF_HIT_ACCUM=0 measures the old signal (gaps up to ~3.3 pt).
-CONF_HIT_ACCUM=${CONF_HIT_ACCUM:-1}
 # The daemon re-sends the bucket listing every --sync-every and runs an admit_replace
 # round on each tick; those rounds fall at arbitrary moments between accesses and
 # moved s3fifo's hit count by up to +-5 pt from run to run.  With the tick out of the
@@ -62,7 +58,7 @@ run_bench() {
 	# the first attempt's first 2000 lines again and always repeat its verdict.
 	local p
 	for p in $1; do rm -f "$OUT/live.$p"; done
-	HIT_ACCUM="$CONF_HIT_ACCUM" PER_ACCESS_LOG="$OUT/live" SEED="$SEED" SOFTCAP="$SOFTCAP" N_ACCESS="$N_ACCESS" \
+	PER_ACCESS_LOG="$OUT/live" SEED="$SEED" SOFTCAP="$SOFTCAP" N_ACCESS="$N_ACCESS" \
 		POLICIES="$1" DAEMON_EXTRA_FLAGS="--arena-metadata-only" OUT="$OUT/bench" \
 		"$TOPDIR/scripts/bench-hitrate.sh" >"$OUT/bench.log" 2>&1 || {
 		tail -20 "$OUT/bench.log" >&2
@@ -106,7 +102,7 @@ print(f"{'ok' if ok else 'FAIL'} live_hits={lh} sim_hits={sh} gap_pt={gap:.1f} d
 PY
 }
 
-echo "==> test-policy-conformance (policies: $POLICIES, HIT_ACCUM=$CONF_HIT_ACCUM, up to $ATTEMPTS attempts)"
+echo "==> test-policy-conformance (policies: $POLICIES, up to $ATTEMPTS attempts)"
 # A real fault (wrong ghost bound, an in-flight miss on_insert'ed) fails every attempt;
 # a timing outlier (s3fifo up to +4.7 pt, wtinylfu +2.5 pt, a few runs in ten: the daemon's
 # 2 s eviction-drain / stats ticks fall between accesses) does not repeat.

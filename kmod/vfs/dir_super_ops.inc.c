@@ -391,29 +391,6 @@ static bool local_entry_remove(unsigned long parent_ino,
 }
 
 /*
- * Drop the ino from the admit hash if present. Symmetric with the
- * eviction-vote path; the ino won't be re-populated because the
- * daemon-side snapshot removes it via evict-drain feedback on the
- * next admit_replace round.
- */
-static void admit_drop_ino_locked(u64 ino)
-{
-	struct s3fs_admit *a;
-	struct hlist_node *tmp;
-
-	write_lock(&s3fs_admits_lock);
-	hash_for_each_possible_safe(s3fs_admits, a, tmp, node, ino) {
-		if (a->ino != ino)
-			continue;
-		hash_del(&a->node);
-		atomic_dec(&s3fs_admits_count);
-		kfree(a);
-		break;
-	}
-	write_unlock(&s3fs_admits_lock);
-}
-
-/*
  * .unlink — remove `dentry` from this FS. Enqueues a delete event so
  * the daemon can DELETE the S3 object. Best-effort at PoC scope:
  * local entries drop immediately, dyn entries only disappear on the
@@ -447,7 +424,6 @@ static int s3fs_ebpf_unlink(struct inode *dir, struct dentry *dentry)
 	 * parent isn't accidentally scrubbed.  AC-85: an S3-derived (dyn) entry
 	 * cannot be removed until the next sync, so it is tombstoned. */
 	entry_forget(dir->i_ino, name, name_len, inode->i_ino, seq);
-	admit_drop_ino_locked(inode->i_ino);
 
 	/* Drop link count so drop_inode fires evict_inode. */
 	drop_nlink(inode);
