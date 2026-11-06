@@ -194,11 +194,11 @@ __bpf_kfunc u64 s3fs_kfunc_ino_size(u64 ino)
  */
 __bpf_kfunc int s3fs_kfunc_policy_hit(u64 ino)
 {
-	/* Issue #22: with hit_accum the kmod counts hits in .read_iter and
-	 * replays them from admit_replace; this direct call is a no-op. */
-	if (READ_ONCE(s3fs_hit_accum))
-		return 0;
-	return s3fs_policy_ops_eval_hit(ino);
+	/* Issue #22: the kmod counts hits in .read_iter and replays them from
+	 * admit_replace, so this direct call is a no-op.  It stays only because
+	 * the committed fastpath object (fentry/generic_file_read_iter) still
+	 * calls it; it goes away with that fentry (docs/design/redesign-v2-simplify.md). */
+	return 0;
 }
 
 __bpf_kfunc_end_defs();
