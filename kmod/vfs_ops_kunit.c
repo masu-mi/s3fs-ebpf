@@ -1483,10 +1483,12 @@ static void s3k_resident_index_follows_cap(struct kunit *test)
 	const u64 ino = S3K_INO_BASE + 90, C = S3FS_CHUNK_SIZE;
 	struct s3fs_file_data *fd = s3fs_file_data_new(ino, NULL, 0);
 	int nodes0 = atomic_read(&s3fs_resident_nodes);
+	char *buf = kunit_kzalloc(test, 8192, GFP_KERNEL);	/* the source of every store below */
 	u64 bytes = 0;
 	char x = 1;
 
 	KUNIT_ASSERT_NOT_NULL(test, fd);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
 	KUNIT_EXPECT_TRUE(test, list_empty(&fd->res_link));	/* cap == 0: not indexed */
 	KUNIT_EXPECT_FALSE(test, s3k_index_has(ino, NULL));
 
@@ -1498,7 +1500,7 @@ static void s3k_resident_index_follows_cap(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, bytes, (u64)fd->cap);
 
 	/* growing an allocated chunk keeps the single node and updates the bytes */
-	KUNIT_ASSERT_EQ(test, s3fs_fd_store(fd, 1, &x, NULL, 8192, 0), 0);
+	KUNIT_ASSERT_EQ(test, s3fs_fd_store(fd, 1, buf, NULL, 8192, 0), 0);
 	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_resident_nodes), nodes0 + 1);
 	KUNIT_EXPECT_TRUE(test, s3k_index_has(ino, &bytes));
 	KUNIT_EXPECT_EQ(test, bytes, (u64)fd->cap);
