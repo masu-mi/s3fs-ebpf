@@ -5,8 +5,8 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 **関連 doc**:
 - [`daemon-kmod-messaging.md`](daemon-kmod-messaging.md) — daemon と kmod の間のメッセージを、イベント (miss / flush / fsync / unlink / rename / sync / evict) とデータ構造 (キュー、pending) で整理した図つきの見取り図。**まずここ**
 - [`read-path-design.md`](read-path-design.md) — Path A/B/C 通信の設計理由
-- [`policy-engine-design.md`](policy-engine-design.md) — 4-layer policy dispatch (Layer 1 CEL / Layer 2 fmod_ret / Layer 3 user eBPF / Layer 4 KFunc)
-- [`policy-attach-comparison.md`](policy-attach-comparison.md) — fmod_ret vs struct_ops
+- [`policy-engine-design.md`](policy-engine-design.md) — policy dispatch (CEL で policy を選び、struct_ops の vtable で呼び、KFunc で kmod の状態を読む。fmod_ret の層は issue #35 で削除済み)
+- [`policy-attach-comparison.md`](policy-attach-comparison.md) — fmod_ret vs struct_ops (fmod_ret は削除済み。比較は当時の記録)
 - [`hook-timings-diagrams.md`](hook-timings-diagrams.md) — 8 タイミング × 3 path のオブジェクト図
 - [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — ここに見えている ioctl/ringbuf/miscdev 選択の理由
 
@@ -18,7 +18,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 |---|---|---|---|---|---|---|
 | **T1** | app → VFS | syscall (`open` / `read` / `write` / `stat` / `unlink` / `rename` / `fsync`) | ユーザ操作の入口 | 常時 | μs | Linux VFS |
 | **T2** | VFS → kmod | file/inode/address_space/super_operations fop dispatch | mount 経由の全操作 | 常時 | μs | `kmod/vfs_ops.c` |
-| **T3** | kmod → BPF (policy) | fmod_ret 経由の関数置換 or struct_ops vtable dispatch | admit / evict / pressure / hit hook。struct_ops はさらに insert / remove / pick_victim (AC-58) | 各 admit_replace | μs | `kmod/tree_traversal.c` (fmod_ret set), `kmod/policy_struct_ops.c` (vtable) |
+| **T3** | kmod → BPF (policy) | struct_ops vtable dispatch | admit / evict / pressure / hit hook、さらに insert / size / remove / pick_victim (AC-58 / AC-66) | 各 admit_replace | μs | `kmod/policy_struct_ops.c` (vtable) |
 | **T4** | BPF → kmod | KFunc call | `admit_count` / `softcap` / `capacity_bytes` / `evictions_total` / `time_ns` / `ino_size`。fentry からは `policy_hit` (page cache hit を `on_hit` に渡す) | policy 判定内 | ns | `kmod/tree_traversal.c` KFunc set |
 | **T5** | kmod ↔ BPF map | `bpf_map_lookup/update_elem` (helper), 一部は kmod 側からも書く | inode_index / counters / arena / policy 個別 map | fentry 発火ごと | ns | `bpf/s3fs_fastpath.bpf.c` maps |
 | **T6** | daemon → BPF map | mmap (arena bytes 書込) / `bpf(BPF_MAP_UPDATE_ELEM)` (inode_index 書込) | arena 書込は syscall なし。inode_index は cilium/ebpf 経由 | admit ごと | μs | `daemon/internal/ebpf/loader.go` `AdmitContent` / `WarmCache` |
@@ -82,7 +82,7 @@ flowchart LR
       end
       subgraph BPF["eBPF"]
         Fentry["fentry/vfs_getattr<br/>(s3fs_fp_getattr)"]
-        Policy["policy BPF<br/>fmod_ret OR<br/>struct_ops vtable"]
+        Policy["policy BPF<br/>struct_ops vtable"]
         subgraph Maps["BPF maps"]
           Arena[(s3fs_arena<br/>ARENA)]
           Idx[(s3fs_inode_index<br/>HASH)]
@@ -112,7 +112,7 @@ flowchart LR
     Fops -.- LocalEntries
     Fops -.- FlushQ
     %% T3
-    Fops -->|"T3: fmod_ret /<br/>struct_ops dispatch"| Policy
+    Fops -->|"T3: struct_ops<br/>dispatch"| Policy
     %% T4
     Policy -->|"T4: KFunc call<br/>(admit_count / softcap /<br/>ino_size / ...)"| Fops
     %% T5
@@ -300,9 +300,9 @@ E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が�
 
 ---
 
-## 5. Policy engine dispatch (Layer 1〜4)
+## 5. Policy engine dispatch
 
-BPF 側 hook が 4 種類 (`on_admit` / `on_evict` / `on_pressure` / `on_hit`) あり、fmod_ret と struct_ops の 2 attach 方式が共存する。struct_ops の vtable には AC-58 で `on_insert` / `on_remove` / `pick_victim` が足され、これを持つ policy は容量超過のときに victim を自分で選ぶ (`docs/design/ac58-pick-victim.md`。fmod_ret 側にはない)。KFunc は BPF → kmod の逆方向 helper。
+BPF 側の policy は struct_ops (`struct s3fs_policy_ops`、`kmod/policy_struct_ops.h`) の 1 方式だけ。hook は `on_admit` / `on_evict` / `on_pressure` / `on_hit` に、AC-58 で `on_insert` / `on_remove` / `pick_victim`、AC-66 で `on_size` が足された。`pick_victim` を持つ policy は容量超過のときに victim を自分で選ぶ (`docs/design/ac58-pick-victim.md`)。KFunc は BPF → kmod の逆方向 helper。差し替えは `BPF_LINK_UPDATE` 1 回 (RCU ポインタ 1 本)。fmod_ret の層は issue #35 で削除した (kmod に `s3fs_policy_on_*` の anchor はない。`docs/design/policy-attach-comparison.md` は当時の比較の記録)。
 
 ```mermaid
 flowchart TB
@@ -310,16 +310,8 @@ flowchart TB
       CEL["policies/*.cel<br/>daemon 起動時 eval<br/>→ prewarm 判定 +<br/>policy_bpf 名選択"]
     end
 
-    subgraph K["Layer 2/3: kmod hook site"]
-      Anchor1["s3fs_policy_on_admit<br/>(noinline anchor)"]
-      Anchor2["s3fs_policy_on_evict<br/>(noinline anchor)"]
-      Anchor3["s3fs_policy_on_pressure"]
-      Anchor4["s3fs_policy_on_hit"]
+    subgraph K["kmod"]
       Vtable["s3fs_policy_active<br/>rcu-guarded vtable"]
-    end
-
-    subgraph L2["Layer 2: fmod_ret (per-hook attach)"]
-      FMR["bpf/policy_freq2bit.bpf.c<br/>SEC(fmod_ret/s3fs_policy_on_*)<br/>各 hook 個別 link"]
     end
 
     subgraph L3["Layer 3: struct_ops (vtable atomic swap)"]
@@ -327,29 +319,18 @@ flowchart TB
     end
 
     subgraph L4["Layer 4: KFunc (BPF → kmod helper)"]
-      KF["s3fs_kfunc_admit_count<br/>_softcap / _capacity_bytes<br/>_evictions_total / _time_ns<br/>_ino_size / _policy_hit"]
+      KF["s3fs_kfunc_admit_count<br/>_softcap / _capacity_bytes<br/>_evictions_total / _time_ns<br/>_ino_size"]
     end
 
     Daemon["daemon"] -->|"--policy-bpf select"| CEL
-    CEL --> FMR
     CEL --> SO
-    Daemon -->|"link.AttachTracing"| FMR
-    Daemon -->|"link.AttachStructOps"| SO
-    Anchor1 -->|"fmod_ret override"| FMR
-    Anchor2 -->|"fmod_ret override"| FMR
-    Anchor3 -->|"fmod_ret override"| FMR
-    Anchor4 -->|"fmod_ret override"| FMR
-    Anchor1 -.-> Vtable
-    Anchor2 -.-> Vtable
-    Anchor3 -.-> Vtable
-    Anchor4 -.-> Vtable
+    Daemon -->|"link.AttachStructOps /<br/>BPF_LINK_UPDATE"| SO
     Vtable -->|"rcu_dereference<br/>→ fn ptr call"| SO
     SO --> KF
-    FMR --> KF
-    KF -.->|"kmod の状態を参照"| Anchor1
+    KF -.->|"kmod の状態を参照"| Vtable
 ```
 
-fmod_ret と struct_ops の trade-off は `docs/design/policy-attach-comparison.md`。両者が同時 attach 可能 (kmod 側 call site は両方 evaluate) で、meetup demo では struct_ops の atomic swap narrative を推奨 (§3)。
+policy の各 hook の呼び出し順と map の使い方は [`policy-bpf-maps.md`](policy-bpf-maps.md) §1。
 
 ---
 

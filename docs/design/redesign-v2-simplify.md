@@ -57,7 +57,7 @@
 | fentry の `policy_hit` KFunc | `hit_accum=0` のときだけ有効 |
 | syscall プログラム 3 本 (`deep_walk_reject` / `arena_prealloc` / `test_shared`) | verifier のデモと arena のテスト用 |
 | policy の struct_ops | **本体**。policy ごとに自分の map を 0〜8 個持つ (`wtinylfu_pick` が 8) |
-| fmod_ret (Layer 2) | `component-communication.md` §5 の図にあるが、kmod に `s3fs_policy_on_*` の anchor が見つからない (grep)。**doc だけに残っている層** |
+| fmod_ret (Layer 2) | `component-communication.md` §5 の図にあるが、kmod に `s3fs_policy_on_*` の anchor が見つからない (grep)。**doc だけに残っていた層** (`component-communication.md` は直した。`policy-attach-comparison.md` は issue #35 で削除済みと明記済み) |
 
 ### 2.3 kmod の表とキュー
 
