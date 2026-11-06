@@ -22,7 +22,8 @@
  *    file is dirty/flushing, and "not cached" otherwise.
  *  - bytes of an allocated chunk at or beyond fd->size are zero.
  *  - fd->cap == sum of chunks[].cap, and s3fs_fd_buf_bytes moves with it
- *    (M1): only s3fs_fd_chunk_ensure / s3fs_fd_chunk_free change either. */
+ *    (M1): only s3fs_fd_chunk_ensure / s3fs_fd_chunk_free change either, and they keep
+ *    the resident index (res_link) in step. */
 struct s3fs_chunk {
 	u8   *p;
 	u32   cap;       /* allocated bytes, <= S3FS_CHUNK_SIZE */
@@ -51,8 +52,23 @@ struct s3fs_hit_acc {
 	u32 rand_count;
 };
 
+/* Resident index (v2 Phase 3d): the fds that hold chunk data (fd->cap > 0),
+ * dirty or clean, linked through fd->res_link.  The capacity pass collects its
+ * candidates here, so it costs O(cached inodes), not O(inodes of the sb) (a walk
+ * of sb->s_inodes was 74 ns per inode, per walk: 4 ms with 30,000 cold inodes).
+ * Membership follows fd->cap exactly: s3fs_fd_chunk_ensure links an fd when its
+ * cap leaves 0, s3fs_fd_chunk_free unlinks it when it returns to 0 (M1 / M2 are
+ * the only places that change cap).  Link / unlink need fd->lock AND
+ * s3fs_resident_lock (a spinlock, innermost: fd->lock -> s3fs_resident_lock).
+ * An fd is freed only after its cap is 0, so a node never outlives its fd. */
+static LIST_HEAD(s3fs_resident_list);
+static DEFINE_SPINLOCK(s3fs_resident_lock);
+static atomic_t s3fs_resident_nodes = ATOMIC_INIT(0);
+
 struct s3fs_file_data {
 	struct mutex lock;
+	unsigned long ino;		/* for the resident index; set at creation */
+	struct list_head res_link;	/* on s3fs_resident_list iff cap > 0 */
 	struct s3fs_chunk *chunks;
 	u32   nr_chunks;  /* length of the chunks table (entries may be empty) */
 	size_t size;
@@ -105,6 +121,25 @@ static int s3fs_fd_chunks_grow(struct s3fs_file_data *fd, u32 ci)
 	return 0;
 }
 
+/* Keep fd on s3fs_resident_list iff fd->cap > 0.  fd->lock held (it serialises
+ * every change of fd->cap and of res_link). */
+static void s3fs_resident_sync(struct s3fs_file_data *fd)
+{
+	bool linked = !list_empty(&fd->res_link);
+
+	if (fd->cap > 0 && !linked) {
+		spin_lock(&s3fs_resident_lock);
+		list_add_tail(&fd->res_link, &s3fs_resident_list);
+		spin_unlock(&s3fs_resident_lock);
+		atomic_inc(&s3fs_resident_nodes);
+	} else if (fd->cap == 0 && linked) {
+		spin_lock(&s3fs_resident_lock);
+		list_del_init(&fd->res_link);
+		spin_unlock(&s3fs_resident_lock);
+		atomic_dec(&s3fs_resident_nodes);
+	}
+}
+
 /* Make chunk ci at least `want` bytes (<= S3FS_CHUNK_SIZE).  The caller is
  * about to overwrite [lo, hi) of the chunk, so only the rest of the new
  * space is zeroed (a freshly populated chunk is not memset and then copied
@@ -141,6 +176,7 @@ static int s3fs_fd_chunk_ensure(struct s3fs_file_data *fd, u32 ci, u32 want,
 	fd->cap += want - oc;
 	c->p = np;
 	c->cap = want;
+	s3fs_resident_sync(fd);
 	return 0;
 }
 
@@ -158,6 +194,7 @@ static void s3fs_fd_chunk_free(struct s3fs_file_data *fd, u32 ci)
 		atomic_long_sub(c->cap, &s3fs_fd_buf_bytes);
 		fd->cap -= c->cap;
 		kvfree(c->p);
+		s3fs_resident_sync(fd);
 	}
 	{
 		u32 readers = c->readers;

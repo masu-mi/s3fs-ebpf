@@ -4,7 +4,7 @@
 
 ## ロック順 (外 → 内)
 (lockdep 付きカーネルで確認済み、2026-10-28: `make test-lockdep` が `test-regression` と evict-race で報告 0 件。`docs/dev-notes/lockdep-kernel.md`)
-- `s3fs_policy_evict_lock` (mutex、容量パス `s3fs_ebpf_capacity_pass`) → `fd->lock` (mutex、per-inode `s3fs_file_data`)。容量パスは `fd->lock` を持たずに入り、候補の収集は `sb->s_inode_list_lock` (spin) → `inode->i_lock` (spin) だけを取る (fd の `cap` / `dirty` / `flushing` は `READ_ONCE`)。
+- `s3fs_policy_evict_lock` (mutex、容量パス `s3fs_ebpf_capacity_pass`) → `fd->lock` (mutex、per-inode `s3fs_file_data`) → `s3fs_resident_lock` (spinlock、resident 索引、最内)。容量パスは `fd->lock` を持たずに入り、候補の収集は `s3fs_resident_lock` だけを取る (fd の `cap` / `dirty` / `flushing` は `READ_ONCE`)。`s3fs_resident_lock` の中では他の lock を取らず、確保もしない。
 - `s3fs_evseq_lock` (spinlock) は flush / delete / rename の 3 つのキューの lock の**外側**: イベントの `seq` の採番と、キューへの `list_add` を同じ lock の下で行う (AC-84)。その中で取ってよいのは `s3fs_flush_lock` / `s3fs_flush_wait_lock` / `s3fs_delete_lock` / `s3fs_rename_lock` だけ。daemon は「seq S のイベントを pop したら、S より小さい seq のイベントはもう各キューに見えている」ことに依存して 3 つのキューを seq 順にマージする (`event_order.go`)。
 - `s3fs_pending_lock` / `s3fs_miss_lock` / `s3fs_flush_*_lock` / `s3fs_flush_pins_lock` は spinlock で末端 (`flush_pins_lock` は fd->lock 下で取る)。保持中に `fd->lock` を取らない。
 - `admit_evict_ino` は `s3fs_file_data_reset` (`fd->lock`) を呼び、それを離したあとで `s3fs_evict_page_cache` を呼ぶ。
@@ -13,7 +13,9 @@
 ## chunk 表が唯一の記録 (旧 R1 / S1)
 (2026-11-05: arena モードを削除した。admit hash に入る entry は PCACHE だけになり、`ADMIT_ARENA` は `EVAL` (引数なし。容量の pass `s3fs_ebpf_capacity_pass` を走らせるだけ) になり、upcall はデバイスの open で有効になる (`s3fs_daemon_armed`、daemon の mm は持たない)。`evict_log` / `DRAIN_EVICTIONS` は削除した。`.read_iter` は常に `generic_file_read_iter`。)
 - **ファイルの中身がどこにあるかを答えるのは chunk 表だけ** (`chunks[ci].p` と `populated`)。別の表 (admit hash の PCACHE entry) は持たない。以前の R1 (「entry があれば chunk は確保済み」) と S1 (lockless な `fc_pcache_check` のあとで世代 `s3fs_admit_gen` を見て entry を再確認) は、同じことを 2 か所が持つから要った規則で、2026-11-05 (v2 Phase 3c) に表ごと消えた。hit の判定は `fd->lock` 下で chunk を見るだけ (T1 / T2)。
-- 容量パスの候補は、`sb->s_inodes` を歩いて「clean (`!dirty && !flushing`) で `fd->cap > 0`」の fd を集める (`s3fs_collect_resident`)。`s3fs_ebpf_populate_pages` と `signal_flush` は `populated` を立てるだけでよい。コスト: 容量パスが O(キャッシュ中の inode 数) (以前は O(entry 数))。
+- 容量パスの候補は **resident 索引** (`s3fs_resident_list`、fd の `res_link`) から集める (`s3fs_collect_resident`): 「clean (`!dirty && !flushing`) で `fd->cap > 0`」の fd。`s3fs_ebpf_populate_pages` と `signal_flush` は `populated` を立てるだけでよい。コスト: 容量パスが O(キャッシュ中の fd 数)、sb の inode 数に依らない (Phase 3c の `sb->s_inodes` の走査は 1 inode あたり約 74 ns × 2 回で、cold inode 30,000 個で 4 ms かかり、その間 `s3fs_inode_list_lock` を握っていた。`benchmark-results.md` §18.53)。
+- **resident 索引の不変条件 (Phase 3d)**: fd が索引に載っているのは **`fd->cap > 0` の間だけ** (dirty かどうかは問わない。dirty / flushing の fd は載っているが候補には返さない)。載せる・外すのは `s3fs_resident_sync` で、`fd->cap` を変える唯一の 2 関数 `s3fs_fd_chunk_ensure` (cap が 0 を離れたとき) と `s3fs_fd_chunk_free` (0 に戻ったとき) の中から、`fd->lock` を持ったまま呼ぶ (link / unlink は `s3fs_resident_lock` も取る)。fd の解放 (`s3fs_file_data_free`) は `s3fs_fd_free_all` が cap を 0 にして先に外すので、索引上の fd は `s3fs_resident_lock` の間は生きている。`fd->ino` は索引のために fd の生成時に入れる (`s3fs_file_data_new(ino, ...)`)。
+- audit (`s3fs_ebpf_fd_buf_audit`、STATS[12/13]): `pcache` は索引から、突き合わせ用に旧来の `sb->s_inodes` の走査 (`s3fs_collect_resident_walk`) も取り、食い違えば `resident index ... != sb walk` を pr_warn する (I/O の途中は食い違いうる)。
 - `setattr` の縮小 (truncate) は切った先の chunk を free する。chunk へのアクセスはすべて `p != NULL` を確認するので、読むと upcall に戻るだけで壊れない。
 - T5: populate が chunk に `populated` を立てるのは、範囲が chunk の先頭から始まり、chunk の終端か eof まで届くときだけ (`s3fs_populate_fills_chunk`)。chunk の途中から始まる範囲は、eof まで届いても立てない (以前は最後の chunk だけこの確認がなく、取得していない前半を 0 として返していた)。daemon の populate は chunk 境界から始まるので、通常の経路では変わらない。
 - T2: 確保済みの chunk に `populated` フラグが立っていることを要求する (未取得の chunk の 0 を返さないため)。フラグは chunk ごとにあるので、256 MiB を超えるファイルも同じ判定になる 。dirty/flushing のときは見ない (T1): 確保されていない chunk は hole で、0 として読める。`fd->size` より後ろも 0 (truncate が read と競合したとき)。
