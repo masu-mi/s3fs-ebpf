@@ -6,7 +6,7 @@
 
 ## 1. 全体像: 3 本の通り道と、そこにあるデータ構造
 
-daemon と kmod の通信は、ほとんどが 1 つのデバイス `/dev/s3fs_ebpf` (miscdevice) を通る。BPF の ringbuf はおまけの経路で、FS の動作には要らない (§7)。
+daemon と kmod の通信は、ほとんどが 1 つのデバイス `/dev/s3fs_ebpf` (miscdevice) を通る。BPF の ringbuf は 2026-11-05 に削除した (§7)。
 
 ```mermaid
 flowchart LR
@@ -279,22 +279,11 @@ sequenceDiagram
 
 ---
 
-## 7. もう一つの経路: BPF の ringbuf (FS の動作には要らない)
+## 7. BPF の ringbuf (削除済み)
 
-```mermaid
-flowchart LR
-    F["fentry/vfs_getattr_nosec<br/>fentry/generic_file_read_iter"] -->|"bpf_ringbuf_reserve / submit<br/>16 B: {ino, op, _pad}"| R[("s3fs_events<br/>RINGBUF 256 KiB")]
-    R -->|"ringbuf.Reader"| D["daemon<br/>(fastpath のメインループ)"]
-    D -->|"ino == 1 のときだけ<br/>LIST して stub を書く"| M[("s3fs_inode_index<br/>HASH")]
-    D -.->|"ino != 1 は何もしない"| X(("no-op"))
-```
+以前は fentry (`vfs_getattr_nosec` / `generic_file_read_iter`) が「`s3fs_inode_index` にない ino を見た」ときに `s3fs_miss_event {ino, op}` を ringbuf `s3fs_events` に出し、daemon (`fastpath` のメインループ) が読んでいた。daemon が処理するのは **root の ino=1 の warm (LIST して stub を書く) だけ**で、ほかの ino は何もしなかった。kmod は読まず、FS の動作 (E1〜E10) には関係なかったので、ringbuf、`struct s3fs_miss_event`、daemon の reader と `warmFromS3` を削除した (`redesign-v2-simplify.md` Phase 1)。fentry は counter (`s3fs_counters`) と read の pattern (`s3fs_ino_slots`) を更新するだけになった。
 
-- **載るもの:** `struct s3fs_miss_event { u64 ino; u32 op; u32 _pad; }` (`include/s3fs_shared_types.h`)。`op` は `GETATTR` / `LOOKUP` / `READ`。fentry の「inode_index にない ino を見た」という通知。
-- **使われ方:** daemon の `warmFromS3` が処理するのは **root の ino=1 だけ**。それ以外の ino は、sync ループと read の miss の経路がすでに扱っているので、何もしない (`daemon/cmd/s3fs-ebpf/prewarm_arena.go`)。
-- **kmod はこの ringbuf を見ない。** read の miss の通知とは別物で、並走して補い合うものではない (以前の図は並走するように描いていた)。FS の動作 (E1〜E10) はこの経路がなくても変わらない。
-- **なぜ使い分けるか:** BPF から書ける唯一の口が ringbuf (`bpf_ringbuf_*` は BPF 用の helper)。kmod には「再登録 (`MARK_DIRTY`)」と「待っている呼び出しを起こす (`SIGNAL_*`)」の対称な API が要るので、自前のキューと ioctl にした。USER_RINGBUF に置き換える検討は `component-communication.md` §7 (効果なし)。
-
-BPF map を daemon が書くもう一本の経路は、policy の差し替え (`BPF_LINK_UPDATE`、`POST /policy/reload`) と、`s3fs_inode_index` への書き込み (`bpf(BPF_MAP_UPDATE_ELEM)`)。どちらも `/dev/s3fs_ebpf` を通らない。
+BPF map を daemon が書く経路は、policy の差し替え (`BPF_LINK_UPDATE`、`POST /policy/reload`) と、arena モードの `s3fs_inode_index` への書き込み (`bpf(BPF_MAP_UPDATE_ELEM)`)。どちらも `/dev/s3fs_ebpf` を通らない。
 
 ---
 

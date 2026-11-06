@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -24,14 +23,11 @@ import (
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policy"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policyprog"
-	"github.com/cilium/ebpf/ringbuf"
 )
 
-// runFastpath loads the BPF collection, attaches fentry/vfs_getattr_nosec,
-// and streams miss events + counter samples until SIGINT/SIGTERM. If
-// --s3 is passed, each miss event triggers an S3 metadata fetch and
-// arena/inode_index population, so subsequent stats on the same ino
-// register as fast_hits.
+// runFastpath loads the BPF collection, attaches the fentry programs, runs
+// the kmod service loops (read miss, flush, delete, rename, sync, stats) and
+// samples counters until SIGINT/SIGTERM.
 func runFastpath(args []string) int {
 	fs := flag.NewFlagSet("fastpath", flag.ExitOnError)
 	sampleEvery := fs.Duration("sample-every", 2*time.Second,
@@ -447,13 +443,6 @@ func runFastpath(args []string) int {
 		}
 	}
 
-	reader, err := ringbuf.NewReader(progs.EventsMap())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ringbuf reader: %v\n", err)
-		return 1
-	}
-	defer reader.Close()
-
 	var s3c objstore.Backend
 	if *enableS3 {
 		s3c, err = newClient()
@@ -553,12 +542,8 @@ func runFastpath(args []string) int {
 		}
 	}
 
-	fmt.Printf("[fastpath] stat any path to trigger events. Ctrl+C to stop.\n")
+	fmt.Printf("[fastpath] Ctrl+C to stop.\n")
 
-	go func() {
-		<-ctx.Done()
-		reader.Close()
-	}()
 	// W-03: one goroutine samples all three stats sources (BPF counters,
 	// kmod ioctl, arena free-list) on a single ticker.
 	go runStatsLoop(ctx, progs, *dev, *sampleEvery)
@@ -643,29 +628,7 @@ func runFastpath(args []string) int {
 		go samplePolicyStats(ctx, &polMu, &polProg, 5*time.Second)
 	}
 
-	for {
-		rec, err := reader.Read()
-		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
-				break
-			}
-			fmt.Fprintf(os.Stderr, "ringbuf read: %v\n", err)
-			continue
-		}
-		if len(rec.RawSample) < 16 {
-			fmt.Fprintf(os.Stderr, "short miss event: %d bytes\n", len(rec.RawSample))
-			continue
-		}
-		ev := fpebpf.MissEvent{
-			Ino: binary.LittleEndian.Uint64(rec.RawSample[0:8]),
-			Op:  binary.LittleEndian.Uint32(rec.RawSample[8:12]),
-			Pad: binary.LittleEndian.Uint32(rec.RawSample[12:16]),
-		}
-		fmt.Printf("[miss] ino=%d op=%s\n", ev.Ino, opName(ev.Op))
-		if s3c != nil {
-			warmFromS3(ctx, progs, s3c, ev)
-		}
-	}
+	<-ctx.Done()
 
 	printCounters(progs, "final")
 	return 0

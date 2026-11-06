@@ -5,9 +5,8 @@
  * Programs:
  *   fentry/vfs_getattr_nosec  -- Fast Path observer: filters by
  *                                super_block::s_magic, looks the inode
- *                                up in s3fs_inode_index, and either
- *                                bumps a per-CPU hit counter or emits a
- *                                miss event on s3fs_events.
+ *                                up in s3fs_inode_index and bumps a
+ *                                per-CPU hit or miss counter.
  *   syscall/s3fs_test_shared  -- BPF_PROG_TEST_RUN harness that proves
  *                                the daemon can populate a real
  *                                BPF_MAP_TYPE_ARENA and the program can
@@ -16,9 +15,10 @@
  *
  * Why the fentry hook exists: it doesn't (and can't) return the kstat.
  * That path lives inside kmod's inode_operations.getattr, which the
- * kernel module will grow in Week 3. Today it drives (a) the
- * hit/miss counters that back the /metrics endpoint and (b) the
- * ringbuf that tells the Go daemon which inodes to fetch from S3.
+ * kernel module will grow in Week 3. Today it only feeds the hit/miss
+ * counters that back the /metrics endpoint.  (It used to push miss events
+ * to the daemon through a ringbuf; the daemon acted on ino=1 only and the
+ * ringbuf was removed.)
  */
 
 #include "vmlinux.h"
@@ -45,7 +45,6 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #endif
 
 /* Ringbuf capacity for slow-path miss events. Must be a power of two. */
-#define S3FS_EVENTS_SIZE (256 * 1024)
 
 /* Upper bound on the ino→offset index. Sized generously for the PoC. */
 #define S3FS_INDEX_MAX_ENTRIES 4096
@@ -73,12 +72,6 @@ struct {
 	__type(value, __u32);
 	__uint(max_entries, S3FS_INDEX_MAX_ENTRIES);
 } s3fs_inode_index SEC(".maps");
-
-/* Slow-path miss events. Consumed by daemon. */
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, S3FS_EVENTS_SIZE);
-} s3fs_events SEC(".maps");
 
 /* Per-CPU counters indexed by enum s3fs_stat_slot. */
 struct {
@@ -182,7 +175,6 @@ int BPF_PROG(s3fs_fp_getattr, const struct path *path, struct kstat *stat,
 	unsigned long magic;
 	__u64 ino;
 	__u32 *offp;
-	struct s3fs_miss_event *ev;
 
 	if (!path)
 		return 0;
@@ -214,13 +206,6 @@ int BPF_PROG(s3fs_fp_getattr, const struct path *path, struct kstat *stat,
 	}
 
 	bump_counter(S3FS_STAT_SLOW_MISSES);
-	ev = bpf_ringbuf_reserve(&s3fs_events, sizeof(*ev), 0);
-	if (!ev)
-		return 0;
-	ev->ino  = ino;
-	ev->op   = S3FS_OP_GETATTR;
-	ev->_pad = 0;
-	bpf_ringbuf_submit(ev, 0);
 	return 0;
 }
 
@@ -244,8 +229,6 @@ int BPF_PROG(s3fs_fp_getattr, const struct path *path, struct kstat *stat,
  *   3. Count read_iter_hits (ino already in inode_index) and
  *      read_iter_misses (ino unknown) separately from stat counters so
  *      the daemon can compute a true page-cache hit rate.
- *   4. Emit a miss event for ino-not-in-index reads so the daemon can
- *      prewarm the right range proactively (reuses op=S3FS_OP_READ).
  *
  * Why NOT return data here: fentry cannot modify the return value or
  * intercept page-cache fills — that stays in kmod's .read_folio.
@@ -263,7 +246,6 @@ int BPF_PROG(s3fs_fp_read_iter,
 	__u32 slot_idx;
 	bool refresh;
 	struct s3fs_ino_slot *slot;
-	struct s3fs_miss_event *ev;
 
 	if (!iocb)
 		return 0;
@@ -355,19 +337,6 @@ int BPF_PROG(s3fs_fp_read_iter,
 	}
 
 	bump_counter(S3FS_STAT_READ_ITER_MISSES);
-
-	/* Emit a read miss so the daemon can warm the arena for this ino —
-	 * once per membership check, not on every read of an unknown inode.
-	 * Re-uses the existing s3fs_miss_event shape with op=S3FS_OP_READ. */
-	if (!refresh)
-		return 0;
-	ev = bpf_ringbuf_reserve(&s3fs_events, sizeof(*ev), 0);
-	if (!ev)
-		return 0;
-	ev->ino  = ino;
-	ev->op   = S3FS_OP_READ;
-	ev->_pad = 0;
-	bpf_ringbuf_submit(ev, 0);
 	return 0;
 }
 

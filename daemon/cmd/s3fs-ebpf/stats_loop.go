@@ -198,16 +198,3 @@ func printCounters(progs *fpebpf.Programs, label string) {
 		c[fpebpf.StatReadIterHits], c[fpebpf.StatReadIterMisses],
 		c[fpebpf.StatReadIterHitsPos0])
 }
-
-func opName(op uint32) string {
-	switch op {
-	case fpebpf.OpGetattr:
-		return "getattr"
-	case fpebpf.OpLookup:
-		return "lookup"
-	case fpebpf.OpRead:
-		return "read"
-	default:
-		return fmt.Sprintf("op#%d", op)
-	}
-}

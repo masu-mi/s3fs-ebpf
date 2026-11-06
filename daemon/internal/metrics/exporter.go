@@ -127,8 +127,7 @@ type Counters struct {
 
 	// R-01: fentry/generic_file_read_iter counters. ReadIterHits counts
 	// reads where the ino was already in inode_index (prewarm hit);
-	// ReadIterMisses counts reads where the ino was unknown (triggers
-	// a daemon upcall via the events ringbuf, op=S3FS_OP_READ).
+	// ReadIterMisses counts reads where the ino was unknown.
 	ReadIterHits   atomic.Uint64 // counter
 	ReadIterMisses atomic.Uint64 // counter
 	// Y-06: subset of ReadIterHits where ki_pos==0 (first read per
@@ -278,7 +277,7 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 
 		// R-01: fentry/generic_file_read_iter access-pattern observer.
 		{"s3fs_ebpf_read_iter_hits_total", "generic_file_read_iter calls where ino was in inode_index (fires ~2× per cat: data + EOF).", "counter", Global.ReadIterHits.Load()},
-		{"s3fs_ebpf_read_iter_misses_total", "generic_file_read_iter calls where ino was unknown; triggers daemon prewarm upcall.", "counter", Global.ReadIterMisses.Load()},
+		{"s3fs_ebpf_read_iter_misses_total", "generic_file_read_iter calls where ino was unknown.", "counter", Global.ReadIterMisses.Load()},
 		// Y-06: pos==0 subset. hits_total / pos0_hits_total ≈ 2 confirms data+EOF double-fire.
 		{"s3fs_ebpf_read_iter_pos0_hits_total", "read_iter hits where ki_pos==0 (first read per open); ≈ N_ACCESS in bench. Y-06 diagnostic.", "counter", Global.ReadIterHitsPos0.Load()},
 	}
