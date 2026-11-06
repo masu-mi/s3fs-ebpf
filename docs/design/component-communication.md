@@ -22,7 +22,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 | **T4** | BPF → kmod | KFunc call | `admit_count` / `softcap` / `capacity_bytes` / `evictions_total` / `time_ns` / `ino_size` | policy 判定内 | ns | `kmod/tree_traversal.c` KFunc set |
 | **T5** | kmod ↔ BPF map | `bpf_map_lookup/update_elem` (helper), 一部は kmod 側からも書く | inode_index / counters / arena / policy 個別 map | fentry 発火ごと | ns | `bpf/s3fs_fastpath.bpf.c` maps |
 | **T6** | daemon → BPF map | mmap (arena bytes 書込) / `bpf(BPF_MAP_UPDATE_ELEM)` (inode_index 書込) | arena 書込は syscall なし。inode_index は cilium/ebpf 経由 | admit ごと | μs | `daemon/internal/ebpf/loader.go` `AdmitContent` / `WarmCache` |
-| **T7** | daemon → kmod | **ioctl on `/dev/s3fs_ebpf`** (15 種類、下表) | table push、waiter wake、queue pop、stats read | miss/flush ごと | μs | `daemon/cmd/s3fs-ebpf/{admit_arena,flush_loop,delete_loop,sync_entries}.go` |
+| **T7** | daemon → kmod | **ioctl on `/dev/s3fs_ebpf`** (13 種類、下表) | table push、waiter wake、queue pop、stats read | miss/flush ごと | μs | `daemon/cmd/s3fs-ebpf/{admit_arena,flush_loop,delete_loop,sync_entries}.go` |
 | **T8** | kmod → daemon (event) | miscdev **`read(2)` blocking** on `/dev/s3fs_ebpf` | read-miss event stream (`s3fs_read_miss_event`) | miss ごと | μs (blocking) | `runReadMissLoop` in admit_arena.go |
 | **T9** | ~~BPF → daemon (event)~~ | ~~`BPF_MAP_TYPE_RINGBUF` (`s3fs_events`)~~ | **削除済み (2026-11-05)**。fentry の miss event を daemon が処理するのは root の ino=1 の warm だけだった | — | — | — |
 | **T10** | daemon ↔ backend | HTTP (minio-go / cloud.google.com/go/storage) | S3/GCS GET/PUT/DELETE/COPY/HEAD/LIST | miss + flush ごと | ms | `daemon/internal/{s3,gcs}/client.go` |
@@ -30,18 +30,17 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 
 ### 1.1 T7 (ioctl) の内訳
 
-`/dev/s3fs_ebpf` 上の 15 個の ioctl (magic `0xE3`)。詳細は `include/s3fs_ebpf_uapi.h`、構造体のフィールドと miss イベントの flags は [`dev-s3fs-ebpf-protocol.md`](dev-s3fs-ebpf-protocol.md)。
+`/dev/s3fs_ebpf` 上の 13 個の ioctl (magic `0xE3`)。詳細は `include/s3fs_ebpf_uapi.h`、構造体のフィールドと miss イベントの flags は [`dev-s3fs-ebpf-protocol.md`](dev-s3fs-ebpf-protocol.md)。
 
 | nr | 名前 | 方向 | 目的 | 発火頻度 |
 |---:|---|---|---|---|
-| 0x02 | `ADMIT_ARENA` | user→kmod | admit table (per-ino userspace range) の replace-all | miss / flush / drain ごと |
+| 0x02 | `EVAL` | user→kmod | kmod の容量 / policy パスを今走らせる (旧 `ADMIT_ARENA`、nr を引き継いだ。引数なし) | 各 miss の populate の後、`POST /policy/eval` |
 | 0x03 | `SIGNAL_ADMIT` | user→kmod | `.read_folio` の pending waiter を wake (err code 付き) | 各 miss の後 |
 | 0x04 | `SYNC_ENTRIES` | user→kmod | entry table (dir listing) の replace-all | ~30s / boot 時 |
 | 0x05 | `POP_FLUSH` | user←kmod | write-back flush queue から 1 event pop | 100ms ticker |
 | 0x06 | `READ_DIRTY` | user↔kmod | per-inode dirty buffer 内容を daemon の uaddr へコピー | 各 flush |
 | 0x07 | `MARK_DIRTY` | user→kmod | PUT 失敗時に ino を dirty に戻す (retry) | 稀 (PUT err 時) |
 | 0x08 | `STATS` | user↔kmod | kmod 側 counter (evictions_total, folio_hits) を read | 5s ticker |
-| 0x09 | `DRAIN_EVICTIONS` | user↔kmod | policy が evict した ino のリング buffer を drain | 2s ticker |
 | 0x0A | `SIGNAL_FLUSH` | user→kmod | `.fsync` の pending waiter を wake | 各 flush の後 |
 | 0x0B | `POP_DELETE` | user←kmod | `.unlink` から来た delete event を pop | 100ms ticker |
 | 0x0C | `POP_RENAME` | user←kmod | `.rename` から来た rename event を pop | 100ms ticker |
@@ -77,7 +76,7 @@ flowchart LR
         Miscdev["/dev/s3fs_ebpf<br/>(ioctl + read + poll)"]
         AdmitTbl[("admit hash<br/>ino → uaddr/size<br/>+ parent_ino")]
         LocalEntries[("s3fs_local_entries<br/>+ dyn_entries<br/>+ attr_overrides")]
-        FlushQ[("flush_queue<br/>delete_queue<br/>rename_queue<br/>evict_log")]
+        FlushQ[("flush_queue<br/>delete_queue<br/>rename_queue")]
       end
       subgraph BPF["eBPF"]
         Fentry["fentry/vfs_getattr<br/>(s3fs_fp_getattr)"]
@@ -124,10 +123,10 @@ flowchart LR
     FlushLoop -.->|"T6: mmap write"| Arena
     SyncLoop -->|"T6: bpf(MAP_UPDATE)<br/>via cilium/ebpf"| Idx
     %% T7 ioctl (daemon → kmod)
-    MissLoop -->|"T7: POPULATE_PAGES<br/>ADMIT_ARENA / SIGNAL_ADMIT"| Miscdev
+    MissLoop -->|"T7: POPULATE_PAGES<br/>EVAL / SIGNAL_ADMIT"| Miscdev
     FlushLoop -->|"T7: POP_FLUSH READ_DIRTY<br/>SIGNAL_FLUSH MARK_DIRTY"| Miscdev
     SyncLoop -->|"T7: SYNC_ENTRIES"| Miscdev
-    DrainLoop -->|"T7: STATS<br/>DRAIN_EVICTIONS"| Miscdev
+    DrainLoop -->|"T7: STATS"| Miscdev
     Miscdev <-.-> Fops
     Miscdev -.- FlushQ
     Miscdev -.- AdmitTbl
@@ -181,8 +180,8 @@ sequenceDiagram
     S3-->>Daemon: bytes
     Daemon->>Kmod: ioctl POPULATE_PAGES (T7)
     Note over Kmod: fd の chunk 表にコピー<br/>+ PCACHE の admit entry
-    Daemon->>Kmod: ioctl ADMIT_ARENA (T7、現在の snapshot を再送)
-    Note over Kmod: admit_replace で容量パス (capacity_bytes が有効なとき)<br/>on_insert / pick_victim / evict
+    Daemon->>Kmod: ioctl EVAL (T7、capacity_bytes が有効なとき)
+    Note over Kmod: 容量パス (s3fs_ebpf_capacity_pass)<br/>on_insert / pick_victim / evict
     Daemon->>Kmod: ioctl SIGNAL_ADMIT (T7、VERIFY_POPULATED)
     Kmod->>Pend: complete(done)
     Pend-->>Kmod: reader が目を覚ます
@@ -190,7 +189,7 @@ sequenceDiagram
     VFS-->>App: bytes
 ```
 
-- `ADMIT_ARENA` の再送は `enforceCapacityAfterPopulate` (`admit_arena.go`)。kmod が capacity モードのときだけで、populate した直後に、まだ pending の間に容量を守る (AC-45 C2)。
+- `EVAL` は `enforceCapacityAfterPopulate` (`kmod_dev.go`)。kmod が capacity モードのときだけで、populate した直後に、まだ pending の間に容量を守る (AC-45 C2)。
 - `SIGNAL_ADMIT` は `VERIFY_POPULATED` 付きで送る。容量パスや同じ ino の別の handler が、populate したばかりの chunk を evict していたら `-EAGAIN` が返り、daemon は populate し直す (`read_miss_repopulates_total`)。
 - 4 MiB を超える object は、range GET を並列にし、取れた chunk から populate と `SIGNAL_ADMIT` を繰り返す (AC-52、`admit_chunkload.go`)。
 
@@ -280,7 +279,6 @@ E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が�
 | kmod `.fsync` | daemon | miscdev `ioctl POP_FLUSH_WAIT` (T7、blocking) | `s3fs_flush_event` (WAIT) | ticker の遅れを避ける。専用の queue と wait queue |
 | kmod `.unlink` | daemon | miscdev `ioctl POP_DELETE` (T7) | delete event | flush と同じ理由 (再登録は不要だが対称性優先) |
 | kmod `.rename` | daemon | miscdev `ioctl POP_RENAME` (T7) | rename event | 同上 |
-| policy BPF vote | daemon | `evict_log` + `ioctl DRAIN_EVICTIONS` (T7) | evicted ino[] | admit_replace 内 synchronous vote 結果の batch drain (§6-b) |
 
 **統一の余地**: flush / delete / rename の queue を 1 本の message queue に寄せる案は [`redesign-v2-simplify.md`](redesign-v2-simplify.md)。
 
@@ -322,45 +320,40 @@ policy の各 hook の呼び出し順と map の使い方は [`policy-bpf-maps.m
 
 ## 6. Sync + eviction feedback
 
-periodic 系は独立 ticker で回る。**メインの feedback は (b) の admit → 容量パス (policy の victim) → evict_log → drain** — daemon が再送する admit と kmod の evict の oscillation を止めるための因果ループがここに閉じている (`docs/journal/backlog-archive.md P-13` の解決点)。policy の各フックの呼び出し順と map の使い方は [`policy-bpf-maps.md`](policy-bpf-maps.md) §1。
+periodic 系は独立 ticker で回る。**メインは (b) の 容量パス** (policy の victim を kmod が evict する)。
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Daemon as daemon
     participant S3 as S3 backend
-    participant Kmod as kmod (admit_replace)
+    participant Kmod as kmod (容量パス)
     participant Pol as policy (struct_ops)
-    participant Log as s3fs_evict_log
 
-    Note over Daemon,Log: (a) 約 30 秒ごと (--sync-every) — LIST → entry 表の置き換え
+    Note over Daemon,Pol: (a) 約 30 秒ごと (--sync-every) — LIST → entry 表の置き換え
     Daemon->>S3: HTTP LIST bucket
     S3-->>Daemon: object list
     Note over Daemon: buildEntriesFromS3 (subdir 分解 + synthetic dir)
     Daemon->>Kmod: ioctl SYNC_ENTRIES (replace-all)
     Note over Kmod: entries_replace + shrink_dcache_sb<br/>(lookup / getattr / readdir / open はこの表で答える)
 
-    Note over Daemon,Log: (b) populate / flush のあと — 容量パスと evict の feedback (メイン)
-    Daemon->>Kmod: ioctl ADMIT_ARENA (現在の snapshot を再送)
+    Note over Daemon,Pol: (b) populate のあと (と POST /policy/eval) — 容量パス
+    Daemon->>Kmod: ioctl EVAL
     Kmod->>Pol: on_hit の再生 → on_insert → on_size
     Kmod->>Pol: pick_victim() (live_bytes が capacity_bytes を超えている間)
     Pol-->>Kmod: victim の ino (0 なら score 順に戻る)
     Note over Kmod: chunk と admit entry を捨てる<br/>→ on_remove(ino)
-    Kmod->>Log: evict_log_push(ino)
-    Note over Daemon: 2 秒ごと (drainEvictionsLoop)
-    Daemon->>Kmod: ioctl DRAIN_EVICTIONS
-    Log-->>Daemon: 追い出した ino の list + overflow
-    Note over Daemon: dropAdmits (arena モードは FreeArenaChunk)<br/>次の admit / prewarm から除外 = oscillation 停止
+    Note over Kmod: 結果は daemon に返さない (daemon は admit の snapshot を持たないので、kmod の evict と往復しない)
 
-    Note over Daemon,Log: (c) 5 秒ごと (runStatsLoop)
+    Note over Daemon,Pol: (c) 5 秒ごと (runStatsLoop)
     Daemon->>Kmod: ioctl STATS
     Kmod-->>Daemon: evictions_total, folio_hits, ...
     Note over Daemon: /metrics の gauge に mirror
 ```
 
 - `pick_victim` を持たない policy (score 型) は、`on_evict(ino)` を全件に呼び、score の降順で捨てる (`policy-bpf-maps.md` §4)。`capacity_bytes` が 0 (既定) の legacy モードでは、softcap を超えたときに `on_evict` の vote で捨てる。
-- `evict_log` は 512 件で頭打ちで、溢れた分は `overflow` に数える。daemon は `overflow` が 0 でなければ表全体を合わせ直す。
-- 実装の位置: 容量パスは `kmod/vfs/capacity_evict.inc.c` (`admit_replace`)、`evict_log_push` は `kmod/vfs/admit_table.inc.c`、drain 側は `daemon/cmd/s3fs-ebpf/stats_loop.go` の `drainEvictionsLoop`。
+- 以前は kmod の evict を `evict_log` + `DRAIN_EVICTIONS` で daemon に返していた (daemon が再送する admit と kmod の evict の oscillation を止めるため、P-13)。daemon が admit の snapshot を持たなくなったので (2026-11-05、v2 Phase 3b)、`evict_log` と `DRAIN_EVICTIONS` は削除した。
+- 実装の位置: 容量パスは `kmod/vfs/capacity_evict.inc.c` の `s3fs_ebpf_capacity_pass` (旧 `admit_replace`)。
 
 ---
 

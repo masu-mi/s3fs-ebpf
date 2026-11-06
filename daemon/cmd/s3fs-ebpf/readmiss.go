@@ -30,6 +30,27 @@ type readMissEvent struct {
 	RandCount uint32
 }
 
+// readMissEventSize is sizeof(struct s3fs_read_miss_event): ino, offset,
+// count, flags, seq_count, rand_count.
+const readMissEventSize = 32
+
+// decodeReadMissEvent parses the kmod's event (little endian, as read from
+// /dev/s3fs_ebpf).  A buffer shorter than the struct (a pre-v2 kmod sent 24
+// bytes) is refused.
+func decodeReadMissEvent(buf []byte) (readMissEvent, bool) {
+	if len(buf) < readMissEventSize {
+		return readMissEvent{}, false
+	}
+	return readMissEvent{
+		Ino:       binary.LittleEndian.Uint64(buf[0:8]),
+		Offset:    int64(binary.LittleEndian.Uint64(buf[8:16])),
+		Count:     binary.LittleEndian.Uint32(buf[16:20]),
+		Flags:     binary.LittleEndian.Uint32(buf[20:24]),
+		SeqCount:  binary.LittleEndian.Uint32(buf[24:28]),
+		RandCount: binary.LittleEndian.Uint32(buf[28:32]),
+	}, true
+}
+
 // seqRatio returns the fraction of sequential reads [0, 1]; 0 when no read
 // has been counted.
 func (ev readMissEvent) seqRatio() float64 {
@@ -259,7 +280,7 @@ func runReadMissLoop(ctx context.Context, devPath string,
 
 	sem := make(chan struct{}, readMissWorkers)
 
-	var buf [32]byte // sizeof(struct s3fs_read_miss_event)
+	var buf [readMissEventSize]byte
 	for {
 		n, err := f.Read(buf[:])
 		if err != nil {
@@ -268,17 +289,10 @@ func runReadMissLoop(ctx context.Context, devPath string,
 			}
 			return
 		}
-		if n < len(buf) {
+		ev, ok := decodeReadMissEvent(buf[:n])
+		if !ok {
 			fmt.Fprintf(os.Stderr, "[upcall] short read: %d bytes\n", n)
 			continue
-		}
-		ev := readMissEvent{
-			Ino:    binary.LittleEndian.Uint64(buf[0:8]),
-			Offset: int64(binary.LittleEndian.Uint64(buf[8:16])),
-			Count:  binary.LittleEndian.Uint32(buf[16:20]),
-			Flags:  binary.LittleEndian.Uint32(buf[20:24]),
-			SeqCount:  binary.LittleEndian.Uint32(buf[24:28]),
-			RandCount: binary.LittleEndian.Uint32(buf[28:32]),
 		}
 		fmt.Printf("[upcall] miss ino=%d offset=%d count=%d\n",
 			ev.Ino, ev.Offset, ev.Count)

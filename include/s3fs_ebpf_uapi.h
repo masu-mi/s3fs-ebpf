@@ -24,49 +24,19 @@ typedef uint64_t __u64;
 /* nr 0x01 was PROBE_KVBASE (a Week 4 spike, removed); do not reuse. */
 
 /*
- * S3FS_IOC_ADMIT_ARENA — register per-ino userspace ranges that back
- * file content.
+ * S3FS_IOC_EVAL — run the kmod's capacity / policy pass now: replay the
+ * accumulated hits into the policy, track new inodes (on_insert / on_size),
+ * take the votes and evict down to capacity_bytes.  The daemon calls it after
+ * the last populate of a miss (before it wakes the reader, so the chunk just
+ * loaded is still pinned) and from POST /policy/eval.  No argument.
  *
- * The daemon writes each object's bytes into its arena mmap, then
- * submits this ioctl to tell kmod: "ino N's content lives at user_vm
- * address `uaddr` for `size` bytes". kmod stores (ino → mm, uaddr,
- * size) in a hash keyed by ino; .read then uses
- * pin_user_pages_remote + kmap_local_page to reach the same physical
- * pages the arena mmap holds and copy_to_user out of them.
- *
- * We use the daemon's user_vm view (not the arena's kernel-VM base)
- * because 6.12's arena kern_vm range has no generic-context fault
- * handler; only BPF programs can service the fault path. GUP over
- * user_vm sidesteps that limitation by going through the daemon's
- * process mm, which does have arena_vm_fault registered.
- *
- * Passing count=0 clears kmod's admission table (used on daemon exit
- * to drop the mm reference cleanly).
+ * (Was S3FS_IOC_ADMIT_ARENA, which registered per-ino userspace ranges for
+ * the arena read path.  The file content lives in the kmod's chunk table;
+ * nr 0x02 now carries this command.  Opening the device arms the read-miss
+ * upcall path.)
  */
-/*
- * `offset` (D-01, added 2026-09): file offset where this range
- * starts. offset==0 & size==file_size means whole-file admit
- * (backward-compat default). Multiple entries per ino are allowed
- * — daemon splits large files into ranges so a 200 MiB blob can
- * be partially admitted into the 128 MiB arena. kmod's admit
- * lookup walks entries at the same hash bucket and picks the range
- * covering the folio pos.
- */
-struct s3fs_admit_entry {
-	__u64 ino;
-	__u64 uaddr;  /* daemon-side user_vm address of the range bytes */
-	__u64 size;   /* range length in bytes */
-	__u64 offset; /* file offset where this range starts */
-};
-
-struct s3fs_admit_arena {
-	__u32 count;   /* in: number of entries; 0 clears the table */
-	__u32 _pad;
-	__u64 entries; /* in: user pointer to array of s3fs_admit_entry */
-};
-
-#define S3FS_IOC_ADMIT_ARENA \
-	_IOW(S3FS_IOC_MAGIC, 0x02, struct s3fs_admit_arena)
+#define S3FS_IOC_EVAL \
+	_IO(S3FS_IOC_MAGIC, 0x02)
 
 /*
  * S3FS_IOC_SIGNAL_ADMIT — wake a pending .read waiter.
@@ -293,29 +263,8 @@ struct s3fs_stats {
 #define S3FS_IOC_STATS \
 	_IOWR(S3FS_IOC_MAGIC, 0x08, struct s3fs_stats)
 
-/*
- * S3FS_IOC_DRAIN_EVICTIONS — pull the list of inos the policy has
- * evicted from the admit hash since the last drain. Daemon polls
- * this periodically to keep its snapshot consistent with kmod's
- * actual hash; without it the daemon re-sends evicted inos on the
- * next admit_replace and kmod evicts them again in a loop.
- *
- * Caller allocates `inos` (up to `cap` slots); kmod writes up to
- * `filled` entries and drops them from its internal queue. Missing
- * entries (queue overflow) surface as `overflow` count so the daemon
- * can degrade gracefully (e.g. do a full-snapshot reconcile).
- */
-#define S3FS_EVICT_LOG_MAX 256
-struct s3fs_drain_evictions {
-	__u32 cap;                              /* in: caller buffer capacity */
-	__u32 filled;                           /* out: entries written to inos[] */
-	__u32 overflow;                         /* out: kmod-side dropped due to queue full since last drain */
-	__u32 _pad;
-	__u64 inos[S3FS_EVICT_LOG_MAX];         /* out: evicted ino list */
-};
-
-#define S3FS_IOC_DRAIN_EVICTIONS \
-	_IOWR(S3FS_IOC_MAGIC, 0x09, struct s3fs_drain_evictions)
+/* nr 0x09 was DRAIN_EVICTIONS (the daemon no longer keeps an admit snapshot
+ * that a kmod eviction could oscillate with); do not reuse. */
 
 /*
  * S3FS_IOC_SIGNAL_FLUSH — wake a pending .fsync waiter (E-01).

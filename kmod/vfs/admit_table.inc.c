@@ -163,7 +163,7 @@ MODULE_PARM_DESC(hit_rearm_jiffies,
 static unsigned int s3fs_hit_replay_max = 15;
 module_param_named(hit_replay_max, s3fs_hit_replay_max, uint, 0644);
 MODULE_PARM_DESC(hit_replay_max,
-	"hit_accum: max on_hit calls per ino per admit_replace");
+	"hit_accum: max on_hit calls per ino per capacity pass");
 atomic_long_t s3fs_hits_replayed_total = ATOMIC_LONG_INIT(0);
 
 /*
@@ -208,55 +208,10 @@ atomic_long_t s3fs_fd_buf_bytes = ATOMIC_LONG_INIT(0);
  * buf_readers > 0 (U8).  Exported via IOC_STATS slot 11. */
 atomic_long_t s3fs_reset_skipped = ATOMIC_LONG_INIT(0);
 
-/* Ring buffer of ino values evicted by policy vote since the last
- * daemon drain. S3FS_IOC_DRAIN_EVICTIONS copies them out and resets
- * head/tail. Overflow (queue full) is counted separately so the
- * daemon can degrade to a full snapshot reconcile. */
-#define S3FS_EVICT_LOG_CAP 512
-static DEFINE_SPINLOCK(s3fs_evict_log_lock);
-static u64 s3fs_evict_log[S3FS_EVICT_LOG_CAP];
-static u32 s3fs_evict_log_len; /* items in the buffer, [0, S3FS_EVICT_LOG_CAP] */
-static u32 s3fs_evict_log_overflow; /* dropped since last drain */
-
-static void evict_log_push(u64 ino)
-{
-	spin_lock(&s3fs_evict_log_lock);
-	if (s3fs_evict_log_len < S3FS_EVICT_LOG_CAP)
-		s3fs_evict_log[s3fs_evict_log_len++] = ino;
-	else
-		s3fs_evict_log_overflow++;
-	spin_unlock(&s3fs_evict_log_lock);
-}
-
-/* Copy up to `cap` entries into `out` and reset the buffer. Returns
- * (filled, overflow) via pointers. */
-static void evict_log_drain(u64 *out, u32 cap, u32 *filled, u32 *overflow)
-{
-	u32 n;
-
-	spin_lock(&s3fs_evict_log_lock);
-	n = min(cap, s3fs_evict_log_len);
-	memcpy(out, s3fs_evict_log, n * sizeof(u64));
-	*filled = n;
-	*overflow = s3fs_evict_log_overflow;
-	/* Shift any leftover down (rare — daemon should keep up). */
-	if (n < s3fs_evict_log_len)
-		memmove(s3fs_evict_log, s3fs_evict_log + n,
-			(s3fs_evict_log_len - n) * sizeof(u64));
-	s3fs_evict_log_len -= n;
-	s3fs_evict_log_overflow = 0;
-	spin_unlock(&s3fs_evict_log_lock);
-}
-
-void s3fs_ebpf_drain_evictions(u64 *out, u32 cap, u32 *filled, u32 *overflow)
-{
-	evict_log_drain(out, cap, filled, overflow);
-}
-
-/* Reference on the daemon's mm, set by every admit_replace that passes
- * an mm (count=0 included, AC-43) and dropped only by admit_shutdown.
- * Also gates the read-miss upcall. All entries share this single mm. */
-static struct mm_struct *s3fs_admitted_mm;
+/* A daemon has opened /dev/s3fs_ebpf (AC-43: even with nothing admitted the
+ * upcall path must be armed).  Gates the read-miss upcall; cleared by
+ * admit_shutdown (umount / daemon-less module state). */
+static bool s3fs_daemon_armed;
 
 /* Set in fill_super so admit_replace can ilookup() cached inodes, grow
  * their i_size to newly admitted range ends (AC-48) and drop stale page
@@ -487,31 +442,6 @@ static void admit_clear_locked(void)
 }
 
 /*
- * P3: admit_replace-specific clear — removes only non-pcache (arena)
- * entries.  Pcache entries survive the snapshot replacement so they
- * are counted in capacity enforcement and remain eviction candidates.
- * Returns the number of pcache entries still in the table.
- * Caller must hold write_lock.
- */
-static int admit_clear_arena_locked(void)
-{
-	struct s3fs_admit *a;
-	struct hlist_node *tmp;
-	unsigned int i;
-	int pcache_count = 0;
-
-	hash_for_each_safe(s3fs_admits, i, tmp, a, node) {
-		if (a->flags & S3FS_ADMIT_FLAG_PCACHE) {
-			pcache_count++;
-			continue;
-		}
-		hash_del(&a->node);
-		kfree(a);
-	}
-	return pcache_count;
-}
-
-/*
  * Return the admitted size for `ino`, or 0 if the ino is not in the
  * admit hash. Exposed to BPF policy programs via the
  * s3fs_kfunc_ino_size() KFunc (see kmod/tree_traversal.c). Acquires
@@ -587,7 +517,6 @@ static bool admit_evict_ino(u64 ino, u64 *freed)
 
 	if (!admit_drop_all_ranges(ino, freed, &had_pcache))
 		return false;
-	evict_log_push(ino);
 	s3fs_evict_page_cache(ino);
 	if (had_pcache)
 		s3fs_file_data_reset(ino);

@@ -158,7 +158,7 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 {
 	struct inode *inode = folio->mapping->host;
 	struct s3fs_file_data *fd = inode->i_private;
-	struct mm_struct *mm = NULL;
+	bool armed = false;	/* a daemon is attached */
 	loff_t pos = folio_pos(folio);
 	size_t fs_size = folio_size(folio);
 	u32 pcache_gen;
@@ -221,25 +221,23 @@ retry:
 	/* Miss + daemon alive: trigger upcall, wait, retry fast paths.
 	 * S5: retry up to S3FS_UPCALL_MAX_RETRIES times so that eviction
 	 * firing in the signal_admit → wakeup window does not cause zeros. */
-	read_lock(&s3fs_admits_lock);
-	mm = s3fs_admitted_mm;
-	read_unlock(&s3fs_admits_lock);
+	armed = READ_ONCE(s3fs_daemon_armed);
 
 	/* A dirty / flushing fd owns its content: a chunk it has (or a hole)
 	 * is served from the fd, the daemon has nothing to add and would only
 	 * be refused (populate -EBUSY) after a timeout per folio.  The
 	 * exception is a remote chunk (AC-51), which the daemon loads. */
-	if (mm && fd) {
+	if (armed && fd) {
 		u32 lci = (u32)((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT);
 
 		mutex_lock(&fd->lock);
 		if ((fd->dirty || fd->flushing) &&
 		    !(lci < fd->nr_chunks && fd->chunks[lci].remote))
-			mm = NULL;
+			armed = false;
 		mutex_unlock(&fd->lock);
 	}
 
-	if (mm && upcall_retries < S3FS_UPCALL_MAX_RETRIES) {
+	if (armed && upcall_retries < S3FS_UPCALL_MAX_RETRIES) {
 		u64 chunk_offset = ((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT)
 				   << S3FS_PCACHE_CHUNK_SHIFT;
 		struct s3fs_pending *p;
@@ -319,7 +317,7 @@ retry:
 	 * every retry, or U11 timeout retries exhausted).  U8: buf_readers
 	 * protects fd->buf for the entire retry window so the gen=0 fallback
 	 * finds valid data if the daemon populated at any point. */
-	if (mm && upcall_retries >= S3FS_UPCALL_MAX_RETRIES)
+	if (armed && upcall_retries >= S3FS_UPCALL_MAX_RETRIES)
 		atomic_long_inc(&s3fs_upcall_retry_exhausted);
 
 	/* Fallback: per-inode bootstrap buffer (gen=0, no TOCTOU re-probe).
@@ -773,7 +771,6 @@ static int s3fs_ebpf_file_open(struct inode *inode, struct file *file)
 		smp_store_release(&fc->gen, 0);
 	}
 	admit_drop_all_ranges(inode->i_ino, NULL, NULL);
-	evict_log_push(inode->i_ino);
 	if (invalidate_inode_pages2(inode->i_mapping) != 0)
 		/* Dirty folios present — harmless, dirty-file path is skipped above */
 		invalidate_mapping_pages(inode->i_mapping, 0, -1);

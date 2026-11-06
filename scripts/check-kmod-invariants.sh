@@ -8,7 +8,7 @@
 #     (skip a miss in flight, forget the hit state).
 #  2. s3fs_hit_forget (resets the per-ino hit state) is called only from those
 #     helpers and from admit_evict_ino, the single exit of a whole-ino evict.
-#  3. s3fs_hit_collect / s3fs_hit_replay run only inside s3fs_ebpf_admit_replace
+#  3. s3fs_hit_collect / s3fs_hit_replay run only inside s3fs_ebpf_capacity_pass
 #     (they need s3fs_policy_evict_lock).
 #  4. The bench seeds' file sizes are measured, not typed in (a typed
 #     FILE_BYTES=44 for 46-byte files once made the cache one slot short).
@@ -41,7 +41,7 @@ only_in() {
 
 only_in 's3fs_policy_ops_(insert|size|remove)\(' s3fs_policy_track s3fs_policy_untrack
 only_in 's3fs_hit_forget\(' s3fs_policy_untrack admit_evict_ino
-only_in 's3fs_hit_(collect|replay)\(' s3fs_ebpf_admit_replace
+only_in 's3fs_hit_(collect|replay)\(' s3fs_ebpf_capacity_pass
 
 for f in scripts/bench-hitrate.sh scripts/bench-hitrate-mixed.sh; do
 	if grep -n -E '^(FILE_BYTES|SMALL_FILE_BYTES)=[0-9]+' "$f"; then

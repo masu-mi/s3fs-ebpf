@@ -265,7 +265,6 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 			continue;
 		for (;;) {
 			struct s3fs_pending *p;
-			struct mm_struct *mm;
 			bool have, bound;
 			long rem = 1;
 
@@ -278,10 +277,7 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 			if (have)
 				break;
 
-			read_lock(&s3fs_admits_lock);
-			mm = s3fs_admitted_mm;
-			read_unlock(&s3fs_admits_lock);
-			if (!mm) {
+			if (!READ_ONCE(s3fs_daemon_armed)) {
 				err = -EIO; /* no daemon: cannot fetch the rest */
 				p = NULL;
 			} else {

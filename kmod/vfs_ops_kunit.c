@@ -750,29 +750,6 @@ static void s3k_flush_wait_reopen(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), 0);
 }
 
-static void s3k_evict_log(struct kunit *test)
-{
-	u64 *out = kunit_kcalloc(test, S3FS_EVICT_LOG_CAP, sizeof(u64), GFP_KERNEL);
-	u32 filled, overflow, i;
-
-	KUNIT_ASSERT_NOT_NULL(test, out);
-	evict_log_drain(out, S3FS_EVICT_LOG_CAP, &filled, &overflow);
-	for (i = 0; i < S3FS_EVICT_LOG_CAP + 3; i++)
-		evict_log_push(1000 + i);
-	/* a short drain keeps the rest in order */
-	evict_log_drain(out, 2, &filled, &overflow);
-	KUNIT_EXPECT_EQ(test, filled, 2u);
-	KUNIT_EXPECT_EQ(test, overflow, 3u);
-	KUNIT_EXPECT_EQ(test, out[1], 1001ull);
-	evict_log_drain(out, S3FS_EVICT_LOG_CAP, &filled, &overflow);
-	KUNIT_EXPECT_EQ(test, filled, (u32)S3FS_EVICT_LOG_CAP - 2);
-	KUNIT_EXPECT_EQ(test, overflow, 0u);
-	KUNIT_EXPECT_EQ(test, out[0], 1002ull);
-	KUNIT_EXPECT_EQ(test, out[filled - 1], 1000ull + S3FS_EVICT_LOG_CAP - 1);
-	evict_log_drain(out, S3FS_EVICT_LOG_CAP, &filled, &overflow);
-	KUNIT_EXPECT_EQ(test, filled, 0u);
-}
-
 /* -- the filesystem, mounted in-kernel ------------------------------------ */
 
 struct s3k_vfs {
@@ -1558,17 +1535,32 @@ static struct kunit_suite s3k_data_suite = {
 	.test_cases = s3k_data_cases,
 };
 
+/* Opening /dev/s3fs_ebpf arms the read-miss upcall path (AC-43) and umount
+ * disarms it; the gate is a plain flag now, not the daemon's mm. */
+static void s3k_daemon_arm(struct kunit *test)
+{
+	const bool old = READ_ONCE(s3fs_daemon_armed);
+
+	WRITE_ONCE(s3fs_daemon_armed, false);
+	KUNIT_EXPECT_FALSE(test, READ_ONCE(s3fs_daemon_armed));
+	s3fs_ebpf_daemon_arm();
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(s3fs_daemon_armed));
+	s3fs_ebpf_daemon_arm();		/* idempotent */
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(s3fs_daemon_armed));
+	WRITE_ONCE(s3fs_daemon_armed, old);
+}
+
 static struct kunit_case s3k_table_cases[] = {
 	KUNIT_CASE(s3k_dyn_index),
 	KUNIT_CASE(s3k_dyn_index_many),
 	KUNIT_CASE(s3k_admit_pcache_ranges),
 	KUNIT_CASE(s3k_admit_fc_cache),
+	KUNIT_CASE(s3k_daemon_arm),
 	KUNIT_CASE(s3k_pending_per_chunk),
 	KUNIT_CASE(s3k_pending_verify_populated),
 	KUNIT_CASE(s3k_miss_queue_fifo),
 	KUNIT_CASE(s3k_flush_queue_f1),
 	KUNIT_CASE(s3k_flush_wait_reopen),
-	KUNIT_CASE(s3k_evict_log),
 	KUNIT_CASE(s3k_pending_concurrent),
 	{}
 };
@@ -1654,12 +1646,177 @@ static void s3k_vfs_forget_on_evict(struct kunit *test)
 	admit_drop_all_ranges(ino, NULL, NULL);
 }
 
+
+/* -- v2 (Phase 2 / 3): flush re-admit, read pattern, capacity pass --------- */
+
+static void s3k_drop_admits(u64 ino)
+{
+	admit_drop_all_ranges(ino, NULL, NULL);
+}
+
+/* AC-82: a successful flush leaves the clean fd with PCACHE entries over its
+ * populated chunks - one per run, a hole ends a run - so the next read is
+ * served from the fd instead of upcalling the daemon (which no longer
+ * re-admits the PUT bytes into an arena).  A failed flush adds none. */
+static void s3k_vfs_signal_flush_readmits(struct kunit *test)
+{
+	const u64 C = S3FS_CHUNK_SIZE;
+	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
+	u64 ino = file_inode(f)->i_ino;
+	struct s3fs_file_data *fd = s3k_fd_of(f);
+	struct s3fs_admit *a;
+
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	s3k_drop_admits(ino);
+
+	/* chunk 0 (the bootstrap content, populated), a hole at chunk 1, and a
+	 * new chunk 2 */
+	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 2 * C, "x", 1), 1L);
+	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
+	mutex_lock(&fd->lock);
+	fd->flush_read_seq = fd->flush_seq;	/* the daemon read the buffer */
+	mutex_unlock(&fd->lock);
+
+	/* PUT failed: the data is not in S3, nothing to serve it as clean */
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, -EIO), -ENOENT);
+	KUNIT_EXPECT_EQ(test, s3k_admit_count(ino), 0u);
+
+	/* the daemon marks it dirty again; the retry's PUT succeeds */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_mark_dirty(ino), 0);
+	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
+	mutex_lock(&fd->lock);
+	fd->flush_read_seq = fd->flush_seq;
+	mutex_unlock(&fd->lock);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), -ENOENT);
+
+	KUNIT_EXPECT_EQ(test, s3k_admit_count(ino), 2u);
+	read_lock(&s3fs_admits_lock);
+	a = admit_lookup_at_locked(ino, 0);
+	KUNIT_ASSERT_NOT_NULL(test, a);
+	KUNIT_EXPECT_EQ(test, a->offset, 0ull);
+	KUNIT_EXPECT_EQ(test, a->size, C);
+	KUNIT_EXPECT_TRUE(test, a->flags & S3FS_ADMIT_FLAG_PCACHE);
+	KUNIT_EXPECT_NULL(test, admit_lookup_at_locked(ino, C));	/* the hole */
+	a = admit_lookup_at_locked(ino, 2 * C);
+	KUNIT_ASSERT_NOT_NULL(test, a);
+	KUNIT_EXPECT_EQ(test, a->offset, 2 * C);
+	KUNIT_EXPECT_EQ(test, a->size, 1ull);
+	read_unlock(&s3fs_admits_lock);
+
+	s3k_drop_admits(ino);
+	s3k_close(f);
+}
+
+/* .read_iter counts the access pattern per fd (sequential when a read starts
+ * within 4 KiB of the previous end, else random), hands it to the daemon in
+ * the miss event, and keeps the .read_iter call counters (IOC_STATS 3 / 4). */
+static void s3k_vfs_read_pattern(struct kunit *test)
+{
+	static const loff_t at[] = { 0, 4096, 12288, 49152, 0 };
+	const u64 ino = S3K_INO_BASE + 41, n = 64 * 1024;
+	struct s3fs_read_miss_event ev;
+	struct s3fs_file_data *fd;
+	u64 calls0 = s3fs_read_iter_calls(), pos0_0 = s3fs_read_iter_pos0();
+	char *buf = kunit_kzalloc(test, 4096, GFP_KERNEL);
+	struct file *f;
+	u32 seq, rnd;
+	loff_t pos;
+	int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	s3k_one_entry(test, ino, "rp", n);
+	f = s3k_open(test, "rp", O_RDONLY);
+	fd = s3k_fd_of(f);
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, ino, 0, 'r', n), 0);
+
+	/* the pattern state is per CPU: stay on one */
+	migrate_disable();
+	for (i = 0; i < ARRAY_SIZE(at); i++) {
+		pos = at[i];
+		KUNIT_EXPECT_EQ(test, kernel_read(f, buf, 4096, &pos),
+				(ssize_t)4096);
+	}
+	migrate_enable();
+
+	/* 0 (first read), 4096 (contiguous), 12288 (a 4 KiB gap is within the
+	 * slack) are sequential; 49152 (a jump) and 0 (backwards) are random */
+	s3fs_fd_read_pattern(fd, &seq, &rnd);
+	KUNIT_EXPECT_EQ(test, seq, 3u);
+	KUNIT_EXPECT_EQ(test, rnd, 2u);
+	KUNIT_EXPECT_EQ(test, s3fs_read_iter_calls() - calls0, (u64)ARRAY_SIZE(at));
+	KUNIT_EXPECT_EQ(test, s3fs_read_iter_pos0() - pos0_0, 2ull);	/* the two reads at 0 */
+
+	/* the miss event of a read carries it; one that is not a read does not */
+	while (s3fs_read_miss_dequeue(&ev, true) > 0)
+		;
+	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 4096, 0, fd), 0);
+	KUNIT_ASSERT_EQ(test, s3fs_read_miss_dequeue(&ev, true), (ssize_t)sizeof(ev));
+	KUNIT_EXPECT_EQ(test, ev.ino, ino);
+	KUNIT_EXPECT_EQ(test, ev.seq_count, 3u);
+	KUNIT_EXPECT_EQ(test, ev.rand_count, 2u);
+	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK, NULL), 0);
+	KUNIT_ASSERT_EQ(test, s3fs_read_miss_dequeue(&ev, true), (ssize_t)sizeof(ev));
+	KUNIT_EXPECT_EQ(test, ev.seq_count, 0u);
+	KUNIT_EXPECT_EQ(test, ev.rand_count, 0u);
+
+	s3k_drop_admits(ino);
+	s3k_close(f);
+}
+
+/* The capacity pass (s3fs_ebpf_capacity_pass, the EVAL ioctl): nothing is
+ * evicted without a capacity (and without a policy vote), and with a capacity
+ * for one of two equally sized files it evicts exactly one - entry dropped,
+ * chunks freed, evictions_total + 1. */
+static void s3k_vfs_capacity_pass_evicts_to_capacity(struct kunit *test)
+{
+	const u64 a = S3K_INO_BASE + 51, b = S3K_INO_BASE + 52, n = 64 * 1024;
+	const u64 old_cap = s3fs_capacity_bytes;
+	struct s3fs_entry_dyn *e = kvcalloc(2, sizeof(*e), GFP_KERNEL);
+	long ev0 = atomic_long_read(&s3fs_evictions_total);
+	struct file *fa, *fb;
+
+	KUNIT_ASSERT_NOT_NULL(test, e);
+	s3k_dyn_set(&e[0], a, S3FS_ROOT_INO, "ca");
+	e[0].size = n;
+	s3k_dyn_set(&e[1], b, S3FS_ROOT_INO, "cb");
+	e[1].size = n;
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace(e, 2), 0);
+	fa = s3k_open(test, "ca", O_RDONLY);
+	fb = s3k_open(test, "cb", O_RDONLY);
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, a, 0, 'a', n), 0);
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, b, 0, 'b', n), 0);
+	KUNIT_ASSERT_EQ(test, s3k_admit_count(a) + s3k_admit_count(b), 2u);
+
+	s3fs_capacity_bytes = 0;
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_capacity_pass(), 0);
+	KUNIT_EXPECT_EQ(test, s3k_admit_count(a) + s3k_admit_count(b), 2u);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&s3fs_evictions_total), ev0);
+
+	s3fs_capacity_bytes = n;	/* room for one of the two */
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_capacity_pass(), 0);
+	s3fs_capacity_bytes = old_cap;
+	KUNIT_EXPECT_EQ(test, s3k_admit_count(a) + s3k_admit_count(b), 1u);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&s3fs_evictions_total), ev0 + 1);
+	KUNIT_EXPECT_EQ(test, s3fs_ino_buf_bytes(a) + s3fs_ino_buf_bytes(b), n);
+
+	s3k_drop_admits(a);
+	s3k_drop_admits(b);
+	s3k_close(fb);
+	s3k_close(fa);
+}
+
 static struct kunit_case s3k_vfs_cases[] = {
 	KUNIT_CASE(s3k_vfs_read_bootstrap),
 	KUNIT_CASE(s3k_vfs_maxbytes),
 	KUNIT_CASE(s3k_vfs_read_past_2g),
 	KUNIT_CASE(s3k_vfs_populate_mid_chunk),
 	KUNIT_CASE(s3k_vfs_hit_count),
+	KUNIT_CASE(s3k_vfs_read_pattern),
+	KUNIT_CASE(s3k_vfs_signal_flush_readmits),
+	KUNIT_CASE(s3k_vfs_capacity_pass_evicts_to_capacity),
 	KUNIT_CASE(s3k_vfs_forget_on_evict),
 	KUNIT_CASE(s3k_vfs_write_read_back),
 	KUNIT_CASE(s3k_vfs_truncate),

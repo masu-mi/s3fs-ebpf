@@ -425,22 +425,6 @@ static inline bool s3fs_fd_buf_owned(struct inode *inode)
 	return fd && (READ_ONCE(fd->dirty) || READ_ONCE(fd->flushing));
 }
 
-/* AC-56: grow i_size to @end unless write/flush owns the size.  write and
- * truncate change dirty and i_size under fd->lock, so the ownership check and
- * the i_size_write happen under it too — otherwise a truncate between the two
- * is undone.  fd->lock is the outer lock (the caller holds no admits_lock). */
-static void s3fs_inode_grow_size_unowned(struct inode *inode, u64 end)
-{
-	struct s3fs_file_data *fd = inode->i_private;
-
-	if (fd)
-		mutex_lock(&fd->lock);
-	if (!s3fs_fd_buf_owned(inode) && end > (u64)i_size_read(inode))
-		i_size_write(inode, end);
-	if (fd)
-		mutex_unlock(&fd->lock);
-}
-
 /* AC-41: bytes actually allocated for ino's fd->buf.  The capacity loop
  * charges pcache inos by this instead of their admitted chunk sizes:
  * s3fs_file_data_reserve sizes fd->buf to at least the populate end (and,
