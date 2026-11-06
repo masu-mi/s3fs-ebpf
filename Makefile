@@ -355,7 +355,7 @@ test-splice-hits: kmod daemon ## sendfile / splice reads are counted as hits (hi
 	@echo "==> test-splice-hits"
 	@$(SCRIPTS_DIR)/test-splice-hits.sh
 
-test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-arena-partial-readback test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-open-check test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
+test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-open-check test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -401,10 +401,6 @@ test-prefetch-next: kmod daemon ## AC-68: prefetch_next reads the next sibling f
 	@echo "==> test-prefetch-next (AC-68)"
 	@sudo $(SCRIPTS_DIR)/test-prefetch-next.sh
 
-test-arena-partial-readback: kmod daemon ## AC-48: arena chunk admits keep i_size (random-first + parallel reads, sha256)
-	@echo "==> test-arena-partial-readback (AC-48)"
-	@sudo $(SCRIPTS_DIR)/test-arena-partial-readback.sh
-
 test-pcache-capacity-noeval: kmod daemon ## AC-45: capacity_bytes bounds fd->buf without any policy eval (full reads, 4 x 9 MiB)
 	@echo "==> test-pcache-capacity-noeval (AC-45)"
 	@sudo $(SCRIPTS_DIR)/test-pcache-capacity-noeval.sh
@@ -433,7 +429,7 @@ test-write-existing-nopm: kmod daemon ## AC-50: same as test-write-existing with
 	@echo "==> test-write-existing-nopm (AC-50, --partial-modify=false)"
 	@sudo PARTIAL_MODIFY=false TEST_NAME=test-write-existing-nopm OUT=/tmp/test-write-existing-nopm $(SCRIPTS_DIR)/test-write-existing.sh
 
-test-write-existing: kmod daemon ## AC-50: write/truncate/append on an unread existing object keeps the rest (pcache + arena)
+test-write-existing: kmod daemon ## AC-50: write/truncate/append on an unread existing object keeps the rest
 	@echo "==> test-write-existing (AC-50)"
 	@sudo $(SCRIPTS_DIR)/test-write-existing.sh
 

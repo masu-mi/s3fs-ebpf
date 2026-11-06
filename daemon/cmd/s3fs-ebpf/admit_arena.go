@@ -7,7 +7,6 @@ import (
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/admit"
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 )
 
 // updateArenaHighWater advances the ArenaUsedBytes gauge when `off+size`
@@ -22,12 +21,6 @@ var (
 	planPruneAdmits       = admit.PlanPrune
 	rangesOverlap         = admit.RangesOverlap
 )
-
-func updateArenaHighWater(off uint64, size int) {
-	if hi := off + uint64(size); hi > metrics.Global.ArenaUsedBytes.Load() {
-		metrics.Global.ArenaUsedBytes.Store(hi)
-	}
-}
 
 // programsArena adapts the eBPF loader to admit.Arena.
 type programsArena struct{ p *fpebpf.Programs }

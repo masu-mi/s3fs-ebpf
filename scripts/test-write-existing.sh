@@ -21,8 +21,7 @@
 #               object is the pre-append one (--sync-every=0), so the load must
 #               follow the kmod's i_size or the second append fails with EIO.
 #
-# Run in both admit modes (MODES="pcache arena"): the loader fills the fd
-# through POPULATE_PAGES either way.
+# The loader fills the fd through POPULATE_PAGES (pcache is the only mode).
 #
 # Usage:
 #   sudo ./scripts/test-write-existing.sh
@@ -50,7 +49,7 @@ pm_flag=()
 S3_BUCKET=${WRITE_EXISTING_BUCKET:-s3fs-write-existing}
 MIB=$(( 1024 * 1024 ))
 SIZE=$(( 6 * MIB ))
-MODES=${MODES:-"pcache arena"}
+MODES=${MODES:-"pcache"}
 
 log()  { printf '[write-existing] %s\n' "$*" >&2; }
 
@@ -106,14 +105,11 @@ run_mode() {
         WANT[$sc]=$(sha256sum < "$f" | awk '{print $1}')
     done
 
-    # The objects are listed by the startup sync; arena mode also prewarms them.
+    # The objects are listed by the startup sync.
     log "[$mode] mounting s3fs-ebpf"
     ebpf_mount "$MOUNT"
-    local extra=()
-    [ "$mode" = pcache ] && extra=(--arena-metadata-only)
     ebpf_start_daemon "$OUT/daemon-$mode.log" \
         --bucket="$S3_BUCKET" \
-        "${extra[@]}" \
         "${pm_flag[@]}" \
         --policy-bpf="builtin:policy_observe_ops" \
         --softcap=8 --cache-capacity=0 \

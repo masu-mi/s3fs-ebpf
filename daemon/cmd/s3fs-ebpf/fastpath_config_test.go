@@ -34,10 +34,8 @@ func TestFastpathModesValidate(t *testing.T) {
 		{"defaults", fastpathModes{patternAdmit: true}, ""},
 		{"nothing set", fastpathModes{}, ""},
 		{"pattern admit without the hook", fastpathModes{patternAdmit: true, noReadIterHook: true}, "--pattern-aware-admit requires"},
-		{"prefetch-seq without the hook", fastpathModes{prefetchSeq: true, noReadIterHook: true}, "--prefetch-seq-admit requires"},
 		{"hook off alone is fine", fastpathModes{noReadIterHook: true}, ""},
-		{"pcache-prewarm needs pcache mode", fastpathModes{pcachePrewarm: true}, "--pcache-prewarm requires --arena-metadata-only"},
-		{"pcache-prewarm with pcache mode", fastpathModes{pcachePrewarm: true, arenaMetadataOnly: true}, ""},
+		{"pcache-prewarm", fastpathModes{pcachePrewarm: true}, ""},
 	} {
 		err := tt.m.validate()
 		switch {

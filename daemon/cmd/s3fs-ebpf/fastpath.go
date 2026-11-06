@@ -64,20 +64,12 @@ func runFastpath(args []string) int {
 		"[R-01] use s3fs_read_pattern_map sequential signal to promote large-file "+
 			"read-miss upcalls to full-file GETs, reducing S3 round-trips. "+
 			"Requires fentry/generic_file_read_iter (incompatible with --no-read-iter-hook).")
-	prefetchSeq := fs.Bool("prefetch-seq-admit", false,
-		"[AA-04] proactively pre-admit the next sequential chunk while the current "+
-			"chunk is still being read, reducing cold-miss upcalls for sequential "+
-			"large-file reads. Fires when s3fs_read_pattern_map shows SeqRatio ≥ 0.70 "+
-			"and the read position is within 2 MiB of the admitted range boundary. "+
-			"Requires --pattern-aware-admit (incompatible with --no-read-iter-hook).")
-	arenaMetadataOnly := fs.Bool("arena-metadata-only", false,
-		"[AB-04] store S3 object data in the kernel page cache (via fd->buf) instead of "+
-			"the BPF arena. Reads are served by generic_file_read_iter from the page "+
-			"cache — no GUP per page. Eliminates the 1.7µs/page GUP overhead at the "+
-			"cost of one extra copy on admit. Does not require BPF arena allocation. "+
-			"Prewarm warms metadata only; bodies are fetched on the first read (AC-44).")
+	// Deprecated no-op: the pcache mode (content in the kmod's chunk table and
+	// page cache) is the only mode; the flag is accepted so existing command lines work.
+	fs.Bool("arena-metadata-only", true,
+		"[deprecated, no-op] the kmod chunk table + page cache is the only content store")
 	pcachePrewarm := fs.Bool("pcache-prewarm", false,
-		"[AC-67] with --arena-metadata-only, read each file the prewarm policy selects "+
+		"[AC-67] read each file the prewarm policy selects "+
 			"once through the mount after startup (and after each sync round with "+
 			"--prewarm-on-sync), so its first read is a page-cache hit. Reads use the "+
 			"normal miss path. Stops before capacity_bytes would be exceeded; set "+
@@ -141,15 +133,12 @@ func runFastpath(args []string) int {
 
 	if err := (fastpathModes{
 		patternAdmit: *patternAdmit, noReadIterHook: *noReadIterHook,
-		prefetchSeq: *prefetchSeq, arenaMetadataOnly: *arenaMetadataOnly,
 		pcachePrewarm: *pcachePrewarm,
 	}).validate(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	patternAwareAdmitEnabled = *patternAdmit
-	prefetchSeqEnabled = *prefetchSeq
-	arenaMetadataOnlyEnabled = *arenaMetadataOnly
 	pcachePrewarmEnabled = *pcachePrewarm
 	pcachePrewarmMount = *pcachePrewarmMnt
 
@@ -175,14 +164,9 @@ func runFastpath(args []string) int {
 	if *policyPath != "" {
 		fmt.Printf("[policy] loaded %s\n", *policyPath)
 	}
-	// AC-68: prefetch_next reads siblings through the mount into the
-	// pcache; arena mode has no such path.
+	// AC-68: prefetch_next reads siblings through the mount into the pcache.
 	if pol.HasPrefetchNext() {
-		if arenaMetadataOnlyEnabled {
-			prefetchPolicy = pol
-		} else {
-			fmt.Fprintln(os.Stderr, "[policy] prefetch_next ignored: needs --arena-metadata-only")
-		}
+		prefetchPolicy = pol
 	}
 
 	// Layer 2 / Layer 3 BPF policy program (Week 4 (d)). --policy-bpf
@@ -516,11 +500,13 @@ func runFastpath(args []string) int {
 	// S3 we reflect real object metadata (size, mtime) and — the
 	// point of Week 4 (a) — copy the object body into the arena so
 	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
-	initialAdmits := prewarm(context.Background(), progs, s3c, pol)
-	if err := setAdmits(*dev, initialAdmits); err != nil {
+	prewarm(context.Background(), progs, s3c, pol)
+	// An empty admit set: kmod keeps no arena ranges any more, but this call
+	// also arms the upcall path (it records the daemon's mm).
+	if err := setAdmits(*dev, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "[admit] %v — kmod fallback (kmalloc scratch) still works\n", err)
 	} else {
-		fmt.Printf("[admit] %d entries via %s\n", len(initialAdmits), *dev)
+		fmt.Printf("[admit] 0 entries via %s (armed)\n", *dev)
 		defer func() {
 			if err := clearAdmits(*dev); err != nil {
 				fmt.Fprintf(os.Stderr, "[admit clear] %v\n", err)
@@ -531,10 +517,6 @@ func runFastpath(args []string) int {
 		// entry with Prewarm=false, or any ino kmod knows about
 		// that daemon hasn't warmed yet.
 		go runReadMissLoop(ctx, *dev, progs, s3c)
-		// AA-04: proactive sequential prefetch — pre-admit the next
-		// chunk of large files while the current chunk is still being
-		// read. No-op unless --prefetch-seq-admit is set.
-		go runSeqPrefetchLoop(ctx, *dev, progs, s3c)
 		// AC-67: the prewarm reads block on upcalls, so start after
 		// runReadMissLoop.
 		if pcachePrewarmEnabled || prefetchPolicy != nil {
@@ -557,10 +539,7 @@ func runFastpath(args []string) int {
 	// only warms newly-appeared entries. Seeded from the startup
 	// prewarm output so the first sync round doesn't re-fetch things
 	// we just admitted.
-	prewarmed := make(map[uint64]struct{}, len(initialAdmits))
-	for _, a := range initialAdmits {
-		prewarmed[a.Ino] = struct{}{}
-	}
+	prewarmed := make(map[uint64]struct{})
 	go runSyncLoop(ctx, *dev, s3c, *syncEvery, func(fresh []fpebpf.Entry) {
 		if len(fresh) != lastSyncCount {
 			fmt.Printf("[sync] delta: %d → %d entries\n",
@@ -593,15 +572,8 @@ func runFastpath(args []string) int {
 			if _, done := prewarmed[entry.Ino]; done {
 				continue
 			}
-			ad, ok := prewarmEntry(ctx, progs, s3c, pol, entry)
+			prewarmEntry(ctx, progs, s3c, pol, entry)
 			prewarmed[entry.Ino] = struct{}{}
-			if !ok {
-				continue
-			}
-			if err := replaceAdmit(*dev, ad, progs); err != nil {
-				fmt.Fprintf(os.Stderr, "[sync prewarm] admit ino=%d: %v\n",
-					entry.Ino, err)
-			}
 		}
 	})
 	// Week 4 (c): drain the kmod write-back queue and PUT bytes to

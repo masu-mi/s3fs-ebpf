@@ -15,55 +15,6 @@
  * worth of file content, then the page cache does the copy_to_user.
  */
 
-/* Returns true when at least one page was pinned (folio fully or partially
- * filled from arena).  Returns false when pin_user_pages_remote failed on
- * the very first iteration — the folio was zeroed but must NOT be marked
- * uptodate; the caller should fall through to the upcall path instead.
- * Partial fills (some pages pinned, later ones failing) still return true —
- * the filled region is correct and the tail is zero-padded as usual. */
-static bool s3fs_folio_fill_from_arena(struct folio *folio, size_t fs_size,
-				       loff_t pos,
-				       struct mm_struct *mm,
-				       u64 uaddr, u64 asize)
-{
-	size_t remaining, total = 0;
-
-	if ((u64)pos >= asize) {
-		folio_zero_range(folio, 0, fs_size);
-		return false;
-	}
-	remaining = min_t(size_t, fs_size, asize - (u64)pos);
-
-	while (remaining > 0) {
-		struct page *ap = NULL;
-		void *akva;
-		u64 abs = uaddr + (u64)pos + total;
-		unsigned long pgoff = abs & (PAGE_SIZE - 1);
-		size_t chunk = min_t(size_t, remaining, PAGE_SIZE - pgoff);
-		int locked = 1;
-		long pinned;
-
-		mmap_read_lock(mm);
-		pinned = pin_user_pages_remote(mm, abs & PAGE_MASK, 1, 0,
-					       &ap, &locked);
-		if (locked)
-			mmap_read_unlock(mm);
-		if (pinned != 1)
-			break; /* short — remainder gets zero-filled below */
-
-		akva = kmap_local_page(ap);
-		memcpy_to_folio(folio, total, (u8 *)akva + pgoff, chunk);
-		kunmap_local(akva);
-		unpin_user_pages(&ap, 1);
-
-		total     += chunk;
-		remaining -= chunk;
-	}
-	if (total < fs_size)
-		folio_zero_range(folio, total, fs_size - total);
-	return total > 0;
-}
-
 /* Q2 / S1: returns true when fd->buf held valid data for pos (pcache hit).
  * Returns false when buf is NULL, pos is beyond buf, or the admit entry
  * disappeared between fc_pcache_check and here.  Caller must invalidate fc
@@ -194,49 +145,6 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
 	return buf_valid;
 }
 
-/* AA-03: copy arena data directly into a user iov_iter, bypassing the
- * page-cache folio path entirely. One page at a time via GUP so we stay
- * within the pin_user_pages_remote() contract (no sleeping while pinned). */
-static ssize_t s3fs_arena_copy_to_iter(struct mm_struct *mm,
-					u64 uaddr, u64 avail,
-					struct iov_iter *to, size_t copy_len)
-{
-	size_t remaining = copy_len;
-	ssize_t total = 0;
-
-	while (remaining > 0) {
-		struct page *ap = NULL;
-		void *akva;
-		unsigned long abs = (unsigned long)(uaddr + (u64)total);
-		unsigned long pgoff = abs & (PAGE_SIZE - 1);
-		size_t chunk = min_t(size_t, remaining, PAGE_SIZE - pgoff);
-		long pinned;
-		int locked = 1;
-		size_t copied;
-
-		mmap_read_lock(mm);
-		{
-			ktime_t t0 = ktime_get();
-			pinned = pin_user_pages_remote(mm, abs & PAGE_MASK, 1, 0, &ap, &locked);
-			atomic_long_inc(&s3fs_gup_calls_total);
-			atomic_long_add(ktime_to_ns(ktime_sub(ktime_get(), t0)), &s3fs_gup_ns_total);
-		}
-		if (locked)
-			mmap_read_unlock(mm);
-		if (pinned != 1)
-			break;
-		akva = kmap_local_page(ap);
-		copied = copy_to_iter((u8 *)akva + pgoff, chunk, to);
-		kunmap_local(akva);
-		unpin_user_pages(&ap, 1);
-		if (!copied)
-			break;
-		total += (ssize_t)copied;
-		remaining -= copied;
-	}
-	return total;
-}
-
 /* S5: max upcall retries before falling back to the bootstrap buffer.
  * Guards against eviction firing in the window between signal_admit
  * (which unhashes the pending, unblocking eviction) and the waiter
@@ -251,7 +159,6 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	struct inode *inode = folio->mapping->host;
 	struct s3fs_file_data *fd = inode->i_private;
 	struct mm_struct *mm = NULL;
-	u64 uaddr = 0, asize = 0;
 	loff_t pos = folio_pos(folio);
 	size_t fs_size = folio_size(folio);
 	u32 pcache_gen;
@@ -297,22 +204,6 @@ retry:
 			struct s3fs_file_admit_cache *fc_local = file->private_data;
 			smp_store_release(&fc_local->gen, 0);
 		}
-	}
-
-	/* Fast path: arena admit hit. admit_snapshot() returns the arena
-	 * address for `pos` and the bytes available in the covering
-	 * range. fill_from_arena reads from the returned uaddr with
-	 * pos=0 (range-relative), copying up to `avail` bytes.
-	 * Skip when buf is owned by write/flush — arena may have stale
-	 * prewarm content from an earlier S3 version of this file. */
-	if (!s3fs_fd_buf_owned(inode) &&
-	    admit_snapshot(inode->i_ino, (u64)pos, &uaddr, &asize, &mm) && mm) {
-		if (s3fs_folio_fill_from_arena(folio, fs_size, 0, mm, uaddr, asize)) {
-			atomic_long_inc(&s3fs_folio_hits);
-			filled = true;
-			goto done;
-		}
-		/* GUP failed: arena pages inaccessible; fall through to upcall. */
 	}
 
 	/* AC-45 C3: we were woken by a verified success signal (the chunk was
@@ -463,47 +354,14 @@ static ssize_t s3fs_ebpf_splice_read(struct file *in, loff_t *ppos,
 	return filemap_splice_read(in, ppos, pipe, len, flags);
 }
 
-/* AA-03 / AB-04: .read_iter fast path.
- *
- * Priority order:
- *   1. AB-04 page-cache mode (PCACHE admit flag): skip arena entirely,
- *      fall through to generic_file_read_iter so page cache serves the data.
- *      .read_folio fills fd->buf → folio on the first miss; subsequent
- *      reads are served from the uptodate folio without touching .read_folio.
- *   2. Arena mode (AA-03): admit hit → s3fs_arena_copy_to_iter (GUP path).
- *      Bypassed when s3fs_arena_bypass=1 (AB-02 bench flag).
- *   3. Fallback: generic_file_read_iter (page cache + .read_folio upcall). */
+/* .read_iter: count the access for the policy (hit_accum), then let the page
+ * cache serve the read; a missing folio reaches .read_folio, which fills it
+ * from the fd's chunk table or upcalls the daemon. */
 static ssize_t s3fs_ebpf_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
 	struct file *file = iocb->ki_filp;
-	struct inode *inode = file_inode(file);
-	loff_t pos = iocb->ki_pos;
-	loff_t size = i_size_read(inode);
-	u64 uaddr = 0, avail = 0;
-	struct mm_struct *mm = NULL;
 
-	s3fs_hit_count(file, inode);
-
-	/* AB-04 / AB-10: page-cache mode — data in fd->buf / page cache.
-	 * fc_pcache_check avoids the rwlock on the hot path once the cache
-	 * entry is confirmed for this file descriptor. */
-	if (pos < size &&
-	    fc_pcache_check(file->private_data, inode->i_ino, (u64)pos, NULL))
-		return generic_file_read_iter(iocb, to);
-
-	if (!s3fs_arena_bypass && !s3fs_fd_buf_owned(inode) && pos < size &&
-	    admit_snapshot(inode->i_ino, (u64)pos, &uaddr, &avail, &mm) && mm) {
-		size_t count = iov_iter_count(to);
-		size_t copy_len = min3(count, (size_t)avail,
-				       (size_t)(size - pos));
-		ssize_t copied = s3fs_arena_copy_to_iter(mm, uaddr, avail,
-							  to, copy_len);
-		if (copied > 0) {
-			atomic_long_inc(&s3fs_folio_hits);
-			iocb->ki_pos += copied;
-			return copied;
-		}
-	}
+	s3fs_hit_count(file, file_inode(file));
 	return generic_file_read_iter(iocb, to);
 }
 

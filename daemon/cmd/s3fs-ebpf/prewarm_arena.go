@@ -1,4 +1,6 @@
-// Arena-mode prewarm: populate arena + inode_index from the kmod entry table.
+// Startup / sync prewarm: metadata warm (inode_index stubs) from the kmod entry table.
+// File bodies are not fetched here: they reach the kmod's chunk table on the first
+// read (upcall + POPULATE_PAGES), or through the mount with --pcache-prewarm.
 
 package main
 
@@ -10,7 +12,6 @@ import (
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 
-	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/policy"
 	"golang.org/x/sync/errgroup"
@@ -21,82 +22,44 @@ import (
 // overwhelming small MinIO test instances (V-03).
 const prewarmWorkers = 8
 
-// prewarm populates the arena + inode_index from the kmod entry table
-// so the first stat on each demo object hits fast_hits, and when S3
-// is available copies each object's body into the arena and returns
-// the (ino, arena_off, size) triples the caller ioctls into kmod so
-// .read serves those bytes without a userspace bounce.
+// prewarm warms the inode_index stub of every entry in the kmod entry table
+// so the first stat hits the fentry fast_hits counter, and queues the files
+// the prewarm policy selects for --pcache-prewarm.
 //
-// Without S3 we still warm the stat cache but skip content admission —
-// kmod's kmalloc scratch buffer covers `cat` at reduced fidelity.
-//
-// V-03: entries are prewarmed in parallel (up to prewarmWorkers) to
-// overlap S3 round-trips. AdmitContent is serialized inside fpebpf so
-// arena offset assignment is still safe under concurrency.
-func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend, pol *policy.Engine) []admitEntry {
+// V-03: entries are prewarmed in parallel (up to prewarmWorkers) to overlap
+// S3 round-trips.
+func prewarm(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend, pol *policy.Engine) {
 	timedCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	live := fpebpf.Snapshot()
-
-	type result struct {
-		ad admitEntry
-		ok bool
-	}
-	results := make([]result, len(live))
-
 	g, gCtx := errgroup.WithContext(timedCtx)
 	g.SetLimit(prewarmWorkers)
-	for i, entry := range live {
-		i, entry := i, entry
+	for _, entry := range live {
+		entry := entry
 		g.Go(func() error {
-			ad, ok := prewarmEntry(gCtx, progs, s3c, pol, entry)
-			results[i] = result{ad, ok}
+			prewarmEntry(gCtx, progs, s3c, pol, entry)
 			return nil
 		})
 	}
 	_ = g.Wait()
-
-	admits := make([]admitEntry, 0, len(live))
-	for _, r := range results {
-		if r.ok {
-			admits = append(admits, r.ad)
-		}
-	}
-	return admits
 }
 
-// prewarmEntry runs the per-entry prewarm work. Split into two
-// distinct steps so F-03 can guarantee metadata warm even when
-// content admit is skipped:
-//
-//  1. **Metadata warm** (always): S3 Stat → progs.WarmCache. Populates
-//     the BPF inode_index so the fentry fast_hits stub recognizes
-//     the ino on the first getattr. Runs regardless of policy — a
-//     policy that suppresses content admit still wants stat to hit
-//     Path A rather than Path C.
-//
-//  2. **Content admit** (policy-gated): S3 Get → progs.AdmitContent.
-//     Only fires when `wantPrewarm` (Entry.Prewarm ∨ CEL override) is
-//     true. Skip returns (zero, false) — the ino stays warm for stat,
-//     the first cat takes Path C.
-//
-// Returns (entry, true) only when content admission completed. The
-// warm-only case is (zero, false) — same signal shape as before F-03,
-// so existing callers keep working; the meaningful visible change is
-// that fentry recognizes policy-skipped inos immediately.
+// prewarmEntry warms the metadata of one entry: S3 Stat (when reachable, for
+// the authoritative size / mtime, else the bootstrap values) -> progs.WarmCache.
+// It runs regardless of the prewarm policy.  When the policy wants the content
+// and --pcache-prewarm is on, the file is queued to be read through the mount
+// once the upcall loop runs (AC-67); POPULATE_PAGES cannot be used here
+// because the inode does not exist yet.
 func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Backend,
-	pol *policy.Engine, entry fpebpf.Entry) (admitEntry, bool) {
-	// G-01: synthetic directory entries have no arena content and
-	// no S3 backing key. WarmCache would try to stat "", which S3
-	// answers with a nonsense error. Short-circuit here.
+	pol *policy.Engine, entry fpebpf.Entry) {
+	// G-01: synthetic directory entries have no S3 backing key; WarmCache
+	// would try to stat "", which S3 answers with a nonsense error.
 	if entry.Mode&fileTypeMask == 0o040000 {
-		return admitEntry{}, false
+		return
 	}
-	// Entry.Prewarm is the static bootstrap default; the policy
-	// engine, when loaded, overrides per-entry (P-01 spike). Both
-	// paths default to prewarm=true if the policy is broken /
-	// missing, so a misconfigured file doesn't strand the mount.
+	// Entry.Prewarm is the static bootstrap default; the policy engine, when
+	// loaded, overrides per-entry (P-01 spike).
 	wantPrewarm := entry.Prewarm
 	if pol != nil {
 		wantPrewarm = pol.EvalPrewarm(policy.EntryInput{
@@ -104,20 +67,7 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 			Size: entry.Fallback, Mode: entry.Mode,
 		})
 	}
-	// AC-44: --arena-metadata-only keeps object bodies out of the arena;
-	// content reaches fd->buf on the first read via upcall + POPULATE_PAGES.
-	// Staging the body here would make it an arena admit that consumes
-	// capacity_bytes (and bypass the pcache path) for every listed object.
-	// POPULATE_PAGES cannot be used instead: the inode does not exist yet.
-	pcacheSkip := wantPrewarm && arenaMetadataOnlyEnabled
-	if pcacheSkip {
-		wantPrewarm = false
-	}
 
-	// Step 1 — metadata warm (unconditional). Prefer S3-authoritative
-	// size/mtime when reachable; fall back to the bootstrap entry
-	// otherwise. Both branches populate the BPF inode_index so the
-	// fentry hook resolves getattr on Path A.
 	stub := fpebpf.InodeStub{
 		Ino:     entry.Ino,
 		Size:    entry.Fallback,
@@ -125,7 +75,6 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 		Mode:    entry.Mode,
 	}
 	source := "fallback"
-	var body []byte
 	if s3c != nil {
 		meta, err := s3c.Stat(ctx, entry.S3Key)
 		if err != nil {
@@ -135,56 +84,17 @@ func prewarmEntry(ctx context.Context, progs *fpebpf.Programs, s3c objstore.Back
 			stub.Size = uint64(meta.Size)
 			stub.MtimeNs = uint64(meta.LastModified.UnixNano())
 			source = fmt.Sprintf("s3://%s", entry.S3Key)
-			if wantPrewarm {
-				body, err = s3c.Get(ctx, entry.S3Key)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[prewarm] ino=%d get: %v (skip admit)\n",
-						entry.Ino, err)
-					body = nil
-				}
-			}
 		}
 	}
 	off, err := progs.WarmCache(stub)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[prewarm] ino=%d warm: %v\n", entry.Ino, err)
-		return admitEntry{}, false
+		return
 	}
 	fmt.Printf("[prewarm] ino=%d name=%s size=%d src=%s → stub=%d\n",
 		entry.Ino, entry.Name, stub.Size, source, off)
 
-	// Step 2 — content admit (policy-gated).
-	if !wantPrewarm {
-		reason := "policy=false"
-		if pcacheSkip {
-			reason = "arena-metadata-only"
-			if pcachePrewarmEnabled {
-				// AC-67: read through the mount once the upcall loop runs.
-				queuePcachePrewarm(entry.Ino, stub.Size)
-				reason = "arena-metadata-only, queued for pcache prewarm"
-			}
-		}
-		fmt.Printf("[prewarm] ino=%d name=%s content-skip (%s, stat=warm, cat=PathC)\n",
-			entry.Ino, entry.Name, reason)
-		return admitEntry{}, false
+	if wantPrewarm && pcachePrewarmEnabled {
+		queuePcachePrewarm(entry.Ino, stub.Size)
 	}
-	if body == nil {
-		return admitEntry{}, false
-	}
-	cOff, err := progs.AdmitContent(body)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[prewarm] ino=%d content: %v (skip admit)\n",
-			entry.Ino, err)
-		return admitEntry{}, false
-	}
-	if hi := cOff + uint64(len(body)); hi > metrics.Global.ArenaUsedBytes.Load() {
-		metrics.Global.ArenaUsedBytes.Store(hi)
-	}
-	fmt.Printf("[prewarm] ino=%d body=%d bytes → content=%d\n",
-		entry.Ino, len(body), cOff)
-	return admitEntry{
-		Ino:   entry.Ino,
-		Uaddr: progs.Arena().BaseAddr() + cOff,
-		Size:  uint64(len(body)),
-	}, true
 }

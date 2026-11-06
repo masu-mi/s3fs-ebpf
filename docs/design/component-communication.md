@@ -56,7 +56,7 @@ ioctl のほかに、daemon は起動時に kmod の module param (`/sys/module/
 
 | map name | type | writer | reader | 用途 |
 |---|---|---|---|---|
-| `s3fs_arena` | `BPF_MAP_TYPE_ARENA` | daemon (mmap 経由) | BPF prog + kmod (GUP over user_vm) | 実データ blob 領域 |
+| `s3fs_arena` | `BPF_MAP_TYPE_ARENA` | daemon (stub の書き込みだけ) | BPF prog | 中身は置かない (arena モードは削除済み)。inode_index の stub と、arena のデモ / テストだけ |
 | `s3fs_inode_index` | `BPF_MAP_TYPE_HASH` | daemon (WarmCache) | fentry BPF | ino → arena_offset (stub) |
 | `s3fs_counters` | `PERCPU_ARRAY` | fentry BPF | daemon (sample) | fast/slow hit counter |
 | `policy_stats` | `PERCPU_ARRAY` | policy BPF | daemon (sample) | policy 発火回数 |
@@ -120,7 +120,7 @@ flowchart LR
     %% arena bytes (T6 side write, kmod side GUP)
     Fops -.->|"pin_user_pages_remote<br/>+ kmap + copy_to_user"| Arena
     %% T6
-    MissLoop -.->|"T6: mmap write<br/>(arena モードのみ、syscall なし)"| Arena
+    MissLoop -.->|"(arena への書き込みは削除済み)"| Arena
     FlushLoop -.->|"T6: mmap write"| Arena
     SyncLoop -->|"T6: bpf(MAP_UPDATE)<br/>via cilium/ebpf"| Idx
     %% T7 ioctl (daemon → kmod)
@@ -194,14 +194,7 @@ sequenceDiagram
 - `SIGNAL_ADMIT` は `VERIFY_POPULATED` 付きで送る。容量パスや同じ ino の別の handler が、populate したばかりの chunk を evict していたら `-EAGAIN` が返り、daemon は populate し直す (`read_miss_repopulates_total`)。
 - 4 MiB を超える object は、range GET を並列にし、取れた chunk から populate と `SIGNAL_ADMIT` を繰り返す (AC-52、`admit_chunkload.go`)。
 
-**arena モード (既定) との差**:
-
-| | pcache モード (上の図) | arena モード |
-|---|---|---|
-| 中身を渡す | `POPULATE_PAGES` (ioctl でバッファを渡す) | daemon が arena に mmap で書く (T6、syscall なし) |
-| admit 表 | `ADMIT_ARENA` は snapshot の再送 (PCACHE entry、`uaddr=0`) | `ADMIT_ARENA` で `uaddr` と範囲を登録 |
-| kmod が読む | fd の chunk 表 (page cache 経由) | `pin_user_pages_remote` + `kmap` + `copy_to_user` (GUP) |
-| 起こす | `SIGNAL_ADMIT` | `SIGNAL_ADMIT` |
+**arena モードは削除した** (2026-11-05、v2 Phase 2): 中身を daemon が arena に mmap で書き、kmod が GUP で読む方式。中身の受け渡しは `POPULATE_PAGES` だけになり、`ADMIT_ARENA` は `count == 0` (daemon の mm を記録して upcall を有効にし、容量の pass を走らせる) 以外を `-EINVAL` で断る。
 
 **BPF の ringbuf (T9) は削除した** (2026-11-05): fentry の miss event を daemon が処理するのは root ino=1 の warm だけで、kmod は ringbuf を見ず、read の miss の完了は T8 + T7 だけで決まっていた。
 
@@ -267,9 +260,8 @@ sequenceDiagram
 ```
 
 fsync は専用の queue (`s3fs_flush_wait_queue`) と blocking の `POP_FLUSH_WAIT` で、ticker の遅れと coalescer の debounce を通らない。close の分と同じ ino の `handleFlush` は直列にし、`.create` の 0 byte の placeholder が fsync の PUT のあとに PUT されてオブジェクトを空にしないようにしている (F1、`flush_order.go`、`docs/kmod-pcache-invariants.md` の F1 / W3)。**PUT のあとの arena への書き直し (コードで確認、2026-11-05):** `handleFlush` (`flush_loop.go`) は、全体の PUT が成功すると、`--arena-metadata-only` かどうかに関係なく、書いた中身を arena にコピーして `ADMIT_ARENA` で admit し直す (`AdmitContent` + `replaceAdmit`)。省かれるのは `--partial-modify` で処理済みの flush (`dropAdmitIno` で arena の古い分を捨てる) と、`progs == nil` のときだけ。
-- **書いた直後の read を支える (コードの読み、実機では未確認):** `SIGNAL_FLUSH` が成功したとき kmod が行うのは chunk の `populated` を立てることだけで、PCACHE の admit entry は入れ直さない。dirty だった fd は PCACHE entry を持たないので、flush 後の `.read_folio` (page cache に folio がないとき) は、PCACHE の判定を外れ、**fd が dirty / flushing でなければ arena の admit entry を GUP で読む** (`aops_read.inc.c`、`file_ops.inc.c` の `admit_snapshot`)。daemon の書き直しがなければ、この read は S3 への upcall になる。コメントの意図もそうで、「古い prewarm ではなく、書いたばかりの中身を返すため」(`flush_loop.go`)。
-- **コスト:** 書いたファイルの大きさ分の memcpy と arena の消費。arena は 128 MiB (`s3fs_arena` の `max_entries` 32768 ページ) で、足りないと `AdmitContent` が `ErrCacheFull` を返す。**PUT は成功しているのに `[flush] admit content: …` をログに出し、`flush_errors_total` (help は "PUT failures") を増やす。**
-- 計測への影響は未計測 (新規の 100 MiB の fsync で、100 MiB の arena コピーが入っている。`benchmark-results.md` §18.48 の B に含まれている)。改善案は backlog AC-82。
+- **書いた直後の read を支える (AC-82、2026-11-05):** `SIGNAL_FLUSH` が成功したとき、kmod は chunk の `populated` を立て、**populated な chunk の連続した範囲ごとに PCACHE の admit entry を入れる** (`fd->lock` の下、R1)。書いた直後の `.read_folio` は chunk から返り、S3 への upcall は出ない。以前は daemon が PUT のあと中身を arena にコピーして `ADMIT_ARENA` で admit し直し (`AdmitContent`)、書いた直後の read はその arena のコピーを GUP で読んでいた。arena の消費と、満杯のときの `flush_errors_total` の誤計上は、削除で解消した。
+- 書いた直後の read の遅延と S3 の GET 数、新規 100 MiB の fsync の時間は**未計測** (`make test-regression` は通る)。
 
 E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/journal/backlog-archive.md J-05` 参照)。
 
