@@ -2484,3 +2484,37 @@ cold (open + 全 op の wall time、ms。s3 = backend の cache を空にして�
 - **キャッシュありの 170× は、open で S3 を一度も確認しない設計の値**。S3 の存在を確認する条件では、時間のほぼ全部が HEAD 1 往復 (ローカル silo で約 420 µs) で、s3fs-ebpf の優位は約 1.2× に縮む。fuse 側の 506 µs も、その HEAD + FUSE の往復。
 - 速くできる余地は HEAD の頻度にある: `open_check=0` の 3 µs (確認なし) が上限、`=1` の 425 µs (毎回) が下限。間 (確認結果を一定時間または ETag で再利用する) は未実装・未測定。遠い S3 (数十 ms) では HEAD の割合がさらに大きくなる。
 - 未切り分け: HEAD が +8〜12 余分 (1%) に数えられる (§18.51 と同じ)。
+
+### 18.53 容量パス 1 回の所要時間: Phase 3c の走査は cold inode 数に比例する (2026-11-06)
+
+Phase 3c (`v2-phase3c-resident`、3a3a538) は容量パスの候補を `sb->s_inodes` を歩いて集める (`s3fs_collect_resident`)。**代償として O(キャッシュ中の inode 数) から O(sb の inode 数) になる**と PR #55 に書いたが、計測していなかった。ここで測る。
+
+**条件**: 2026-11-06、`6.12.0-061200-generic` (lockdep なし)、`scripts/bench-capacity-pass.sh`。キャッシュ済みのファイル 100 個 (4 KiB) と、`stat` だけした cold なファイル N 個 (inode は生えるが中身は載らない)。daemon は `--cache-capacity` を 1 GiB (`nocap`: 集めて policy に渡すだけ) と 200 KiB (`evict`: evict も走る)、policy は `observe_ops`。`POST /policy/eval` を 200 回流し、bpftrace の kprobe / kretprobe で `s3fs_ebpf_capacity_pass` の所要時間を取る。比較は Phase 3b (3d3bd2a、admit hash を歩く)。各 2 run。
+
+**値** (`nocap`、パス 1 回の p50。2 run の範囲。`evict` は cold 1,000 個以上で `nocap` と 8% 以内、cold 0 では 3b・3c とも `evict` の方が 15〜20 µs 速い):
+
+| cold inode 数 | 3b | 3c | 3c の inode あたり |
+|---:|---:|---:|---:|
+| 0 | 49–53 µs | 48 µs | — |
+| 1,000 | 49 µs | 159–162 µs | 約 110 ns |
+| 10,000 | 51–52 µs | 1.366–1.372 ms | 約 137 ns |
+| 30,000 | 49 µs | 4.04–4.10 ms | 約 136 ns |
+
+3b は cold inode の数に依存せず、3c は線形に増える。キャッシュ済みのファイルだけなら 3c は 3b と同じ (cold 0 で 48 µs)。dmesg に BUG / Oops / WARNING なし。
+
+**原因の切り分け** (cold 10,000、PASSES=100。使い捨ての worktree で走査だけを変えた。p50):
+
+| 変種 | p50 | 読み取り |
+|---|---:|---|
+| V0: 3c そのまま | 1.355 ms | 基準 |
+| V1: inode ごとの `i_lock` を外す | 1.276 ms | -6%。ロックの取得・解放は 1 inode あたり約 8 ns |
+| V2: 2 回目の走査の中身を空にする (リストをたどるだけ) | 1.328 ms | -2%。中身の処理は効いていない |
+| V4: 2 回目の走査を丸ごと外す (数えるだけ) | 0.747 ms | 1 回の走査で約 74 ns/inode |
+
+**結論**: 遅くなった主因は並行制御のオーバーヘッドではない。`s_inodes` の走査そのもの (1 inode あたり約 74 ns × 2 回) で、v2 の走査は数える走査と集める走査の 2 回ある。inode が slab 上に散らばっているので、リストを 1 段たどるごとにキャッシュミスが出ている、と考えている (**perf などでキャッシュミスの数は確かめていない**)。計測は誰とも競合しない状態で行った。
+
+**未計測**: 走査の間 `s_inode_list_lock` (spinlock) を握り続ける (10,000 inode で 1 回の走査につき約 0.7 ms、30,000 で約 4 ms)。その間、この sb の inode の生成・破棄は待たされる。競合している状態での待ち時間は測っていない。
+
+**対処**: 設計 doc §4.2 の `resident` (キャッシュ中の fd だけの索引。`fd->cap` を変える 2 関数の中で更新) を入れれば、走査は O(キャッシュ中の inode 数) に戻る。Phase 3 の続きで入れ、同じ計測で cold の数への依存が消えることを確かめる。
+
+生データ: `docs/journal/data/capacity-pass-20261106/`。

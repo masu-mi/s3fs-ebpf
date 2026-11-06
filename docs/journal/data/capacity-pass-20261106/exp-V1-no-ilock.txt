@@ -1,0 +1,4 @@
+# commit 3a3a538 (v2 Phase 3c: remove the admit hash - the chunk table is the only record); kernel 6.12.0-061200-generic; NHOT=100 PASSES=100 CAPACITY=1073741824
+# cap_mode ncold inodes_delta n min_ns p50_ns p90_ns max_ns
+nocap 10000 10102 100 1207257 1276177 1315289 1391012
+evict 10000 10102 100 1219231 1275571 1329942 1389583
