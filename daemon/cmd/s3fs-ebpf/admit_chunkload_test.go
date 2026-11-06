@@ -47,7 +47,6 @@ func (k *fakeKmod) ops(src []byte, delay time.Duration, failChunk int64) chunkLo
 			}
 			return nil
 		},
-		enforce: func() {},
 	}
 }
 

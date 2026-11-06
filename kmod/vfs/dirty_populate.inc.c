@@ -252,6 +252,8 @@ static bool s3fs_populate_fills_chunk(u64 offset, u64 end, u64 eof, u32 ci)
 	return end >= ce || end >= eof;
 }
 
+static void s3fs_ebpf_capacity_pass_after_populate(void);
+
 int s3fs_ebpf_populate_pages(u64 ino, u64 offset, u64 size,
 			     const void __user *data_ptr)
 {
@@ -345,6 +347,11 @@ out_unlock:
 	mutex_unlock(&fd->lock);
 out_iput:
 	iput(inode);
+	/* AC-45 C2 (v2 Phase 3e): enforce capacity while the miss that asked for this
+	 * range is still pending; no lock is held here.  The daemon signals the miss
+	 * only after this ioctl returns. */
+	if (!err)
+		s3fs_ebpf_capacity_pass_after_populate();
 	return err;
 }
 

@@ -405,8 +405,8 @@ func handleReadMiss(ctx context.Context, devPath string,
 		}
 		fmt.Printf("[upcall] ino=%d %s pcache [%d,%d)\n",
 			ev.Ino, entry.Name, chunkOffset, chunkOffset+int64(len(body)))
-		// AC-45 C2: enforce capacity while this miss is still pending.
-		enforceCapacityAfterPopulate(devPath)
+		// AC-45 C2: the kmod ran its capacity pass at the end of each populate
+		// ioctl, while this miss was still pending (v2 Phase 3e).
 		// AC-45: kmod wakes the waiter only if the chunk is still
 		// cached.  Concurrent handlers for one ino and the capacity
 		// pass can evict what we just populated; populate again
