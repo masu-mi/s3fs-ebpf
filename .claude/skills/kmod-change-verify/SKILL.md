@@ -10,6 +10,7 @@ kmod の誤りはカーネルの oops になる。**oops すると、そのプ�
 ## 1. 載せる前
 
 - `docs/kmod-pcache-invariants.md` を読む (CLAUDE.md の指示)。ロック順は `fd->lock` → `s3fs_admits_lock`。不変条件を変えるなら同じ変更でこのメモを更新する。
+- flush / rename / sync のように**非同期・複数の持ち主**の状態を触るなら、コードの前に `tlc-design-verification` (状態遷移図 → TLA+)。実装後に実機で見つけるより安い (AC-84 / AC-85)。
 - 関数は `scripts/fn.sh <func>` で引く。`vfs_ops.c` を全文 Read しない。
 - folio / readahead / page cache を触るなら `docs/dev-notes/ac75-ac76-lessons.md` の「AC-76」の知見と、`docs/kmod-pcache-invariants.md` の「読み取りの readahead と large folio」を読む (`readahead_*` の遅れ、`kmap_local_folio` の範囲、`ra_pages` は bdi で決めること、hit の計上単位)。
 
@@ -22,7 +23,10 @@ kmod の誤りはカーネルの oops になる。**oops すると、そのプ�
 
 ## 3. 通す
 
-- `make test-regression` (約 25 分、28 件が PASS)。背景で走らせ、`<scratch>/reg.log` の `EXIT=` と `status=PASS` の数を見る。終了通知は起動用シェルのもので、本体の終了ではない (`grep EXIT=` で確かめる)。
+- `make test-regression` (約 25 分、30 件が PASS。`test-parity` と `test-open-check` を含む。`test-spec` は含まない: ネットワークとコンテナが要るので、手元では `make test-spec`、CI は別ジョブ)。背景で走らせ、`<scratch>/reg.log` の `EXIT=` と `status=PASS` の数を見る。終了通知は起動用シェルのもので、本体の終了ではない (`grep EXIT=` で確かめる)。
+- **KUnit** (`make test-kunit KSRC=<linux-6.12 の tree>`、UML、lockdep + KASAN 付き、約 80 秒): kmod の**新しいデータ構造・分岐にはテストを足す**。実機の回帰は粗いので、tombstone の消去条件のような境界は KUnit で書く。足したら**変異で確かめる** (条件を 1 つ外して、そのテストだけが落ちること。確認後は戻す)。tree は `curl -O https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz` で取り、**sha256 を `.../v6.x/sha256sums.asc` の行と照合**してから専用ディレクトリに解く (`docs/dev-notes/kunit.md`)。KUnit の lockdep は、実機の `test-lockdep` の代わりにならない (UML は 1 CPU、実カーネルの経路ではない)。
+- **ABI を変える** (`include/s3fs_ebpf_uapi.h` の構造体にフィールドを足す) と、ioctl 番号と `sizeof` が変わる。`daemon/internal/kmodio` の構造体、`kmodio_test.go` の期待値 (`sizeof` と ioctl 番号。C の `sizeof` は手計算で確かめる)、kmod と daemon の同時 build。古い daemon と新しい kmod の組み合わせは動かない。
+- `make test-parity` は s3fs-fuse との差分テスト。kmod の見え方 (lookup / readdir / rename / unlink) を変えたら、`scripts/lib/parity-known-diff.sh` の既知の差が減ったか増えたかを見る。修正前のコードで新しい操作が FAIL することも確かめる (`git worktree add --detach <scratch>/base <commit>` で修正前をビルド)。
 - `make test-lockdep` は lockdep 付きカーネル (`make setup-kernel-lockdep` で 20〜40 分の build、再起動) が要る。ロック順を触ったら必須。触っていなければ PR に「未実施」と明記する。`docs/dev-notes/lockdep-kernel.md`。
 - 性能を言うなら `perf-bench-verify` の手順 (環境の衛生、対照項目、行ごとの counter)。
 

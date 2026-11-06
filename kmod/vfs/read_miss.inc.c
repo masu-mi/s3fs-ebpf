@@ -310,12 +310,20 @@ static bool find_entry(unsigned long parent_ino, const struct qstr *qname,
  * additions with a mismatched ino stay put so a rogue basename
  * collision doesn't silently eat someone's write. */
 static void local_prune_promoted_locked(const struct s3fs_entry_dyn *entries,
-					const struct s3fs_dyn_index *ix)
+					const struct s3fs_dyn_index *ix,
+					u64 applied_seq)
 {
 	struct s3fs_local_entry *le, *tmp;
 
 	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
 		u32 h = dyn_ino_hash(le->ino) & ix->mask, v;
+
+		/* AC-85: a listing taken before the daemon applied the event that made
+		 * this entry may show a state of S3 that a later operation changes
+		 * (mv a b; mv b a: the listing has a, the next one only b).  Promote
+		 * only when the listing reflects the entry's own operation. */
+		if (le->seq > applied_seq)
+			continue;
 
 		while ((v = ix->by_ino[h])) {
 			const struct s3fs_entry_dyn *e = &entries[v - 1];
@@ -364,7 +372,40 @@ static bool dyn_entries_equal(const struct s3fs_entry_dyn *a, u32 na,
 	return true;
 }
 
+/*
+ * Drop the tombstones the new listing has made unnecessary: those whose
+ * operation the daemon had applied (seq <= applied_seq) and whose entry the
+ * listing no longer has.  `ix` is NULL for an empty listing.  s3fs_entries_mtx
+ * held, s3fs_dyn_entries / s3fs_dyn_idx already the new ones.
+ */
+static void hidden_prune_locked(u64 applied_seq)
+{
+	struct s3fs_hidden_entry *h, *tmp;
+
+	list_for_each_entry_safe(h, tmp, &s3fs_hidden_entries, link) {
+		const struct s3fs_entry_dyn *e = NULL;
+
+		if (h->seq > applied_seq)
+			continue;
+		if (s3fs_dyn_entries)
+			e = dyn_find_name(norm_parent(h->parent_ino), h->name,
+					  h->name_len);
+		if (e && e->ino == h->ino)
+			continue;	/* S3 still lists it: keep hiding */
+		list_del(&h->link);
+		s3fs_hidden_nr--;
+		kfree(h);
+	}
+}
+
 int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
+{
+	/* Callers without the daemon's report treat every operation as applied. */
+	return s3fs_ebpf_entries_replace_applied(entries, count, U64_MAX);
+}
+
+int s3fs_ebpf_entries_replace_applied(struct s3fs_entry_dyn *entries, u32 count,
+				      u64 applied_seq)
 {
 	struct s3fs_entry_dyn *prev;
 	struct s3fs_dyn_index *ix = NULL, *prev_ix;
@@ -387,12 +428,13 @@ int s3fs_ebpf_entries_replace(struct s3fs_entry_dyn *entries, u32 count)
 		s3fs_dyn_entries = entries;
 		s3fs_dyn_nr      = count;
 		s3fs_dyn_idx     = ix;
-		local_prune_promoted_locked(entries, ix);
+		local_prune_promoted_locked(entries, ix, applied_seq);
 	} else {
 		s3fs_dyn_entries = NULL;
 		s3fs_dyn_nr      = 0;
 		s3fs_dyn_idx     = NULL;
 	}
+	hidden_prune_locked(applied_seq);
 	mutex_unlock(&s3fs_entries_mtx);
 
 	/* allocated with kvcalloc by the ioctl */
@@ -412,12 +454,19 @@ static void local_entries_drain(void)
 {
 	struct s3fs_local_entry *le, *tmp;
 
+	struct s3fs_hidden_entry *h, *htmp;
+
 	mutex_lock(&s3fs_entries_mtx);
 	list_for_each_entry_safe(le, tmp, &s3fs_local_entries, link) {
 		list_del(&le->link);
 		kfree(le);
 	}
 	s3fs_local_nr = 0;
+	list_for_each_entry_safe(h, htmp, &s3fs_hidden_entries, link) {
+		list_del(&h->link);
+		kfree(h);
+	}
+	s3fs_hidden_nr = 0;
 	mutex_unlock(&s3fs_entries_mtx);
 }
 

@@ -136,6 +136,8 @@ Targets:
     test-write-partial            AC-51: partial_modify end to end (multipart + server-side copy, 412 fallback)
     test-write-existing-capacity  AC-50: write/truncate on an existing object bigger than capacity, under read pressure (shed/evict race)
     test-open-check               open_check=1: open(2) without O_CREAT HEADs S3 and fails ENOENT for a key deleted after the last sync
+    test-spec                     TLA+ models (specs/tla) with TLC in a throwaway container: every variant gives the result its cfg expects
+    test-parity                   differential test: the same operations on s3fs-fuse and s3fs-ebpf give the same result (known gaps listed in scripts/lib/parity-known-diff.sh)
     test-fsync-new-file           a new file written + fsync'ed is not truncated by the create placeholder flush
     test-pattern-aware-admit      R-01/AC-47: the fentry's access pattern still drives full-file promotion (seq, random, parallel, off)
     test-pick-victim-stale        AC-64: an ino that left the admit set does not stay in the policy's own list (pick_victim -> on_remove)

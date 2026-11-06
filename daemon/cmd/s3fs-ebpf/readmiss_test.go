@@ -286,24 +286,27 @@ func TestOpenCheck(t *testing.T) {
 }
 
 // A file this daemon created or renamed is not in the entry mirror until the
-// next sync: the open check must HEAD the key it wrote, not fail "unknown ino"
-// and not HEAD the key from before a rename.
-func TestOpenCheckLocalKeys(t *testing.T) {
+// next sync, so flush and rename record its key there (RecordKey, AC-86): the
+// open check HEADs the key the daemon wrote, and a read miss would GET it.
+func TestOpenCheckUsesRecordedKeys(t *testing.T) {
 	u := fakeUpcall(t)
-	t.Cleanup(func() { localKeys.Delete(uint64(910)); localKeys.Delete(uint64(911)) })
 	b := &statBackend{present: map[string]bool{"dir/new.txt": true, "after": true}}
 
-	noteLocalKey(910, "dir/new.txt") // created, flushed, not in the mirror
+	fpebpf.RecordKey(910, 3, "new.txt", "dir/new.txt", 5, 2) // created and flushed, not in the mirror
+	t.Cleanup(func() { fpebpf.Replace(nil) })
 	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 910, Flags: missFlagOpenCheck})
 	if len(b.stats) != 1 || b.stats[0] != "dir/new.txt" || len(u.signals) != 1 || u.signals[0] != 0 {
 		t.Errorf("created: stats=%v signals=%v, want HEAD dir/new.txt and [0]", b.stats, u.signals)
 	}
 
 	withEntry(t, fpebpf.Entry{Ino: 911, Name: "before", S3Key: "before", Fallback: 1})
-	noteLocalKey(911, "after") // renamed since the last sync
+	fpebpf.RecordKey(911, 0, "after", "after", 0, 3) // renamed since the last sync
 	b.stats, u.signals = nil, nil
 	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 911, Flags: missFlagOpenCheck})
 	if len(b.stats) != 1 || b.stats[0] != "after" || u.signals[0] != 0 {
 		t.Errorf("renamed: stats=%v signals=%v, want HEAD of the new key and [0]", b.stats, u.signals)
+	}
+	if e := fpebpf.LookupByIno(911); e == nil || e.Fallback != 1 || e.Mode != 0 {
+		t.Errorf("RecordKey on a known ino must keep its size and mode, got %+v", e)
 	}
 }

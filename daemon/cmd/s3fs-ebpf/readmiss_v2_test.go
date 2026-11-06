@@ -43,78 +43,15 @@ func TestReadMissEventSeqRatio(t *testing.T) {
 	}
 }
 
-// sizedBackend answers Stat from a size map (and an error for the rest).
-type sizedBackend struct {
-	objstore.Backend
-	sizes map[string]int64
-	stats []string
-}
-
-func (s *sizedBackend) Stat(_ context.Context, key string) (objstore.ObjectMeta, error) {
-	s.stats = append(s.stats, key)
-	if n, ok := s.sizes[key]; ok {
-		return objstore.ObjectMeta{Key: key, Size: n, LastModified: time.Unix(1, 0)}, nil
-	}
-	return objstore.ObjectMeta{}, objstore.ErrNotFound
-}
-
-// entryForMiss: the sync mirror first, then the keys this daemon wrote since
-// the last sync (size from S3), else nothing.
-func TestEntryForMissResolution(t *testing.T) {
-	withEntry(t, fpebpf.Entry{Ino: 7001, Name: "m.bin", S3Key: "dir/m.bin", Fallback: 123})
-	b := &sizedBackend{sizes: map[string]int64{"dir/new.bin": 4096}}
-
-	// 1. Known to the mirror: returned as is, no S3 round trip.
-	if e := entryForMiss(context.Background(), b, 7001); e == nil || e.S3Key != "dir/m.bin" || e.Fallback != 123 {
-		t.Fatalf("mirror entry = %+v", e)
-	}
-	if len(b.stats) != 0 {
-		t.Errorf("mirror hit still called Stat: %v", b.stats)
-	}
-
-	// 2. Unknown everywhere: nil.
-	if e := entryForMiss(context.Background(), b, 7002); e != nil {
-		t.Errorf("unknown ino resolved to %+v", e)
-	}
-
-	// 3. Written through the mount since the last sync: key from localKeys,
-	// size from S3.
-	noteLocalKey(7003, "dir/new.bin")
-	t.Cleanup(func() { localKeys.Delete(uint64(7003)) })
-	e := entryForMiss(context.Background(), b, 7003)
-	if e == nil || e.S3Key != "dir/new.bin" || e.Name != "new.bin" || e.Fallback != 4096 || e.Ino != 7003 {
-		t.Fatalf("local entry = %+v, want key dir/new.bin name new.bin size 4096", e)
-	}
-	if len(b.stats) != 1 || b.stats[0] != "dir/new.bin" {
-		t.Errorf("Stat calls %v, want one for dir/new.bin", b.stats)
-	}
-
-	// 4. A local key whose Stat fails still resolves (size 0): the caller
-	// reports the error from its own GET.
-	noteLocalKey(7004, "gone.bin")
-	t.Cleanup(func() { localKeys.Delete(uint64(7004)) })
-	if e := entryForMiss(context.Background(), b, 7004); e == nil || e.S3Key != "gone.bin" || e.Fallback != 0 {
-		t.Errorf("local entry with failing Stat = %+v", e)
-	}
-
-	// 5. No backend: the key still resolves.
-	noteLocalKey(7005, "nob.bin")
-	t.Cleanup(func() { localKeys.Delete(uint64(7005)) })
-	if e := entryForMiss(context.Background(), nil, 7005); e == nil || e.S3Key != "nob.bin" {
-		t.Errorf("local entry without a backend = %+v", e)
-	}
-}
-
 // A file the daemon wrote (not in the mirror until the next sync) can be read
-// back after its inode was evicted: the miss resolves through localKeys.
+// back after its inode was evicted: the miss resolves through the entry
+// mirror, where flush recorded the key and size (RecordKey, AC-86).
 func TestReadMissOfALocallyWrittenFile(t *testing.T) {
 	u := fakeUpcall(t)
 	withEntry(t, fpebpf.Entry{Ino: 1})
-	noteLocalKey(7101, "written.bin")
-	t.Cleanup(func() { localKeys.Delete(uint64(7101)) })
+	fpebpf.RecordKey(7101, 0, "written.bin", "written.bin", 7, 1)
 	b := &getBackend{objects: map[string][]byte{"written.bin": []byte("payload")}}
-	handleReadMiss(context.Background(), "/dev/x", nil, &getStatBackend{b, map[string]int64{"written.bin": 7}},
-		readMissEvent{Ino: 7101})
+	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 7101})
 
 	if len(u.signals) != 0 || u.verifySignals != 1 {
 		t.Errorf("plain signals %v, verify signals %d: want the verifying wake only", u.signals, u.verifySignals)
@@ -122,19 +59,6 @@ func TestReadMissOfALocallyWrittenFile(t *testing.T) {
 	if len(u.populated) != 1 || u.populated[0].off != 0 || u.populated[0].n != 7 {
 		t.Errorf("populated %+v, want one call of 7 bytes at 0", u.populated)
 	}
-}
-
-// getStatBackend is a getBackend that also answers Stat.
-type getStatBackend struct {
-	*getBackend
-	sizes map[string]int64
-}
-
-func (g *getStatBackend) Stat(_ context.Context, key string) (objstore.ObjectMeta, error) {
-	if n, ok := g.sizes[key]; ok {
-		return objstore.ObjectMeta{Key: key, Size: n}, nil
-	}
-	return objstore.ObjectMeta{}, objstore.ErrNotFound
 }
 
 // rangeCounter totals the bytes GetRange was asked for.  (The chunk load fetches

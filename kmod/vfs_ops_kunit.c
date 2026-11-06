@@ -525,6 +525,165 @@ static void s3k_dyn_index_many(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_entries_replace(NULL, 0), 0);
 }
 
+/* -- tombstones, local-entry promotion, event seq (AC-84, AC-85) ------------ */
+
+static bool s3k_visible(const char *name)
+{
+	struct s3fs_entry_snap snap;
+	struct qstr q = QSTR_INIT(name, strlen(name));
+
+	return find_entry(S3FS_ROOT_INO, &q, &snap);
+}
+
+static struct s3fs_entry_dyn *s3k_listing(struct kunit *test, u32 n,
+					  const unsigned long *inos,
+					  const char *const *names)
+{
+	struct s3fs_entry_dyn *e = kvcalloc(n, sizeof(*e), GFP_KERNEL);
+	u32 i;
+
+	KUNIT_ASSERT_NOT_NULL(test, e);
+	for (i = 0; i < n; i++)
+		s3k_dyn_set(&e[i], inos[i], 0, names[i]);
+	return e;
+}
+
+/* A renamed / unlinked S3-derived entry is hidden from lookup until the daemon has
+ * applied the operation (seq <= applied) AND the listing no longer has it. */
+static void s3k_hidden_entry_lifecycle(struct kunit *test)
+{
+	static const unsigned long ab_inos[] = { 200, 201 };
+	static const char *const ab[] = { "a", "b" };
+	static const unsigned long b_inos[] = { 201 };
+	static const char *const b[] = { "b" };
+
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace(s3k_listing(test, 2, ab_inos, ab), 2), 0);
+	KUNIT_EXPECT_TRUE(test, s3k_visible("a"));
+
+	entry_forget(S3FS_ROOT_INO, "a", 1, 200, 5);	/* unlink a: event #5 */
+	KUNIT_EXPECT_FALSE(test, s3k_visible("a"));
+	KUNIT_EXPECT_TRUE(test, s3k_visible("b"));
+	KUNIT_EXPECT_EQ(test, s3fs_hidden_nr, 1ul);
+
+	/* a sync whose listing predates the delete (applied < 5) keeps hiding it */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace_applied(s3k_listing(test, 2, ab_inos, ab), 2, 4), 0);
+	KUNIT_EXPECT_FALSE(test, s3k_visible("a"));
+	/* applied, but S3 still lists it (the delete failed): still hidden */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace_applied(s3k_listing(test, 2, ab_inos, ab), 2, 5), 0);
+	KUNIT_EXPECT_FALSE(test, s3k_visible("a"));
+	KUNIT_EXPECT_EQ(test, s3fs_hidden_nr, 1ul);
+	/* not applied yet although the listing lacks it: kept (it was listed before) */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace_applied(s3k_listing(test, 1, b_inos, b), 1, 4), 0);
+	KUNIT_EXPECT_EQ(test, s3fs_hidden_nr, 1ul);
+	/* applied and gone from the listing: dropped */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace_applied(s3k_listing(test, 1, b_inos, b), 1, 5), 0);
+	KUNIT_EXPECT_EQ(test, s3fs_hidden_nr, 0ul);
+	KUNIT_EXPECT_FALSE(test, s3k_visible("a"));	/* not in the listing either */
+
+	/* no event was queued (seq 0): S3 keeps the object, so no tombstone that nothing
+	 * would ever drop */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace(s3k_listing(test, 2, ab_inos, ab), 2), 0);
+	entry_forget(S3FS_ROOT_INO, "a", 1, 200, 0);
+	KUNIT_EXPECT_EQ(test, s3fs_hidden_nr, 0ul);
+	KUNIT_EXPECT_TRUE(test, s3k_visible("a"));
+
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_entries_replace(NULL, 0), 0);
+}
+
+/* mv a c; mv c a: the tombstone for (a, ino) from the first rename must not hide a
+ * once the inode is back under that name. */
+static void s3k_hidden_entry_revived(struct kunit *test)
+{
+	static const unsigned long a_inos[] = { 200 };
+	static const char *const a[] = { "a" };
+	struct s3fs_hidden_entry *h = kzalloc(sizeof(*h), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, h);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace(s3k_listing(test, 1, a_inos, a), 1), 0);
+	mutex_lock(&s3fs_entries_mtx);
+	hidden_add_locked(h, S3FS_ROOT_INO, "a", 1, 200, 3);	/* renamed away */
+	mutex_unlock(&s3fs_entries_mtx);
+	KUNIT_EXPECT_FALSE(test, s3k_visible("a"));
+
+	mutex_lock(&s3fs_entries_mtx);
+	hidden_revive_locked(S3FS_ROOT_INO, "a", 1, 200);	/* renamed back */
+	mutex_unlock(&s3fs_entries_mtx);
+	KUNIT_EXPECT_TRUE(test, s3k_visible("a"));
+	KUNIT_EXPECT_EQ(test, s3fs_hidden_nr, 0ul);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_entries_replace(NULL, 0), 0);
+}
+
+/* A local entry (create, the new name of a rename) is promoted by a sync only when
+ * the listing has it AND the daemon had applied the event that made it. */
+static void s3k_local_entry_promotion_needs_applied(struct kunit *test)
+{
+	static const unsigned long x_inos[] = { 2000000 };
+	static const char *const x[] = { "x" };
+	struct s3fs_local_entry *le = kzalloc(sizeof(*le), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, le);
+	le->ino = 2000000;
+	le->parent_ino = 0;
+	le->mode = S_IFREG | 0644;
+	le->seq = 7;
+	le->name_len = 1;
+	le->name[0] = 'x';
+	mutex_lock(&s3fs_entries_mtx);
+	list_add_tail(&le->link, &s3fs_local_entries);
+	s3fs_local_nr++;
+	mutex_unlock(&s3fs_entries_mtx);
+
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace_applied(s3k_listing(test, 1, x_inos, x), 1, 6), 0);
+	KUNIT_EXPECT_EQ(test, s3fs_local_nr, 1ul);	/* listed, but event #7 not applied: kept */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace_applied(s3k_listing(test, 1, x_inos, x), 1, 7), 0);
+	KUNIT_EXPECT_EQ(test, s3fs_local_nr, 0ul);	/* applied and listed: promoted */
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_entries_replace(NULL, 0), 0);
+}
+
+/* flush / delete / rename events share one strictly increasing seq (AC-84), and
+ * s3fs_ebpf_event_seq() is the highest handed out. */
+static void s3k_event_seq_is_shared_and_increasing(struct kunit *test)
+{
+	struct s3fs_flush_event *fe = kunit_kzalloc(test, sizeof(*fe), GFP_KERNEL);
+	struct s3fs_delete_event *de = kunit_kzalloc(test, sizeof(*de), GFP_KERNEL);
+	struct s3fs_rename_event *re = kunit_kzalloc(test, sizeof(*re), GFP_KERNEL);
+	u64 s1, s2, s3, s4;
+
+	KUNIT_ASSERT_NOT_NULL(test, fe);
+	KUNIT_ASSERT_NOT_NULL(test, de);
+	KUNIT_ASSERT_NOT_NULL(test, re);
+	while (s3fs_ebpf_flush_pop(fe) == 0)
+		;
+	while (s3fs_ebpf_delete_pop(de) == 0)
+		;
+	while (s3fs_ebpf_rename_pop(re) == 0)
+		;
+
+	s1 = flush_enqueue(5000001, 0, 0, "f", 1, 0);
+	s2 = rename_enqueue(5000001, 0, 0, "f", 1, "g", 1);
+	s3 = delete_enqueue(5000002, 0, "h", 1);
+	s4 = flush_enqueue(5000003, 0, 0, "i", 1, 0);
+	KUNIT_EXPECT_GT(test, s1, 0ull);
+	KUNIT_EXPECT_LT(test, s1, s2);
+	KUNIT_EXPECT_LT(test, s2, s3);
+	KUNIT_EXPECT_LT(test, s3, s4);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_event_seq(), s4);
+
+	/* each queue hands its event back with the seq it was given */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(fe), 0);
+	KUNIT_EXPECT_EQ(test, fe->seq, s1);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_rename_pop(re), 0);
+	KUNIT_EXPECT_EQ(test, re->seq, s2);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_delete_pop(de), 0);
+	KUNIT_EXPECT_EQ(test, de->seq, s3);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(fe), 0);
+	KUNIT_EXPECT_EQ(test, fe->seq, s4);
+
+	/* nothing queued: no seq */
+	KUNIT_EXPECT_EQ(test, flush_enqueue(5000004, 0, 0, "", 0, 0), 0ull);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_event_seq(), s4);
+}
+
 /* -- read-miss upcall (U13, P1, H-06, AC-45 C2) --------------------------- */
 
 static void s3k_drain_miss_events(void)
@@ -1470,6 +1629,10 @@ static struct kunit_case s3k_table_cases[] = {
 	KUNIT_CASE(s3k_dyn_index),
 	KUNIT_CASE(s3k_dyn_index_many),
 	KUNIT_CASE(s3k_daemon_arm),
+	KUNIT_CASE(s3k_hidden_entry_lifecycle),
+	KUNIT_CASE(s3k_hidden_entry_revived),
+	KUNIT_CASE(s3k_local_entry_promotion_needs_applied),
+	KUNIT_CASE(s3k_event_seq_is_shared_and_increasing),
 	KUNIT_CASE(s3k_pending_per_chunk),
 	KUNIT_CASE(s3k_pending_verify_populated),
 	KUNIT_CASE(s3k_miss_queue_fifo),

@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
-	"sync"
 	"time"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
@@ -77,58 +75,6 @@ const missFlagOpenCheck = 0x4
 // check (all ones as a u64; a read's chunk offsets are 4 MiB multiples).
 const openCheckKey int64 = -1 // uint64(openCheckKey) is all ones
 
-// localKeys remembers the S3 key of every ino this daemon created (flush) or
-// renamed. The entry mirror only learns them at the next sync, but an open
-// check for such a file must HEAD the key the daemon wrote, not "unknown ino"
-// (ENOENT) or the key before the rename. It is not cleared by a sync (a flush
-// racing the listing would otherwise lose its key); one small entry per file
-// this daemon wrote, and a later sync keeps ino <-> key stable.
-var localKeys sync.Map // ino (uint64) -> S3 key (string)
-
-func noteLocalKey(ino uint64, key string) {
-	if key != "" {
-		localKeys.Store(ino, key)
-	}
-}
-
-// openCheckKeyFor returns the key to HEAD for ino.
-func openCheckKeyFor(ino uint64) (name, key string, ok bool) {
-	if v, hit := localKeys.Load(ino); hit {
-		k := v.(string)
-		return path.Base(k), k, true
-	}
-	if e := fpebpf.LookupByIno(ino); e != nil {
-		return e.Name, e.S3Key, true
-	}
-	return "", "", false
-}
-
-// entryForMiss resolves the entry a read miss / load-for-write is about.  The
-// entry mirror knows what the last sync listed; a file this daemon created
-// (flush) or renamed since then is only in localKeys, and its size comes from
-// S3.  Without that fallback a file written through the mount and evicted
-// from the inode cache before the next sync could not be read back: the miss
-// was answered ENOENT.  Used to be hidden by the post-flush arena copy.
-func entryForMiss(ctx context.Context, s3c objstore.Backend, ino uint64) *fpebpf.Entry {
-	if e := fpebpf.LookupByIno(ino); e != nil {
-		return e
-	}
-	v, ok := localKeys.Load(ino)
-	if !ok {
-		return nil
-	}
-	key := v.(string)
-	e := &fpebpf.Entry{Ino: ino, Name: path.Base(key), S3Key: key, Mode: 0o100644}
-	if s3c != nil {
-		if meta, err := s3c.Stat(ctx, key); err == nil {
-			e.Fallback = uint64(meta.Size)
-		} else {
-			fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s stat: %v\n", ino, key, err)
-		}
-	}
-	return e
-}
-
 // handleOpenCheck HEADs the object behind ev.Ino and signals the open's
 // waiter: 0 if it exists, -ENOENT if S3 says 404 (or the ino is unknown),
 // -EIO for any other failure. It is not a read miss, so it is neither counted
@@ -136,8 +82,8 @@ func entryForMiss(ctx context.Context, s3c objstore.Backend, ino uint64) *fpebpf
 func handleOpenCheck(ctx context.Context, devPath string, s3c objstore.Backend, ev readMissEvent) {
 	metrics.Global.OpenChecks.Add(1)
 	signal := func(code int32) { _ = signalAdmitFn(devPath, ev.Ino, openCheckKey, code) }
-	name, key, ok := openCheckKeyFor(ev.Ino)
-	if !ok {
+	entry := fpebpf.LookupByIno(ev.Ino)
+	if entry == nil {
 		metrics.Global.OpenCheckMissing.Add(1)
 		signal(-2 /* -ENOENT */)
 		return
@@ -146,14 +92,14 @@ func handleOpenCheck(ctx context.Context, devPath string, s3c objstore.Backend, 
 		signal(-61 /* -ENODATA */)
 		return
 	}
-	if _, err := s3c.Stat(ctx, key); err != nil {
+	if _, err := s3c.Stat(ctx, entry.S3Key); err != nil {
 		if errors.Is(err, objstore.ErrNotFound) {
 			metrics.Global.OpenCheckMissing.Add(1)
-			fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: not in S3 — ENOENT\n", ev.Ino, name)
+			fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: not in S3 — ENOENT\n", ev.Ino, entry.Name)
 			signal(-2)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: %v\n", ev.Ino, name, err)
+		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: open check: %v\n", ev.Ino, entry.Name, err)
 		metrics.Global.ReadMissErrors.Add(1)
 		signal(-5 /* -EIO */)
 		return
@@ -174,7 +120,7 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, code)
 	}
-	entry := entryForMiss(ctx, s3c, ev.Ino)
+	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
 		fail(-2 /* -ENOENT */, "unknown ino")
 		return
@@ -365,7 +311,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	// the correct per-chunk pending entry.
 	missChunkOffset := (ev.Offset / partialAdmitChunk) * partialAdmitChunk
 
-	entry := entryForMiss(ctx, s3c, ev.Ino)
+	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d unknown — signaling ENOENT\n", ev.Ino)
 		metrics.Global.ReadMissErrors.Add(1)

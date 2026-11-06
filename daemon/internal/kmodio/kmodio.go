@@ -39,6 +39,7 @@ type FlushEvent struct {
 	Ino       uint64
 	ParentIno uint64 // G-01: dir the file lives under, for full-key reconstruction
 	Size      uint64
+	Seq       uint64 // AC-84: kmod-wide event order (flush / rename / delete)
 	NameLen   uint32
 	Flags     uint32
 	Name      [SyncNameMax + 1]byte
@@ -69,6 +70,7 @@ type StatsArg struct {
 type DeleteEvent struct {
 	Ino       uint64
 	ParentIno uint64 // G-01
+	Seq       uint64 // AC-84
 	NameLen   uint32
 	_pad      uint32
 	Name      [SyncNameMax + 1]byte
@@ -81,6 +83,7 @@ type RenameEvent struct {
 	Ino          uint64
 	OldParentIno uint64 // G-01
 	NewParentIno uint64 // G-01
+	Seq          uint64 // AC-84
 	OldNameLen   uint32
 	NewNameLen   uint32
 	OldName      [SyncNameMax + 1]byte
@@ -116,9 +119,10 @@ type SyncEntry struct {
 
 // SyncEntriesArg mirrors `struct s3fs_sync_entries`.
 type SyncEntriesArg struct {
-	Count   uint32
-	_pad    uint32
-	Entries uint64
+	Count      uint32
+	_pad       uint32
+	Entries    uint64
+	AppliedSeq uint64 // AC-85: events with seq <= AppliedSeq are applied to S3
 }
 
 // ioctl numbers: _IO{R,W,WR}(0xE3, nr, type).

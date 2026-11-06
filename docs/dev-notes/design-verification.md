@@ -1,0 +1,20 @@
+# 設計と既存実装の調査では、状態遷移図を作り、検証する
+
+PR #44 で、open が S3 を確認しない設計漏れと、作成直後のファイルを開き直すと ENOENT になる実装バグを、実装と測定のあとで見つけた。どちらも「ファイルがとりうる状態」を先に並べていれば見つかる種類だった。設計するとき、既存の実装を調べるときは、次の順で進める。
+
+1. **状態を持つものを並べる**: 誰がどの状態を持ち (kmod / daemon / S3 / page cache)、誰が更新するか。更新の経路が複数あるもの (別ループ、非同期) に印を付ける。
+2. **状態遷移図を書く** (mermaid の `stateDiagram-v2`、`docs/design/` に置く): 作成 / 書き込み / flush / rename / 削除 / 外部の更新 / sync を全部の状態から引く。矢印が出ない状態、複数の更新者が競合する遷移を探す。
+3. **検証する**: 並行・非同期・複数の持ち主が絡む状態遷移は、TLA+ のモデルにして TLC で網羅する。
+   - 置き場: `specs/tla/<名前>.tla` と、変種ごとの `.cfg`。
+   - `.cfg` の 1 行目に `\* EXPECT: ok` か `\* EXPECT: violated` を書く。失敗するべき変種は既知の反例の記録で、期待と食い違うと失敗する。
+   - 実行: `make test-spec` (`scripts/tlc.sh --all`)。ホストに Java は要らない (使い捨てコンテナ、ネットワークなし、`tla2tools.jar` は sha256 を固定して `~/.cache/s3fs-ebpf/tlc` に取得)。1 つ: `scripts/tlc.sh specs/tla/X.tla specs/tla/X.v.P.cfg`。
+   - 性質は「ユーザーに見えるものが、デーモンの解決する key で見つかる」「仕事が尽きたら S3 とユーザーの名前が一致する」のように、観測できる形で書く。
+   - 変種は修正案を定数にして比べる。通る変種が、設計の根拠になる。
+4. **反例は実機で確かめる**: モデルは抽象化している。反例を再現する操作を `scripts/test-parity.sh` (s3fs-fuse との差分テスト) に足す。再現しなければ、モデルが実装と違うか、別のバグが隠している。両方を `docs/design/` に書く。
+5. **コードを直したら**: モデルの変種を実装に合わせて更新し (`base` が実装、通る変種が修正後)、`parity-known-diff.sh` の行を消す。
+
+形式手法を使わない場合 (単純な直列の処理、表を引くだけの変更) は、図だけでよい。使わなかった理由は PR に 1 行書く。
+
+手順の詳細と落とし穴は skill `tlc-design-verification`、TLA+ の入門は `docs/dev-notes/tlaplus-introduction.md`。
+
+最初の適用例: `docs/design/file-lifecycle-state-machine.md` (`specs/tla/FileLifecycle.tla`)。
