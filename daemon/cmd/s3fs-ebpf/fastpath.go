@@ -56,14 +56,13 @@ func runFastpath(args []string) int {
 		"AC-51: a write into a large existing object loads only the chunks it touches and flushes the rest with a server-side copy "+
 			"(enabled by default, S3 only — ignored with a log line on backends without server-side copy; "+
 			"--partial-modify=false takes the AC-50 whole-object GET + PUT path; written to the kmod partial_modify parameter on every start)")
-	noReadIterHook := fs.Bool("no-read-iter-hook", false,
-		"[R-01] disable fentry/generic_file_read_iter hook. "+
-			"Use for overhead measurement only; disables read pattern tracking and "+
-			"is incompatible with --pattern-aware-admit.")
+	// Deprecated no-op: the read pattern is counted by the kmod's .read_iter
+	// (there is no fentry/generic_file_read_iter any more).
+	fs.Bool("no-read-iter-hook", false,
+		"[deprecated, no-op] the read pattern is counted in the kmod; there is no read_iter hook to disable")
 	patternAdmit := fs.Bool("pattern-aware-admit", true,
-		"[R-01] use s3fs_read_pattern_map sequential signal to promote large-file "+
-			"read-miss upcalls to full-file GETs, reducing S3 round-trips. "+
-			"Requires fentry/generic_file_read_iter (incompatible with --no-read-iter-hook).")
+		"[R-01] use the kmod's sequential-read signal (in the miss event) to promote large-file "+
+			"read-miss upcalls to full-file GETs, reducing S3 round-trips.")
 	// Deprecated no-op: the pcache mode (content in the kmod's chunk table and
 	// page cache) is the only mode; the flag is accepted so existing command lines work.
 	fs.Bool("arena-metadata-only", true,
@@ -131,13 +130,6 @@ func runFastpath(args []string) int {
 		MapMaxEntries: map[string]uint32{s3fifoGhostMap: s3fifoGhostCap},
 	}
 
-	if err := (fastpathModes{
-		patternAdmit: *patternAdmit, noReadIterHook: *noReadIterHook,
-		pcachePrewarm: *pcachePrewarm,
-	}).validate(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
 	patternAwareAdmitEnabled = *patternAdmit
 	pcachePrewarmEnabled = *pcachePrewarm
 	pcachePrewarmMount = *pcachePrewarmMnt
@@ -413,19 +405,6 @@ func runFastpath(args []string) int {
 		return 1
 	}
 	defer fentry.Close()
-
-	if *noReadIterHook {
-		fmt.Println("[fastpath] fentry/generic_file_read_iter disabled (--no-read-iter-hook); read pattern tracking off")
-	} else {
-		readIter, err := progs.AttachFentryReadIter()
-		if err != nil {
-			// Non-fatal: some kernels inline generic_file_read_iter.
-			fmt.Fprintf(os.Stderr, "[warn] attach fentry/generic_file_read_iter: %v (read pattern tracking disabled)\n", err)
-		} else {
-			defer readIter.Close()
-			fmt.Println("[fastpath] attached fentry/generic_file_read_iter; read pattern tracking enabled")
-		}
-	}
 
 	var s3c objstore.Backend
 	if *enableS3 {

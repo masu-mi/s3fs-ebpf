@@ -173,12 +173,6 @@ atomic_long_t s3fs_hits_replayed_total = ATOMIC_LONG_INIT(0);
  */
 atomic_long_t s3fs_admit_invalidations = ATOMIC_LONG_INIT(0);
 
-/* AB-01: GUP call count and accumulated latency (ns) in s3fs_arena_copy_to_iter.
- * Exported via IOC_STATS slots 3/4. bench-ab-arena-vs-pagecache.sh reads
- * delta values to compute mean ns/GUP call without needing bpftrace. */
-atomic_long_t s3fs_gup_calls_total = ATOMIC_LONG_INIT(0);
-atomic_long_t s3fs_gup_ns_total    = ATOMIC_LONG_INIT(0);
-
 /* T4: .read_folio cases where S3FS_UPCALL_MAX_RETRIES were exhausted with the
  * daemon alive — eviction fired in the retry window every time.  Reached when
  * capacity=1 chunk and many concurrent readers compete for the same ino.

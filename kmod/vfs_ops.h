@@ -133,8 +133,8 @@ extern unsigned long long s3fs_capacity_bytes;
 /* AB-01: cumulative GUP (pin_user_pages_remote) call count and total
  * latency in nanoseconds. Exported via IOC_STATS slots 3/4 so the
  * bench script can compute mean ns/call without bpftrace. */
-extern atomic_long_t s3fs_gup_calls_total;
-extern atomic_long_t s3fs_gup_ns_total;
+u64 s3fs_read_iter_calls(void);
+u64 s3fs_read_iter_pos0(void);
 
 /* T4: .read_folio calls that exhausted S3FS_UPCALL_MAX_RETRIES with the
  * daemon alive. Exported via IOC_STATS slot 5.  Non-zero means capacity

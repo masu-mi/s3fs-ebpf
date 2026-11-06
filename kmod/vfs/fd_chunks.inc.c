@@ -43,6 +43,12 @@ struct s3fs_chunk {
 struct s3fs_hit_acc {
 	u64 count;     /* accesses counted on this CPU (monotonic) */
 	u64 last_tick; /* jiffies of the last one */
+	/* Read access pattern (what the read_iter fentry used to keep in
+	 * s3fs_ino_slots): the end of the previous read on this CPU, and how many
+	 * reads were sequential / random.  Handed to the daemon in the miss event. */
+	u64 last_end_pos;
+	u32 seq_count;
+	u32 rand_count;
 };
 
 struct s3fs_file_data {

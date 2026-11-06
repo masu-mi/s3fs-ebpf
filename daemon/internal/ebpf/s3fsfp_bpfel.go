@@ -8,22 +8,9 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
-	"structs"
 
 	"github.com/cilium/ebpf"
 )
-
-type s3fsfpS3fsInoSlot struct {
-	_              structs.HostLayout
-	Ino            uint64
-	LastEndPos     uint64
-	TotalBytes     uint64
-	LastPolicyTick uint64
-	SeqCount       uint32
-	RandCount      uint32
-	Reads          uint32
-	Flags          uint32
-}
 
 // Names of all BPF objects in the ELF.
 //
@@ -31,12 +18,10 @@ type s3fsfpS3fsInoSlot struct {
 const (
 	s3fsfpMapS3fsArena           = "s3fs_arena"
 	s3fsfpMapS3fsCounters        = "s3fs_counters"
-	s3fsfpMapS3fsInoSlots        = "s3fs_ino_slots"
 	s3fsfpMapS3fsInodeIndex      = "s3fs_inode_index"
 	s3fsfpProgS3fsArenaPrealloc  = "s3fs_arena_prealloc"
 	s3fsfpProgS3fsDeepWalkReject = "s3fs_deep_walk_reject"
 	s3fsfpProgS3fsFpGetattr      = "s3fs_fp_getattr"
-	s3fsfpProgS3fsFpReadIter     = "s3fs_fp_read_iter"
 	s3fsfpProgS3fsTestShared     = "s3fs_test_shared"
 )
 
@@ -85,7 +70,6 @@ type s3fsfpProgramSpecs struct {
 	S3fsArenaPrealloc  *ebpf.ProgramSpec `ebpf:"s3fs_arena_prealloc"`
 	S3fsDeepWalkReject *ebpf.ProgramSpec `ebpf:"s3fs_deep_walk_reject"`
 	S3fsFpGetattr      *ebpf.ProgramSpec `ebpf:"s3fs_fp_getattr"`
-	S3fsFpReadIter     *ebpf.ProgramSpec `ebpf:"s3fs_fp_read_iter"`
 	S3fsTestShared     *ebpf.ProgramSpec `ebpf:"s3fs_test_shared"`
 }
 
@@ -95,7 +79,6 @@ type s3fsfpProgramSpecs struct {
 type s3fsfpMapSpecs struct {
 	S3fsArena      *ebpf.MapSpec `ebpf:"s3fs_arena"`
 	S3fsCounters   *ebpf.MapSpec `ebpf:"s3fs_counters"`
-	S3fsInoSlots   *ebpf.MapSpec `ebpf:"s3fs_ino_slots"`
 	S3fsInodeIndex *ebpf.MapSpec `ebpf:"s3fs_inode_index"`
 }
 
@@ -127,7 +110,6 @@ func (o *s3fsfpObjects) Close() error {
 type s3fsfpMaps struct {
 	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
 	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
-	S3fsInoSlots   *ebpf.Map `ebpf:"s3fs_ino_slots"`
 	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
 }
 
@@ -135,7 +117,6 @@ func (m *s3fsfpMaps) Close() error {
 	return _S3fsfpClose(
 		m.S3fsArena,
 		m.S3fsCounters,
-		m.S3fsInoSlots,
 		m.S3fsInodeIndex,
 	)
 }
@@ -153,7 +134,6 @@ type s3fsfpPrograms struct {
 	S3fsArenaPrealloc  *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 	S3fsDeepWalkReject *ebpf.Program `ebpf:"s3fs_deep_walk_reject"`
 	S3fsFpGetattr      *ebpf.Program `ebpf:"s3fs_fp_getattr"`
-	S3fsFpReadIter     *ebpf.Program `ebpf:"s3fs_fp_read_iter"`
 	S3fsTestShared     *ebpf.Program `ebpf:"s3fs_test_shared"`
 }
 
@@ -162,7 +142,6 @@ func (p *s3fsfpPrograms) Close() error {
 		p.S3fsArenaPrealloc,
 		p.S3fsDeepWalkReject,
 		p.S3fsFpGetattr,
-		p.S3fsFpReadIter,
 		p.S3fsTestShared,
 	)
 }

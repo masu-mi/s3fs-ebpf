@@ -115,6 +115,11 @@ struct s3fs_read_miss_event {
 	__s64 offset; /* where the miss was */
 	__u32 count;  /* bytes requested */
 	__u32 flags;  /* S3FS_MISS_FLAG_* */
+	/* Read access pattern of the file so far (sequential / random reads
+	 * counted in .read_iter, summed over the CPUs); 0 for a miss that is not
+	 * a read (open check, load for write). */
+	__u32 seq_count;
+	__u32 rand_count;
 };
 
 /*
@@ -270,6 +275,10 @@ struct s3fs_mark_dirty {
  *                              _upcalls) for true hit ratio)
  *   [2] s3fs_admit_invalidations — page-cache invalidations by
  *                              admit_replace for new/moved ranges
+ *   [3]  s3fs_read_iter_calls — .read_iter calls (all reads; was the GUP
+ *                              call count)
+ *   [4]  s3fs_read_iter_pos0 — .read_iter calls at ki_pos == 0 (first read
+ *                              per open; was the GUP latency)
  *   [14] s3fs_hits_replayed_total — hit_accum: accesses counted in
  *                              .read_iter and replayed into the policy
  *                              (before the hit_replay_max cut)

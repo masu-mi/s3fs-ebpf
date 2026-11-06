@@ -296,7 +296,7 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 
 				err = p ? miss_enqueue(inode->i_ino, cs, want,
 						       S3FS_MISS_FLAG_FOR_WRITE |
-						       (bound ? S3FS_MISS_FLAG_PINNED : 0))
+						       (bound ? S3FS_MISS_FLAG_PINNED : 0), NULL)
 					: -ENOMEM;
 			}
 			if (!err) {

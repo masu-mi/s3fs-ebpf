@@ -136,7 +136,13 @@ static bool pending_exists(u64 ino)
 	return found;
 }
 
-static int miss_enqueue(u64 ino, loff_t offset, size_t count, u32 flags)
+struct s3fs_file_data;
+static void s3fs_fd_read_pattern(struct s3fs_file_data *fd, u32 *seq, u32 *rnd);
+
+/* `fd` (may be NULL) supplies the read pattern the daemon uses to decide
+ * between a chunk and the whole file. */
+static int miss_enqueue(u64 ino, loff_t offset, size_t count, u32 flags,
+			struct s3fs_file_data *fd)
 {
 	struct s3fs_miss_node *node = kmalloc(sizeof(*node), GFP_KERNEL);
 
@@ -147,6 +153,7 @@ static int miss_enqueue(u64 ino, loff_t offset, size_t count, u32 flags)
 	node->ev.offset = offset;
 	node->ev.count  = (u32)min_t(size_t, count, U32_MAX);
 	node->ev.flags  = flags;
+	s3fs_fd_read_pattern(fd, &node->ev.seq_count, &node->ev.rand_count);
 
 	spin_lock(&s3fs_miss_lock);
 	list_add_tail(&node->link, &s3fs_miss_events);

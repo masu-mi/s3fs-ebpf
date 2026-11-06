@@ -402,9 +402,9 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		if (st.count > 2)
 			st.values[2] = (u64)atomic_long_read(&s3fs_admit_invalidations);
 		if (st.count > 3)
-			st.values[3] = (u64)atomic_long_read(&s3fs_gup_calls_total);
+			st.values[3] = s3fs_read_iter_calls();
 		if (st.count > 4)
-			st.values[4] = (u64)atomic_long_read(&s3fs_gup_ns_total);
+			st.values[4] = s3fs_read_iter_pos0();
 		if (st.count > 5)
 			st.values[5] = (u64)atomic_long_read(&s3fs_upcall_retry_exhausted);
 		if (st.count > 6)

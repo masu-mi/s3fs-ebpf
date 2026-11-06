@@ -1,7 +1,5 @@
 package main
 
-import "errors"
-
 // s3fifoGhostMap is the BPF map the S3-FIFO policy keeps its ghost queue in.
 const s3fifoGhostMap = "s3fifo3_state"
 
@@ -26,19 +24,4 @@ func s3fifoGhostCapFor(softcap int) uint32 {
 		ghost = s3fifoGhostMaxCap
 	}
 	return ghost
-}
-
-// fastpathModes are the boolean flags of `fastpath` that constrain each other.
-type fastpathModes struct {
-	patternAdmit   bool // --pattern-aware-admit
-	noReadIterHook bool // --no-read-iter-hook
-	pcachePrewarm  bool // --pcache-prewarm
-}
-
-// validate rejects the combinations the daemon cannot honour.
-func (m fastpathModes) validate() error {
-	if m.patternAdmit && m.noReadIterHook {
-		return errors.New("--pattern-aware-admit requires the read-iter hook; cannot combine with --no-read-iter-hook")
-	}
-	return nil
 }
