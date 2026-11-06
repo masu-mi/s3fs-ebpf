@@ -11,8 +11,11 @@
 # violation (the trace is printed), other = error.
 set -euo pipefail
 TOPDIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-TLA_VERSION=${TLA_VERSION:-v1.8.0}
-TLA_SHA256=${TLA_SHA256:-e20447644bfabd29d6bd0fc2c0eb1473fb301c1a0e4dfe1961938ce5a191edbf}
+# v1.7.4 is a regular (non-pre) release whose asset does not change.  The v1.8.0 release is a
+# pre-release whose tla2tools.jar was replaced on 2026-11-06 (sha256 e2044764... -> 654aa501...), which
+# broke the pin and the CI spec job; do not pin a pre-release or "rolling".
+TLA_VERSION=${TLA_VERSION:-v1.7.4}
+TLA_SHA256=${TLA_SHA256:-936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88}
 IMAGE=${TLC_IMAGE:-docker.io/library/eclipse-temurin:21-jre}
 CACHE=${TLC_CACHE:-$HOME/.cache/s3fs-ebpf/tlc}
 JAR=$CACHE/tla2tools-$TLA_VERSION.jar
@@ -41,10 +44,10 @@ tlc() { # <tla> <cfg> — paths relative to the repo root
 	work=$(mktemp -d)
 	trap 'rm -rf "$work"' RETURN
 	meta=$work/states
-	"$RUNTIME" run --rm "${USER_ARGS[@]}" --network none --read-only --tmpfs /tmp \
+	"$RUNTIME" run --rm "${USER_ARGS[@]}" --network none --read-only --tmpfs /tmp --workdir /work \
 		-v "$TOPDIR/$(dirname "$1"):/spec:ro" -v "$JAR:/tla2tools.jar:ro" -v "$work:/work" \
 		"$IMAGE" java -XX:+UseSerialGC -cp /tla2tools.jar tlc2.TLC \
-		-workers 2 -noGenerateSpecTE -metadir /work/states -config "/spec/$(basename "$2")" "/spec/$(basename "$1")" 2>&1
+		-workers 2 -metadir /work/states -config "/spec/$(basename "$2")" "/spec/$(basename "$1")" 2>&1
 }
 
 if [ "${1:-}" = --all ]; then
