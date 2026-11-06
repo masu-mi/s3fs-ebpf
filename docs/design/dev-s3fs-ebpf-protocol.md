@@ -67,7 +67,6 @@ struct s3fs_read_miss_event {
 | 0x0E | `POPULATE_PAGES` | →kmod | `s3fs_populate_pages` | `ino`、`offset` (データの開始位置)、`size` (バイト数)、`data_ptr` (daemon のバッファ) | pcache モード。kmod は fd の chunk 表にコピーし、`S3FS_ADMIT_FLAG_PCACHE` の admit entry を入れる。以降の read は `generic_file_read_iter` が page cache から返す |
 | 0x03 | `SIGNAL_ADMIT` | →kmod | `s3fs_signal_admit` | `ino`、`chunk_offset` (4 MiB 境界、小さいファイルは 0)、`err` (0 = 成功、負の errno は read に返る)、`flags` | 待っている reader がなければ `-ENOENT`。`S3FS_SIGNAL_VERIFY_POPULATED` (0x1) を付けると、chunk が実際に入っているときだけ起こし、なければ `-EAGAIN` (AC-45) |
 | 0x02 | `ADMIT_ARENA` | →kmod | `s3fs_admit_arena` + `s3fs_admit_entry[]` | `count` (0 で表を空に)、`entries` (配列へのポインタ)。各 entry は `ino`、`uaddr` (daemon の arena mmap 上の番地)、`size`、`offset` (ファイル上の開始位置。1 つの ino に複数可) | arena モード。表の置き換え。kmod は read のときに `uaddr` を GUP で読む |
-| 0x01 | `PROBE_KVBASE` | ↔kmod | `s3fs_probe_kvbase` | in: `arena_fd`。out: `out_kvbase` (arena の kern_vm の先頭)、`out_size` | 起動時の確認用 (Week 4 の spike) |
 
 ### 3.2 ディレクトリの内容
 

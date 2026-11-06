@@ -19,7 +19,6 @@ type (
 	readDirtyRangeArg = kmodio.ReadDirtyRangeArg
 	syncEntry         = kmodio.SyncEntry
 	syncEntriesArg    = kmodio.SyncEntriesArg
-	probeKvbaseArg    = kmodio.ProbeKvbaseArg
 )
 
 const (
@@ -38,7 +37,6 @@ const (
 	s3fsIocDirtyLayout    = kmodio.IocDirtyLayout
 	s3fsIocReadDirtyRange = kmodio.IocReadDirtyRange
 	s3fsIocSyncEntries    = kmodio.IocSyncEntries
-	s3fsIocProbeKvbase    = kmodio.IocProbeKvbase
 	syncNameMax           = kmodio.SyncNameMax
 	statsMax              = kmodio.StatsMax
 	evictLogMax           = kmodio.EvictLogMax
