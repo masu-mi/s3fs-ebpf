@@ -57,7 +57,7 @@ static void s3k_populate_fills_chunk(struct kunit *test)
 
 static struct s3fs_file_data *s3k_fd_new(struct kunit *test)
 {
-	struct s3fs_file_data *fd = s3fs_file_data_new(NULL, 0);
+	struct s3fs_file_data *fd = s3fs_file_data_new(S3K_INO_BASE, NULL, 0);
 
 	KUNIT_ASSERT_NOT_NULL(test, fd);
 	return fd;
@@ -264,7 +264,7 @@ static void s3k_chunk_limits_and_pins(struct kunit *test)
 static void s3k_chunk_initial_content(struct kunit *test)
 {
 	static const char init[] = "hello, s3fs-ebpf\n";
-	struct s3fs_file_data *fd = s3fs_file_data_new(init, sizeof(init) - 1);
+	struct s3fs_file_data *fd = s3fs_file_data_new(S3K_INO_BASE, init, sizeof(init) - 1);
 
 	KUNIT_ASSERT_NOT_NULL(test, fd);
 	KUNIT_EXPECT_EQ(test, fd->size, sizeof(init) - 1);
@@ -1458,9 +1458,82 @@ static void s3k_hit_bump(struct s3fs_file_data *fd, u64 n, u64 tick)
 	put_cpu_ptr(fd->hit);
 }
 
+/* Phase 3d: the resident index holds an fd exactly while fd->cap > 0, whatever
+ * the dirty flag (dirty fds are linked but never returned as candidates), and
+ * s3fs_collect_resident returns each clean one once with its fd->cap. */
+static bool s3k_index_has(u64 ino, u64 *bytes)
+{
+	struct s3fs_resident *res;
+	bool found = false;
+	int n, i;
+
+	n = s3fs_collect_resident(&res);
+	for (i = 0; i < n; i++)
+		if (res[i].ino == ino) {
+			found = true;
+			if (bytes)
+				*bytes = res[i].bytes;
+		}
+	kfree(res);
+	return found;
+}
+
+static void s3k_resident_index_follows_cap(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 90, C = S3FS_CHUNK_SIZE;
+	struct s3fs_file_data *fd = s3fs_file_data_new(ino, NULL, 0);
+	int nodes0 = atomic_read(&s3fs_resident_nodes);
+	u64 bytes = 0;
+	char x = 1;
+
+	KUNIT_ASSERT_NOT_NULL(test, fd);
+	KUNIT_EXPECT_TRUE(test, list_empty(&fd->res_link));	/* cap == 0: not indexed */
+	KUNIT_EXPECT_FALSE(test, s3k_index_has(ino, NULL));
+
+	KUNIT_ASSERT_EQ(test, s3fs_fd_store(fd, 0, &x, NULL, 1, 0), 0);
+	KUNIT_ASSERT_EQ(test, s3fs_fd_store(fd, C, &x, NULL, 1, 0), 0);
+	KUNIT_EXPECT_FALSE(test, list_empty(&fd->res_link));
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_resident_nodes), nodes0 + 1);	/* one node per fd, not per chunk */
+	KUNIT_EXPECT_TRUE(test, s3k_index_has(ino, &bytes));
+	KUNIT_EXPECT_EQ(test, bytes, (u64)fd->cap);
+
+	/* growing an allocated chunk keeps the single node and updates the bytes */
+	KUNIT_ASSERT_EQ(test, s3fs_fd_store(fd, 1, &x, NULL, 8192, 0), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_resident_nodes), nodes0 + 1);
+	KUNIT_EXPECT_TRUE(test, s3k_index_has(ino, &bytes));
+	KUNIT_EXPECT_EQ(test, bytes, (u64)fd->cap);
+
+	/* dirty / flushing: still linked (it holds data) but not a candidate */
+	fd->dirty = true;
+	KUNIT_EXPECT_FALSE(test, list_empty(&fd->res_link));
+	KUNIT_EXPECT_FALSE(test, s3k_index_has(ino, NULL));
+	fd->dirty = false;
+	fd->flushing = true;
+	KUNIT_EXPECT_FALSE(test, s3k_index_has(ino, NULL));
+	fd->flushing = false;
+	KUNIT_EXPECT_TRUE(test, s3k_index_has(ino, NULL));
+
+	/* freeing one chunk of two keeps it; freeing the last one unlinks it */
+	s3fs_fd_chunk_free(fd, 1);
+	KUNIT_EXPECT_FALSE(test, list_empty(&fd->res_link));
+	KUNIT_EXPECT_TRUE(test, s3k_index_has(ino, NULL));
+	s3fs_fd_chunk_free(fd, 0);
+	KUNIT_EXPECT_EQ(test, (u64)fd->cap, 0ull);
+	KUNIT_EXPECT_TRUE(test, list_empty(&fd->res_link));
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_resident_nodes), nodes0);
+	KUNIT_EXPECT_FALSE(test, s3k_index_has(ino, NULL));
+
+	/* populate again, then free the whole fd: no node is left behind */
+	KUNIT_ASSERT_EQ(test, s3fs_fd_store(fd, 0, &x, NULL, 1, 0), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_resident_nodes), nodes0 + 1);
+	s3fs_file_data_free(fd);
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_resident_nodes), nodes0);
+	KUNIT_EXPECT_FALSE(test, s3k_index_has(ino, NULL));
+}
+
 static void s3k_hit_delta_once(struct kunit *test)
 {
-	struct s3fs_file_data *fd = s3fs_file_data_new(NULL, 0);
+	struct s3fs_file_data *fd = s3fs_file_data_new(S3K_INO_BASE, NULL, 0);
 	struct s3fs_hit_rec rec = {};
 
 	KUNIT_ASSERT_NOT_NULL(test, fd);
@@ -1594,6 +1667,7 @@ static struct kunit_case s3k_data_cases[] = {
 	KUNIT_CASE(s3k_chunk_truncate),
 	KUNIT_CASE(s3k_chunk_limits_and_pins),
 	KUNIT_CASE(s3k_chunk_initial_content),
+	KUNIT_CASE(s3k_resident_index_follows_cap),
 	KUNIT_CASE(s3k_mop_range),
 	KUNIT_CASE(s3k_mop_needs_data),
 	KUNIT_CASE(s3k_mpin_balanced),

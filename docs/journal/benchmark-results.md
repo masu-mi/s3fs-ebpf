@@ -2515,6 +2515,15 @@ Phase 3c (`v2-phase3c-resident`、3a3a538) は容量パスの候補を `sb->s_in
 
 **未計測**: 走査の間 `s_inode_list_lock` (spinlock) を握り続ける (10,000 inode で 1 回の走査につき約 0.7 ms、30,000 で約 4 ms)。その間、この sb の inode の生成・破棄は待たされる。競合している状態での待ち時間は測っていない。
 
-**対処**: 設計 doc §4.2 の `resident` (キャッシュ中の fd だけの索引。`fd->cap` を変える 2 関数の中で更新) を入れれば、走査は O(キャッシュ中の inode 数) に戻る。Phase 3 の続きで入れ、同じ計測で cold の数への依存が消えることを確かめる。
+**対処と再計測 (Phase 3d、resident 索引)**: 設計 doc §4.2 の `resident` に相当する索引 (`s3fs_resident_list`: `fd->cap > 0` の fd だけを、`fd->cap` を変える唯一の 2 関数 `s3fs_fd_chunk_ensure` / `_free` の中で載せ外しする。spinlock `s3fs_resident_lock` は最内) を入れ、容量パスの候補をそこから集めるようにした。同じ条件で 2 run (`nocap`、p50):
+
+| cold inode 数 | 3b | 3c | 3d (索引) |
+|---:|---:|---:|---:|
+| 0 | 49–53 µs | 48 µs | 47–51 µs |
+| 1,000 | 49 µs | 159–162 µs | 47 µs |
+| 10,000 | 51–52 µs | 1.366–1.372 ms | 47–52 µs |
+| 30,000 | 49 µs | 4.04–4.10 ms | 47–48 µs |
+
+cold inode 数への依存は消え、3b と同じ水準に戻った (`evict` も 29–31 µs で、3b の 27–29 µs と同程度)。dmesg に BUG / Oops / WARNING なし、audit の `resident index != sb walk` も出ていない。走査の間 `s_inode_list_lock` を握ることもなくなった (候補の収集が取るのは `s3fs_resident_lock` だけ)。**キャッシュ済みの fd が多いとき** (索引の長さが効く側) の計測はしていない。
 
 生データ: `docs/journal/data/capacity-pass-20261106/`。

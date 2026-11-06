@@ -40,7 +40,7 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		u64 admit_uaddr, admit_size;
 		struct mm_struct *admit_mm;
 
-		fd = s3fs_file_data_new(e->initial_content,
+		fd = s3fs_file_data_new(e->ino, e->initial_content,
 					e->initial_content_size);
 		if (!fd) {
 			iget_failed(inode);

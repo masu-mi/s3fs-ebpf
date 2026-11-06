@@ -153,7 +153,8 @@ int s3fs_ebpf_mark_dirty(u64 ino)
 	return 0;
 }
 
-static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
+static struct s3fs_file_data *s3fs_file_data_new(unsigned long ino,
+						 const void *initial,
 						 size_t initial_size)
 {
 	struct s3fs_file_data *fd = kzalloc(sizeof(*fd), GFP_KERNEL);
@@ -162,6 +163,8 @@ static struct s3fs_file_data *s3fs_file_data_new(const void *initial,
 		return NULL;
 	mutex_init(&fd->lock);
 	INIT_LIST_HEAD(&fd->pin_link);
+	INIT_LIST_HEAD(&fd->res_link);
+	fd->ino = ino;
 	fd->hit = alloc_percpu(struct s3fs_hit_acc);
 	if (!fd->hit) {
 		kfree(fd);
@@ -191,6 +194,8 @@ static void s3fs_file_data_free(struct s3fs_file_data *fd)
 	if (!fd)
 		return;
 	s3fs_fd_free_all(fd);
+	/* free_all took cap to 0, which unlinked it from the resident index */
+	WARN_ON_ONCE(!list_empty(&fd->res_link));
 	free_percpu(fd->hit);
 	kfree(fd);
 }
