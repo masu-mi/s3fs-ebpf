@@ -34,7 +34,7 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 
 | nr | 名前 | 方向 | 目的 | 発火頻度 |
 |---:|---|---|---|---|
-| 0x02 | `EVAL` | user→kmod | kmod の容量 / policy パスを今走らせる (旧 `ADMIT_ARENA`、nr を引き継いだ。引数なし) | 各 miss の populate の後、`POST /policy/eval` |
+| 0x02 | `EVAL` | user→kmod | kmod の容量 / policy パスを今走らせる (旧 `ADMIT_ARENA`、nr を引き継いだ。引数なし) | `POST /policy/eval` だけ (miss の populate のあとの容量パスは kmod が `POPULATE_PAGES` の中で走らせる) |
 | 0x03 | `SIGNAL_ADMIT` | user→kmod | `.read_folio` の pending waiter を wake (err code 付き) | 各 miss の後 |
 | 0x04 | `SYNC_ENTRIES` | user→kmod | entry table (dir listing) の replace-all | ~30s / boot 時 |
 | 0x05 | `POP_FLUSH` | user←kmod | write-back flush queue から 1 event pop | 100ms ticker |
@@ -179,9 +179,7 @@ sequenceDiagram
     Daemon->>S3: HTTP GET / GetRange (T10、4 MiB の chunk)
     S3-->>Daemon: bytes
     Daemon->>Kmod: ioctl POPULATE_PAGES (T7)
-    Note over Kmod: fd の chunk 表にコピー<br/>+ PCACHE の admit entry
-    Daemon->>Kmod: ioctl EVAL (T7、capacity_bytes が有効なとき)
-    Note over Kmod: 容量パス (s3fs_ebpf_capacity_pass)<br/>on_insert / pick_victim / evict
+    Note over Kmod: fd の chunk 表にコピー (populated を立てる)<br/>→ 最後に容量パス (capacity_bytes が有効なとき、同時には 1 つ)<br/>on_insert / pick_victim / evict
     Daemon->>Kmod: ioctl SIGNAL_ADMIT (T7、VERIFY_POPULATED)
     Kmod->>Pend: complete(done)
     Pend-->>Kmod: reader が目を覚ます
@@ -189,7 +187,7 @@ sequenceDiagram
     VFS-->>App: bytes
 ```
 
-- `EVAL` は `enforceCapacityAfterPopulate` (`kmod_dev.go`)。kmod が capacity モードのときだけで、populate した直後に、まだ pending の間に容量を守る (AC-45 C2)。
+- 容量パスは `POPULATE_PAGES` の最後に kmod が走らせる (`s3fs_ebpf_capacity_pass_after_populate`、v2 Phase 3e。以前は daemon が別の `EVAL` を送っていた)。capacity モードのときだけで、まだ pending の間に容量を守る (AC-45 C2)。同時に走るのは 1 つで、走っている間に来た populate は 1 回追加を頼むだけ。
 - `SIGNAL_ADMIT` は `VERIFY_POPULATED` 付きで送る。容量パスや同じ ino の別の handler が、populate したばかりの chunk を evict していたら `-EAGAIN` が返り、daemon は populate し直す (`read_miss_repopulates_total`)。
 - 4 MiB を超える object は、range GET を並列にし、取れた chunk から populate と `SIGNAL_ADMIT` を繰り返す (AC-52、`admit_chunkload.go`)。
 
@@ -337,8 +335,8 @@ sequenceDiagram
     Daemon->>Kmod: ioctl SYNC_ENTRIES (replace-all)
     Note over Kmod: entries_replace + shrink_dcache_sb<br/>(lookup / getattr / readdir / open はこの表で答える)
 
-    Note over Daemon,Pol: (b) populate のあと (と POST /policy/eval) — 容量パス
-    Daemon->>Kmod: ioctl EVAL
+    Note over Daemon,Pol: (b) populate のあと (kmod が POPULATE_PAGES の中で。POST /policy/eval は daemon から EVAL) — 容量パス
+    Daemon->>Kmod: ioctl EVAL (POST /policy/eval のとき)
     Kmod->>Pol: on_hit の再生 → on_insert → on_size
     Kmod->>Pol: pick_victim() (live_bytes が capacity_bytes を超えている間)
     Pol-->>Kmod: victim の ino (0 なら score 順に戻る)
