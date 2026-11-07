@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/coalesce"
-	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 )
 
@@ -14,10 +13,10 @@ import (
 type coalescer = coalesce.Coalescer
 
 func newCoalescer(devFd int, devPath string,
-	progs *fpebpf.Programs, s3c objstore.Backend, window time.Duration) *coalescer {
+	s3c objstore.Backend, window time.Duration) *coalescer {
 	return coalesce.New(window, func(ctx context.Context, ev *flushEvent) {
 		flushOrd.runParked(ev.Ino, func() {
-			handleFlush(ctx, devFd, devPath, progs, s3c, ev)
+			handleFlush(ctx, devFd, devPath, s3c, ev)
 		})
 	})
 }

@@ -73,7 +73,7 @@ func TestHandleFlushPutsTheDirtyBytes(t *testing.T) {
 	k := &fakeFlushKmod{dirty: []byte("hello")}
 	b := &putRecorder{}
 	before := metrics.Global.FlushBytes.Load()
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9001, "flush-ok.txt", 5))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9001, "flush-ok.txt", 5))
 
 	if b.key != "flush-ok.txt" || string(b.data) != "hello" {
 		t.Errorf("Put(%q, %q), want flush-ok.txt / hello", b.key, b.data)
@@ -94,7 +94,7 @@ func TestHandleFlushPutsTheDirtyBytes(t *testing.T) {
 func TestHandleFlushEmptyFileStillReadsDirty(t *testing.T) {
 	k := &fakeFlushKmod{}
 	b := &putRecorder{}
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9002, "empty.txt", 0))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9002, "empty.txt", 0))
 	if k.readCalls != 1 || b.key != "empty.txt" || len(b.data) != 0 {
 		t.Errorf("readCalls=%d put=%q/%d bytes, want 1 read and an empty put", k.readCalls, b.key, len(b.data))
 	}
@@ -102,7 +102,7 @@ func TestHandleFlushEmptyFileStillReadsDirty(t *testing.T) {
 
 func TestHandleFlushNoBackendDrops(t *testing.T) {
 	k := &fakeFlushKmod{dirty: []byte("x")}
-	handleFlushWith(context.Background(), k, "/dev/x", nil, nil, flushEv(9003, "n.txt", 1))
+	handleFlushWith(context.Background(), k, "/dev/x", nil, flushEv(9003, "n.txt", 1))
 	if len(k.signalled) != 1 || k.signalled[0] != -61 {
 		t.Errorf("signalled %v, want -ENODATA (-61)", k.signalled)
 	}
@@ -115,7 +115,7 @@ func TestHandleFlushReadDirtyErrorRestoresDirtyFlag(t *testing.T) {
 	k := &fakeFlushKmod{readErr: errors.New("copy failed")}
 	b := &putRecorder{}
 	errs := metrics.Global.FlushErrors.Load()
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9004, "r.txt", 3))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9004, "r.txt", 3))
 	if len(k.markedDirt) != 1 || k.markedDirt[0] != 9004 {
 		t.Errorf("marked dirty %v, want [9004] so the next close retries", k.markedDirt)
 	}
@@ -133,7 +133,7 @@ func TestHandleFlushReadDirtyErrorRestoresDirtyFlag(t *testing.T) {
 func TestHandleFlushPutErrorRestoresDirtyFlag(t *testing.T) {
 	k := &fakeFlushKmod{dirty: []byte("abc")}
 	b := &putRecorder{err: errors.New("s3 down")}
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9005, "p.txt", 3))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9005, "p.txt", 3))
 	if len(k.markedDirt) != 1 || k.markedDirt[0] != 9005 {
 		t.Errorf("marked dirty %v, want [9005]", k.markedDirt)
 	}
@@ -146,7 +146,7 @@ func TestHandleFlushPartialPath(t *testing.T) {
 	k := &fakeFlushKmod{partial: func() (bool, int64, int64, error) { return true, 4096, 1 << 20, nil }}
 	b := &putRecorder{}
 	bytes := metrics.Global.FlushBytes.Load()
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9006, "big.bin", 1<<20))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9006, "big.bin", 1<<20))
 	if b.key != "" || k.readCalls != 0 {
 		t.Errorf("full put ran after a handled partial flush (put=%q reads=%d)", b.key, k.readCalls)
 	}
@@ -159,7 +159,7 @@ func TestHandleFlushPartialPath(t *testing.T) {
 
 	// A failed partial flush restores the dirty flag and reports EIO.
 	k = &fakeFlushKmod{partial: func() (bool, int64, int64, error) { return true, 0, 0, errors.New("copy part failed") }}
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9007, "big2.bin", 1<<20))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9007, "big2.bin", 1<<20))
 	if len(k.markedDirt) != 1 || len(k.signalled) != 1 || k.signalled[0] != -5 {
 		t.Errorf("partial failure: marked=%v signalled=%v, want one markDirty and -5", k.markedDirt, k.signalled)
 	}
@@ -172,7 +172,7 @@ func TestHandleFlushPartialPath(t *testing.T) {
 func TestHandleFlushStaleSizeReadsTheWholeContent(t *testing.T) {
 	k := &fakeFlushKmod{dirty: []byte("the full 100 MiB, in spirit")}
 	b := &putRecorder{}
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9006, "grown.bin", 0))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9006, "grown.bin", 0))
 	if string(b.data) != "the full 100 MiB, in spirit" {
 		t.Errorf("Put(%q), want the whole content", b.data)
 	}
@@ -191,7 +191,7 @@ func TestHandleFlushGivesUpWhenTheFileKeepsGrowing(t *testing.T) {
 	k := &fakeFlushKmod{}
 	k.growEachRead = true
 	b := &putRecorder{}
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(9007, "g.bin", 1))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(9007, "g.bin", 1))
 	if b.key != "" {
 		t.Errorf("put %q after a refused read", b.key)
 	}

@@ -1966,6 +1966,65 @@ static void s3k_vfs_capacity_pass_evicts_to_capacity(struct kunit *test)
 	s3k_close(fa);
 }
 
+/* v2 Phase 3e: the capacity pass runs at the end of POPULATE_PAGES (the daemon no
+ * longer asks for it with an extra ioctl).  In capacity mode the populate that
+ * takes the cache over capacity evicts down to it before it returns; without a
+ * capacity nothing is evicted; and while a pass is already running a populate only
+ * asks for one more round (coalescing) instead of running a second pass. */
+static void s3k_vfs_populate_runs_capacity_pass(struct kunit *test)
+{
+	const u64 a = S3K_INO_BASE + 71, b = S3K_INO_BASE + 72, c = S3K_INO_BASE + 73;
+	const u64 n = 64 * 1024, old_cap = s3fs_capacity_bytes;
+	struct s3fs_entry_dyn *e = kvcalloc(3, sizeof(*e), GFP_KERNEL);
+	long ev0 = atomic_long_read(&s3fs_evictions_total);
+	struct file *fa, *fb, *fc;
+
+	KUNIT_ASSERT_NOT_NULL(test, e);
+	s3k_dyn_set(&e[0], a, S3FS_ROOT_INO, "pa");
+	e[0].size = n;
+	s3k_dyn_set(&e[1], b, S3FS_ROOT_INO, "pb");
+	e[1].size = n;
+	s3k_dyn_set(&e[2], c, S3FS_ROOT_INO, "pc");
+	e[2].size = n;
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_entries_replace(e, 3), 0);
+	fa = s3k_open(test, "pa", O_RDONLY);
+	fb = s3k_open(test, "pb", O_RDONLY);
+	fc = s3k_open(test, "pc", O_RDONLY);
+
+	/* no capacity: both populates stay */
+	s3fs_capacity_bytes = 0;
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, a, 0, 'a', n), 0);
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, b, 0, 'b', n), 0);
+	KUNIT_EXPECT_TRUE(test, s3k_is_resident(a, NULL) && s3k_is_resident(b, NULL));
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&s3fs_evictions_total), ev0);
+
+	/* room for two: the third populate evicts exactly one before it returns */
+	s3fs_capacity_bytes = 2 * n;
+	KUNIT_ASSERT_EQ(test, s3k_populate(test, c, 0, 'c', n), 0);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&s3fs_evictions_total), ev0 + 1);
+	KUNIT_EXPECT_EQ(test, s3fs_ino_buf_bytes(a) + s3fs_ino_buf_bytes(b) + s3fs_ino_buf_bytes(c), 2 * n);
+
+	/* a pass is running: the populate only asks for another round */
+	s3fs_capacity_bytes = n;
+	atomic_set(&s3fs_pass_running, 1);
+	atomic_set(&s3fs_pass_again, 0);
+	s3fs_ebpf_capacity_pass_after_populate();
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_pass_again), 1);
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&s3fs_evictions_total), ev0 + 1);	/* no pass ran */
+	atomic_set(&s3fs_pass_running, 0);
+	atomic_set(&s3fs_pass_again, 0);
+	/* and once nothing runs, it runs the pass and leaves the flags clear */
+	s3fs_ebpf_capacity_pass_after_populate();
+	KUNIT_EXPECT_EQ(test, atomic_long_read(&s3fs_evictions_total), ev0 + 2);
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_pass_running), 0);
+	KUNIT_EXPECT_EQ(test, atomic_read(&s3fs_pass_again), 0);
+	s3fs_capacity_bytes = old_cap;
+
+	s3k_close(fc);
+	s3k_close(fb);
+	s3k_close(fa);
+}
+
 /* U8: a reader pins its chunk BEFORE it creates the pending - possibly before
  * the chunk is allocated.  s3fs_file_data_reset (a whole-ino eviction) must
  * count that pin: it frees the idle chunks around it, keeps the table, and
@@ -2025,6 +2084,7 @@ static struct kunit_case s3k_vfs_cases[] = {
 	KUNIT_CASE(s3k_vfs_reset_counts_unallocated_pin),
 	KUNIT_CASE(s3k_vfs_signal_flush_keeps_chunks),
 	KUNIT_CASE(s3k_vfs_capacity_pass_evicts_to_capacity),
+	KUNIT_CASE(s3k_vfs_populate_runs_capacity_pass),
 	KUNIT_CASE(s3k_vfs_forget_on_evict),
 	KUNIT_CASE(s3k_vfs_write_read_back),
 	KUNIT_CASE(s3k_vfs_truncate),

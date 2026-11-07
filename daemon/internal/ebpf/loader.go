@@ -5,21 +5,10 @@ package ebpf
 import (
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
 	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/rlimit"
-)
-
-// StatSlot indices mirror `enum s3fs_stat_slot` in
-// include/s3fs_shared_types.h. Keep in sync.
-const (
-	StatFastHits         uint32 = 0
-	StatSlowMisses       uint32 = 1
-	StatUnknownFS        uint32 = 2
-	StatSlotMax          uint32 = 3
 )
 
 // TestArgs mirrors `struct s3fs_test_args` in include/s3fs_shared_types.h.
@@ -43,20 +32,17 @@ type TestArgs struct {
 // the demo path load its own program by name.
 type runtimeObjs struct {
 	// Programs.
-	S3fsFpGetattr     *ebpf.Program `ebpf:"s3fs_fp_getattr"`
 	S3fsTestShared    *ebpf.Program `ebpf:"s3fs_test_shared"`
 	S3fsArenaPrealloc *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 
 	// Maps.
 	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
-	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
-	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
 }
 
 func (o *runtimeObjs) Close() error {
 	return _S3fsfpClose(
-		o.S3fsFpGetattr, o.S3fsTestShared, o.S3fsArenaPrealloc,
-		o.S3fsArena, o.S3fsCounters, o.S3fsInodeIndex,
+		o.S3fsTestShared, o.S3fsArenaPrealloc,
+		o.S3fsArena,
 	)
 }
 
@@ -69,13 +55,6 @@ func (o *runtimeObjs) Close() error {
 type Programs struct {
 	Objs  runtimeObjs
 	arena *arena.Arena
-
-	// cache admission state for WarmCache. cacheKnown deduplicates
-	// concurrent misses on the same ino; cacheNextOff is a bump
-	// allocator into the arena (stubs only: file content is not kept there).
-	cacheMu      sync.Mutex
-	cacheKnown   map[uint64]uint64
-	cacheNextOff uint64
 }
 
 // Load pulls the bpf2go collection into the kernel and returns a handle.
@@ -106,7 +85,7 @@ func Load() (*Programs, error) {
 		return nil, fmt.Errorf("mmap arena: %w", err)
 	}
 
-	p := &Programs{arena: a, cacheKnown: make(map[uint64]uint64)}
+	p := &Programs{arena: a}
 	opts := &ebpf.CollectionOptions{
 		MapReplacements: map[string]*ebpf.Map{
 			"s3fs_arena": arenaMap,
@@ -133,49 +112,11 @@ func (p *Programs) Arena() *arena.Arena {
 	return p.arena
 }
 
-// CountersMap returns the per-CPU counter array indexed by StatSlot*.
-func (p *Programs) CountersMap() *ebpf.Map { return p.Objs.S3fsCounters }
-
-// InodeIndexMap returns the ino → arena-offset hash the fentry hook uses
-// to decide hit/miss. Daemon populates this as it caches S3 metadata.
-func (p *Programs) InodeIndexMap() *ebpf.Map { return p.Objs.S3fsInodeIndex }
-
-// AttachFentry attaches the fentry/vfs_getattr program. The returned
-// link.Link must be Close()d during teardown or the program stays
-// attached beyond the process lifetime.
-func (p *Programs) AttachFentry() (link.Link, error) {
-	l, err := link.AttachTracing(link.TracingOptions{
-		Program: p.Objs.S3fsFpGetattr,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("attach fentry/vfs_getattr: %w", err)
-	}
-	return l, nil
-}
-
 // ArenaFD returns the file descriptor of the underlying arena map.
 // Used by the daemon to hand kmod an arena reference over the
 // /dev/s3fs_ebpf admit-arena ioctl.
 func (p *Programs) ArenaFD() int {
 	return p.arena.Map.FD()
-}
-
-// ReadCounters returns the aggregated (summed over CPUs) counter value
-// for each StatSlot* index. The returned slice has length StatSlotMax.
-func (p *Programs) ReadCounters() ([]uint64, error) {
-	out := make([]uint64, StatSlotMax)
-	perCPU := make([]uint64, 0)
-	for slot := uint32(0); slot < StatSlotMax; slot++ {
-		if err := p.Objs.S3fsCounters.Lookup(&slot, &perCPU); err != nil {
-			return nil, fmt.Errorf("read counter slot %d: %w", slot, err)
-		}
-		var sum uint64
-		for _, v := range perCPU {
-			sum += v
-		}
-		out[slot] = sum
-	}
-	return out, nil
 }
 
 // RunTestShared invokes the SEC("syscall") test harness with the given

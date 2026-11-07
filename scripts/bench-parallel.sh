@@ -205,8 +205,7 @@ if [ -f "$OUT_DIR/metrics-t0.txt" ] && [ -f "$OUT_DIR/metrics-t1.txt" ]; then
 		echo '## ebpf metric delta'
 		echo
 		echo '```'
-		for m in s3fs_ebpf_fast_path_hits_total \
-			 s3fs_ebpf_read_miss_upcalls_total \
+		for m in s3fs_ebpf_read_miss_upcalls_total \
 			 s3fs_ebpf_flush_events_total \
 			 s3fs_ebpf_flush_bytes_total \
 			 s3fs_ebpf_folio_hits_total; do

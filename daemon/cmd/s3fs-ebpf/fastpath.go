@@ -390,22 +390,9 @@ func runFastpath(args []string) int {
 		devF.Close()
 	}()
 
-	progs, err := fpebpf.Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "load: %v\n", err)
-		return 1
-	}
-	defer progs.Close()
-
-	fentry, err := progs.AttachFentry()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "attach: %v\n", err)
-		return 1
-	}
-	defer fentry.Close()
-
 	var s3c objstore.Backend
 	if *enableS3 {
+		var err error
 		s3c, err = newClient()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fastpath: backend: %v\n", err)
@@ -417,17 +404,12 @@ func runFastpath(args []string) int {
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("[fastpath] attached fentry/vfs_getattr_nosec; arena size=%d\n",
-		progs.Arena().Size())
-	// arena capacity is fixed for the lifetime of the daemon; publish
-	// once so the dashboard's usage% panel has a denominator.
-	metrics.Global.ArenaCapacityBytes.Store(progs.Arena().Size())
 	if s3c != nil {
 		prefixStr := ""
 		if p, ok := s3c.(interface{ Prefix() string }); ok {
 			prefixStr = " key-prefix=" + p.Prefix()
 		}
-		fmt.Printf("[fastpath] object backend: bucket=%s%s (will warm arena on miss)\n",
+		fmt.Printf("[fastpath] object backend: bucket=%s%s\n",
 			s3c.Bucket(), prefixStr)
 		// The module outlives the daemon, so a value left by an earlier run
 		// (--partial-modify on S3) would stay on for a backend that cannot
@@ -477,13 +459,13 @@ func runFastpath(args []string) int {
 	// S3 we reflect real object metadata (size, mtime) and — the
 	// point of Week 4 (a) — copy the object body into the arena so
 	// kmod's .read reaches those bytes via GUP over daemon's user_vm.
-	prewarm(context.Background(), progs, s3c, pol)
+	prewarm(context.Background(), s3c, pol)
 	// Opening the device (above) armed the kmod's upcall path.
 	fmt.Printf("[admit] 0 entries via %s (armed)\n", *dev)
 
 	// Read-miss upcall reader: services `cat` on any admitted entry with
 	// Prewarm=false, or any ino kmod knows about that daemon hasn't warmed yet.
-	go runReadMissLoop(ctx, *dev, progs, s3c)
+	go runReadMissLoop(ctx, *dev, s3c)
 	// AC-67: the prewarm reads block on upcalls, so start after runReadMissLoop.
 	if pcachePrewarmEnabled || prefetchPolicy != nil {
 		go runPcachePrewarm(ctx)
@@ -493,7 +475,7 @@ func runFastpath(args []string) int {
 
 	// W-03: one goroutine samples all three stats sources (BPF counters,
 	// kmod ioctl, arena free-list) on a single ticker.
-	go runStatsLoop(ctx, progs, *dev, *sampleEvery)
+	go runStatsLoop(ctx, *dev, *sampleEvery)
 	// Periodic bucket sync: keep kmod's entry table + daemon mirror
 	// aligned with S3 without re-mounting. New keys become visible
 	// via `ls`, deleted keys stop resolving. When admit state is
@@ -530,17 +512,17 @@ func runFastpath(args []string) int {
 			if _, done := prewarmed[entry.Ino]; done {
 				continue
 			}
-			prewarmEntry(ctx, progs, s3c, pol, entry)
+			prewarmEntry(ctx, s3c, pol, entry)
 			prewarmed[entry.Ino] = struct{}{}
 		}
 	})
 	// Week 4 (c): drain the kmod write-back queue and PUT bytes to
 	// S3. Runs even without --s3 so the queue doesn't grow unbounded
 	// (in offline mode it just logs and drops each event).
-	go runFlushLoop(ctx, *dev, progs, s3c, 100*time.Millisecond)
+	go runFlushLoop(ctx, *dev, s3c, 100*time.Millisecond)
 	// S-08: blocking goroutine for fsync-triggered (WAIT-flagged) flush
 	// events — eliminates the up-to-100 ms ticker latency for fsync.
-	go runFlushWaitLoop(ctx, *dev, progs, s3c)
+	go runFlushWaitLoop(ctx, *dev, s3c)
 	// E-02 / AC-84: kmod's delete and rename queues are drained by
 	// runFlushLoop too (drainOrdered), so the three kinds of event are
 	// handled in the order kmod queued them.
@@ -558,6 +540,5 @@ func runFastpath(args []string) int {
 
 	<-ctx.Done()
 
-	printCounters(progs, "final")
 	return 0
 }

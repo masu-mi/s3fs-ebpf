@@ -180,9 +180,7 @@ run_one() {
 
 	# What we actually measure: read_miss_upcalls fires when kmod-side
 	# admit_snapshot() returns false in .read_folio and we go to path C
-	# (daemon upcall + re-admit). This is the true cache miss, whereas
-	# fast_path_hits/slow_path_misses count fentry hits on the BPF-side
-	# inode_index which stays populated even after admit eviction.
+	# (daemon upcall + re-admit). This is the true cache miss.
 	local b_miss b_reload b_evict b_admits b_folio_hits b_read_iter_hits b_read_iter_pos0_hits
 	b_miss=$(read_counter s3fs_ebpf_read_miss_upcalls_total)
 	b_reload=$(read_counter s3fs_ebpf_read_miss_errors_total)
