@@ -71,7 +71,9 @@ if [[ "$KUNIT" == 1 ]]; then
 		log "KUnit build of the kmod (results in dmesg)"
 		sudo scripts/kmod-unload.sh s3fs_kfunc >/dev/null 2>&1 || true
 		sudo dmesg -C
-		make kmod-clean >/dev/null 2>&1
+		# KUNIT= : with KUNIT=1 in the environment kmod/Kbuild's $(error) fires for 'clean' too
+		# (no CONFIG_KUNIT there), make exits 2 and set -e ends this script silently.
+		KUNIT= make kmod-clean >/dev/null 2>&1
 		# KUNIT=1 reaches kmod/Kbuild through the environment (kmod/Kbuild: -DS3FS_KUNIT).
 		KUNIT=1 make kmod >"$OUT/kunit-build.log" 2>&1 || {
 			tail -10 "$OUT/kunit-build.log" >&2
@@ -83,7 +85,7 @@ if [[ "$KUNIT" == 1 ]]; then
 		sudo rmmod s3fs_kfunc 2>/dev/null || true
 		grep -E 'ok [0-9]+ - |# .*: pass:|not ok' "$OUT/kunit.log" | tail -20 || true
 		grep -q 'not ok' "$OUT/kunit.log" && die "KUnit failures under lockdep: $OUT/kunit.log"
-		make kmod-clean >/dev/null 2>&1 && make kmod >/dev/null 2>&1   # back to the normal build for the runs below
+		KUNIT= make kmod-clean >/dev/null 2>&1 && KUNIT= make kmod >/dev/null 2>&1   # back to the normal build for the runs below
 	else
 		warn "this kernel has no CONFIG_KUNIT=y; KUNIT=1 skipped (setup-kernel-lockdep.sh enables it)"
 	fi
