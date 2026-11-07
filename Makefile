@@ -65,14 +65,14 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
+.PHONY: test-nocache-signal test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
         lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
-        test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
+        test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-nocache-signal test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
         test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
         clean
@@ -420,6 +420,10 @@ test-fsync-large-new-file: kmod daemon ## issue #35: fsync of a new 100 MiB file
 test-policy-data-members: kmod bpf daemon ## struct_ops data members (flags / name) + validate: accepted, refused (EINVAL), carried by a hot swap
 	@echo "==> test-policy-data-members"
 	@sudo $(SCRIPTS_DIR)/test-policy-data-members.sh
+
+test-nocache-signal: kmod daemon ## a signal during the upcall wait must not turn a cold read into -EIO (nocache=1 + Go microbench)
+	@echo "==> test-nocache-signal"
+	@sudo $(SCRIPTS_DIR)/test-nocache-signal.sh
 
 test-pcache-drop: kmod daemon ## pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
 	@echo "==> test-pcache-drop"
