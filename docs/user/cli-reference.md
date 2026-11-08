@@ -131,6 +131,7 @@ Targets:
     test-fsync-large-new-file     issue #35: fsync of a new 100 MiB file returns only after the PUT landed; no late 0-byte PUT empties it
     test-policy-data-members      struct_ops data members (flags / name) + validate: accepted, refused (EINVAL), carried by a hot swap
     test-nocache-signal           a signal during the upcall wait must not turn a cold read into -EIO (nocache=1 + Go microbench)
+    test-cold-signal              a signal during the upcall wait must not turn a cache-mode cold read into -EIO (distinct files + Go microbench)
     test-pcache-drop              pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
     test-write-existing-nopm      AC-50: same as test-write-existing with --partial-modify=false (whole-object GET + PUT path)
     test-write-existing           AC-50: write/truncate/append on an unread existing object keeps the rest
