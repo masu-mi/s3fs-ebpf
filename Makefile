@@ -427,7 +427,7 @@ test-nocache-signal: kmod daemon ## a signal during the upcall wait must not tur
 
 test-cold-signal: kmod daemon ## a signal during the upcall wait must not turn a cache-mode cold read into -EIO (distinct files + Go microbench)
 	@echo "==> test-cold-signal"
-	@sudo $(SCRIPTS_DIR)/test-cold-signal.sh
+	@sudo env HALTPOLL="$$HALTPOLL" $(SCRIPTS_DIR)/test-cold-signal.sh
 
 test-pcache-drop: kmod daemon ## pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
 	@echo "==> test-pcache-drop"

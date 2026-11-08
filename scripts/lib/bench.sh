@@ -281,6 +281,7 @@ bench_down() {
 bench_up() {
 	local be=$1 logf=$2; shift 2
 	bench_down
+	haltpoll_apply
 	case $be in
 	fuse-raw)
 		fuse_mount_raw "$BENCH_MP_FUSE"; BENCH_KIND=fuse; BENCH_MP=$BENCH_MP_FUSE ;;
@@ -308,11 +309,27 @@ bench_up() {
 	esac
 }
 
+# haltpoll_set <0|1> — guest idle polling (cpuidle-haltpoll).  A KVM guest with no
+# cpuidle driver halts (HLT) on idle, and waking it costs a VM exit; haltpoll spins
+# briefly first.  It shortens the upcall round trip (cold read p50 about -13%, br
+# §18.55 / AC-88), so a measurement must say which one it ran with.
+# Needs the cpuidle-haltpoll module (root, KVM guest).  Not persistent across reboots.
+haltpoll_set() {
+	case $1 in
+	1) sudo modprobe cpuidle-haltpoll force=1 ;;
+	0) sudo modprobe -r cpuidle-haltpoll 2>/dev/null || true ;;
+	*) echo "haltpoll_set: want 0 or 1" >&2; return 1 ;;
+	esac
+}
+# haltpoll_apply — honour HALTPOLL=0|1 (unset = leave the host as it is).
+haltpoll_apply() { [ -z "${HALTPOLL:-}" ] || haltpoll_set "$HALTPOLL"; }
+
 # bench_env_report — conditions for the record (date, kernel, commit, options).
 bench_env_report() {
 	echo "date_utc: $(date -u +%FT%TZ)"
 	echo "uname: $(uname -srv)"
 	echo "git: $(git -C "$TOPDIR" rev-parse HEAD)"
+	echo "cpuidle: driver=$(cat /sys/devices/system/cpu/cpuidle/current_driver 2>/dev/null || echo ?) (HALTPOLL=${HALTPOLL:-unset}; haltpoll = guest idle polling)"
 	echo "cpus: $(nproc)  mem: $(free -m | awk '/Mem:/{print $2}') MiB"
 	echo "s3fs: $(s3fs --version 2>&1 | head -1)"
 	echo "fuse-raw:       s3fs <bucket> (no use_cache, no kernel_cache)"

@@ -2600,7 +2600,7 @@ ebpf-nocache の cat-cold も 6686 → 8354 ms (+25%)、ebpf-pcachedrop は 7058
 - この環境は KVM で、実機では測れない (backlog の確認項目 ① は未実施)。
 - cpuidle の driver が `none` (ゲストが `HLT` でアイドルする) のため、`modprobe cpuidle-haltpoll force=1` (アイドルの前に短く spin する) を入れて、`test-cold-signal` (3,000 個の distinct な小さいファイルの cold read、1 件ごとに upcall) の p50 を比べた (各 3 回): haltpoll あり 442 / 448 / 454 µs、なし 519 / 515 / 503 µs (**約 -13%**、ops/s 2,140〜2,220 対 1,860〜1,950)。
 - 読み: cold read 1 件の往復のうち、アイドルからの復帰の分は仮想環境の `HLT` の復帰で、haltpoll で縮む。これは「daemon を起こし続けていたことが速かった」という仮説と矛盾しない。ただし **E の cat-cold そのものは haltpoll で測っていない** (+22% が消えるかは未確認)。実機で同じ差が出るかも未確認。
-- 判断: daemon 側で spin する変更は入れない (CPU を燃やす割に、効くのは仮想環境のアイドル復帰だけの見込み)。仮想環境で動かすなら、ゲストで `cpuidle-haltpoll` を使う (docs には書いていない)。
+- 判断: daemon 側で spin する変更は入れない (CPU を燃やす割に、効くのは仮想環境のアイドル復帰だけの見込み)。haltpoll の有無は環境変数 `HALTPOLL=0|1` で選べる (`scripts/lib/bench.sh` の `haltpoll_set` / `haltpoll_apply`。`bench_up` と `test-cold-signal` が見る。未設定ならホストのまま)。`bench_env_report` は cpuidle の driver を記録する。
 
 **未計測だった 4 項目**
 

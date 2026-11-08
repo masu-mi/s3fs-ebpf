@@ -41,6 +41,7 @@ docker exec "$MINIO_CONTAINER" mc rm --recursive --force "local/$S3_BUCKET" >/de
 docker exec "$MINIO_CONTAINER" mc mb --ignore-existing "local/$S3_BUCKET" >/dev/null
 docker exec "$MINIO_CONTAINER" sh -c "rm -rf /tmp/cold-signal && mkdir -p /tmp/cold-signal && i=0 && while [ \$i -lt $ITERS ]; do echo cold-\$i > /tmp/cold-signal/f\$i; i=\$((i+1)); done && mc cp --recursive /tmp/cold-signal/ local/$S3_BUCKET/ >/dev/null"
 
+haltpoll_apply
 ebpf_mount "$MOUNT"
 ebpf_start_daemon "$OUT/daemon.log" --bucket="$S3_BUCKET" --arena-metadata-only \
 	--policy-bpf=builtin:policy_observe_ops --metrics-addr=:9600 --sample-every=1s --sync-every=0
