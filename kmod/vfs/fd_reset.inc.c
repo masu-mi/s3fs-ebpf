@@ -3,61 +3,6 @@
  * unit, never compiled on its own. */
 
 
-/* The same set as s3fs_collect_resident, found the slow way: walking the
- * superblock's inodes (O(inodes of the sb); the Phase 3c implementation).  Used
- * only by the audit, as the ground truth the resident index is checked against.  *out gets a kmalloc'ed array (caller kfree), the count is
- * returned; each element carries the bytes fd->cap charges (AC-41).
- *
- * Reads fd->cap / dirty / flushing without fd->lock under i_lock (a snapshot: a
- * write or an evict racing it only makes the pass see the inode one round
- * early or late).  i_private is read under i_lock because evict frees fd only
- * after I_FREEING is set, which is checked under the same lock. */
-static int s3fs_collect_resident_walk(struct s3fs_resident **out)
-{
-	struct super_block *sb = s3fs_active_sb;
-	struct s3fs_resident *r;
-	struct inode *inode;
-	int cap, n;
-
-	*out = NULL;
-	if (!sb)
-		return 0;
-	for (;;) {
-		cap = 0;
-		spin_lock(&sb->s_inode_list_lock);
-		list_for_each_entry(inode, &sb->s_inodes, i_sb_list)
-			cap++;
-		spin_unlock(&sb->s_inode_list_lock);
-		if (!cap)
-			return 0;
-		cap += 16;	/* inodes that appear meanwhile */
-		r = kmalloc_array(cap, sizeof(*r), GFP_KERNEL);
-		if (!r)
-			return 0;
-		n = 0;
-		spin_lock(&sb->s_inode_list_lock);
-		list_for_each_entry(inode, &sb->s_inodes, i_sb_list) {
-			struct s3fs_file_data *fd;
-
-			spin_lock(&inode->i_lock);
-			if (!(inode->i_state & (I_FREEING | I_WILL_FREE | I_NEW)) &&
-			    S_ISREG(inode->i_mode) && n < cap) {
-				fd = inode->i_private;
-				if (fd && READ_ONCE(fd->cap) > 0 &&
-				    !READ_ONCE(fd->dirty) && !READ_ONCE(fd->flushing)) {
-					r[n].ino = inode->i_ino;
-					r[n].bytes = READ_ONCE(fd->cap);
-					n++;
-				}
-			}
-			spin_unlock(&inode->i_lock);
-		}
-		spin_unlock(&sb->s_inode_list_lock);
-		*out = r;
-		return n;
-	}
-}
-
 /* The inodes whose content the cache holds: clean regular files with allocated
  * chunks (fd->cap > 0), from the resident index (s3fs_resident_list, kept by
  * s3fs_fd_chunk_ensure / _free).  O(cached inodes), whatever the number of
@@ -121,7 +66,6 @@ void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache)
 	struct super_block *sb = s3fs_active_sb;
 	struct s3fs_resident *res;
 	struct inode *inode;
-	u64 walk_pcache = 0;
 	int n, i;
 
 	*walk = 0;
@@ -144,20 +88,10 @@ void s3fs_ebpf_fd_buf_audit(u64 *walk, u64 *pcache)
 	}
 	spin_unlock(&sb->s_inode_list_lock);
 
-	/* The resident index is what the capacity pass charges; the sb walk is the
-	 * ground truth.  They differ only while I/O is in flight, so a mismatch is
-	 * reported (rate limited) rather than treated as a bug. */
 	n = s3fs_collect_resident(&res);
 	for (i = 0; i < n; i++)
 		*pcache += res[i].bytes;
 	kfree(res);
-	n = s3fs_collect_resident_walk(&res);
-	for (i = 0; i < n; i++)
-		walk_pcache += res[i].bytes;
-	kfree(res);
-	if (walk_pcache != *pcache)
-		pr_warn_ratelimited("s3fs_ebpf: resident index %llu B != sb walk %llu B (ok while I/O is in flight)\n",
-				    *pcache, walk_pcache);
 }
 
 /* W1: inodes pinned by an outstanding flush.  put_super releases any

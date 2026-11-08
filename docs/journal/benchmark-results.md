@@ -2524,7 +2524,7 @@ Phase 3c (`v2-phase3c-resident`、3a3a538) は容量パスの候補を `sb->s_in
 | 10,000 | 51–52 µs | 1.366–1.372 ms | 47–52 µs |
 | 30,000 | 49 µs | 4.04–4.10 ms | 47–48 µs |
 
-cold inode 数への依存は消え、3b と同じ水準に戻った (`evict` も 29–31 µs で、3b の 27–29 µs と同程度)。dmesg に BUG / Oops / WARNING なし、audit の `resident index != sb walk` も出ていない。走査の間 `s_inode_list_lock` を握ることもなくなった (候補の収集が取るのは `s3fs_resident_lock` だけ)。**キャッシュ済みの fd が多いとき** (索引の長さが効く側) の計測はしていない。
+cold inode 数への依存は消え、3b と同じ水準に戻った (`evict` も 29–31 µs で、3b の 27–29 µs と同程度)。dmesg に BUG / Oops / WARNING なし。走査の間 `s_inode_list_lock` を握ることもなくなった (候補の収集が取るのは `s3fs_resident_lock` だけ)。**キャッシュ済みの fd が多いとき** (索引の長さが効く側) の計測はしていない。
 
 生データ: `docs/journal/data/capacity-pass-20261106/`。
 
@@ -2532,7 +2532,7 @@ cold inode 数への依存は消え、3b と同じ水準に戻った (`evict` �
 
 v2 再設計 (#47〜#57。設計は `docs/design/redesign-v2-simplify.md`) の前後で、A〜F を測り直した。**同じセッションで交互に測る** (基準 → 新 → 新 → 基準) ことで、ホストの揺れを見た。基準は stack の前の master (`03bb636`)、新は #57 のブランチ (`a33f10f`。#55 / #56 を含む。#55 / #56 は測定中にマージされた)。
 
-**条件**: `6.12.0-061200-generic` (lockdep なし)、6 CPU、ローカル MinIO、`bench-pcache-remeasure.sh` (A B C D E、`BACKENDS="fuse-cache ebpf-nocache ebpf-pcachedrop ebpf-pcache"`、`RUNS_W=5 RUNS_COLD=5 E_REPS=3`、microbench 5000 iters) と `bench-read-64jobs.sh` (F、5 reps)。生データ: `docs/journal/data/v2-gate-20261107/`。fuse-cache は対照 (s3fs-fuse は触っていないので、動いたら環境)。
+**条件**: `6.12.0-061200-generic` (lockdep なし)、6 CPU、ローカル MinIO、`bench-pcache-remeasure.sh` (A B C D E、`BACKENDS="fuse-cache ebpf-nocache ebpf-pcachedrop ebpf-pcache"`、`RUNS_W=5 RUNS_COLD=5 E_REPS=3`、microbench 5000 iters) と `bench-read-64jobs.sh` (F、5 reps)。生データ: `docs/journal/data/v2-gate-20261107/` (F は fio の JSON ではなく IOPS の表 `f64-iops.tsv`)。fuse-cache は対照 (s3fs-fuse は触っていないので、動いたら環境)。
 
 **測定中に見つけたバグ (修正済み)**: 新側の最初の run は、`ebpf-nocache` の A が `read: input/output error` で止まった。upcall の待機 (`wait_for_completion_interruptible_timeout`) がシグナルで中断されると、`read_folio` の分岐のどれにも当たらず、cold の fallback fill が chunk を見つけられずに -EIO を返していた。Go の runtime は goroutine の preemption に SIGURG を数 ms ごとに送るので、`dev microbench` で 100 回前後の read で必ず出る。Phase 3b までは nocache の `.open` が chunk を残していて fallback が拾えたため見えず、3c (#55) で `.open` が chunk を解放して顕在化した。待機を killable にして直した (`a33f10f`)。回帰テスト `test-nocache-signal` は、修正前の master で warmup #91 に EIO で落ち、修正後は通る。二分探索: `3d3bd2a` (3b) は 3/3 通り、`3a3a538` (3c)・`3cc66c6`・`ea248dc` (master) は 3/3 EIO。通常の cold read が同じ経路でシグナルに中断された場合も同じ失敗になりうる (修正前の挙動からの推測で、nocache 以外では再現を確かめていない)。
 
