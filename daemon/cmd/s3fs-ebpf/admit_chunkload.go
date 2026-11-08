@@ -50,7 +50,6 @@ type chunkLoadOps struct {
 	getRange func(ctx context.Context, off, n int64) ([]byte, error)
 	populate func(off int64, data []byte) error
 	signal   func(chunkOff int64, errCode int32, flags uint32) error
-	enforce  func()
 }
 
 // chunkLoads maps ino -> *chunkLoad for loads in flight.
@@ -83,14 +82,11 @@ func (l *chunkLoad) setErr(err error) {
 // (bounded) when kmod reports that the chunk was evicted in between — the
 // same contract as the single-chunk path (signal VERIFY_POPULATED, AC-45 C2).
 // A chunk nobody waits for answers ENOENT, which is fine.
-func (l *chunkLoad) populateAndSignal(ops chunkLoadOps, i int, data []byte, enforce bool) error {
+func (l *chunkLoad) populateAndSignal(ops chunkLoadOps, i int, data []byte) error {
 	off := int64(i) * partialAdmitChunk
 	for attempt := 0; ; attempt++ {
 		if err := ops.populate(off, data); err != nil {
 			return err
-		}
-		if enforce && attempt == 0 {
-			ops.enforce()
 		}
 		err := ops.signal(off, 0, s3fsSignalVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
@@ -158,9 +154,9 @@ func (l *chunkLoad) run(ctx context.Context, ops chunkLoadOps, missIdx int) erro
 				for j := 0; j < cnt; j++ {
 					i := first + j
 					cb := b[int64(j)*partialAdmitChunk : int64(j)*partialAdmitChunk+l.chunkLen(i)]
-					// enforce the capacity once the miss chunk is in and once the
-					// last chunk is in, before their signals (still pending-protected).
-					perr := l.populateAndSignal(ops, i, cb, k+j == 0 || k+j == l.n-1)
+					// (the kmod runs its capacity pass at the end of each populate,
+					// before the signal: still pending-protected.)
+					perr := l.populateAndSignal(ops, i, cb)
 					if perr != nil {
 						l.setErr(perr)
 						cancel()
@@ -241,7 +237,6 @@ func serveChunkLoad(ctx context.Context, devPath string, s3c objstore.Backend,
 		signal: func(off int64, errCode int32, flags uint32) error {
 			return signalAdmitFlagsFn(devPath, ev.Ino, off, errCode, flags)
 		},
-		enforce: func() { enforceCapacityAfterPopulate(devPath) },
 	}
 	mine := newChunkLoad(fullSize)
 	ci := int(missChunkOffset / partialAdmitChunk)

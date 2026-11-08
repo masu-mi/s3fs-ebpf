@@ -17,11 +17,8 @@ import (
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
 	s3fsfpMapS3fsArena           = "s3fs_arena"
-	s3fsfpMapS3fsCounters        = "s3fs_counters"
-	s3fsfpMapS3fsInodeIndex      = "s3fs_inode_index"
 	s3fsfpProgS3fsArenaPrealloc  = "s3fs_arena_prealloc"
 	s3fsfpProgS3fsDeepWalkReject = "s3fs_deep_walk_reject"
-	s3fsfpProgS3fsFpGetattr      = "s3fs_fp_getattr"
 	s3fsfpProgS3fsTestShared     = "s3fs_test_shared"
 )
 
@@ -69,7 +66,6 @@ type s3fsfpSpecs struct {
 type s3fsfpProgramSpecs struct {
 	S3fsArenaPrealloc  *ebpf.ProgramSpec `ebpf:"s3fs_arena_prealloc"`
 	S3fsDeepWalkReject *ebpf.ProgramSpec `ebpf:"s3fs_deep_walk_reject"`
-	S3fsFpGetattr      *ebpf.ProgramSpec `ebpf:"s3fs_fp_getattr"`
 	S3fsTestShared     *ebpf.ProgramSpec `ebpf:"s3fs_test_shared"`
 }
 
@@ -77,9 +73,7 @@ type s3fsfpProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type s3fsfpMapSpecs struct {
-	S3fsArena      *ebpf.MapSpec `ebpf:"s3fs_arena"`
-	S3fsCounters   *ebpf.MapSpec `ebpf:"s3fs_counters"`
-	S3fsInodeIndex *ebpf.MapSpec `ebpf:"s3fs_inode_index"`
+	S3fsArena *ebpf.MapSpec `ebpf:"s3fs_arena"`
 }
 
 // s3fsfpVariableSpecs contains global variables before they are loaded into the kernel.
@@ -108,16 +102,12 @@ func (o *s3fsfpObjects) Close() error {
 //
 // It can be passed to loadS3fsfpObjects or ebpf.CollectionSpec.LoadAndAssign.
 type s3fsfpMaps struct {
-	S3fsArena      *ebpf.Map `ebpf:"s3fs_arena"`
-	S3fsCounters   *ebpf.Map `ebpf:"s3fs_counters"`
-	S3fsInodeIndex *ebpf.Map `ebpf:"s3fs_inode_index"`
+	S3fsArena *ebpf.Map `ebpf:"s3fs_arena"`
 }
 
 func (m *s3fsfpMaps) Close() error {
 	return _S3fsfpClose(
 		m.S3fsArena,
-		m.S3fsCounters,
-		m.S3fsInodeIndex,
 	)
 }
 
@@ -133,7 +123,6 @@ type s3fsfpVariables struct {
 type s3fsfpPrograms struct {
 	S3fsArenaPrealloc  *ebpf.Program `ebpf:"s3fs_arena_prealloc"`
 	S3fsDeepWalkReject *ebpf.Program `ebpf:"s3fs_deep_walk_reject"`
-	S3fsFpGetattr      *ebpf.Program `ebpf:"s3fs_fp_getattr"`
 	S3fsTestShared     *ebpf.Program `ebpf:"s3fs_test_shared"`
 }
 
@@ -141,7 +130,6 @@ func (p *s3fsfpPrograms) Close() error {
 	return _S3fsfpClose(
 		p.S3fsArenaPrealloc,
 		p.S3fsDeepWalkReject,
-		p.S3fsFpGetattr,
 		p.S3fsTestShared,
 	)
 }

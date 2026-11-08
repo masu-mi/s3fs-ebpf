@@ -63,6 +63,8 @@
 | ベクトル warm (ops/s、α=0 / 1.1) | 52.3k / 56.0k | 52.0k / 56.5k | 0.99× / 1.01× |
 | 64 jobs の 18 B read (IOPS) | 6.12M | 5.88M | 0.96× |
 
+**2026-11-07 追記 (§18.54、v2 再設計の後の再計測)**: 上の表は再設計の前の値。getattr の fentry・ringbuf・arena を外した後は、open+read+close が約 5〜7% 速く (pcache 3.1 → 2.9 µs、pcachedrop 4.3 → 4.1 µs)、64 jobs の read が `ebpf-pcache ÷ fuse-raw` で 0.92〜0.94 → 0.98〜1.00、小さいファイルの warm cat が 144 → 110 ms (pcache)。**cold の cat (10,000 個) は 6.8 → 8.3 秒と +22% 遅くなった** (S3 の仕事は同じ。daemon が ringbuf の event を読まなくなった副作用で、機構は未確認)。
+
 - 勝つのは open が繰り返される経路 (FUSE の往復がなくなる分)。ベクトル検索のように fd を保持して mmap や pread を繰り返す負荷では差がない。OLTP の差 (2.4〜2.5×) は fuse-diskcache の read が毎回 FUSE を通ることによる可能性があるが、切り分けていない。
 - 全体 (fuse-cache 対 ebpf-pcache) の warm OLTP / ベクトルは ±3% で、D1 のとおり差がつかない。
 - 新規ファイルの durable write は、計測中に fsync が PUT の完了前に返る不具合を見つけて直した (§18.48)。100 MiB の差は 0.97〜1.20× で、以前の「1.37× 速い」は取り下げる。

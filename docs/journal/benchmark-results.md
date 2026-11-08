@@ -2524,6 +2524,70 @@ Phase 3c (`v2-phase3c-resident`、3a3a538) は容量パスの候補を `sb->s_in
 | 10,000 | 51–52 µs | 1.366–1.372 ms | 47–52 µs |
 | 30,000 | 49 µs | 4.04–4.10 ms | 47–48 µs |
 
-cold inode 数への依存は消え、3b と同じ水準に戻った (`evict` も 29–31 µs で、3b の 27–29 µs と同程度)。dmesg に BUG / Oops / WARNING なし、audit の `resident index != sb walk` も出ていない。走査の間 `s_inode_list_lock` を握ることもなくなった (候補の収集が取るのは `s3fs_resident_lock` だけ)。**キャッシュ済みの fd が多いとき** (索引の長さが効く側) の計測はしていない。
+cold inode 数への依存は消え、3b と同じ水準に戻った (`evict` も 29–31 µs で、3b の 27–29 µs と同程度)。dmesg に BUG / Oops / WARNING なし。走査の間 `s_inode_list_lock` を握ることもなくなった (候補の収集が取るのは `s3fs_resident_lock` だけ)。**キャッシュ済みの fd が多いとき** (索引の長さが効く側) の計測はしていない。
 
 生データ: `docs/journal/data/capacity-pass-20261106/`。
+
+### 18.54 v2 再設計の性能のゲート: stack の前 (`03bb636`) と #57 の先端 (`a33f10f`) (2026-11-07)
+
+v2 再設計 (#47〜#57。設計は `docs/design/redesign-v2-simplify.md`) の前後で、A〜F を測り直した。**同じセッションで交互に測る** (基準 → 新 → 新 → 基準) ことで、ホストの揺れを見た。基準は stack の前の master (`03bb636`)、新は #57 のブランチ (`a33f10f`。#55 / #56 を含む。#55 / #56 は測定中にマージされた)。
+
+**条件**: `6.12.0-061200-generic` (lockdep なし)、6 CPU、ローカル MinIO、`bench-pcache-remeasure.sh` (A B C D E、`BACKENDS="fuse-cache ebpf-nocache ebpf-pcachedrop ebpf-pcache"`、`RUNS_W=5 RUNS_COLD=5 E_REPS=3`、microbench 5000 iters) と `bench-read-64jobs.sh` (F、5 reps)。生データ: `docs/journal/data/v2-gate-20261107/` (F は fio の JSON ではなく IOPS の表 `f64-iops.tsv`)。fuse-cache は対照 (s3fs-fuse は触っていないので、動いたら環境)。
+
+**測定中に見つけたバグ (修正済み)**: 新側の最初の run は、`ebpf-nocache` の A が `read: input/output error` で止まった。upcall の待機 (`wait_for_completion_interruptible_timeout`) がシグナルで中断されると、`read_folio` の分岐のどれにも当たらず、cold の fallback fill が chunk を見つけられずに -EIO を返していた。Go の runtime は goroutine の preemption に SIGURG を数 ms ごとに送るので、`dev microbench` で 100 回前後の read で必ず出る。Phase 3b までは nocache の `.open` が chunk を残していて fallback が拾えたため見えず、3c (#55) で `.open` が chunk を解放して顕在化した。待機を killable にして直した (`a33f10f`)。回帰テスト `test-nocache-signal` は、修正前の master で warmup #91 に EIO で落ち、修正後は通る。二分探索: `3d3bd2a` (3b) は 3/3 通り、`3a3a538` (3c)・`3cc66c6`・`ea248dc` (master) は 3/3 EIO。通常の cold read が同じ経路でシグナルに中断された場合も同じ失敗になりうる (修正前の挙動からの推測で、nocache 以外では再現を確かめていない)。
+
+**値** (中央値。「新 / 基準」が 1 未満なら新が速い)
+
+A (open+read+close の p50、5000 iters)
+
+| 構成 | 基準 (2 run) | 新 (3 run) | 新 / 基準 |
+|---|---:|---:|---:|
+| ebpf-pcache | 3.131 / 3.104 µs | 2.918 / 2.970 / 2.722 µs | 約 0.93 |
+| ebpf-pcachedrop | 4.322 / 4.376 µs | 4.136 / 4.149 / 4.097 µs | 約 0.95 |
+| ebpf-nocache | 543.6 µs | 505.5 µs | 0.93 |
+| fuse-cache (対照) | 526.6 / 519.2 µs | 504.5 / 526.1 / 525.4 µs | 約 1.0 |
+
+F (64 jobs、psync、bs=1、5 s。中央値の IOPS の `ebpf-pcache ÷ fuse-raw`)
+
+| run | 比 |
+|---|---:|
+| 基準 r1 / r2 | 0.923 / 0.941 |
+| master (`ea248dc`、3d。基準の取り違えで測った) | 0.976 |
+| 新 r2 / r3 / r4 | 0.976 / 0.982 / 0.999 |
+
+B (新規ファイルの durable write、fsync の中央値。`fsync-returned-early` は全行 0/5)
+
+| サイズ | ebpf-pcache 基準 → 新 | ebpf-pcachedrop 基準 → 新 | fuse-cache (対照) 基準 → 新 |
+|---|---:|---:|---:|
+| 1 MiB | 14.8 → 13.6 ms | 15.7 → 13.4 ms | 21.8 → 20.6 ms |
+| 10 MiB | 53.0 → 50.3 ms | 55.5 → 50.6 ms | 75.4 → 71.9 ms |
+| 100 MiB | 247.1 → 260.0 ms | 254.3 → 243.9 ms | 363.8 → 358.4 ms |
+
+C (既存オブジェクトの途中に 4 KiB + fsync、fsync の中央値): ebpf-pcache は 1 MiB 18.6 → 17.6 ms、10 MiB 70.5 → 63.7 ms、100 MiB 167.9 → 171.7 ms (±10% 以内)。**fuse-cache の対照が大きく動いた** (1 MiB 21.5 → 39.7 ms、10 MiB 48.1 → 166.9 ms)。s3fs-fuse は触っていないので、環境の揺れか s3fs-fuse の挙動で、**未切り分け**。ebpf の列は影響を受けていない。
+
+D (cold read、中央値): 10 MiB ebpf-pcache 21.6 → 20.2 ms、100 MiB 100.9 → 93.2 ms (どちらも fuse-cache と同じ水準)。**300 MiB は不安定で結論を書かない** (fuse-cache の対照が 528 → 2418 ms に動いた。ebpf-pcache は 472 → 766 ms)。
+
+E (小さいファイル 10,000 個、4 KiB、中央値 ms)
+
+| 項目 | ebpf-pcache 基準 → 新 | fuse-cache (対照) 基準 → 新 |
+|---|---:|---:|
+| ls-cold | 70.5 → 67.5 | 3414 → 3427 |
+| **cat-cold** | **6808 → 8277 (+22%)** | 21534 → 21419 |
+| ls-warm | 25.1 → 23.2 | 1445 → 1438 |
+| cat-warm | 143.7 → 109.8 | 6462 → 6410 |
+
+ebpf-nocache の cat-cold も 6686 → 8354 ms (+25%)、ebpf-pcachedrop は 7058 → 8486 ms (+20%)。対照は動いていないので、環境ではなく**コード変更の影響**。
+
+**E の cat-cold の +22% の切り分け**
+- 同じ仕事か: `db42b4e` と `684cd5d` で、cat-cold の間の MinIO のリクエストは HEAD 10,000 / GET 10,000、upcall も 10,000 で同じ (LIST の 11 と 44 は定期 sync の回数)。S3 に対する仕事は同じで、1 回の miss の daemon の handler の平均が 約 600 µs から 約 800 µs に増えている。
+- 二分探索 (`ebpf-pcache` の E、n=3): `03bb636` 6.90 / 6.88 s、`4b1e357` 6.94、`684cd5d` 6.93、**`db42b4e` 9.08**、`9e0022f` 8.96、`711f8fa` 8.88、`3d3bd2a` 9.00、`3a3a538` 8.83、`ea248dc` 8.95。境目は `db42b4e` (BPF の ringbuf と daemon の `ino=1` の warm の削除)。
+- 変種: `684cd5d` に「ringbuf を読む goroutine だけを外す」変更を入れる (BPF object はそのまま) と、cat-cold 9.05 s (handler 826 µs) で `db42b4e` と同じになる。つまり、**daemon が ringbuf の event を読まなくなったこと**が効いている。旧版は fentry が未知の ino ごとに event を投げ、daemon がそのたびに起こされていた。
+- 機構は**証明していない**。perf には `pv_native_safe_halt` (仮想環境のアイドル) が見え、daemon を起こし続けていたことが upcall の往復の wake-up を速くしていた (逆に言えば、今の遅さはアイドルからの復帰の遅延) という読みは自然だが、CPU を忙しくする対照 (3 CPU でスピナー) では新側は基準に近づかなかった (基準 6.97 → 8.62 s、新 8.61 → 9.55 s)。この環境 (6 CPU の仮想マシン) の値で、実機の idle では違いうる。
+- `drop_caches=3` と `tee` を入れない手動の手順では差が出ない (684cd5d 6.5 s、db42b4e 6.3 s)。E の手順 (daemon 起動の前後の `drop_caches=3`) の条件で出る。
+
+**まとめ**
+- 速くなった: A の pcache / pcachedrop の p50 (約 5〜7%)、F の `pcache ÷ fuse-raw` (0.92〜0.94 → 0.98〜1.00)、E の cat-warm (-24%)・ls-warm、B の小さいサイズ。getattr の fentry (全 FS の getattr のたびに走っていた) を外した分と考えている (**perf で確かめてはいない**)。
+- 変わらない (±10%): B / C の ebpf、D の 10・100 MiB。fsync の早期 return は 0。
+- **遅くなった: E の cat-cold (+20〜25%)**。10,000 個の小さいファイルの初回読みで、1 ファイルあたり約 200 µs。S3 の仕事は同じ。ringbuf の event を読まなくなった副作用で、機構は未確認。
+- 測っていない: 100 MiB の warm cat (旧 gate (b) の 14.7 ms。`bench-ab-pcache.sh` は今は存在しない)、`hook なし` ビルドとの `hook_ratio` (F の旧 gate の定義)、capacity モードでの cold read (#57 の「chunk ごとに容量パス」の分)、キャッシュ済みの fd が非常に多いときの容量パス。
+- 基準の取り違え: ドリフト確認の `base r3` は、二分探索のあとで worktree が `ea248dc` (master、3d) のまま残っていたため、`03bb636` ではなく `ea248dc` で測っている (A と F のみ。上の表では別行にした)。

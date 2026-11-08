@@ -118,6 +118,7 @@ static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
 	bool filled = false;
 	bool pinned = false;	/* U8: chunk pin held (per chunk) */
 	u32 pin_ci = 0;
+	int ret = -EIO;		/* returned when the folio is not filled */
 
 	/* A folio wholly past EOF holds zeros (filemap_read clips the copy at
 	 * i_size).  A truncate racing the read gets here; an upcall or the
@@ -209,10 +210,20 @@ retry:
 			}
 			err = miss_enqueue(inode->i_ino, mpos, mcount, mflags, fd);
 			if (err == 0) {
-				remaining = wait_for_completion_interruptible_timeout(
+				/* Killable, not interruptible: a plain signal (a Go
+				 * runtime sends SIGURG to preempt goroutines, every few
+				 * ms) must not cut the wait short.  An interrupted wait
+				 * (remaining < 0) used to fall through to the fallback
+				 * fill below, which finds no chunk in a cold read and
+				 * returned -EIO.  Only a fatal signal ends it now. */
+				remaining = wait_for_completion_killable_timeout(
 					&p->done, S3FS_UPCALL_WAIT_JIFFIES);
 				err = p->err;
 				pending_put(p);
+				if (remaining < 0) {
+					ret = -EINTR;	/* fatal signal: the task is going away */
+					goto done;
+				}
 				if (remaining > 0 && err == 0) {
 					upcall_retries++;
 					goto retry;
@@ -261,7 +272,7 @@ done:
 	if (filled)
 		folio_mark_uptodate(folio);
 	folio_unlock(folio);
-	return filled ? 0 : -EIO;
+	return filled ? 0 : ret;
 }
 
 /* splice / sendfile reach the page cache without .read_iter. */

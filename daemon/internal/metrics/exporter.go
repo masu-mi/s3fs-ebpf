@@ -20,13 +20,6 @@ import (
 //   - *gauge* values reflect a current-state snapshot (queue depth,
 //     bytes in use, table sizes). Written with Store(), no Add().
 type Counters struct {
-	// BPF-side fast path counters. Populated from the per-CPU map
-	// snapshot each sample tick — Store the absolute value rather
-	// than incrementing, since the map is authoritative.
-	FastPathHits   atomic.Uint64 // counter
-	SlowPathMisses atomic.Uint64 // counter
-	UnknownFS      atomic.Uint64 // counter
-
 	// Week 4 (a) C: on-demand read-miss upcall handled by the daemon.
 	// Bumped from admit_arena.go:handleReadMiss.
 	ReadMissUpcalls     atomic.Uint64 // counter
@@ -53,7 +46,6 @@ type Counters struct {
 	AdmitsCurrent atomic.Uint64 // gauge, len(admits) after last replace
 
 	// arena backing store.
-	ArenaCapacityBytes atomic.Uint64 // gauge, arena.Size() (constant per run)
 
 	// Layer 2/3 policy program (BPF fentry on s3fs_policy_on_admit).
 	// Sourced from the loaded .bpf.o's policy_stats map on every
@@ -74,8 +66,8 @@ type Counters struct {
 	PolicyPressureLenientTotal atomic.Uint64 // counter
 
 	// kmod-side .read_folio arena hits — the "true" cache hit count
-	// (as opposed to fentry-side FastPathHits which measures getattr
-	// hits on the BPF-side inode_index). Sourced from
+	// (the BPF getattr fentry that once counted fast/slow hits is gone,
+	// v2 Phase 3e). Sourced from
 	// S3FS_IOC_STATS[1]. Divide by (this + ReadMissUpcalls) for the
 	// real kmod cache hit ratio.
 	FolioHits atomic.Uint64 // counter
@@ -206,9 +198,6 @@ type metricDesc struct {
 func handle(w http.ResponseWriter, _ *http.Request) {
 	metrics := []metricDesc{
 		// BPF-side (fentry counters).
-		{"s3fs_ebpf_fast_path_hits_total", "Fast-path (fentry admit-hit) VFS getattr count.", "counter", Global.FastPathHits.Load()},
-		{"s3fs_ebpf_slow_path_misses_total", "Slow-path (fentry admit-miss) VFS getattr count.", "counter", Global.SlowPathMisses.Load()},
-		{"s3fs_ebpf_unknown_fs_total", "Non-s3fs_ebpf superblock touches (noise from other FS).", "counter", Global.UnknownFS.Load()},
 
 		// Path C read-miss upcalls.
 		{"s3fs_ebpf_read_miss_upcalls_total", "Read-miss upcalls received by daemon.", "counter", Global.ReadMissUpcalls.Load()},
@@ -233,7 +222,6 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 
 		// Admit table / arena.
 		{"s3fs_ebpf_admits_current", "Entries in the daemon-side admit snapshot.", "gauge", Global.AdmitsCurrent.Load()},
-		{"s3fs_ebpf_arena_capacity_bytes", "BPF arena mmap size (constant per run).", "gauge", Global.ArenaCapacityBytes.Load()},
 
 		// Layer 2/3 policy program hook counters.
 		{"s3fs_ebpf_policy_hook_invocations_total", "fentry invocations on s3fs_policy_on_admit (counted by the loaded policy BPF program).", "counter", Global.PolicyHookInvocations.Load()},

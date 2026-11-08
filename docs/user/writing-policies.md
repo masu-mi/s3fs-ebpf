@@ -129,8 +129,7 @@ sudo bin/s3fs-ebpf fastpath --s3 \
     --metrics-addr=:9600
 
 # 確認: prewarm ログに全 ino が "[prewarm] ino=... body=..." で出る
-# 確認: stat 後に fast_hits が上がる
-curl -s http://localhost:9600/metrics | grep s3fs_ebpf_fast_path_hits_total
+# (stat の fast_path_hits カウンタは v2 Phase 3e で削除した: getattr の fentry がなくなった)
 ```
 
 > **注**: `prewarm: true` (宣言なし) がデフォルト動作なので、
@@ -178,10 +177,10 @@ curl -s http://localhost:9600/metrics \
 
 # 確認3: models/weights.bin を cat → fast_hits が増える (arena hit)
 #        other/config.json  を cat → slow_misses → upcall → arena admit
-stat /mnt/s3demo/models/weights.bin   # Fast Path Hit
-stat /mnt/s3demo/other/config.json    # Slow Path Miss (first access)
+stat /mnt/s3demo/models/weights.bin
+stat /mnt/s3demo/other/config.json
 curl -s http://localhost:9600/metrics \
-    | grep -E 'fast_path_hits|slow_path_misses'
+    | grep -E 'read_miss_upcalls|folio_hits'   # 読みの hit / miss (fast_path_hits は削除した)
 ```
 
 ---
@@ -224,9 +223,9 @@ sudo bin/s3fs-ebpf fastpath --s3 \
 #   Tier 3 (.log / 大) → "content-skip (policy=false ...)" ログ
 grep "\[prewarm\]" /tmp/bench/fastpath.log | grep -E "body=|content-skip"
 
-# 確認: arena 使用量がどれだけ増えたか
+# 確認: キャッシュ (chunk 表) の使用量
 curl -s http://localhost:9600/metrics \
-    | grep -E 'arena_used_bytes|arena_capacity_bytes|admits_current'
+    | grep -E 'fd_buf_bytes|admits_current'
 ```
 
 ---
@@ -259,9 +258,8 @@ grep "content-skip" /tmp/bench/fastpath.log
 cat /mnt/s3demo/big.bin > /dev/null
 grep "pattern-aware full admit" /tmp/bench/fastpath.log
 
-# 確認3: stat は最初から Fast Path (metadata warm 済み)
+# 確認3: stat は kmod の entry 表で答える (getattr の fentry / metadata warm はなくなった)
 stat /mnt/s3demo/big.bin
-curl -s http://localhost:9600/metrics | grep fast_path_hits_total
 ```
 
 > **仕組み**: `prewarm=false` でも `prewarmEntry` の step 1 (metadata warm)

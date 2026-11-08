@@ -1,6 +1,6 @@
 # s3fs-ebpf
 
-Linux 6.12 LTS の eBPF 機能 (**`bpf_arena`**、**KFunc**、**struct_ops**) で S3 ファイルシステムを組めるかを試す **PoC** です。FUSE を経由せず、カーネルモジュールが Linux VFS に直接ファイルシステムを登録し、キャッシュ判定やポリシーを eBPF に任せます。本番利用は想定していません。
+Linux 6.12 LTS の eBPF 機能 (**`struct_ops`**、**KFunc**) で S3 ファイルシステムを組めるかを試す **PoC** です。(`bpf_arena` は最初の版でファイルの中身を置いていましたが、今は検証用のデモ `make test-arena` だけが使います。)FUSE を経由せず、カーネルモジュールが Linux VFS に直接ファイルシステムを登録し、キャッシュ判定やポリシーを eBPF に任せます。本番利用は想定していません。
 
 - 実装済み: read / write path、ポリシーの hot swap (CEL + built-in eBPF + user eBPF + KFunc の 4 層)、中身を kmod の chunk と page cache に置く pcache モード、既存オブジェクトの途中書き換え、victim 選択の BPF 化 (`pick_victim`)、open で S3 の存在を確認するモード (`open_check`)、flush / rename / delete を kmod が積んだ順に S3 へ反映する処理、rename・unlink した S3 由来の名前を隠す tombstone
 - 経緯と現状: [`docs/journal/history.md`](docs/journal/history.md)、残課題: [`docs/journal/backlog.md`](docs/journal/backlog.md)
@@ -13,7 +13,7 @@ Linux 6.12 LTS の eBPF 機能 (**`bpf_arena`**、**KFunc**、**struct_ops**) �
               ▼
   ┌──────────────────────────────────────────────┐
   │ kmod: VFS (s3fs_ebpf) + KFunc                │
-  │  eBPF: struct_ops policy vtable (+ fentry)   │
+  │  eBPF: struct_ops policy vtable              │
   │  kmod の chunk 表 / page cache にあれば即応答 │
   └──────────────┬──────────────────┬────────────┘
                  │ hit              │ miss
@@ -83,6 +83,8 @@ make unmount            # daemon 停止 + umount + rmmod
 **180× の行の読み方**: s3fs-fuse は open のたびに S3 へ HEAD を 1 回投げます (キャッシュありでも、1000 回で HEAD 1001)。既定の s3fs-ebpf は投げないので、180× は「open で S3 を確認しない設計の値」です。確認を揃える (`open_check=1`) と、時間のほぼ全部が HEAD 1 往復になり、差は約 1.2× に縮みます (§18.52)。キャッシュなし同士の差も、3.2× と書いていたものは HEAD の分を含み、揃えると約 1.7× です (§18.51)。確認の頻度を下げて速くする案 (TTL、更新通知) は [`docs/journal/backlog.md`](docs/journal/backlog.md) の AC-78〜81 にあります。
 
 open / `ls -l` / cat を何度も繰り返す小さいファイルの使い方で勝ち、大きいファイルの cold read と、`--partial-modify` の対象 (16 MiB) 未満の途中書き換えではまだ負けます。page cache のヒットで終わる warm の SQLite / ベクトル検索は fuse-cache と ±3% で差がつきません。新規ファイルの durable write は、fsync が PUT の完了前に返る不具合を直した後は 1 MiB / 10 MiB が 1.3〜1.5×、100 MiB は差がなくなりました。
+
+**v2 再設計後の再計測 (2026-11-07、§18.54)**: 再設計の前 (`03bb636`) と後 (#57 の先端) を同じセッションで交互に測りました。getattr の fentry・ringbuf・arena の経路を外した結果、**速くなったもの**は open+read+close の p50 (キャッシュあり 3.1 → 2.9 µs)、64 スレッドの並列 read (`ebpf-pcache ÷ fuse-raw` が 0.92〜0.94 から 0.98〜1.00)、小さいファイルの warm cat (143.7 → 109.8 ms) です。書き込み (新規・途中の書き換え) と cold read の 10・100 MiB は変わりません (±10%)。**遅くなったもの**は、小さいファイル 10,000 個の **cold cat** で、6.8 秒 → 8.3 秒 (+22%) です。S3 へのリクエスト (HEAD / GET) と upcall の数は同じで、1 回の miss が約 200 µs 遅くなっています。daemon が ringbuf の event を読まなくなった副作用で、機構は確かめていません (仮想環境のアイドルからの復帰が疑わしい)。上の表の「小さいファイル 10,000 個を cat (warm)」の s3fs-ebpf は 0.16 s、再計測では 0.11 s です。cold cat の s3fs-fuse との比 (21.5 s ÷ 8.3 s = 2.6×) は、この表にはまだ載せていません。
 
 表と測り方は [`docs/journal/benchmark-results.md`](docs/journal/benchmark-results.md) の §18.48 (6 構成 × 8 項目の測り直し) と §18.49 (page cache / kmod の chunk 表 / daemon の disk cache / S3 の層ごとのレイテンシ)、試験の概要と測っている側面は [`docs/dev-notes/bench-suite-overview.md`](docs/dev-notes/bench-suite-overview.md)、ベンチの実行方法は [`docs/user/getting-started.md`](docs/user/getting-started.md#ベンチマーク) です。キャッシュ policy ごとの hit rate は [`docs/journal/hit-rate-bench.md`](docs/journal/hit-rate-bench.md) と §18.48 (open のたびに page cache を捨てる構成では、policy なしの 27.8% に対して W-TinyLFU が 50.9%) にあります。
 

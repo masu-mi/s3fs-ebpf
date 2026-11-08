@@ -40,16 +40,7 @@ struct s3fs_stat {
 	__u32 gid;
 };
 
-/* Per-CPU counter slots (indices into s3fs_counters map). */
-enum s3fs_stat_slot {
-	S3FS_STAT_FAST_HITS             = 0,
-	S3FS_STAT_SLOW_MISSES           = 1,
-	S3FS_STAT_UNKNOWN_FS            = 2,
-	S3FS_STAT_SLOT_MAX,
-};
-
-/* Magic identifying an s3fs_ebpf super_block. Kept in sync with
- * kmod/vfs_ops.c so the BPF fentry hook can filter by it. */
+/* Magic identifying an s3fs_ebpf super_block. Set by the kmod's fill_super. */
 #define S3FS_EBPF_MAGIC 0x53334642UL  /* "S3FB" */
 
 /*

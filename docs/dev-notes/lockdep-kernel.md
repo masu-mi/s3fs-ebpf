@@ -129,6 +129,11 @@ scripts/boot-kernel.sh lockdep          # lockdep カーネルを既定にする
 
 通ったときも、見つかったときも、`docs/design/hit-signal-percpu-accumulation.md` §9 の lockdep の項と、`docs/journal/issue22-hit-accum-investigation.md` §8 を更新する。見つかったロック順の修正は `docs/kmod-pcache-invariants.md` の「ロック順」に反映する。
 
+## 実施の記録
+
+- **2026-11-07** (`6.12.0-s3fs-lockdep`、`v2-phase3e-cleanup` = 3c の admit hash 削除 + 3d の resident 索引 `s3fs_resident_lock` + 3e の「容量パスを `POPULATE_PAGES` の中へ」を含む): `make test-lockdep` PASS (kernel log の hit 0、`debug_locks=1`)、120 秒の `test-pcache-evict-race` PASS (`read_err=0` `retry_exh_delta=0` `evict_delta=9989` `lockdep=PASS`)、`KUNIT=1 scripts/test-lockdep.sh` PASS (KUnit 4 suite 58 件 fail 0、続く回帰も PASS)。新しいロック順 `policy_evict_lock → fd->lock → s3fs_resident_lock` に報告はなかった。
+- `KUNIT=1 scripts/test-lockdep.sh` は、この日まで最後まで動いたことがなかった: `KUNIT=1` を環境に入れたまま `make kmod-clean` を呼ぶと、`kmod/Kbuild` の `$(error KUNIT=1 needs a kernel built with CONFIG_KUNIT)` が clean でも評価されて make が 2 で終わり、`set -e` でスクリプトが黙って終了していた。clean と元のビルドは `KUNIT=` を外して呼ぶように直した。
+
 ## 関連
 
 - `scripts/setup-kernel-lockdep.sh`、`scripts/test-lockdep.sh`、`scripts/test-pcache-evict-race.sh` (lockdep の判定をこのテストも持つ)

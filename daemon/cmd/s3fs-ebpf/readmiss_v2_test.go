@@ -51,7 +51,7 @@ func TestReadMissOfALocallyWrittenFile(t *testing.T) {
 	withEntry(t, fpebpf.Entry{Ino: 1})
 	fpebpf.RecordKey(7101, 0, "written.bin", "written.bin", 7, 1)
 	b := &getBackend{objects: map[string][]byte{"written.bin": []byte("payload")}}
-	handleReadMiss(context.Background(), "/dev/x", nil, b, readMissEvent{Ino: 7101})
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: 7101})
 
 	if len(u.signals) != 0 || u.verifySignals != 1 {
 		t.Errorf("plain signals %v, verify signals %d: want the verifying wake only", u.signals, u.verifySignals)
@@ -91,7 +91,7 @@ func TestReadMissPatternAwareAdmit(t *testing.T) {
 		ev.Ino = 7201
 		withEntry(t, fpebpf.Entry{Ino: 7201, Name: "big", S3Key: "big", Fallback: uint64(size)})
 		b := &rangeCounter{object: make([]byte, size)}
-		handleReadMiss(context.Background(), "/dev/x", nil, b, ev)
+		handleReadMiss(context.Background(), "/dev/x", b, ev)
 		return b
 	}
 	// fetched waits until `want` bytes were requested (or 2 s), then a little
@@ -145,7 +145,7 @@ func TestHandleFlushUpdatesTheMirrorSize(t *testing.T) {
 	k := &fakeFlushKmod{dirty: make([]byte, 5<<20)}
 	b := &putRecorder{}
 	before := metrics.Global.FlushBytes.Load()
-	handleFlushWith(context.Background(), k, "/dev/x", nil, b, flushEv(7301, "shrunk.bin", 5<<20))
+	handleFlushWith(context.Background(), k, "/dev/x", b, flushEv(7301, "shrunk.bin", 5<<20))
 
 	if got := fpebpf.LookupByIno(7301); got == nil || got.Fallback != 5<<20 {
 		t.Errorf("mirror size after the PUT = %+v, want %d", got, 5<<20)

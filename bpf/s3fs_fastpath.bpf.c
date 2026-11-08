@@ -1,24 +1,19 @@
 // SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 /*
- * s3fs-ebpf: Fast Path + Week 2 arena round-trip.
+ * s3fs-ebpf: bpf_arena + KFunc demos (not loaded by the production daemon).
  *
- * Programs:
- *   fentry/vfs_getattr_nosec  -- Fast Path observer: filters by
- *                                super_block::s_magic, looks the inode
- *                                up in s3fs_inode_index and bumps a
- *                                per-CPU hit or miss counter.
- *   syscall/s3fs_test_shared  -- BPF_PROG_TEST_RUN harness that proves
- *                                the daemon can populate a real
- *                                BPF_MAP_TYPE_ARENA and the program can
- *                                dereference it via __arena/
- *                                bpf_addr_space_cast.
+ * Programs (BPF_PROG_TEST_RUN harnesses, SEC("syscall")):
+ *   s3fs_test_shared       -- the daemon populates a real BPF_MAP_TYPE_ARENA
+ *                             and the program dereferences it via __arena /
+ *                             bpf_addr_space_cast, then calls a kmod KFunc.
+ *   s3fs_arena_prealloc    -- force-fault arena pages so user and kernel PTEs exist.
+ *   s3fs_deep_walk_reject  -- deliberately rejected by the verifier (the demo's point).
  *
- * Why the fentry hook exists: it doesn't (and can't) return the kstat.
- * That path lives inside kmod's inode_operations.getattr, which the
- * kernel module will grow in Week 3. Today it only feeds the hit/miss
- * counters that back the /metrics endpoint.  (It used to push miss events
- * to the daemon through a ringbuf; the daemon acted on ino=1 only and the
- * ringbuf was removed.)
+ * v2 Phase 3e: the fentry/vfs_getattr_nosec observer, s3fs_inode_index and
+ * s3fs_counters are gone.  The hook fired on every getattr of every filesystem
+ * on the host just to bump counters nobody used, and the arena it indexed no
+ * longer holds file content (docs/design/redesign-v2-simplify.md).  The production
+ * daemon loads only the policy struct_ops.
  */
 
 #include "vmlinux.h"
@@ -44,11 +39,6 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #define BPF_MAP_TYPE_ARENA 33
 #endif
 
-/* Ringbuf capacity for slow-path miss events. Must be a power of two. */
-
-/* Upper bound on the ino→offset index. Sized generously for the PoC. */
-#define S3FS_INDEX_MAX_ENTRIES 4096
-
 /*
  * s3fs_arena: multi-page bpf_arena shared with the daemon.
  *
@@ -64,22 +54,6 @@ struct {
 	__uint(map_flags, BPF_F_MMAPABLE);
 	__uint(max_entries, 32768);
 } s3fs_arena SEC(".maps");
-
-/* ino -> arena byte offset. Populated by daemon. */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, __u64);
-	__type(value, __u32);
-	__uint(max_entries, S3FS_INDEX_MAX_ENTRIES);
-} s3fs_inode_index SEC(".maps");
-
-/* Per-CPU counters indexed by enum s3fs_stat_slot. */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, __u32);
-	__type(value, __u64);
-	__uint(max_entries, S3FS_STAT_SLOT_MAX);
-} s3fs_counters SEC(".maps");
 
 /*
  * KFunc provided by kmod/tree_traversal.c, registered against
@@ -111,73 +85,6 @@ extern void *bpf_arena_alloc_pages(void *map, void *addr, __u32 page_cnt,
 static __always_inline void s3fs_arena_pin(void)
 {
 	asm volatile("" :: "r"(&s3fs_arena));
-}
-
-static __always_inline void bump_counter(__u32 slot)
-{
-	__u64 *c = bpf_map_lookup_elem(&s3fs_counters, &slot);
-	/* AC-47: s3fs_counters is PERCPU_ARRAY, so no other CPU touches this
-	 * value and a locked add buys nothing (~1% of the 64-job read bench:
-	 * the hook bumps a counter on every read).  A plain increment can only
-	 * lose an update if the program is preempted on this CPU between its
-	 * load and store; these are advisory statistics. */
-	if (c)
-		(*c)++;
-}
-
-/*
- * Attach point notes:
- *   vfs_statx_path -> vfs_getattr_nosec is the modern stat/newfstatat
- *   syscall path. vfs_getattr is only called from a small number of
- *   legacy or capability-gated paths (vfs_fstat, some internal callers)
- *   and misses the common case. Hooking vfs_getattr_nosec catches every
- *   getattr against every mounted FS — verified with:
- *     echo 'vfs_getattr*' > /sys/kernel/tracing/set_ftrace_filter
- *   showing vfs_getattr_nosec fires for `stat /mnt/...` while
- *   vfs_getattr does not.
- */
-SEC("fentry/vfs_getattr_nosec")
-int BPF_PROG(s3fs_fp_getattr, const struct path *path, struct kstat *stat,
-	     __u32 request_mask, unsigned int query_flags)
-{
-	struct dentry *dentry;
-	struct super_block *sb;
-	struct inode *inode;
-	unsigned long magic;
-	__u64 ino;
-	__u32 *offp;
-
-	if (!path)
-		return 0;
-
-	dentry = BPF_CORE_READ(path, dentry);
-	if (!dentry)
-		return 0;
-	sb = BPF_CORE_READ(dentry, d_sb);
-	if (!sb)
-		return 0;
-
-	magic = BPF_CORE_READ(sb, s_magic);
-	if (magic != S3FS_EBPF_MAGIC) {
-		/* Not our filesystem — ignore. Bumped for smoke-visibility so
-		 * we can confirm the hook itself is firing on any getattr. */
-		bump_counter(S3FS_STAT_UNKNOWN_FS);
-		return 0;
-	}
-
-	inode = BPF_CORE_READ(dentry, d_inode);
-	if (!inode)
-		return 0;
-	ino = BPF_CORE_READ(inode, i_ino);
-
-	offp = bpf_map_lookup_elem(&s3fs_inode_index, &ino);
-	if (offp) {
-		bump_counter(S3FS_STAT_FAST_HITS);
-		return 0;
-	}
-
-	bump_counter(S3FS_STAT_SLOW_MISSES);
-	return 0;
 }
 
 /*

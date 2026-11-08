@@ -403,3 +403,40 @@ void s3fs_ebpf_admit_shutdown(void)
 	s3fs_ebpf_upcall_shutdown();
 }
 
+/*
+ * The pass that runs at the end of a successful POPULATE_PAGES (AC-45 C2; before
+ * v2 Phase 3e the daemon asked for it with an extra EVAL ioctl after the last
+ * populate of a miss).  Only in capacity mode (capacity_bytes > 0): without it the
+ * pass is the policy's own business (EVAL / sync).  The chunk just populated is
+ * either pinned by the reader that waits for it (pending is created after the pin)
+ * or has no waiter; the daemon signals the miss only after this returns, so the
+ * order populate -> pass -> signal is unchanged.
+ *
+ * Coalesced: one pass runs at a time, and callers that arrive while it runs just
+ * ask for one more round (their chunk was populated before that round starts to
+ * collect, or the running pass sees it), instead of queueing on
+ * s3fs_policy_evict_lock.  No lock is held on entry.
+ */
+static atomic_t s3fs_pass_running = ATOMIC_INIT(0);
+static atomic_t s3fs_pass_again = ATOMIC_INIT(0);
+
+static void s3fs_ebpf_capacity_pass_after_populate(void)
+{
+	if (!READ_ONCE(s3fs_capacity_bytes))
+		return;
+	if (atomic_xchg(&s3fs_pass_running, 1)) {
+		atomic_set(&s3fs_pass_again, 1);
+		return;
+	}
+	for (;;) {
+		atomic_set(&s3fs_pass_again, 0);
+		(void)s3fs_ebpf_capacity_pass();
+		if (!atomic_read(&s3fs_pass_again)) {
+			atomic_set(&s3fs_pass_running, 0);
+			/* a caller may have asked between the read and the clear */
+			if (!atomic_read(&s3fs_pass_again) ||
+			    atomic_xchg(&s3fs_pass_running, 1))
+				return;
+		}
+	}
+}
