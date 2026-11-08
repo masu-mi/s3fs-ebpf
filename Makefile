@@ -127,7 +127,7 @@ kmod-clean: ## Clean kernel module build artefacts
 # CLANG / BPFTOOL must be passed explicitly: variables computed in this
 # Makefile are not exported, so the sub-make would fall back to plain
 # `clang` (18 on noble) and fail on __arena casts.
-bpf: ## Build eBPF program -> bpf/s3fs_fastpath.bpf.o
+bpf: ## Build eBPF program -> bpf/demo/arena_demo.bpf.o
 	@$(call preflight,--only bpf)
 	@$(MAKE) --no-print-directory $(BPF_DIR)/vmlinux.h
 	$(MAKE) -C $(BPF_DIR) CLANG=$(CLANG) BPFTOOL=$(BPFTOOL)
@@ -166,7 +166,7 @@ daemon-gen: | $(BIN_DIR) ## Run bpf2go codegen then build daemon (needs network)
 
 daemon-clean: ## Clean Go build cache and bin/s3fs-ebpf
 	# Note: intentionally NOT running `go clean ./...` — it removes *.o
-	# including bpf2go's embedded s3fsfp_bpf{el,eb}.o (checked in). Use
+	# including bpf2go's embedded arenademo_bpf{el,eb}.o (checked in). Use
 	# `make daemon-gen` to regenerate those from bpf/**.
 	rm -f $(BIN_DIR)/s3fs-ebpf
 

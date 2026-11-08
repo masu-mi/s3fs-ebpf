@@ -1,4 +1,4 @@
-package ebpf
+package arenademo
 
 import (
 	"errors"
@@ -18,7 +18,7 @@ type rejectDemoObjs struct {
 }
 
 func (o *rejectDemoObjs) Close() error {
-	return _S3fsfpClose(o.S3fsDeepWalkReject, o.S3fsArena)
+	return _ArenademoClose(o.S3fsDeepWalkReject, o.S3fsArena)
 }
 
 // LoadRejectDemo instantiates ONLY the intentionally verifier-rejected
@@ -36,7 +36,7 @@ func LoadRejectDemo() (*ebpf.VerifierError, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("remove memlock: %w", err)
 	}
-	spec, err := loadS3fsfp()
+	spec, err := loadArenademo()
 	if err != nil {
 		return nil, fmt.Errorf("parse bpf spec: %w", err)
 	}

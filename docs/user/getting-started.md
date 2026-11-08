@@ -66,7 +66,7 @@ make daemon-gen # cilium/ebpf を fetch して bpf2go 実行 → build（Week 1+
 | 成果物 | パス |
 |---|---|
 | カーネルモジュール | `kmod/s3fs_kfunc.ko` |
-| eBPF オブジェクト | `bpf/s3fs_fastpath.bpf.o` |
+| eBPF オブジェクト | `bpf/demo/arena_demo.bpf.o` |
 | policy (struct_ops、Layer 2) | `bpf/policy_*_ops.bpf.o` (`--policy-bpf=builtin:<名前>` で指定。例 `builtin:policy_sieve_pick_ops`) |
 | Go デーモン | `bin/s3fs-ebpf` |
 

@@ -1,6 +1,7 @@
-// Package ebpf wraps the bpf2go-generated objects (s3fsfp_*) with a
-// small Load/Run/Close lifecycle for the daemon.
-package ebpf
+// Package arenademo wraps the bpf2go-generated objects (arenademo_*) with a
+// small Load/Run/Close lifecycle for the bpf_arena + KFunc demos
+// (dev test-arena, verifier demo). Not part of the production data path.
+package arenademo
 
 import (
 	"errors"
@@ -25,7 +26,7 @@ type TestArgs struct {
 
 // runtimeObjs is the subset of bpf2go objects loaded at daemon startup.
 //
-// The generated s3fsfpObjects also includes S3fsDeepWalkReject — a
+// The generated arenademoObjects also includes S3fsDeepWalkReject — a
 // deliberately verifier-rejected program used only by the verifier-demo
 // CLI. Referencing it here would drag it into every LoadAndAssign and
 // break runtime paths, so we mirror only the healthy programs and let
@@ -40,7 +41,7 @@ type runtimeObjs struct {
 }
 
 func (o *runtimeObjs) Close() error {
-	return _S3fsfpClose(
+	return _ArenademoClose(
 		o.S3fsTestShared, o.S3fsArenaPrealloc,
 		o.S3fsArena,
 	)
@@ -64,7 +65,7 @@ func Load() (*Programs, error) {
 		return nil, fmt.Errorf("remove memlock: %w", err)
 	}
 
-	spec, err := loadS3fsfp()
+	spec, err := loadArenademo()
 	if err != nil {
 		return nil, fmt.Errorf("parse bpf spec: %w", err)
 	}

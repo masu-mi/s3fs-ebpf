@@ -21,8 +21,8 @@ bpf/vmlinux.h
 # so `go build ./...` works without clang / bpf2go. Regenerate with
 # `make daemon-gen`. The .o embed files are also tracked because
 # //go:embed refers to them (explicitly un-ignore since **/*.o above).
-!daemon/internal/ebpf/*_bpfel.o
-!daemon/internal/ebpf/*_bpfeb.o
+!daemon/internal/arenademo/*_bpfel.o
+!daemon/internal/arenademo/*_bpfeb.o
 
 # Bench results
 bench/results/

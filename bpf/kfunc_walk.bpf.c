@@ -2,7 +2,7 @@
 //
 // kfunc_walk — the "after" half of `s3fs-ebpf dev verifier-demo`.
 //
-// s3fs_fastpath.bpf.c:s3fs_deep_walk_reject writes an arena
+// demo/arena_demo.bpf.c:s3fs_deep_walk_reject writes an arena
 // linked-list walk as a plain eBPF loop and the verifier refuses it
 // (it cannot bound `n = n->next`). This program hands the identical
 // walk to the kmod KFunc s3fs_kfunc_arena_list_walk
@@ -11,7 +11,7 @@
 // ordinary kernel C with its own safety (copy_from_user) and
 // termination (max_nodes, signal check) guarantees.
 //
-// Kept out of s3fs_fastpath.bpf.c so it does not depend on the
+// Kept out of demo/arena_demo.bpf.c so it does not depend on the
 // embedded bpf2go object; the daemon loads bpf/kfunc_walk.bpf.o from
 // disk. Needs the kmod loaded (the __ksym resolves against its BTF).
 

@@ -7,7 +7,7 @@
  *         to prove the eBPF → KFunc call path independent of arena access.
  *
  * Verifier-demo counterpart: `s3fs_kfunc_arena_list_walk` is the same
- * arena linked-list walk that bpf/s3fs_fastpath.bpf.c's
+ * arena linked-list walk that bpf/demo/arena_demo.bpf.c's
  * s3fs_deep_walk_reject tries (and fails) to express in pure eBPF.
  */
 

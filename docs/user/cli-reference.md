@@ -62,7 +62,7 @@ Targets:
     build                         Alias of 'all'
     kmod                          Build kernel module -> kmod/s3fs_kfunc.ko
     kmod-clean                    Clean kernel module build artefacts
-    bpf                           Build eBPF program -> bpf/s3fs_fastpath.bpf.o
+    bpf                           Build eBPF program -> bpf/demo/arena_demo.bpf.o
     bpf-clean                     Clean eBPF build artefacts
     vmlinux                       Regenerate bpf/vmlinux.h from running kernel BTF
     vmlinux-clean                 Drop bpf/vmlinux.h
