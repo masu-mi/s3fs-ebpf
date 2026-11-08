@@ -1,0 +1,13 @@
+RESULT round=1 arm=none jobs=1 iops=1803k
+RESULT round=1 arm=none jobs=64 iops=6123k
+RESULT round=1 arm=observe_ops jobs=1 iops=1801k
+RESULT round=1 arm=observe_ops jobs=64 iops=6134k
+RESULT round=2 arm=none jobs=1 iops=1714k
+RESULT round=2 arm=none jobs=64 iops=6096k
+RESULT round=2 arm=observe_ops jobs=1 iops=1727k
+RESULT round=2 arm=observe_ops jobs=64 iops=6059k
+RESULT round=3 arm=none jobs=1 iops=1761k
+RESULT round=3 arm=none jobs=64 iops=6112k
+RESULT round=3 arm=observe_ops jobs=1 iops=1805k
+RESULT round=3 arm=observe_ops jobs=64 iops=6120k
+DONE

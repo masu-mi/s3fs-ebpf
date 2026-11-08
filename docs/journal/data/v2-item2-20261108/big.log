@@ -1,0 +1,18 @@
+warm100 fuse-cache median_ms=13.704162
+warm100 ebpf-pcache median_ms=11.661357
+cold100 cap=0 run=1 ms=152
+cold100 cap=0 run=2 ms=151
+cold100 cap=0 run=3 ms=152
+cold100 cap=0 run=4 ms=149
+cold100 cap=0 run=5 ms=156
+cold100 cap=1073741824 run=1 ms=140
+cold100 cap=1073741824 run=2 ms=151
+cold100 cap=1073741824 run=3 ms=140
+cold100 cap=1073741824 run=4 ms=144
+cold100 cap=1073741824 run=5 ms=146
+cold100 cap=33554432 run=1 ms=252
+cold100 cap=33554432 run=2 ms=252
+cold100 cap=33554432 run=3 ms=247
+cold100 cap=33554432 run=4 ms=242
+cold100 cap=33554432 run=5 ms=252
+DONE

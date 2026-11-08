@@ -117,6 +117,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`journal/data/policy-latency-netem-20261104/`](journal/data/policy-latency-netem-20261104/) | `benchmark-results.md` §18.50 の生データ: policy 5 種 × silo への netem 遅延 10〜15 ms の有無 × 3 seed |
 | [`journal/data/capacity-pass-20261106/`](journal/data/capacity-pass-20261106/) | `benchmark-results.md` §18.53 の生データ: 容量パス 1 回の所要時間 (3b と 3c、cold inode 数 0〜30,000) と、走査の変種 |
 | [`journal/data/v2-gate-20261107/`](journal/data/v2-gate-20261107/) | `benchmark-results.md` §18.54 の生データ: v2 再設計の前 (`03bb636`) と #57 の先端の A〜F、E の cat-cold の切り分け (`diag/`) |
+| [`journal/data/v2-item2-20261108/`](journal/data/v2-item2-20261108/) | `benchmark-results.md` §18.55 の生データ: 100 MiB の warm cat、capacity モードの cold read、capacity pass とキャッシュ済み数、policy の有無 (AC-89 / AC-90) |
 | [`journal/data/open-check-remeasure-20261104/`](journal/data/open-check-remeasure-20261104/) | `benchmark-results.md` §18.51 の生データ: open の存在確認 (`open_check`) 前後の A、silo への GET / HEAD 数 |
 | [`journal/data/open-check-cached-20261104/`](journal/data/open-check-cached-20261104/) | `benchmark-results.md` §18.52 の生データ: キャッシュあり同士 (fuse-cache / fuse-diskcache 対 ebpf-pcache / pcachedrop) の A を `open_check` 0/1 で |
 | [`design/file-lifecycle-state-machine.md`](design/file-lifecycle-state-machine.md) | ファイルの状態遷移図 (kmod / daemon / S3) と、TLA+ (`specs/tla/FileLifecycle.tla`) の検証結果 (反例 3 件、うち 1 件を実機で再現) |
