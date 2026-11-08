@@ -33,7 +33,7 @@ USER_ARGS=(--user "$(id -u):$(id -g)")
 
 if [ ! -f "$JAR" ]; then
 	mkdir -p "$CACHE"
-	curl -fsSL -o "$JAR.part" "https://github.com/tlaplus/tlaplus/releases/download/$TLA_VERSION/tla2tools.jar"
+	curl -fsSL --retry 4 --retry-delay 3 --retry-all-errors -o "$JAR.part" "https://github.com/tlaplus/tlaplus/releases/download/$TLA_VERSION/tla2tools.jar"
 	got=$(sha256sum "$JAR.part" | awk '{print $1}')
 	[ "$got" = "$TLA_SHA256" ] || { rm -f "$JAR.part"; echo "tlc.sh: tla2tools.jar sha256 $got != pinned $TLA_SHA256" >&2; exit 2; }
 	mv "$JAR.part" "$JAR"
