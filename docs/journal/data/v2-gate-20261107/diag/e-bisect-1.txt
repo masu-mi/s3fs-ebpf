@@ -1,0 +1,6 @@
+03bb636 03:33:31 E ebpf-pcache cat-cold n=3 median=6898.5 q1=6864.7 q3=6898.5 min=6864.7 max=6913.6
+3d3bd2a 03:34:37 E ebpf-pcache cat-cold n=3 median=8995.7 q1=8751.0 q3=8995.7 min=8751.0 max=9068.7
+3a3a538 03:35:40 E ebpf-pcache cat-cold n=3 median=8833.9 q1=8528.7 q3=8833.9 min=8528.7 max=8888.9
+ea248dc 03:36:46 E ebpf-pcache cat-cold n=3 median=8947.4 q1=8450.7 q3=8947.4 min=8450.7 max=9022.1
+03bb636 03:37:48 E ebpf-pcache cat-cold n=3 median=6877.4 q1=6705.5 q3=6877.4 min=6705.5 max=6943.1
+DONE

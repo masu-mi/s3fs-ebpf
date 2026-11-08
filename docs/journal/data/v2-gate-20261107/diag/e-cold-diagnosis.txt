@@ -1,0 +1,15 @@
+# E cat-cold (10,000 x 4 KiB) の切り分け (2026-11-07、ebpf-pcache、--sample-every=200ms)
+# bench-pcache-remeasure.sh の E と同じ手順 (drop_caches=3 を daemon 起動の前後、ls -l、find|sort|xargs cat|tee) で測った値。
+commit=684cd5d flags=[]                 ls-cold=0.05s cat-cold=6.86s upcalls=10000 handler_avg_us=602
+commit=684cd5d flags=[--softcap=20000]  ls-cold=0.05s cat-cold=6.96s upcalls=10000 handler_avg_us=610
+commit=db42b4e flags=[]                 ls-cold=0.04s cat-cold=8.89s upcalls=10000 handler_avg_us=812
+commit=db42b4e flags=[--softcap=20000]  ls-cold=0.04s cat-cold=8.68s upcalls=10000 handler_avg_us=792
+# 684cd5d に「ringbuf を読む goroutine だけを外す」変更を入れた変種 (BPF object はそのまま、2 回):
+variant=684cd5d+no-ringbuf-reader        cat-cold=9.05s upcalls=10000 handler_avg_us=826
+variant=684cd5d+no-ringbuf-reader        cat-cold=9.05s upcalls=10000 handler_avg_us=826
+# drop_caches と tee を入れない手動の手順 (差が出ない):
+commit=684cd5d cat-cold=6.57s / 6.47s   handler_avg_us=579 / 570
+commit=db42b4e cat-cold=6.36s / 6.21s   handler_avg_us=564 / 551
+# MinIO の API 別リクエスト数 (Prometheus の minio_s3_requests_total、cat-cold の前後の差):
+commit 684cd5d cat-cold 6.31s  {'headobject': 10000, 'listobjectsv2': 44, 'getobject': 10000}
+commit db42b4e cat-cold 8.76s  {'headobject': 10000, 'listobjectsv2': 11, 'getobject': 10000}

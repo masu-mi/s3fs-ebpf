@@ -1,0 +1,46 @@
+15:04:14 chain start
+15:04:14 loadavg 0.27 0.20 0.11
+15:04:14 START base r1 (full) 03bb636
+15:11:18   main rc=0
+15:14:37   F64 rc=0
+  dmesg hits=0
+15:14:37 END base r1
+15:14:57 loadavg 31.54 23.30 10.32
+15:14:57 START new r1 (full) 2f76e03
+15:15:02   main rc=1
+15:18:19   F64 rc=0
+  dmesg hits=0
+15:18:19 END new r1
+15:18:39 loadavg 34.61 33.61 17.54
+15:18:39 START new r2 (quick) 2f76e03
+15:18:46   main(A) rc=0
+15:22:03   F64 rc=0
+  dmesg hits=0
+15:22:03 END new r2
+15:22:23 loadavg 34.17 38.34 23.22
+15:22:23 START base r2 (quick) 03bb636
+15:22:30   main(A) rc=0
+15:25:48   F64 rc=0
+  dmesg hits=0
+15:25:48 END base r2
+15:26:08 chain end
+00:53:15 chain start
+00:53:15 loadavg 0.05 0.12 0.17
+00:53:15 START new r3 (full) a33f10f
+01:00:08   main rc=0
+01:03:26   F64 rc=0
+  dmesg hits=0
+01:03:26 END new r3
+01:03:46 loadavg 32.99 22.68 9.90
+01:03:46 START base r3 (quick) ea248dc
+01:03:53   main(A) rc=0
+01:07:11   F64 rc=0
+  dmesg hits=0
+01:07:11 END base r3
+01:07:31 loadavg 33.17 32.30 16.82
+01:07:31 START new r4 (quick) a33f10f
+01:07:38   main(A) rc=0
+01:10:55   F64 rc=0
+  dmesg hits=0
+01:10:55 END new r4
+01:11:15 chain end

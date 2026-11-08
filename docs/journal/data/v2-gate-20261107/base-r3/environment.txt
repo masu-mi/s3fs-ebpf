@@ -1,0 +1,13 @@
+date_utc: 2026-11-08T01:03:46Z
+uname: Linux 6.12.0-061200-generic #202411220723 SMP PREEMPT_DYNAMIC Tue Nov 26 13:49:49 UTC 2024
+git: ea248dc71a0a18f65d157e040d873b367081c0d7
+cpus: 6  mem: 7940 MiB
+s3fs: Amazon Simple Storage Service File System V1.93 (commit:unknown) with GnuTLS(gcrypt)
+fuse-raw:       s3fs <bucket> (no use_cache, no kernel_cache)
+fuse-diskcache: s3fs -o use_cache=<dir> -o max_stat_cache_size=100000 (no kernel_cache)
+fuse-cache:     s3fs -o use_cache=<dir> -o kernel_cache -o max_stat_cache_size=100000
+ebpf-*:         fastpath --arena-metadata-only --policy-bpf=builtin:policy_observe_ops (+ --cache-dir except nocache)
+ebpf-nocache:   kmod nocache=1;  ebpf-pcachedrop: kmod pcache_drop=1;  ebpf-pcache: defaults
+open_check:     kmod open_check=0 (1 = open(2) HEADs the object; set BENCH_OPEN_CHECK=1)
+partial_modify: daemon default (on); partial_modify_min default
+steps=A backends=fuse-cache ebpf-pcachedrop ebpf-pcache runs_w=10 runs_cold=10 e_reps=5 micro_iters=5000 small_n=10000

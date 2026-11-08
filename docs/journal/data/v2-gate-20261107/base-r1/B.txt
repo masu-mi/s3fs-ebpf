@@ -1,0 +1,72 @@
+1 fuse-cache 21.1 36.8 0
+1 fuse-cache 21.8 37.4 0
+1 fuse-cache 22.8 38.9 0
+1 fuse-cache 21.1 38.2 0
+1 fuse-cache 22.1 39.4 0
+verify 1 fuse-cache PASS
+10 fuse-cache 75.0 90.9 0
+10 fuse-cache 78.6 94.2 0
+10 fuse-cache 74.3 89.9 0
+10 fuse-cache 75.4 90.8 0
+10 fuse-cache 75.8 91.5 0
+verify 10 fuse-cache PASS
+100 fuse-cache 369.1 384.7 0
+100 fuse-cache 363.8 380.0 0
+100 fuse-cache 351.5 368.0 0
+100 fuse-cache 355.3 371.5 0
+100 fuse-cache 374.5 390.3 0
+verify 100 fuse-cache PASS
+1 ebpf-nocache 14.6 32.2 0
+1 ebpf-nocache 17.1 37.9 0
+1 ebpf-nocache 18.3 35.8 0
+1 ebpf-nocache 14.6 30.2 0
+1 ebpf-nocache 14.3 29.7 0
+verify 1 ebpf-nocache PASS
+10 ebpf-nocache 57.4 72.6 0
+10 ebpf-nocache 52.2 67.9 0
+10 ebpf-nocache 55.8 71.3 0
+10 ebpf-nocache 56.4 72.4 0
+10 ebpf-nocache 56.6 72.7 0
+verify 10 ebpf-nocache PASS
+100 ebpf-nocache 280.2 296.0 0
+100 ebpf-nocache 268.1 283.6 0
+100 ebpf-nocache 241.3 257.3 0
+100 ebpf-nocache 265.5 281.5 0
+100 ebpf-nocache 271.0 287.0 0
+verify 100 ebpf-nocache PASS
+1 ebpf-pcachedrop 14.6 30.6 0
+1 ebpf-pcachedrop 15.7 33.1 0
+1 ebpf-pcachedrop 17.4 40.0 0
+1 ebpf-pcachedrop 16.0 32.8 0
+1 ebpf-pcachedrop 14.4 29.9 0
+verify 1 ebpf-pcachedrop PASS
+10 ebpf-pcachedrop 57.6 73.9 0
+10 ebpf-pcachedrop 52.3 68.0 0
+10 ebpf-pcachedrop 56.8 72.7 0
+10 ebpf-pcachedrop 55.5 71.1 0
+10 ebpf-pcachedrop 54.7 70.1 0
+verify 10 ebpf-pcachedrop PASS
+100 ebpf-pcachedrop 286.7 308.0 0
+100 ebpf-pcachedrop 242.9 259.0 0
+100 ebpf-pcachedrop 242.5 259.9 0
+100 ebpf-pcachedrop 254.3 270.3 0
+100 ebpf-pcachedrop 259.5 275.6 0
+verify 100 ebpf-pcachedrop PASS
+1 ebpf-pcache 14.8 31.1 0
+1 ebpf-pcache 14.6 29.8 0
+1 ebpf-pcache 14.3 29.4 0
+1 ebpf-pcache 15.5 32.0 0
+1 ebpf-pcache 16.2 37.1 0
+verify 1 ebpf-pcache PASS
+10 ebpf-pcache 80.4 95.2 0
+10 ebpf-pcache 51.8 66.7 0
+10 ebpf-pcache 53.0 67.7 0
+10 ebpf-pcache 53.4 68.2 0
+10 ebpf-pcache 52.6 67.4 0
+verify 10 ebpf-pcache PASS
+100 ebpf-pcache 247.1 266.6 0
+100 ebpf-pcache 223.3 238.2 0
+100 ebpf-pcache 253.8 269.4 0
+100 ebpf-pcache 289.8 304.7 0
+100 ebpf-pcache 234.4 248.9 0
+verify 100 ebpf-pcache PASS

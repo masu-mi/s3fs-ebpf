@@ -1,0 +1,5 @@
+base spin=0 E ebpf-pcache cat-cold n=3 median=6967.7 q1=6883.9 q3=6967.7 min=6883.9 max=7000.6
+new spin=0 E ebpf-pcache cat-cold n=3 median=8612.1 q1=8332.9 q3=8612.1 min=8332.9 max=8629.7
+base spin=1 E ebpf-pcache cat-cold n=3 median=8621.8 q1=8345.9 q3=8621.8 min=8345.9 max=8658.8
+new spin=1 E ebpf-pcache cat-cold n=3 median=9553.9 q1=9414.2 q3=9553.9 min=9414.2 max=9658.8
+DONE
