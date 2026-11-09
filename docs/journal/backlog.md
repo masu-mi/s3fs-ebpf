@@ -139,7 +139,7 @@
 | AC-89 | capacity モードで 100 MiB を、容量 32 MiB で cold read すると 242〜252 ms で、evict なしの 140〜156 ms より +65% 遅い (chunk ごとに容量パスが走る分)。`br §18.55` | P3 | 🔶 原因は chunk ごとの直列の GET (容量パスは計 1.5 ms)。read-ahead で 210 → 162 ms (`br §18.55` 続き)。無制限 (約 100 ms) との差は残る |
 | AC-90 | `s3fs_ebpf_capacity_pass` の時間が、キャッシュ済み inode の数に対して超線形: p50 は 100 件で 49 µs、1,000 件で 730 µs、10,000 件で 36.3 ms (100 倍で約 740 倍)。`sb->s_inodes` の収集か policy への受け渡しのどちらかが O(n²) 気味。`br §18.55` | P2 | ✅ 解決: 線形化 (10,000 件 36.3 → 4.5 ms)。`br §18.55` 続き |
 | AC-91 | `scripts/bench-policy-cost.sh` が `set -e` のため、最初の arm (none) の後で終わる (2 つ目の arm の daemon が起動する前)。`br §18.55` | P3 | ✅ 解決: パイプに `|| true` |
-| AC-92 | `test-policy-conformance` の wtinylfu_pick_ops が、v2 の 3e (A) (`97643c1`、容量パスを POPULATE_PAGES の末尾へ) の後、確率的に FAIL する (1 回目の失敗は約 4〜5 割。v2 の前は 0/10)。evict 自体は成功していて、live の policy が sim と違う victim を選ぶ。`br §18.55` 続き | P3 | ⏳ 未着手。確かめること: pass の直前に policy が見た hit / insert の順序を、決定的な run と外れた run で比べる (trace)。pass を populate の末尾でなく signal の直前の別点に置くと戻るか。順序の取り合いが原因なら、hit の replay と pass の順序を TLA+ (`specs/tla/`) にして網羅する。当面の緩和: `ATTEMPTS` を増やす、wtinylfu の閾値の見直し |
+| AC-92 | `test-policy-conformance` の wtinylfu が、v2 の 3e (A) の後、確率的に FAIL した (v2 の前は 0/10、3e の後は約 4〜5 割)。原因: evict した ino の page cache が `invalidate_mapping_pages` に飛ばされて取り残され、chunk がないので誰も落とさず、以後その ino が page cache から読まれ続ける。`br §18.55` 続き | P2 | ✅ 解決: 取り残された ino を `s3fs_pc_retry[]` に覚え、次の pass の先頭で落とし直す。conformance 12/12 が決定的、`test-regression` 全件 PASS |
 
 ### AC-06 調査計画 (未着手)
 - `perf c2c record -a -- fio ...` (64 jobs, shared small file) でキャッシュライン競合の特定
