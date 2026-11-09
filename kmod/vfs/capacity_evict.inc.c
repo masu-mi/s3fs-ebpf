@@ -183,8 +183,12 @@ int s3fs_ebpf_capacity_pass(void)
 {
 	/* The candidates for capacity accounting and eviction. */
 	struct s3fs_resident *res = NULL;
-	int nres = s3fs_collect_resident(&res);
-	int pcache_remaining = nres;	/* unique inodes */
+	int nres;
+	int pcache_remaining;	/* unique inodes */
+
+	s3fs_pc_retry_run();
+	nres = s3fs_collect_resident(&res);
+	pcache_remaining = nres;
 
 	/* By ino: a deterministic order for the policy, and s3fs_admit_size()
 	 * can binary-search it. */

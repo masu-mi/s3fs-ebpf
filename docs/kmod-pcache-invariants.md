@@ -122,3 +122,7 @@
 - sync (`s3fs_ebpf_entries_replace_applied(entries, count, applied_seq)`) は、`seq <= applied_seq` の local entry だけを昇格 (listing に同じ (親, 名前, ino) があれば削除) し、`seq <= applied_seq` で listing にもう無い tombstone だけを消す。`applied_seq` は daemon が listing の**前**に測る (それ以下のイベントは S3 に適用済み): kmod の現在のイベント番号 (`S3FS_IOC_STATS` の slot 15、`s3fs_ebpf_event_seq()`) を読み、その番号までのキュー済みイベントを全部処理して (`appliedSeqFor`)、PUT 中の flush の手前で止める。kmod の番号は daemon の再起動をまたいで続くので、再起動後も残った local entry / tombstone を昇格・削除できる。0 を渡す古い daemon は、何も昇格・削除しない (安全側)。readdir は、listing に同じ (名前, ino) がある local entry を出さない (昇格を待つ間の重複を避ける)。イベントが積まれなかった (`seq == 0`) unlink は tombstone を作らない (S3 に object が残るので、消えない tombstone になる)。
 - 同じ (名前, ino) に rename で戻したら、その tombstone は取り消す (`mv a c; mv c a`)。上書きされる rename の target は unlink と同じく `entry_forget`。
 - unload で `local_entries_drain` が tombstone も解放する。
+
+## evict したページキャッシュの取り残し (AC-92)
+- `s3fs_evict_page_cache` は `invalidate_mapping_pages` (trylock、参照が余分な folio は黙って飛ばす) で落とす。chunk のない ino は capacity pass の候補ではないので、飛ばされた folio を後から落とす者がいない。evict したのにその ino が page cache から読まれ続け、hit が policy に見えず、容量も守れなくなる (v2 3e 以降の `test-policy-conformance` の確率的な FAIL の原因)。
+- 対策: `invalidate` のあとに `nrpages != 0` なら ino を `s3fs_pc_retry[]` (最大 64、`s3fs_pc_retry_lock` は末端の spinlock) に覚え、**次の capacity pass の先頭** (`s3fs_pc_retry_run`、lock を持たずに呼ぶ) でもう一度落とす。chunk が戻っている ino (`fd->cap > 0`) は何もしない。miss が in-flight (`pending_exists`) の ino は次の pass に回す。

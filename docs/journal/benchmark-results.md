@@ -2638,3 +2638,11 @@ AC-90 の変更の後に 1 回目が FAIL (live 1084 対 sim 969 hits、5.8 pt) 
 - **データの安全性や容量の問題ではない**: bpftrace で数えると、どの run も `s3fs_capacity_evict_one` = `s3fs_file_data_reset` の呼び出し数 = 戻り値 1 (chunk を free した) の数で、evict の失敗・スキップはない。`populate` 数 − evict 数 = 8 (容量) で一定。失敗した run は populate が少ない (914〜1,004 対 決定的な run の 1,034)、つまり hit が多い。**live の policy が sim と違う ino を victim に選ぶ** (policy が見る hit / insert の順序・タイミングが run ごとに違う) と読める。
 - **機構は未確認**。3e の A で、daemon の EVAL (populate の後の別 ioctl) がなくなり、pass が populate ioctl の末尾に移ったこと (hit の replay との相対的なタイミング) が疑わしい。`hit_rearm_jiffies` は、bench が毎回 open し直すので関係しない見込み。
 
+**続き: AC-92 の原因と修正 (2026-11-09)**
+- **原因 (確定)**: evict した ino の page cache が取り残される。`s3fs_evict_page_cache` は `invalidate_mapping_pages` (trylock、参照が余分な folio を黙って飛ばす) で落とすが、chunk のない ino は capacity pass の候補ではないので、飛ばされた folio を後から落とす者がいない。その ino は以後ずっと page cache から読まれ (hit)、upcall も policy の on_hit も起きない。
+- **根拠**: (1) 失敗した run のイベント列 (bpftrace で `miss_enqueue` / `populate` / `evict_one` / policy の insert・hit・remove・pick_victim を記録) から resident 集合を再構成すると、94 件のアクセスが「resident でないのに upcall なし」で、全部が 1 つの ino (114)。決定的な run (966 hits) は 0 件。(2) 実測 (`trace_printk`): invalidate 後も `nrpages != 0` の evict が 1 run に 0〜2 回あり、失敗した run は 1〜2 回、0 回の run は決定的な値。1 つの folio が取り残されると、その ino への以後の全アクセスが hit になる。(3) policy の insert が 1 ラウンド遅れる件は設計どおり (テストの注釈にある)。jiffies の同値による replay の順序の乱れ (last_tick を ns にする) は**関係なかった** (2/12 FAIL のまま)。
+- **3e で増えた理由**: pass が populate ioctl の末尾に移り、読み手の直後 (folio にまだ LRU バッチの参照が付いている間) に evict が走るようになったため、と推測 (直接には測っていない)。
+- **修正**: invalidate のあとに `nrpages != 0` なら `s3fs_pc_retry[]` (最大 64) に覚え、次の capacity pass の先頭でもう一度落とす (chunk が戻った ino は除く、miss が in-flight なら次回)。`docs/kmod-pcache-invariants.md` に追記。
+- **結果**: `test-policy-conformance` (wtinylfu、`ATTEMPTS=1`) は **12/12 が決定的な値 (966 hits、differ 6.2%)** (修正前は約 4〜5 割が FAIL)。`make test-regression` は全件 PASS。
+- TLA+ は使わなかった: 原因は「`invalidate_mapping_pages` が folio を飛ばしうる」というカーネルの振る舞いで、既存のモデルに page cache の保持を入れていなかった。実機のイベント列の再構成で見つかった。モデルに入れるなら「evict の後に page cache が残りうる」を 1 つの遷移にし、「chunk のない ino は page cache を持たない」を不変条件にするのが妥当。
+

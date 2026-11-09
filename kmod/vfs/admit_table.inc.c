@@ -174,9 +174,40 @@ static struct super_block *s3fs_active_sb;
  * data).  miss-handling is serial in the daemon, so the window where a reader
  * is blocked with a folio lock is bounded by S3FS_UPCALL_WAIT_JIFFIES.
  */
+/*
+ * AC-92: invalidate_mapping_pages() silently skips a folio that is locked or
+ * holds an extra reference (a per-CPU LRU batch, a reader that has not let go).
+ * A chunk-less ino is not a capacity-pass candidate, so nothing would ever drop
+ * that page again and the evicted file would be served from the page cache for
+ * good (the hit stays "free" for the policy and the capacity is not honoured).
+ * Such inos are remembered and their page cache is dropped again at the start
+ * of the next pass (s3fs_pc_retry_run), by which time the reference is gone.
+ */
+#define S3FS_PC_RETRY_MAX 64
+static DEFINE_SPINLOCK(s3fs_pc_retry_lock);	/* leaf */
+static u64 s3fs_pc_retry[S3FS_PC_RETRY_MAX];
+static unsigned int s3fs_pc_retry_n;
+static u64 s3fs_ino_buf_bytes(u64 ino);	/* fd_chunks.inc.c */
+static bool pending_exists(u64 ino);	/* read_miss.inc.c */
+
+static void s3fs_pc_retry_add(u64 ino)
+{
+	unsigned int i;
+
+	spin_lock(&s3fs_pc_retry_lock);
+	for (i = 0; i < s3fs_pc_retry_n; i++)
+		if (s3fs_pc_retry[i] == ino)
+			goto out;
+	if (s3fs_pc_retry_n < S3FS_PC_RETRY_MAX)
+		s3fs_pc_retry[s3fs_pc_retry_n++] = ino;
+out:
+	spin_unlock(&s3fs_pc_retry_lock);
+}
+
 static void s3fs_evict_page_cache(u64 ino)
 {
 	struct inode *inode;
+	bool left;
 
 	if (!s3fs_active_sb)
 		return;
@@ -184,7 +215,34 @@ static void s3fs_evict_page_cache(u64 ino)
 	if (!inode)
 		return;
 	invalidate_mapping_pages(inode->i_mapping, 0, -1);
+	left = READ_ONCE(inode->i_mapping->nrpages) != 0;
 	iput(inode);
+	if (left)
+		s3fs_pc_retry_add(ino);
+}
+
+/* Drop the page cache again for the inos that kept pages last time.  An ino
+ * that has a chunk table again (re-admitted) is left alone; one with a miss in
+ * flight is tried at the next pass.  No lock held. */
+static void s3fs_pc_retry_run(void)
+{
+	u64 inos[S3FS_PC_RETRY_MAX];
+	unsigned int n, i;
+
+	spin_lock(&s3fs_pc_retry_lock);
+	n = s3fs_pc_retry_n;
+	memcpy(inos, s3fs_pc_retry, n * sizeof(inos[0]));
+	s3fs_pc_retry_n = 0;
+	spin_unlock(&s3fs_pc_retry_lock);
+
+	for (i = 0; i < n; i++) {
+		if (s3fs_ino_buf_bytes(inos[i]))
+			continue;
+		if (pending_exists(inos[i]))
+			s3fs_pc_retry_add(inos[i]);
+		else
+			s3fs_evict_page_cache(inos[i]);
+	}
 }
 
 static bool pending_exists(u64 ino); /* defined with the upcall machinery */

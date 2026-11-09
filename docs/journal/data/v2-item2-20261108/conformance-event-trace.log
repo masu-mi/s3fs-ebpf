@@ -1,0 +1,11 @@
+1   FAIL live_hits=1032 sim_hits=969 gap_pt=3.1 differ=183 (9.2%)
+2   FAIL live_hits=1054 sim_hits=969 gap_pt=4.2 differ=229 (11.4%)
+3   ok live_hits=966 sim_hits=969 gap_pt=0.1 differ=125 (6.2%)
+4   FAIL live_hits=1012 sim_hits=969 gap_pt=2.1 differ=187 (9.3%)
+5   ok live_hits=1003 sim_hits=969 gap_pt=1.7 differ=168 (8.4%)
+6   ok live_hits=1000 sim_hits=969 gap_pt=1.6 differ=171 (8.6%)
+7   ok live_hits=1007 sim_hits=969 gap_pt=1.9 differ=180 (9.0%)
+8   FAIL live_hits=1019 sim_hits=969 gap_pt=2.5 differ=188 (9.4%)
+9   FAIL live_hits=1092 sim_hits=969 gap_pt=6.2 differ=225 (11.2%)
+10   ok live_hits=1019 sim_hits=969 gap_pt=2.5 differ=170 (8.5%)
+DONE
