@@ -2619,3 +2619,22 @@ ebpf-nocache の cat-cold も 6686 → 8354 ms (+25%)、ebpf-pcachedrop は 7058
 - **AC-89 (部分的に対処)**: daemon に read-ahead を追加 (`readahead.go`)。容量に収まらないファイルを sequential に読むとき、miss の chunk に続く最大 `min(3, 容量/4 MiB/4)` 個を並列に取って populate し、その chunk の miss は進行中の read-ahead を待つ。100 MiB / 32 MiB の cold read は **約 210 ms → 約 162 ms** (無制限は約 100 ms。この計測では 98〜103 ms で、前の表の 149〜156 ms とは別の日の値)。残りは、サイズが容量を超えるファイルは chunk を直列に近い形で読む性質。
 - **AC-91 (済み)**: `bench-policy-cost.sh` は、`bpftool | awk | sed` のパイプが `set -e -o pipefail` で非 0 を返して途中で終わっていた。`|| true` を付けた。
 
+**続き: `test-policy-conformance` (wtinylfu_pick_ops) の 1 回目の失敗 (2026-11-09)**
+
+AC-90 の変更の後に 1 回目が FAIL (live 1084 対 sim 969 hits、5.8 pt) した。原因が AC-90 かを切り分け、v2 のどこで出始めたかを調べた。`ATTEMPTS=1` で wtinylfu だけを繰り返した (生データ: `conformance-*`)。
+
+| ビルド | FAIL / 回 | 備考 |
+|---|---|---|
+| `03bb636` (v2 の前) | 0 / 10 | 最悪 2.5 pt、differ 8.1% |
+| `ea248dc` (#56) | 0 / 8 | 最悪 2.2 pt、8.7% |
+| `3d3bd2a` (3b) | 0 / 8 | 最悪 2.9 pt、8.2% |
+| `97643c1` (3e A: 容量パスを POPULATE_PAGES の中へ) | 2 / 10 | 最悪 4.5 pt、10.8% |
+| `3412dd1` (3e B) | 4 / 10 | |
+| 6736b03 の kmod (AC-90 の前) | 4 / 10 | |
+| AC-90 の変更 (`ad2d560` + 線形化) | 5 / 10 | 上と同じ割合 |
+
+- **AC-90 は原因ではない** (AC-90 の前後で 4/10 対 5/10)。**出始めは 3e の A (`97643c1`)**。
+- **確率的**: 同じビルドで、決定的な値 (966 hits / differ 125) の run と 1,060〜1,090 hits の run が混ざる。テストの閾値 (differ 6.2% を基にした天井) を超える割合が、3e の後は約 4 割になった。3 回の再試行でも約 6% は 3 回とも落ちる。
+- **データの安全性や容量の問題ではない**: bpftrace で数えると、どの run も `s3fs_capacity_evict_one` = `s3fs_file_data_reset` の呼び出し数 = 戻り値 1 (chunk を free した) の数で、evict の失敗・スキップはない。`populate` 数 − evict 数 = 8 (容量) で一定。失敗した run は populate が少ない (914〜1,004 対 決定的な run の 1,034)、つまり hit が多い。**live の policy が sim と違う ino を victim に選ぶ** (policy が見る hit / insert の順序・タイミングが run ごとに違う) と読める。
+- **機構は未確認**。3e の A で、daemon の EVAL (populate の後の別 ioctl) がなくなり、pass が populate ioctl の末尾に移ったこと (hit の replay との相対的なタイミング) が疑わしい。`hit_rearm_jiffies` は、bench が毎回 open し直すので関係しない見込み。
+
