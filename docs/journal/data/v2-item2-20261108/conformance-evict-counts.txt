@@ -1,0 +1,10 @@
+1: @evict_one: 935 @pop: 943 @reset: 935 @ret[1]: 935 
+2: @evict_one: 973 @pop: 981 @reset: 973 @ret[1]: 973 
+3: @evict_one: 996 @pop: 1004 @reset: 996 @ret[1]: 996 
+4: @evict_one: 1000 @pop: 1008 @reset: 1000 @ret[1]: 1000 
+5: @evict_one: 987 @pop: 995 @reset: 987 @ret[1]: 987 
+6: @evict_one: 1021 @pop: 1029 @reset: 1021 @ret[1]: 1021 
+7: @evict_one: 995 @pop: 1003 @reset: 995 @ret[1]: 995 
+8: @evict_one: 986 @pop: 994 @reset: 986 @ret[1]: 986 
+9: @evict_one: 1026 @pop: 1034 @reset: 1026 @ret[1]: 1026 
+10: @evict_one: 953 @pop: 961 @reset: 953 @ret[1]: 953 

@@ -2613,3 +2613,36 @@ ebpf-nocache の cat-cold も 6686 → 8354 ms (+25%)、ebpf-pcachedrop は 7058
 
 補足: `bench-policy-cost.sh` は `set -e` のため、最初の arm の後 (bpftool の awk の出力処理のあたり) で終わってしまう。`set -e` を外したコピーで流した (AC-91)。
 
+**続き: AC-90 / AC-89 / AC-91 の対処 (2026-11-09)**
+- **AC-90 (済み)**: `s3fs_ebpf_capacity_pass` の O(n²) は、候補の重複除去 (`eval_inos` の線形探索) と、票の引き当て、cand の重複除去、`pick_victim` の答えの検索の 4 か所だった。`res[]` は ino で整列済みなので、隣と比べる / 二分探索にした。`bench-capacity-pass.sh` の p50: 100 件 49 µs (同じ)、1,000 件 730 → 423 µs、**10,000 件 36.3 → 4.5 ms**、evict あり 10,000 件 10.5 → 2.5 ms (件数あたり約 0.45 µs で線形)。`test-pcache-capacity-{tail,noeval,seq}` / `test-pick-victim-stale` / `test-evict-readback` / `test-pcache-evict-race-short` / `test-policy-conformance` / `test-write-existing-capacity` PASS (conformance の wtinylfu は 1 回目 FAIL、再試行で PASS。既知のタイミング差)。
+- **AC-89 の原因**: 100 MiB / 容量 32 MiB の cold read で、容量パスは 25 回 (計 1.2〜1.8 ms) で時間の主因ではない。容量が足りないと全体 load にならず (`fullAdmitExceedsCapacity`)、4 MiB ごとに upcall + range GET を**直列**にするため、約 4 ms × 25 が足される (無制限は 1 回の upcall + 4 並列の GET)。
+- **AC-89 (部分的に対処)**: daemon に read-ahead を追加 (`readahead.go`)。容量に収まらないファイルを sequential に読むとき、miss の chunk に続く最大 `min(3, 容量/4 MiB/4)` 個を並列に取って populate し、その chunk の miss は進行中の read-ahead を待つ。100 MiB / 32 MiB の cold read は **約 210 ms → 約 162 ms** (無制限は約 100 ms。この計測では 98〜103 ms で、前の表の 149〜156 ms とは別の日の値)。残りは、サイズが容量を超えるファイルは chunk を直列に近い形で読む性質。
+- **AC-91 (済み)**: `bench-policy-cost.sh` は、`bpftool | awk | sed` のパイプが `set -e -o pipefail` で非 0 を返して途中で終わっていた。`|| true` を付けた。
+
+**続き: `test-policy-conformance` (wtinylfu_pick_ops) の 1 回目の失敗 (2026-11-09)**
+
+AC-90 の変更の後に 1 回目が FAIL (live 1084 対 sim 969 hits、5.8 pt) した。原因が AC-90 かを切り分け、v2 のどこで出始めたかを調べた。`ATTEMPTS=1` で wtinylfu だけを繰り返した (生データ: `conformance-*`)。
+
+| ビルド | FAIL / 回 | 備考 |
+|---|---|---|
+| `03bb636` (v2 の前) | 0 / 10 | 最悪 2.5 pt、differ 8.1% |
+| `ea248dc` (#56) | 0 / 8 | 最悪 2.2 pt、8.7% |
+| `3d3bd2a` (3b) | 0 / 8 | 最悪 2.9 pt、8.2% |
+| `97643c1` (3e A: 容量パスを POPULATE_PAGES の中へ) | 2 / 10 | 最悪 4.5 pt、10.8% |
+| `3412dd1` (3e B) | 4 / 10 | |
+| 6736b03 の kmod (AC-90 の前) | 4 / 10 | |
+| AC-90 の変更 (`ad2d560` + 線形化) | 5 / 10 | 上と同じ割合 |
+
+- **AC-90 は原因ではない** (AC-90 の前後で 4/10 対 5/10)。**出始めは 3e の A (`97643c1`)**。
+- **確率的**: 同じビルドで、決定的な値 (966 hits / differ 125) の run と 1,060〜1,090 hits の run が混ざる。テストの閾値 (differ 6.2% を基にした天井) を超える割合が、3e の後は約 4 割になった。3 回の再試行でも約 6% は 3 回とも落ちる。
+- **データの安全性や容量の問題ではない**: bpftrace で数えると、どの run も `s3fs_capacity_evict_one` = `s3fs_file_data_reset` の呼び出し数 = 戻り値 1 (chunk を free した) の数で、evict の失敗・スキップはない。`populate` 数 − evict 数 = 8 (容量) で一定。失敗した run は populate が少ない (914〜1,004 対 決定的な run の 1,034)、つまり hit が多い。**live の policy が sim と違う ino を victim に選ぶ** (policy が見る hit / insert の順序・タイミングが run ごとに違う) と読める。
+- **機構は未確認**。3e の A で、daemon の EVAL (populate の後の別 ioctl) がなくなり、pass が populate ioctl の末尾に移ったこと (hit の replay との相対的なタイミング) が疑わしい。`hit_rearm_jiffies` は、bench が毎回 open し直すので関係しない見込み。
+
+**続き: AC-92 の原因と修正 (2026-11-09)**
+- **原因 (確定)**: evict した ino の page cache が取り残される。`s3fs_evict_page_cache` は `invalidate_mapping_pages` (trylock、参照が余分な folio を黙って飛ばす) で落とすが、chunk のない ino は capacity pass の候補ではないので、飛ばされた folio を後から落とす者がいない。その ino は以後ずっと page cache から読まれ (hit)、upcall も policy の on_hit も起きない。
+- **根拠**: (1) 失敗した run のイベント列 (bpftrace で `miss_enqueue` / `populate` / `evict_one` / policy の insert・hit・remove・pick_victim を記録) から resident 集合を再構成すると、94 件のアクセスが「resident でないのに upcall なし」で、全部が 1 つの ino (114)。決定的な run (966 hits) は 0 件。(2) 実測 (`trace_printk`): invalidate 後も `nrpages != 0` の evict が 1 run に 0〜2 回あり、失敗した run は 1〜2 回、0 回の run は決定的な値。1 つの folio が取り残されると、その ino への以後の全アクセスが hit になる。(3) policy の insert が 1 ラウンド遅れる件は設計どおり (テストの注釈にある)。jiffies の同値による replay の順序の乱れ (last_tick を ns にする) は**関係なかった** (2/12 FAIL のまま)。
+- **3e で増えた理由**: pass が populate ioctl の末尾に移り、読み手の直後 (folio にまだ LRU バッチの参照が付いている間) に evict が走るようになったため、と推測 (直接には測っていない)。
+- **修正**: invalidate のあとに `nrpages != 0` なら `s3fs_pc_retry[]` (最大 64) に覚え、次の capacity pass の先頭でもう一度落とす (chunk が戻った ino は除く、miss が in-flight なら次回)。`docs/kmod-pcache-invariants.md` に追記。
+- **結果**: `test-policy-conformance` (wtinylfu、`ATTEMPTS=1`) は **12/12 が決定的な値 (966 hits、differ 6.2%)** (修正前は約 4〜5 割が FAIL)。`make test-regression` は全件 PASS。
+- TLA+ は使わなかった: 原因は「`invalidate_mapping_pages` が folio を飛ばしうる」というカーネルの振る舞いで、既存のモデルに page cache の保持を入れていなかった。実機のイベント列の再構成で見つかった。モデルに入れるなら「evict の後に page cache が残りうる」を 1 つの遷移にし、「chunk のない ino は page cache を持たない」を不変条件にするのが妥当。
+

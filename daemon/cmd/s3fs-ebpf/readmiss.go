@@ -358,6 +358,14 @@ func handleReadMiss(ctx context.Context, devPath string,
 				ev.Ino, entry.Name, ev.seqRatio(), fullSize)
 		}
 	}
+	if !useFullAdmit && readaheadWait(ctx, ev.Ino, missChunkOffset) {
+		// AC-89: the chunk was being read ahead; it is in, so just wake the
+		// reader (EAGAIN: it was shed meanwhile, fetch it below).
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0, s3fsSignalVerifyPopulated)
+		if !errors.Is(err, unix.EAGAIN) {
+			return
+		}
+	}
 	if useFullAdmit && isLarge {
 		// AC-52 step 3: parallel range GETs, populated and signalled per chunk.
 		serveChunkLoad(ctx, devPath, s3c, ev, entry.S3Key, entry.Name, fullSize, missChunkOffset)
@@ -380,6 +388,9 @@ func handleReadMiss(ctx context.Context, devPath string,
 		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
 		return
+	}
+	if !useFullAdmit {
+		maybeReadahead(ctx, devPath, s3c, ev, entry.S3Key, fullSize, missChunkOffset)
 	}
 	// Send the data to kmod's chunk table (and page cache) via the
 	// POPULATE_PAGES ioctl.
