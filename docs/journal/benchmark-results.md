@@ -2613,3 +2613,9 @@ ebpf-nocache の cat-cold も 6686 → 8354 ms (+25%)、ebpf-pcachedrop は 7058
 
 補足: `bench-policy-cost.sh` は `set -e` のため、最初の arm の後 (bpftool の awk の出力処理のあたり) で終わってしまう。`set -e` を外したコピーで流した (AC-91)。
 
+**続き: AC-90 / AC-89 / AC-91 の対処 (2026-11-09)**
+- **AC-90 (済み)**: `s3fs_ebpf_capacity_pass` の O(n²) は、候補の重複除去 (`eval_inos` の線形探索) と、票の引き当て、cand の重複除去、`pick_victim` の答えの検索の 4 か所だった。`res[]` は ino で整列済みなので、隣と比べる / 二分探索にした。`bench-capacity-pass.sh` の p50: 100 件 49 µs (同じ)、1,000 件 730 → 423 µs、**10,000 件 36.3 → 4.5 ms**、evict あり 10,000 件 10.5 → 2.5 ms (件数あたり約 0.45 µs で線形)。`test-pcache-capacity-{tail,noeval,seq}` / `test-pick-victim-stale` / `test-evict-readback` / `test-pcache-evict-race-short` / `test-policy-conformance` / `test-write-existing-capacity` PASS (conformance の wtinylfu は 1 回目 FAIL、再試行で PASS。既知のタイミング差)。
+- **AC-89 の原因**: 100 MiB / 容量 32 MiB の cold read で、容量パスは 25 回 (計 1.2〜1.8 ms) で時間の主因ではない。容量が足りないと全体 load にならず (`fullAdmitExceedsCapacity`)、4 MiB ごとに upcall + range GET を**直列**にするため、約 4 ms × 25 が足される (無制限は 1 回の upcall + 4 並列の GET)。
+- **AC-89 (部分的に対処)**: daemon に read-ahead を追加 (`readahead.go`)。容量に収まらないファイルを sequential に読むとき、miss の chunk に続く最大 `min(3, 容量/4 MiB/4)` 個を並列に取って populate し、その chunk の miss は進行中の read-ahead を待つ。100 MiB / 32 MiB の cold read は **約 210 ms → 約 162 ms** (無制限は約 100 ms。この計測では 98〜103 ms で、前の表の 149〜156 ms とは別の日の値)。残りは、サイズが容量を超えるファイルは chunk を直列に近い形で読む性質。
+- **AC-91 (済み)**: `bench-policy-cost.sh` は、`bpftool | awk | sed` のパイプが `set -e -o pipefail` で非 0 を返して途中で終わっていた。`|| true` を付けた。
+

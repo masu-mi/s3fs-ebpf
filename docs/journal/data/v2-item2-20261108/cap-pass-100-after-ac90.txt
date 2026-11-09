@@ -1,0 +1,4 @@
+# commit c965b52 (bench: HALTPOLL=0|1 selects guest cpuidle-haltpoll (haltpoll_set/apply in lib/bench.sh), recorded in bench_env_report); kernel 6.12.0-061200-generic; NHOT=100 PASSES=100 CAPACITY=1073741824
+# cap_mode ncold inodes_delta n min_ns p50_ns p90_ns max_ns
+nocap 0 107 100 40888 48827 56013 66386
+evict 0 103 100 22247 29305 34203 57480

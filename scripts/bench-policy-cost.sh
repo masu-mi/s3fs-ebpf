@@ -47,7 +47,7 @@ for r in $(seq "$ROUNDS"); do
 				match($0, /run_time_ns [0-9]+/); t=substr($0, RSTART+12, RLENGTH-12)
 				match($0, /run_cnt [0-9]+/); c=substr($0, RSTART+8, RLENGTH-8)
 				if (c > 0) printf "PROG round=%s arm=%s %s run_cnt=%d avg_ns=%.0f\n", R, A, name, c, t/c } }' |
-			sed -E 's/[0-9]+: struct_ops +//; s/ +tag [0-9a-f]+//; s/ +gpl//'
+			sed -E 's/[0-9]+: struct_ops +//; s/ +tag [0-9a-f]+//; s/ +gpl//' || true
 		ebpf_stop "$MP"
 	done
 done
