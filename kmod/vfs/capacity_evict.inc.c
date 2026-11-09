@@ -70,6 +70,7 @@ struct s3fs_victim {
 	u64 ino;       /* inode number (P3: replaces entries[] idx so pcache can be included) */
 	u32 tiebreak;  /* hash_32(ino,32): decorrelates from ino/Zipf distribution (Y-02) */
 	bool tried;    /* AC-58: pick_victim already returned this ino */
+	u32 ord;       /* position in ino order (= index into eval_inos[]) */
 };
 
 /* Highest score first; ties broken by tiebreak (ino hash) to avoid
@@ -120,6 +121,24 @@ static void s3fs_capacity_evict_one(u64 ino, u64 *live_bytes, u32 *evicted,
 	buf_before -= min(s3fs_ino_buf_bytes(ino), buf_before);
 	freed += buf_before;
 	*live_bytes -= min(freed, *live_bytes);
+}
+
+/* The vote recorded for @ino in the ino-sorted eval arrays (0 if absent). */
+static int s3fs_eval_score(const u64 *inos, const int *scores, u32 n, u64 ino)
+{
+	int lo = 0, hi = (int)n - 1;
+
+	while (lo <= hi) {
+		int mid = lo + (hi - lo) / 2;
+
+		if (inos[mid] == ino)
+			return scores[mid];
+		if (inos[mid] < ino)
+			lo = mid + 1;
+		else
+			hi = mid - 1;
+	}
+	return 0;
 }
 
 static int s3fs_resident_cmp(const void *a, const void *b)
@@ -236,13 +255,9 @@ int s3fs_ebpf_capacity_pass(void)
 		/* Phase 1: collect unique inos and call on_evict once each. */
 		for (pi = 0; pi < pcache_remaining; pi++) {
 			u64 ino = res[pi].ino;
-			u32 j;
 
-			for (j = 0; j < eval_count; j++) {
-				if (eval_inos[j] == ino)
-					break;
-			}
-			if (j < eval_count)
+			/* res[] is sorted by ino: a repeat is adjacent. */
+			if (pi > 0 && res[pi - 1].ino == ino)
 				continue;
 
 			{
@@ -285,30 +300,17 @@ int s3fs_ebpf_capacity_pass(void)
 		 * mode each ino appears at most once. */
 		for (pi = 0; pi < pcache_remaining; pi++) {
 			u64 ino = res[pi].ino;
-			int score = 0;
-			u32 j;
-
-			for (j = 0; j < eval_count; j++) {
-				if (eval_inos[j] == ino) {
-					score = eval_scores[j];
-					break;
-				}
-			}
+			int score = s3fs_eval_score(eval_inos, eval_scores,
+						    eval_count, ino);
 
 			if (cap_bytes) {
 				if (cand) {
-					u32 k;
-					bool already = false;
-
-					for (k = 0; k < ncand; k++) {
-						if (cand[k].ino == ino) {
-							already = true;
-							break;
-						}
-					}
-					if (!already) {
+					/* cand[] is filled in res[] (ino)
+					 * order: a repeat is the last one. */
+					if (!ncand || cand[ncand - 1].ino != ino) {
 						cand[ncand].score    = score;
 						cand[ncand].ino      = ino;
+						cand[ncand].ord      = ncand;
 						cand[ncand].tiebreak = hash_32((u32)ino ^ (u32)(ino >> 32), 32);
 						ncand++;
 					}
@@ -325,25 +327,45 @@ int s3fs_ebpf_capacity_pass(void)
 				evicted++;
 		}
 
-		kfree(eval_inos);
 		kfree(eval_scores);
 
 		if (cand) {
 			u32 k;
+			/* pos[ord] = where cand[] (score order) holds the ino at
+			 * eval_inos[ord], so pick_victim's answer is found by a
+			 * binary search + one lookup, not a scan. */
+			u32 *pos = pv ? kcalloc(ncand, sizeof(*pos), GFP_KERNEL) : NULL;
 
 			sort(cand, ncand, sizeof(*cand), s3fs_victim_cmp, NULL);
+			if (pos)
+				for (k = 0; k < ncand; k++)
+					pos[cand[k].ord] = k;
 			/* AC-58: the policy's own order first.  Anything it
 			 * cannot name (0, unknown ino, one already tried) hands
 			 * the rest to the score order below. */
-			for (k = 0; pv && k < ncand && live_bytes > cap_bytes; k++) {
+			for (k = 0; pos && k < ncand && live_bytes > cap_bytes; k++) {
 				u64 v = s3fs_policy_ops_pick_victim();
 				u32 j;
 
 				if (!v)
 					break;
-				for (j = 0; j < ncand; j++)
-					if (cand[j].ino == v)
-						break;
+				j = ncand;
+				if (pos) {
+					int lo = 0, hi = (int)ncand - 1;
+
+					while (lo <= hi) {
+						int mid = lo + (hi - lo) / 2;
+
+						if (eval_inos[mid] == v) {
+							j = pos[mid];
+							break;
+						}
+						if (eval_inos[mid] < v)
+							lo = mid + 1;
+						else
+							hi = mid - 1;
+					}
+				}
 				if (j == ncand) {
 					/* Not a candidate any more (evicted by
 					 * another route): let the policy forget
@@ -362,11 +384,13 @@ int s3fs_ebpf_capacity_pass(void)
 				s3fs_capacity_evict_one(cand[k].ino, &live_bytes,
 							&evicted, pv);
 			}
+			kfree(pos);
 			kfree(cand);
 			if (live_bytes > cap_bytes)
 				pr_info_ratelimited("s3fs_ebpf: admit set %llu B still over capacity %llu B (in-flight misses)\n",
 						    live_bytes, cap_bytes);
 		}
+		kfree(eval_inos);
 		s3fs_pass_res = NULL;
 		s3fs_pass_nres = 0;
 		s3fs_policy_evict_unlock();
