@@ -1,0 +1,2 @@
+Linux 6.12.0-061200-generic #202411220723 SMP PREEMPT_DYNAMIC Tue Nov 26 13:49:49 UTC 2024
+git: ad2d560 (+docs), kvm, 6 cpus

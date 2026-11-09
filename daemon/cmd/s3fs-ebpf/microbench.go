@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -16,7 +17,7 @@ import (
 func runMicrobench(args []string) int {
 	fs := flag.NewFlagSet("microbench", flag.ExitOnError)
 	op := fs.String("op", "stat", "syscall to measure: stat|read")
-	path := fs.String("path", "", "target path")
+	path := fs.String("path", "", "target path; a %d is replaced by the running operation number (warmup included, from 0), so each operation touches a different file")
 	iters := fs.Int("iters", 100000, "iterations per run")
 	warmup := fs.Int("warmup", 1000, "warmup iterations discarded")
 	label := fs.String("label", "", "label to print with results")
@@ -29,7 +30,7 @@ func runMicrobench(args []string) int {
 
 	// Warmup.
 	for i := 0; i < *warmup; i++ {
-		if err := doOp(*op, *path); err != nil {
+		if err := doOp(*op, benchPath(*path, i)); err != nil {
 			fmt.Fprintf(os.Stderr, "microbench: warmup #%d: %v\n", i, err)
 			return 1
 		}
@@ -39,7 +40,7 @@ func runMicrobench(args []string) int {
 	start := time.Now()
 	for i := 0; i < *iters; i++ {
 		t0 := time.Now()
-		if err := doOp(*op, *path); err != nil {
+		if err := doOp(*op, benchPath(*path, *warmup+i)); err != nil {
 			// Bench abort (e.g. mount removed mid-run): print partial
 			// stats + non-zero exit instead of a Go panic that dumps a
 			// stack trace and confuses bench harness output.
@@ -71,6 +72,14 @@ func runMicrobench(args []string) int {
 	fmt.Printf("  min=%v  p50=%v  p95=%v  p99=%v  max=%v\n",
 		samples[0], pct(0.50), pct(0.95), pct(0.99), samples[len(samples)-1])
 	return 0
+}
+
+// benchPath expands a %d in the path pattern to n.
+func benchPath(pattern string, n int) string {
+	if !strings.Contains(pattern, "%d") {
+		return pattern
+	}
+	return fmt.Sprintf(pattern, n)
 }
 
 func doOp(op, path string) error {

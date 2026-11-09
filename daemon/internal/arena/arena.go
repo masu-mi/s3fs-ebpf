@@ -1,4 +1,4 @@
-// Package arena wraps a BPF_MAP_TYPE_ARENA map: create (or attach to an
+// Package arena (demo-only: used by arenademo and dev test-arena) wraps a BPF_MAP_TYPE_ARENA map: create (or attach to an
 // existing one), mmap, and hand out both a byte-addressable view and the
 // user-space base address so BPF programs can reconstruct arena pointers.
 // Requires Linux 6.9+.

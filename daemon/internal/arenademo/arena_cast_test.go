@@ -1,4 +1,4 @@
-package ebpf
+package arenademo
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 )
 
 // TestEmbeddedObjectHasArenaCasts guards the committed bpf2go objects
-// (s3fsfp_bpf{el,eb}.o) against being regenerated with clang < 19.
+// (arenademo_bpf{el,eb}.o) against being regenerated with clang < 19.
 //
 // Older clang does not define __BPF_FEATURE_ADDR_SPACE_CAST, so
 // bpf/arena_types.h silently falls back to plain pointers: the object
@@ -18,9 +18,9 @@ import (
 //
 // Regenerate with `make daemon-gen` (it refuses clang < 19).
 func TestEmbeddedObjectHasArenaCasts(t *testing.T) {
-	spec, err := loadS3fsfp()
+	spec, err := loadArenademo()
 	if err != nil {
-		t.Fatalf("loadS3fsfp: %v", err)
+		t.Fatalf("loadArenademo: %v", err)
 	}
 
 	casts := 0

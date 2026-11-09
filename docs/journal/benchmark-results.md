@@ -2591,3 +2591,25 @@ ebpf-nocache の cat-cold も 6686 → 8354 ms (+25%)、ebpf-pcachedrop は 7058
 - **遅くなった: E の cat-cold (+20〜25%)**。10,000 個の小さいファイルの初回読みで、1 ファイルあたり約 200 µs。S3 の仕事は同じ。ringbuf の event を読まなくなった副作用で、機構は未確認。
 - 測っていない: 100 MiB の warm cat (旧 gate (b) の 14.7 ms。`bench-ab-pcache.sh` は今は存在しない)、`hook なし` ビルドとの `hook_ratio` (F の旧 gate の定義)、capacity モードでの cold read (#57 の「chunk ごとに容量パス」の分)、キャッシュ済みの fd が非常に多いときの容量パス。
 - 基準の取り違え: ドリフト確認の `base r3` は、二分探索のあとで worktree が `ea248dc` (master、3d) のまま残っていたため、`03bb636` ではなく `ea248dc` で測っている (A と F のみ。上の表では別行にした)。
+
+### 18.55 v2 の未計測だった項目と AC-88 の切り分け (2026-11-08)
+
+条件: KVM の仮想環境 (6 CPU)、`6.12.0-061200-generic`、commit `ad2d560` (v2 の先端に Phase 3 の名前の整理 + `test-cold-signal` を足したもの)、MinIO はローカル。生データは `docs/journal/data/v2-item2-20261108/`。
+
+**AC-88 (E の cat-cold +22%) の切り分け**
+- この環境は KVM で、実機では測れない (backlog の確認項目 ① は未実施)。
+- cpuidle の driver が `none` (ゲストが `HLT` でアイドルする) のため、`modprobe cpuidle-haltpoll force=1` (アイドルの前に短く spin する) を入れて、`test-cold-signal` (3,000 個の distinct な小さいファイルの cold read、1 件ごとに upcall) の p50 を比べた (各 3 回): haltpoll あり 442 / 448 / 454 µs、なし 519 / 515 / 503 µs (**約 -13%**、ops/s 2,140〜2,220 対 1,860〜1,950)。
+- 読み: cold read 1 件の往復のうち、アイドルからの復帰の分は仮想環境の `HLT` の復帰で、haltpoll で縮む。これは「daemon を起こし続けていたことが速かった」という仮説と矛盾しない。ただし **E の cat-cold そのものは haltpoll で測っていない** (+22% が消えるかは未確認)。実機で同じ差が出るかも未確認。
+- 判断: daemon 側で spin する変更は入れない (CPU を燃やす割に、効くのは仮想環境のアイドル復帰だけの見込み)。haltpoll の有無は環境変数 `HALTPOLL=0|1` で選べる (`scripts/lib/bench.sh` の `haltpoll_set` / `haltpoll_apply`。`bench_up` と `test-cold-signal` が見る。未設定ならホストのまま)。`bench_env_report` は cpuidle の driver を記録する。
+
+**未計測だった 4 項目**
+
+| 項目 | 結果 |
+|---|---|
+| 100 MiB の warm cat (`hyperfine -N`、15 回の中央値) | ebpf-pcache **11.7 ms** 対 fuse-cache 13.7 ms (旧 gate (b) の 14.7 ms より速い) |
+| `hook_ratio` | **意味がなくなった**: `--no-read-iter-hook` は no-op (read_iter の fentry は v2 で消え、read pattern は kmod が数える)。代わりに policy 有り / 無しで比べた (`bench-policy-cost.sh`、fio psync bs=1、3 回): 1 job で 1,803 / 1,714 / 1,761k (none) 対 1,801 / 1,727 / 1,805k (observe_ops)、64 jobs で 6,123 / 6,096 / 6,112k 対 6,134 / 6,059 / 6,120k。差は揺れの内 (比 ≈ 1.00) |
+| capacity モードの 100 MiB cold read (5 回、daemon の起動 + `drop_caches=3`) | 無制限 (`--cache-capacity=0`) 149〜156 ms、1 GiB (evict なし) 140〜151 ms、**32 MiB (100 MiB を evict しながら読む) 242〜252 ms (+65%)** → AC-89 |
+| キャッシュ済み inode が多いときの capacity pass (`bench-capacity-pass.sh`、p50) | 100 件: 49 µs、1,000 件: 730 µs、**10,000 件: 36.3 ms** (件数 100 倍で約 740 倍、**超線形**)。evict ありは 31 µs / 300 µs / 10.5 ms → AC-90 |
+
+補足: `bench-policy-cost.sh` は `set -e` のため、最初の arm の後 (bpftool の awk の出力処理のあたり) で終わってしまう。`set -e` を外したコピーで流した (AC-91)。
+

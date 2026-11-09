@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 
-	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arenademo"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arena"
 )
@@ -83,7 +83,7 @@ func subtestArena() int {
 
 func subtestSharedAndKfunc(idx, kfuncArg uint32) int {
 	fmt.Println("== subtest B+C: bpf_arena populate + KFunc call ===============")
-	progs, err := fpebpf.Load()
+	progs, err := arenademo.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[FAIL B] ebpf.Load: %v\n", err)
 		return 1
@@ -110,7 +110,7 @@ func subtestSharedAndKfunc(idx, kfuncArg uint32) int {
 	}
 	fmt.Printf("[B] wrote %d dummy inodes into arena\n", testInodes)
 
-	in := fpebpf.TestArgs{
+	in := arenademo.TestArgs{
 		ArenaBaseUaddr: a.BaseAddr(),
 		Idx:            idx,
 		KfuncArg:       kfuncArg,

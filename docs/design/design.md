@@ -128,7 +128,7 @@ s3fs-ebpf/
 │   └── tree_traversal.c        # bpf_arena を走査する C 言語 KFunc (Verifier 回避)
 │
 ├── bpf/                        # eBPF フックコード (C言語)
-│   ├── s3fs_fastpath.bpf.c     # fentry 補獲 & KFunc 呼び出し
+│   ├── demo/arena_demo.bpf.c   # fentry 補獲 & KFunc 呼び出し
 │   └── arena_types.h           # bpf_arena メタデータ構造体定義
 │
 ├── daemon/                     # コントロールプレーン (Go言語 / cilium/ebpf)

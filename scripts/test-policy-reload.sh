@@ -75,8 +75,8 @@ for round in $(seq "$N"); do
 done
 
 # A non struct_ops object must be refused with 400.  Any non-struct_ops .bpf.o will do.
-if [ -f "$TOPDIR/bpf/s3fs_fastpath.bpf.o" ]; then
-	code=$(curl -s -o "$OUT/reload-bad.out" -w '%{http_code}' -X POST --data "file:$TOPDIR/bpf/s3fs_fastpath.bpf.o" "$METRICS/policy/reload")
+if [ -f "$TOPDIR/bpf/demo/arena_demo.bpf.o" ]; then
+	code=$(curl -s -o "$OUT/reload-bad.out" -w '%{http_code}' -X POST --data "file:$TOPDIR/bpf/demo/arena_demo.bpf.o" "$METRICS/policy/reload")
 	[ "$code" = 400 ] || bad "non-struct_ops reload: HTTP $code, want 400 ($(cat "$OUT/reload-bad.out"))"
 fi
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data "builtin:policy_sieve_ops" "$METRICS/policy/reload")

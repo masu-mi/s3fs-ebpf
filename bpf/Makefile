@@ -9,7 +9,7 @@ BPF_CFLAGS := -O2 -g -Wall -target bpf -mcpu=v3 \
               -D__TARGET_ARCH_$(ARCH) \
               -I. -I../include
 
-OBJS := s3fs_fastpath.bpf.o policy_observe_ops.bpf.o \
+OBJS := demo/arena_demo.bpf.o policy_observe_ops.bpf.o \
         policy_freq2bit_ops.bpf.o \
         policy_lru_ops.bpf.o policy_sieve_ops.bpf.o policy_sieve_pick_ops.bpf.o \
         policy_lru_pick_ops.bpf.o policy_s3fifo_pick_ops.bpf.o \
@@ -46,4 +46,4 @@ vmlinux.h:
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.bpf.o
+	rm -f *.bpf.o demo/*.bpf.o

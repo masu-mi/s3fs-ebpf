@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"time"
 
-	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/arenademo"
 
 	"github.com/cilium/ebpf"
 
@@ -154,7 +154,7 @@ func runVerifierDemo(args []string) int {
 	fmt.Println("reject it with a complexity-limit or unbounded-loop diagnostic.")
 	fmt.Println()
 
-	ve, err := fpebpf.LoadRejectDemo()
+	ve, err := arenademo.LoadRejectDemo()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "verifier-demo: %v\n", err)
 		return 1

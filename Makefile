@@ -65,14 +65,14 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: test-nocache-signal test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
+.PHONY: test-nocache-signal test-cold-signal test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
         doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
         lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
-        test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-nocache-signal test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
+        test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-nocache-signal test-cold-signal test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
         test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
         clean
@@ -127,7 +127,7 @@ kmod-clean: ## Clean kernel module build artefacts
 # CLANG / BPFTOOL must be passed explicitly: variables computed in this
 # Makefile are not exported, so the sub-make would fall back to plain
 # `clang` (18 on noble) and fail on __arena casts.
-bpf: ## Build eBPF program -> bpf/s3fs_fastpath.bpf.o
+bpf: ## Build eBPF program -> bpf/demo/arena_demo.bpf.o
 	@$(call preflight,--only bpf)
 	@$(MAKE) --no-print-directory $(BPF_DIR)/vmlinux.h
 	$(MAKE) -C $(BPF_DIR) CLANG=$(CLANG) BPFTOOL=$(BPFTOOL)
@@ -166,7 +166,7 @@ daemon-gen: | $(BIN_DIR) ## Run bpf2go codegen then build daemon (needs network)
 
 daemon-clean: ## Clean Go build cache and bin/s3fs-ebpf
 	# Note: intentionally NOT running `go clean ./...` — it removes *.o
-	# including bpf2go's embedded s3fsfp_bpf{el,eb}.o (checked in). Use
+	# including bpf2go's embedded arenademo_bpf{el,eb}.o (checked in). Use
 	# `make daemon-gen` to regenerate those from bpf/**.
 	rm -f $(BIN_DIR)/s3fs-ebpf
 
@@ -355,7 +355,7 @@ test-splice-hits: kmod daemon ## sendfile / splice reads are counted as hits (hi
 	@echo "==> test-splice-hits"
 	@$(SCRIPTS_DIR)/test-splice-hits.sh
 
-test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-open-check test-parity test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-nocache-signal test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
+test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-open-check test-parity test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-nocache-signal test-cold-signal test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -424,6 +424,10 @@ test-policy-data-members: kmod bpf daemon ## struct_ops data members (flags / na
 test-nocache-signal: kmod daemon ## a signal during the upcall wait must not turn a cold read into -EIO (nocache=1 + Go microbench)
 	@echo "==> test-nocache-signal"
 	@sudo $(SCRIPTS_DIR)/test-nocache-signal.sh
+
+test-cold-signal: kmod daemon ## a signal during the upcall wait must not turn a cache-mode cold read into -EIO (distinct files + Go microbench)
+	@echo "==> test-cold-signal"
+	@sudo env HALTPOLL="$$HALTPOLL" $(SCRIPTS_DIR)/test-cold-signal.sh
 
 test-pcache-drop: kmod daemon ## pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
 	@echo "==> test-pcache-drop"

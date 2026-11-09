@@ -233,7 +233,7 @@ s3fs-ebpf/
 │   └── tree_traversal.c        # Verifier 制限を受けない深層 Radix Tree 走査
 │
 ├── bpf/                        # eBPF フックコード (C言語)
-│   ├── s3fs_fastpath.bpf.c     # システムコールフック ＋ KFunc 呼び出し
+│   ├── demo/arena_demo.bpf.c   # システムコールフック ＋ KFunc 呼び出し
 │   └── arena_types.h           # bpf_arena 共有ヘッダー
 │
 ├── daemon/                     # コントロールプレーン (言語未確定: Go/Rust/C++)
