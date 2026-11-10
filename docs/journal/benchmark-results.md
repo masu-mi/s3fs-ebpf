@@ -2646,6 +2646,22 @@ AC-90 の変更の後に 1 回目が FAIL (live 1084 対 sim 969 hits、5.8 pt) 
 - **結果**: `test-policy-conformance` (wtinylfu、`ATTEMPTS=1`) は **12/12 が決定的な値 (966 hits、differ 6.2%)** (修正前は約 4〜5 割が FAIL)。`make test-regression` は全件 PASS。
 - TLA+ は使わなかった: 原因は「`invalidate_mapping_pages` が folio を飛ばしうる」というカーネルの振る舞いで、既存のモデルに page cache の保持を入れていなかった。実機のイベント列の再構成で見つかった。モデルに入れるなら「evict の後に page cache が残りうる」を 1 つの遷移にし、「chunk のない ino は page cache を持たない」を不変条件にするのが妥当。
 
+### 18.56 AC-89 の残りと E cat-cold との関係 (2026-11-10)
+
+条件: KVM、`6.12.0-061200-generic`、master `5d7cca9` + この変更。haltpoll は off (E の比較を除く)。生データ: `docs/journal/data/v2-ac89-20261110/`。
+
+**AC-89 (容量 32 MiB で 100 MiB の cold read)**
+- read-ahead の窓を振った (5 回ずつ、ms): なし 266、1 chunk 256、2 chunk 221、**3 chunk 200**、4 chunk 200、6 chunk 190。無制限は同じ日で 160〜179。窓は 3 で頭打ち。
+- 窓を 1 回の range GET にまとめる案は**遅かった** (250〜290 ms): 読み手が窓全体の到着を待つ。chunk ごとの並列 GET のままにした。
+- 窓の式を `容量 / 4 MiB / 4` (32 MiB で 2) から `容量 / 4 MiB / 2 − 1` (32 MiB で 3、上限 4) に変えた。容量 12 MiB 以下では 0 のまま。最終ビルドの値は 211〜215 ms (同じ日の無制限 160〜179 ms、約 +25%)。
+- 残る差の読み: 無制限は 4 並列 × 16 MiB の range GET の全体 load で、容量付きは 4 MiB 単位の GET (要求数が 4 倍)。容量の中に収まる範囲の先読みが上限。これ以上は GET のまとめ方の設計 (読み手を待たせない形) が要るので、P3 のまま残す。
+- 回帰: capacity-tail / noeval / seq / evict-race-short / large-file-read / multiread / write-existing-capacity PASS、`go test -race ./cmd/...` PASS。
+
+**E の cat-cold との関係** (`bench-pcache-remeasure.sh` の E、ebpf-pcache、10,000 個、各 3〜5 回)
+- haltpoll off 8.54 / 8.62 / 8.69 s、haltpoll on 8.31 / 8.06 / 7.86 s (**約 -6%**)。AC-88 の基準 (v2 の前 約 6.8 s) までは戻らない。haltpoll は一部しか説明しない。
+- 共通点は「依存した要求の直列」だが、E は 1 ファイルずつ open → upcall → GET → populate で、read-ahead の対象になる chunk の並びがない。同じ手では直らない。
+- 既存の sibling の先読み (`prefetch_next: 8`、mount 経由) を入れると **9.0 s で逆に遅い** (mount 経由の読みが cat と競合する)。mount を通さずに daemon が直接 populate するには、まだ instantiate されていない inode にも populate できる必要がある (kmod の機能追加)。AC-88 に追記。
+
 ### 18.57 object staging: E の cat-cold (AC-88) (2026-11-10)
 
 条件: KVM、`6.12.0-061200-generic`、haltpoll off、MinIO はローカル、ebpf-pcache、`--softcap=20000`。生データ: `docs/journal/data/v2-staging-20261110/`。設計: `docs/design/object-staging.md`、モデル: `specs/tla/ObjStaging.tla`。

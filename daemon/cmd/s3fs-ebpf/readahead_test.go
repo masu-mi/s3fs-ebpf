@@ -7,7 +7,7 @@ func TestReadaheadWindow(t *testing.T) {
 	for _, c := range []struct {
 		cap  int64
 		want int
-	}{{0, 0}, {-1, 0}, {8 * mib, 0}, {16 * mib, 1}, {32 * mib, 2}, {1024 * mib, readaheadMaxChunks}} {
+	}{{0, 0}, {-1, 0}, {8 * mib, 0}, {12 * mib, 0}, {16 * mib, 1}, {32 * mib, 3}, {1024 * mib, readaheadMaxChunks}} {
 		if got := readaheadWindow(c.cap); got != c.want {
 			t.Errorf("readaheadWindow(%d) = %d, want %d", c.cap, got, c.want)
 		}
