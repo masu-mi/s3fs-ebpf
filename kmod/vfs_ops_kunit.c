@@ -846,6 +846,7 @@ static int s3k_vfs_init(struct kunit *test)
 
 	if (!type || !v)
 		return -ENODEV;
+	s3fs_open_check = false;	/* default is on (AC-78); no daemon answers here */
 	v->mnt = kern_mount(type);
 	module_put(type->owner);	/* put_filesystem() is not exported */
 	if (IS_ERR(v->mnt))
@@ -1767,6 +1768,41 @@ static void s3k_vfs_hit_count(struct kunit *test)
 	s3k_close(f);
 }
 
+/* AC-77: with a NO_ON_HIT policy the hit signal is not counted, but the read
+ * pattern (miss events, IOC_STATS) still is. */
+static void s3k_vfs_hit_count_skipped_no_on_hit(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 32;
+	const unsigned int old_rearm = s3fs_hit_rearm_jiffies;
+	struct file *f;
+	struct s3fs_file_data *fd;
+	u64 calls0;
+	char buf[8];
+	loff_t pos = 64;
+	u32 seq, rnd;
+
+	s3k_one_entry(test, ino, "hn", 64);
+	f = s3k_open(test, "hn", O_RDONLY);
+	fd = s3k_fd_of(f);
+	s3fs_hit_rearm_jiffies = 0;
+	calls0 = s3fs_read_iter_calls();
+
+	WRITE_ONCE(s3fs_policy_skip_hit, true);
+	kernel_read(f, buf, sizeof(buf), &pos);
+	WRITE_ONCE(s3fs_policy_skip_hit, false);
+	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 0ull);
+	KUNIT_EXPECT_EQ(test, s3fs_read_iter_calls() - calls0, 1ull);
+	s3fs_fd_read_pattern(fd, &seq, &rnd);
+	KUNIT_EXPECT_EQ(test, seq + rnd, 1u);
+
+	pos = 64;			/* policy swapped to one with on_hit: counted again */
+	kernel_read(f, buf, sizeof(buf), &pos);
+	KUNIT_EXPECT_EQ(test, s3k_hit_sum(fd), 1ull);
+
+	s3fs_hit_rearm_jiffies = old_rearm;
+	s3k_close(f);
+}
+
 /* Every whole-ino eviction goes through admit_evict_ino (it needs idle chunks to free), which resets the
  * per-ino hit state (policy_seen) - the policy forgets the ino, so its next
  * populate is a first look again.  A populate while the policy still knows the
@@ -2080,6 +2116,7 @@ static struct kunit_case s3k_vfs_cases[] = {
 	KUNIT_CASE(s3k_vfs_read_past_2g),
 	KUNIT_CASE(s3k_vfs_populate_mid_chunk),
 	KUNIT_CASE(s3k_vfs_hit_count),
+	KUNIT_CASE(s3k_vfs_hit_count_skipped_no_on_hit),
 	KUNIT_CASE(s3k_vfs_read_pattern),
 	KUNIT_CASE(s3k_vfs_reset_counts_unallocated_pin),
 	KUNIT_CASE(s3k_vfs_signal_flush_keeps_chunks),

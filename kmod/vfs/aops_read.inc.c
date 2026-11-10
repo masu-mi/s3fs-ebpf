@@ -558,15 +558,15 @@ MODULE_PARM_DESC(pcache_drop,
  * S3FS_MISS_FLAG_OPEN_CHECK upcall and fails with the daemon's error
  * (-ENOENT when the HEAD says 404).  Not done for O_CREAT (the file may not
  * exist yet), for a non-regular inode, or for an inode with an unflushed
- * write buffer (its local content is newer than S3).  Default off: every open
- * then costs one S3 HEAD, which a cache hit path should not pay.  Runtime-
+ * write buffer (its local content is newer than S3).  Default on (AC-78): every open
+ * costs one S3 HEAD (about 420 us), the price of s3fs-fuse-equivalent semantics.  Runtime-
  * toggleable:
  *   echo 1 > /sys/module/s3fs_kfunc/parameters/open_check
  */
-static bool s3fs_open_check;
+static bool s3fs_open_check = true;
 module_param_named(open_check, s3fs_open_check, bool, 0644);
 MODULE_PARM_DESC(open_check,
-	"open(2) without O_CREAT asks the daemon (S3 HEAD) whether the object exists; fail with its error (default off)");
+	"open(2) without O_CREAT asks the daemon (S3 HEAD) whether the object exists; fail with its error (default on, AC-78)");
 
 /* pending key of an open check: not a multiple of the 4 MiB chunk size, so it
  * never collides with a read's (ino, chunk_offset). */

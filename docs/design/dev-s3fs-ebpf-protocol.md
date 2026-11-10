@@ -48,7 +48,7 @@ struct s3fs_read_miss_event {
 |---|---|
 | `0` | 普通の read の miss。daemon は取得して populate (pcache) か admit (arena) し、`SIGNAL_ADMIT` で起こす |
 | `S3FS_MISS_FLAG_FOR_WRITE` (0x1) | read ではなく変更 (write、truncate) の前の読み込み (AC-50)。daemon は `offset` を含む 4 MiB の chunk を `POPULATE_PAGES` で入れて `SIGNAL_ADMIT` する。arena モードでも arena には入れない |
-| `S3FS_MISS_FLAG_OPEN_CHECK` (0x4) | read ではなく、`open(2)` (O_CREAT なし) が S3 に存在を確かめる要求。kmod の module param `open_check=1` のときだけ送る (既定 0)。daemon は HEAD して `SIGNAL_ADMIT` の `err` に 0 / `-ENOENT` (404) / `-EIO` を入れる。何も populate しない。pending の `chunk_offset` は all ones (`S3FS_OPEN_CHECK_KEY`) |
+| `S3FS_MISS_FLAG_OPEN_CHECK` (0x4) | read ではなく、`open(2)` (O_CREAT なし) が S3 に存在を確かめる要求。kmod の module param `open_check=1` (既定) のときだけ送る (既定 1)。daemon は HEAD して `SIGNAL_ADMIT` の `err` に 0 / `-ENOENT` (404) / `-EIO` を入れる。何も populate しない。pending の `chunk_offset` は all ones (`S3FS_OPEN_CHECK_KEY`) |
 | `S3FS_MISS_FLAG_PINNED` (0x2) | fd の中身が、固定した ETag のオブジェクトに依存している (dirty、flush 中、remote chunk を持つ)。オブジェクトが変わっていたら衝突として扱う。付いていなければ daemon は古い pin を捨てて Stat し直してよい (AC-51) |
 
 - `read(2)` のバッファが `sizeof(struct s3fs_read_miss_event)` (24 B) より小さいと `-EINVAL`。1 回の `read` で 1 件だけ返す。

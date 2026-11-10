@@ -78,6 +78,9 @@ static void s3fs_hit_count(struct kiocb *iocb, size_t len, struct file *file,
 			this_cpu_inc(s3fs_ri_pos0);
 	}
 	preempt_enable();
+	/* AC-77: the policy has no on_hit; nothing would consume the count. */
+	if (READ_ONCE(s3fs_policy_skip_hit))
+		return;
 	last = READ_ONCE(fc->hit_tick);
 	rearm = READ_ONCE(s3fs_hit_rearm_jiffies);
 	if (last && (!rearm || now - last < rearm))

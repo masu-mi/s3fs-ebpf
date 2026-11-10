@@ -68,6 +68,7 @@ os.close(fd)
 PY
 }
 
+ebpf_open_check 0   # default is 1 (AC-78); the first step shows the old behaviour
 check "off: deleted key still opens, fails only at read (old behaviour)" "ok:!EIO" "$(opn r gone.txt)"
 
 ebpf_open_check 1

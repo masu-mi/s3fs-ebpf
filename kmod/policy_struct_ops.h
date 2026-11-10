@@ -73,6 +73,8 @@ int s3fs_policy_ops_eval_admit(u64 count, u64 arena_used_hint);
 int s3fs_policy_ops_eval_evict(u64 ino);
 int s3fs_policy_ops_eval_pressure(u64 count, u64 threshold);
 int s3fs_policy_ops_eval_hit(u64 ino);
+/* AC-77: the active policy declared NO_ON_HIT, so counting hits for it is wasted. */
+extern bool s3fs_policy_skip_hit;
 
 /* AC-58.  Take s3fs_policy_evict_lock around a whole eviction round:
  * the three calls below must not run concurrently with each other. */
