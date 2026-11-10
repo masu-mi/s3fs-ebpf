@@ -46,6 +46,8 @@ func drainDeletesWith(ctx context.Context, pop func(*deleteEvent) error, s3c obj
 func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	name := string(ev.Name[:ev.NameLen])
 	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
+	stagingInvalidate(s3key) // object staging: before and after the DELETE
+	defer stagingInvalidate(s3key)
 	if s3c == nil {
 		fmt.Printf("[delete] drop ino=%d name=%s (no S3 backend)\n",
 			ev.Ino, name)
@@ -97,6 +99,11 @@ func handleRename(ctx context.Context, s3c objstore.Backend, ev *renameEvent) {
 	newName := string(ev.NewName[:ev.NewNameLen])
 	oldKey := resolveEventS3Key(ev.Ino, ev.OldParentIno, oldName)
 	newKey := resolveKeyPath(ev.NewParentIno, newName)
+	// object staging: both keys change (the old one goes, the new one is replaced)
+	stagingInvalidate(oldKey)
+	stagingInvalidate(newKey)
+	defer stagingInvalidate(oldKey)
+	defer stagingInvalidate(newKey)
 	if s3c == nil {
 		fmt.Printf("[rename] drop ino=%d %s→%s (no S3 backend)\n",
 			ev.Ino, oldKey, newKey)

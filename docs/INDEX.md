@@ -22,6 +22,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
+| [`design/object-staging.md`](design/object-staging.md) | 設計を読む dev | 小さいファイルの先読み (staging): 状態遷移図、TLA+ (`ObjStaging`) の変種と反例、コードとの対応、上限 |
 | [`design/daemon-kmod-messaging.md`](design/daemon-kmod-messaging.md) | 全員 | daemon と kmod の間でどんなメッセージがどのキューを通るか、基本イベントごとの流れ (上の全景の次に) |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 
@@ -118,6 +119,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`journal/data/capacity-pass-20261106/`](journal/data/capacity-pass-20261106/) | `benchmark-results.md` §18.53 の生データ: 容量パス 1 回の所要時間 (3b と 3c、cold inode 数 0〜30,000) と、走査の変種 |
 | [`journal/data/v2-gate-20261107/`](journal/data/v2-gate-20261107/) | `benchmark-results.md` §18.54 の生データ: v2 再設計の前 (`03bb636`) と #57 の先端の A〜F、E の cat-cold の切り分け (`diag/`) |
 | [`journal/data/v2-item2-20261108/`](journal/data/v2-item2-20261108/) | `benchmark-results.md` §18.55 の生データ: 100 MiB の warm cat、capacity モードの cold read、capacity pass とキャッシュ済み数、policy の有無 (AC-89 / AC-90) |
+| [`journal/data/v2-staging-20261110/`](journal/data/v2-staging-20261110/) | `benchmark-results.md` §18.57 の生データ: E の cat-cold (staging なし / depth 4・8・16・32)、handler の内訳 |
 | [`journal/data/open-check-remeasure-20261104/`](journal/data/open-check-remeasure-20261104/) | `benchmark-results.md` §18.51 の生データ: open の存在確認 (`open_check`) 前後の A、silo への GET / HEAD 数 |
 | [`journal/data/open-check-cached-20261104/`](journal/data/open-check-cached-20261104/) | `benchmark-results.md` §18.52 の生データ: キャッシュあり同士 (fuse-cache / fuse-diskcache 対 ebpf-pcache / pcachedrop) の A を `open_check` 0/1 で |
 | [`design/file-lifecycle-state-machine.md`](design/file-lifecycle-state-machine.md) | ファイルの状態遷移図 (kmod / daemon / S3) と、TLA+ (`specs/tla/FileLifecycle.tla`) の検証結果 (反例 3 件、うち 1 件を実機で再現) |

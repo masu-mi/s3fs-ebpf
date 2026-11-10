@@ -108,6 +108,11 @@ func runFastpath(args []string) int {
 		"[S-02] admit-set capacity in bytes. >0 switches kmod to capacity mode "+
 			"(evict by policy score, then oldest first, until the admitted bytes fit); "+
 			"0 restores legacy vote mode; -1 (default) leaves the kmod value as is.")
+	stagingBytes := fs.Int64("staging-bytes", defaultStagingCfg.maxBytes,
+		"[AC-88] object staging: bytes of sibling small files fetched ahead (read in name order "+
+			"within a directory) so their misses skip the S3 GET. 0 turns staging off.")
+	stagingDepth := fs.Int("staging-depth", defaultStagingCfg.depth,
+		"[AC-88] object staging: how many following files to fetch ahead of the current miss.")
 	newClient := backendFlags(fs)
 	fs.Parse(args)
 
@@ -403,6 +408,13 @@ func runFastpath(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if s3c != nil && *stagingBytes > 0 {
+		cfg := defaultStagingCfg
+		cfg.maxBytes, cfg.depth = *stagingBytes, *stagingDepth
+		staging = newBackendStager(cfg, s3c)
+		fmt.Printf("[staging] on: %d bytes, depth %d, objects <= %d bytes\n", cfg.maxBytes, cfg.depth, cfg.maxObj)
+	}
 
 	if s3c != nil {
 		prefixStr := ""

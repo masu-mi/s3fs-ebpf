@@ -28,6 +28,11 @@ type Counters struct {
 	OpenCheckMissing    atomic.Uint64 // counter: of those, the object did not exist
 	ReadMissRepopulates atomic.Uint64 // counter (AC-45: chunk evicted before the success signal, populated again)
 
+	// Object staging (docs/design/object-staging.md).
+	StagingFetches atomic.Uint64 // counter: sibling objects GET ahead of their miss
+	StagingHits    atomic.Uint64 // counter: misses served from the staged copy
+	StagingWasted  atomic.Uint64 // counter: staged copies dropped unused (expired, evicted, invalidated, wrong size, stale fetch)
+
 	// Week 4 (b): dynamic bucket sync loop.
 	SyncRounds         atomic.Uint64 // counter, bumped per successful sync
 	SyncErrors         atomic.Uint64 // counter
@@ -205,6 +210,10 @@ func handle(w http.ResponseWriter, _ *http.Request) {
 		{"s3fs_ebpf_open_check_missing_total", "open_check HEADs that found no object (open fails with ENOENT).", "counter", Global.OpenCheckMissing.Load()},
 		{"s3fs_ebpf_read_miss_errors_total", "Read-miss upcalls that failed (S3 Get / admit).", "counter", Global.ReadMissErrors.Load()},
 		{"s3fs_ebpf_read_miss_repopulates_total", "Read-miss populates repeated because kmod found the chunk evicted before the success signal (AC-45).", "counter", Global.ReadMissRepopulates.Load()},
+
+		{"s3fs_ebpf_staging_fetches_total", "Sibling objects fetched ahead of their read miss (object staging).", "counter", Global.StagingFetches.Load()},
+		{"s3fs_ebpf_staging_hits_total", "Read misses served from a staged copy (no S3 GET on the miss path).", "counter", Global.StagingHits.Load()},
+		{"s3fs_ebpf_staging_wasted_total", "Staged copies dropped unused (expired, evicted, invalidated by a write, wrong size, or fetched across an invalidation).", "counter", Global.StagingWasted.Load()},
 
 		// Sync loop.
 		{"s3fs_ebpf_sync_rounds_total", "Successful bucket-sync rounds.", "counter", Global.SyncRounds.Load()},

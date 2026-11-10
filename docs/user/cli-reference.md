@@ -132,6 +132,7 @@ Targets:
     test-policy-data-members      struct_ops data members (flags / name) + validate: accepted, refused (EINVAL), carried by a hot swap
     test-nocache-signal           a signal during the upcall wait must not turn a cold read into -EIO (nocache=1 + Go microbench)
     test-cold-signal              a signal during the upcall wait must not turn a cache-mode cold read into -EIO (distinct files + Go microbench)
+    test-staging                  object staging (AC-88): sibling files fetched ahead in name order; never a stale copy after a write / delete / rename
     test-pcache-drop              pcache_drop=1: open drops only the page cache; chunk table hit needs no upcall
     test-write-existing-nopm      AC-50: same as test-write-existing with --partial-modify=false (whole-object GET + PUT path)
     test-write-existing           AC-50: write/truncate/append on an unread existing object keeps the rest

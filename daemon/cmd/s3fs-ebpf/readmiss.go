@@ -372,7 +372,16 @@ func handleReadMiss(ctx context.Context, devPath string,
 		return
 	}
 	if useFullAdmit {
-		body, err = s3c.Get(ctx, entry.S3Key)
+		// Object staging: a small file whose siblings are being read in name
+		// order was fetched ahead; a miss with no staged copy GETs as before.
+		var staged bool
+		if staging != nil && !isLarge {
+			staging.observe(ctx, ev.Ino)
+			body, staged = staging.take(ctx, entry.S3Key, entry.Fallback)
+		}
+		if !staged {
+			body, err = s3c.Get(ctx, entry.S3Key)
+		}
 	} else {
 		// Align to chunk boundary containing the miss.
 		chunkOffset = missChunkOffset

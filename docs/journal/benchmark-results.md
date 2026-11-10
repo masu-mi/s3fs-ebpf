@@ -2662,3 +2662,26 @@ AC-90 の変更の後に 1 回目が FAIL (live 1084 対 sim 969 hits、5.8 pt) 
 - 共通点は「依存した要求の直列」だが、E は 1 ファイルずつ open → upcall → GET → populate で、read-ahead の対象になる chunk の並びがない。同じ手では直らない。
 - 既存の sibling の先読み (`prefetch_next: 8`、mount 経由) を入れると **9.0 s で逆に遅い** (mount 経由の読みが cat と競合する)。mount を通さずに daemon が直接 populate するには、まだ instantiate されていない inode にも populate できる必要がある (kmod の機能追加)。AC-88 に追記。
 
+### 18.57 object staging: E の cat-cold (AC-88) (2026-11-10)
+
+条件: KVM、`6.12.0-061200-generic`、haltpoll off、MinIO はローカル、ebpf-pcache、`--softcap=20000`。生データ: `docs/journal/data/v2-staging-20261110/`。設計: `docs/design/object-staging.md`、モデル: `specs/tla/ObjStaging.tla`。
+
+**ハンドラの内訳** (一時の計測、10,000 個の cold cat、1 upcall あたりの平均): S3 GET **728 µs**、populate 15 µs、lookup 0 µs、合計 約 820 µs。つまり GET が 89%。AC-88 の「ringbuf の読みをやめて遅くなった」差は GET の待ち (アイドルからの復帰を含む) の差で、GET を重ねない限り縮まらない。
+
+**cat-cold (10,000 個 × 4 KiB、3 回、ms)**
+
+| 構成 | 値 | 比 |
+|---|---|---|
+| staging なし (master `5d7cca9`) | 8,631 / 8,667 / 8,621 | 1.0 |
+| depth 4 | 2,954 / 2,835 / 2,837 | 3.0× |
+| depth 8 | 2,280 / 2,384 / 2,257 | 3.7× |
+| **depth 16 (既定)** | **2,170 / 2,198 / 2,171** | **4.0×** |
+| depth 32 | 2,081 / 2,050 / 2,219 | 4.1× |
+
+- sha256 は全 run で一致。cat-warm は変わらない (約 100〜120 ms)。depth 16 より先は頭打ち。1 ファイルあたり約 217 µs (起床 2 回 + populate + signal + 読み手)。
+- AC-88 の基準 (v2 の前 約 6.8 s) より速い。
+
+**検証**: `make test-staging` PASS (名前順で hit 57 / fetch 73、staged の file を同じ長さで書き換え + fsync → 新しい中身、delete / rename、ランダムな順)。**無効化を外す (negative control) と stale が返って FAIL する**ことを確認した (最初のテストは新しい中身が短く、サイズ照合だけで通ってしまっていたので、同じ長さに直した)。`make test-regression` 全件 PASS、`make test-spec` の `ObjStaging.*` 5 変種が期待どおり、`go test -race ./cmd/...` PASS。
+
+**計測の落とし穴**: この branch の `scripts/bench-pcache-remeasure.sh` に `E_EXTRA` がなく (別 PR #60)、`--staging-bytes=0` を渡した最初の「off」の run は実は staging が有効で、off が 2.1 s に見えた。log の `[staging] on:` の有無で確かめて、`E_EXTRA` を入れて取り直した。
+

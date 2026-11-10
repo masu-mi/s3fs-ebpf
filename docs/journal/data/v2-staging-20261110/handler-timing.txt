@@ -1,0 +1,3 @@
+[dbg] n=6000 look=0us get=729us pop=15us total=0us (avg/upcall)
+[dbg] n=8000 look=0us get=725us pop=15us total=0us (avg/upcall)
+[dbg] n=10000 look=0us get=728us pop=15us total=0us (avg/upcall)
