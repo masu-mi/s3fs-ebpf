@@ -2662,6 +2662,19 @@ AC-90 の変更の後に 1 回目が FAIL (live 1084 対 sim 969 hits、5.8 pt) 
 - 共通点は「依存した要求の直列」だが、E は 1 ファイルずつ open → upcall → GET → populate で、read-ahead の対象になる chunk の並びがない。同じ手では直らない。
 - 既存の sibling の先読み (`prefetch_next: 8`、mount 経由) を入れると **9.0 s で逆に遅い** (mount 経由の読みが cat と競合する)。mount を通さずに daemon が直接 populate するには、まだ instantiate されていない inode にも populate できる必要がある (kmod の機能追加)。AC-88 に追記。
 
+### 18.58 AC-89: read-ahead の GET をまとめる実験 (2026-11-10)
+
+条件: KVM、`6.12.0-061200-generic`、`d883485` の次の commit、haltpoll off、MinIO (local)。生データと script: `docs/journal/data/v2-ac89-group-20261110/`。100 MiB の cold read (ms)、容量 32 MiB、窓は 3 chunk。read-ahead の chunk を 1 / 2 / 3 個ずつ 1 回の range GET にまとめ、GET が返ったら chunk ごとに populate して待ち手を起こす形 (§18.56 の「窓全体を 1 回の GET」と違い、読み手は自分の chunk の populate を待つだけ) を試した。
+
+| | 2 ラウンドの中央値 (ms) | 無制限比 |
+|---|---|---|
+| 無制限 (`--cache-capacity=0`) | 122〜133 | 1.00 |
+| 容量 32 MiB、1 chunk ずつ (今のコード) | 161〜175 | 約 1.3 |
+| 2 chunk ずつ | 176〜190 | 約 1.45 |
+| 3 chunk ずつ | 199〜232 | 約 1.7 |
+
+まとめるほど遅い。chunk ごとの並列 GET が、まとめた GET より速い (local MinIO では 1 要求あたりの固定費より、並列度と、先に届いた chunk から populate できることが効く)。窓全体を 1 回で取る案 (§18.56) と同じ向きで、**GET のまとめ方で縮まる残りはない**。コードは戻した。残る約 +30% は、容量の中に収まる範囲の先読みが上限で、4 MiB ごとの upcall と GET が並列度を持てないことによる。AC-89 は P3 のまま「これ以上は GET のまとめでは縮まない」と記録して閉じる。
+
 ### 18.57 object staging: E の cat-cold (AC-88) (2026-11-10)
 
 条件: KVM、`6.12.0-061200-generic`、haltpoll off、MinIO はローカル、ebpf-pcache、`--softcap=20000`。生データ: `docs/journal/data/v2-staging-20261110/`。設計: `docs/design/object-staging.md`、モデル: `specs/tla/ObjStaging.tla`。
