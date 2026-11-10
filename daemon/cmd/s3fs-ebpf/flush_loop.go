@@ -409,6 +409,10 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	name := string(ev.Name[:ev.NameLen])
 
 	s3key := resolveEventS3Key(ev.Ino, ev.ParentIno, name)
+	// Object staging: no staged copy of this key may outlive the PUT (before and
+	// after it, ObjStaging.tla); the deferred call runs before the waiter is woken.
+	stagingInvalidate(s3key)
+	defer stagingInvalidate(s3key)
 	// AC-86: the mirror learns a created file (or its new name) only at the next
 	// sync; read misses and open_check look the key up there.
 	fpebpf.RecordKey(ev.Ino, ev.ParentIno, name, s3key, ev.Size, ev.Seq)

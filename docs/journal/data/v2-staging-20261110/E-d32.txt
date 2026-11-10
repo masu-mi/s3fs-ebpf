@@ -1,0 +1,12 @@
+ebpf-pcache ls-cold 75.3 sha=- files=10001 bytes= rep=1
+ebpf-pcache cat-cold 2080.6 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-pcache ls-warm 24.3 sha=- files=10001 bytes=40960000 rep=1
+ebpf-pcache cat-warm 130.8 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-pcache ls-cold 64.4 sha=- files=10001 bytes=40960000 rep=2
+ebpf-pcache cat-cold 2050.2 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-pcache ls-warm 22.3 sha=- files=10001 bytes=40960000 rep=2
+ebpf-pcache cat-warm 128.9 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-pcache ls-cold 77.5 sha=- files=10001 bytes=40960000 rep=3
+ebpf-pcache cat-cold 2218.7 sha=ok files=10001 bytes=40960000 rep=3
+ebpf-pcache ls-warm 23.4 sha=- files=10001 bytes=40960000 rep=3
+ebpf-pcache cat-warm 125.0 sha=ok files=10001 bytes=40960000 rep=3

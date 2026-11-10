@@ -1,6 +1,9 @@
 package ebpf
 
-import "sync"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 // Entry mirrors one row of kmod's live entry table — the set of
 // objects the mount currently exposes. Sync is one-way: daemon
@@ -18,6 +21,14 @@ type Entry struct {
 	Prewarm   bool   // if false, wait for a read-miss upcall before fetching
 	RecSeq    uint64 // AC-86/85: seq of the flush / rename event RecordKey recorded this key for (0 = from a listing)
 }
+
+// entriesGen counts changes of the table's membership (Replace, ReplaceApplied,
+// RecordKey, DropRecorded), so a reader of Snapshot can tell a derived index
+// has gone stale without comparing the table.
+var entriesGen atomic.Uint64
+
+// Generation returns the current membership generation (see entriesGen).
+func Generation() uint64 { return entriesGen.Load() }
 
 // bootstrap mirrors kmod's compile-time s3fs_bootstrap_entries so the
 // daemon can operate (and prewarm) without S3 — useful for smoke
@@ -67,6 +78,7 @@ func Replace(newEntries []Entry) {
 	copy(dup, newEntries)
 	entriesMu.Lock()
 	entries = dup
+	entriesGen.Add(1)
 	entriesMu.Unlock()
 }
 
@@ -108,6 +120,7 @@ func SetSizeByIno(ino, size uint64) {
 func RecordKey(ino, parentIno uint64, name, key string, size, seq uint64) {
 	entriesMu.Lock()
 	defer entriesMu.Unlock()
+	entriesGen.Add(1)
 	for i := range entries {
 		if entries[i].Ino == ino {
 			entries[i].ParentIno = parentIno
@@ -129,6 +142,7 @@ func RecordKey(ino, parentIno uint64, name, key string, size, seq uint64) {
 func DropRecorded(ino uint64) {
 	entriesMu.Lock()
 	defer entriesMu.Unlock()
+	entriesGen.Add(1)
 	out := entries[:0]
 	for _, e := range entries {
 		if e.Ino == ino && e.RecSeq > 0 {
@@ -149,6 +163,7 @@ func DropRecorded(ino uint64) {
 func ReplaceApplied(fresh []Entry, applied uint64) {
 	entriesMu.Lock()
 	defer entriesMu.Unlock()
+	entriesGen.Add(1)
 	recorded := map[uint64]Entry{}
 	for _, e := range entries {
 		if e.RecSeq > applied {
