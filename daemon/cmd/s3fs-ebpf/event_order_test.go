@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/kmodio"
 	"golang.org/x/sys/unix"
 )
 
@@ -22,46 +23,20 @@ func resetFlushTracking(t *testing.T) {
 	})
 }
 
-// queues is a fake kmod: three FIFO queues whose events carry kmod's seq.
-type queues struct {
-	flush  []flushEvent
-	del    []deleteEvent
-	rename []renameEvent
-	// onPop runs after every successful pop (e.g. to enqueue another event the
-	// way a concurrent syscall would).
-	onPop func()
+// fifo is a fake kmod: the write-back FIFO, whose events carry kmod's seq.
+type fifo struct {
+	q []wbEvent
 }
 
-func (q *queues) ops(log *[]string) orderedOps {
+func wb(typ uint32, seq uint64) wbEvent { return wbEvent{Type: typ, Seq: seq} }
+
+func (f *fifo) ops(log *[]string) orderedOps {
 	return orderedOps{
-		popFlush: func(ev *flushEvent) error {
-			if len(q.flush) == 0 {
+		popWB: func(ev *wbEvent) error {
+			if len(f.q) == 0 {
 				return unix.EAGAIN
 			}
-			*ev, q.flush = q.flush[0], q.flush[1:]
-			if q.onPop != nil {
-				q.onPop()
-			}
-			return nil
-		},
-		popDelete: func(ev *deleteEvent) error {
-			if len(q.del) == 0 {
-				return unix.EAGAIN
-			}
-			*ev, q.del = q.del[0], q.del[1:]
-			if q.onPop != nil {
-				q.onPop()
-			}
-			return nil
-		},
-		popRename: func(ev *renameEvent) error {
-			if len(q.rename) == 0 {
-				return unix.EAGAIN
-			}
-			*ev, q.rename = q.rename[0], q.rename[1:]
-			if q.onPop != nil {
-				q.onPop()
-			}
+			*ev, f.q = f.q[0], f.q[1:]
 			return nil
 		},
 		flush:  func(ev *flushEvent) { *log = append(*log, fmt.Sprintf("flush#%d", ev.Seq)) },
@@ -70,63 +45,72 @@ func (q *queues) ops(log *[]string) orderedOps {
 	}
 }
 
-func TestDrainOrderedFollowsSeq(t *testing.T) {
+// The drain handles events in the order kmod queued them, whatever their kind.
+func TestDrainOrderedFollowsFIFO(t *testing.T) {
 	resetFlushTracking(t)
 	// Model counterexample 2: create b (flush #1), rename b->c (#2): flush first.
 	// Counterexample 3: rename a->b (#3), create a (flush #4): rename first.
-	q := &queues{
-		flush:  []flushEvent{{Seq: 1}, {Seq: 4}, {Seq: 6}},
-		rename: []renameEvent{{Seq: 2}, {Seq: 3}},
-		del:    []deleteEvent{{Seq: 5}},
-	}
+	f := &fifo{q: []wbEvent{wb(kmodio.WBFlush, 1), wb(kmodio.WBRename, 2), wb(kmodio.WBRename, 3),
+		wb(kmodio.WBFlush, 4), wb(kmodio.WBDelete, 5), wb(kmodio.WBFlush, 6)}}
 	var log []string
-	drainOrdered(q.ops(&log))
+	drainOrdered(f.ops(&log))
 	want := []string{"flush#1", "rename#2", "rename#3", "flush#4", "delete#5", "flush#6"}
 	if fmt.Sprint(log) != fmt.Sprint(want) {
 		t.Errorf("order %v, want %v", log, want)
 	}
 }
 
-// An event queued while the drain is running (after the empty queue was polled)
-// with a smaller seq than a held one must still go first: that is what polling
-// the empty slots again after every pop guarantees.
-func TestDrainOrderedLateOlderEvent(t *testing.T) {
+// The fields of a WB event reach the handler of its kind.
+func TestDrainOrderedConvertsFields(t *testing.T) {
 	resetFlushTracking(t)
-	q := &queues{flush: []flushEvent{{Seq: 2}}}
-	done := false
-	q.onPop = func() {
-		// the flush #2 has just been popped; a rename with seq #1 was assigned
-		// before #2 but only becomes visible now (kmod assigns seq under the
-		// lock that queues, so this cannot happen there; the polls after a pop
-		// make the drain correct even if the queues were read in any order)
-		if !done {
-			done = true
-			q.rename = append(q.rename, renameEvent{Seq: 1})
-		}
+	fe := wbEvent{Type: kmodio.WBFlush, Ino: 7, ParentIno: 3, Size: 99, Seq: 1, Flags: 1, NameLen: 1}
+	fe.Name[0] = 'f'
+	re := wbEvent{Type: kmodio.WBRename, Ino: 8, ParentIno: 3, NewParentIno: 4, Seq: 2, NameLen: 1, NewNameLen: 2}
+	re.Name[0] = 'a'
+	copy(re.NewName[:], "bb")
+	de := wbEvent{Type: kmodio.WBDelete, Ino: 9, ParentIno: 5, Seq: 3, NameLen: 1}
+	de.Name[0] = 'd'
+	f := &fifo{q: []wbEvent{fe, re, de}}
+	var gf *flushEvent
+	var gr *renameEvent
+	var gd *deleteEvent
+	ops := f.ops(new([]string))
+	ops.flush = func(e *flushEvent) { gf = e }
+	ops.rename = func(e *renameEvent) { gr = e }
+	ops.delete = func(e *deleteEvent) { gd = e }
+	drainOrdered(ops)
+	if gf == nil || gf.Ino != 7 || gf.ParentIno != 3 || gf.Size != 99 || gf.Flags != 1 || gf.NameLen != 1 || gf.Name[0] != 'f' {
+		t.Errorf("flush = %+v", gf)
 	}
-	var log []string
-	drainOrdered(q.ops(&log))
-	if fmt.Sprint(log) != fmt.Sprint([]string{"rename#1", "flush#2"}) {
-		t.Errorf("order %v, want [rename#1 flush#2]", log)
+	if gr == nil || gr.Ino != 8 || gr.OldParentIno != 3 || gr.NewParentIno != 4 || gr.OldNameLen != 1 ||
+		gr.NewNameLen != 2 || gr.OldName[0] != 'a' || string(gr.NewName[:2]) != "bb" {
+		t.Errorf("rename = %+v", gr)
+	}
+	if gd == nil || gd.Ino != 9 || gd.ParentIno != 5 || gd.NameLen != 1 || gd.Name[0] != 'd' {
+		t.Errorf("delete = %+v", gd)
 	}
 }
 
 func TestDrainOrderedPopErrorStops(t *testing.T) {
 	resetFlushTracking(t)
 	var log []string
-	ops := (&queues{flush: []flushEvent{{Seq: 1}}}).ops(&log)
-	ops.popRename = func(*renameEvent) error { return errors.New("ioctl broke") }
-	drainOrdered(ops)
+	ops := (&fifo{q: []wbEvent{wb(kmodio.WBFlush, 1)}}).ops(&log)
+	ops.popWB = func(*wbEvent) error { return errors.New("ioctl broke") }
+	d := newOrderedDrain(ops)
+	d.run(noSeqLimit)
 	if len(log) != 0 {
 		t.Errorf("handled %v after a pop error, want nothing (the event stays for the next tick)", log)
+	}
+	if !d.failed.Load() {
+		t.Error("failed not set after a pop error")
 	}
 }
 
 func TestDrainOrderedStop(t *testing.T) {
 	resetFlushTracking(t)
-	q := &queues{flush: []flushEvent{{Seq: 1}, {Seq: 2}, {Seq: 3}}}
+	f := &fifo{q: []wbEvent{wb(kmodio.WBFlush, 1), wb(kmodio.WBFlush, 2), wb(kmodio.WBFlush, 3)}}
 	var log []string
-	ops := q.ops(&log)
+	ops := f.ops(&log)
 	ops.stop = func() bool { return len(log) >= 2 }
 	drainOrdered(ops)
 	if fmt.Sprint(log) != fmt.Sprint([]string{"flush#1", "flush#2"}) {
@@ -135,16 +119,13 @@ func TestDrainOrderedStop(t *testing.T) {
 }
 
 // An fsync's flush (seq 5) is handled at once by its own goroutine. Before it
-// PUTs, run(5) must have handled the rename queued before it (seq 3) — and
+// PUTs, run(5) must have handled the events queued before it (seq 2, 3) — and
 // must not touch the events queued after it, which stay held for the next run.
 func TestOrderedDrainRunLimitHoldsNewerEvents(t *testing.T) {
 	resetFlushTracking(t)
-	q := &queues{
-		rename: []renameEvent{{Seq: 3}, {Seq: 8}},
-		flush:  []flushEvent{{Seq: 2}, {Seq: 6}},
-	}
+	f := &fifo{q: []wbEvent{wb(kmodio.WBFlush, 2), wb(kmodio.WBRename, 3), wb(kmodio.WBFlush, 6), wb(kmodio.WBRename, 8)}}
 	var log []string
-	d := newOrderedDrain(q.ops(&log))
+	d := newOrderedDrain(f.ops(&log))
 
 	d.run(5)
 	if fmt.Sprint(log) != fmt.Sprint([]string{"flush#2", "rename#3"}) {

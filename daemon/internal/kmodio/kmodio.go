@@ -64,9 +64,29 @@ type StatsArg struct {
 	Values [StatsMax]uint64
 }
 
-// DeleteEvent mirrors `struct s3fs_delete_event` (G-01 layout).
-// Kept as a separate type from FlushEvent so the ioctl size encoding
-// matches kmod's expected sizeof exactly.
+// WBEvent mirrors `struct s3fs_wb_event`: what S3FS_IOC_POP_WB returns, one of
+// a flush, a delete or a rename (Type), in the order kmod queued them.
+type WBEvent struct {
+	Type         uint32 // WBFlush / WBDelete / WBRename
+	Flags        uint32 // flush: FlushFlag*
+	Ino          uint64
+	ParentIno    uint64 // rename: source dir
+	NewParentIno uint64 // rename: destination dir
+	Size         uint64 // flush
+	Seq          uint64
+	NameLen      uint32
+	NewNameLen   uint32
+	Name         [SyncNameMax + 1]byte
+	NewName      [SyncNameMax + 1]byte
+}
+
+const (
+	WBFlush  = 1
+	WBDelete = 2
+	WBRename = 3
+)
+
+// DeleteEvent is the delete form of a WBEvent, as the handlers take it.
 type DeleteEvent struct {
 	Ino       uint64
 	ParentIno uint64 // G-01
@@ -76,7 +96,7 @@ type DeleteEvent struct {
 	Name      [SyncNameMax + 1]byte
 }
 
-// RenameEvent mirrors `struct s3fs_rename_event` (G-01 layout).
+// RenameEvent is the rename form of a WBEvent, as the handlers take it.
 // Carries both names + their parent inos in one payload so daemon
 // resolves full S3 keys for a cross-dir CopyObject + Delete.
 type RenameEvent struct {
@@ -130,14 +150,12 @@ const (
 	IocPopulatePages  = (1 << 30) | (uint32(unsafe.Sizeof(PopulatePagesArg{})) << 16) | (0xE3 << 8) | 0x0E
 	IocEval           = (0 << 30) | (0 << 16) | (0xE3 << 8) | 0x02 // _IO(0xE3, 0x02)
 	IocSignalAdmit    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
-	IocPopFlush       = (2 << 30) | (uint32(unsafe.Sizeof(FlushEvent{})) << 16) | (0xE3 << 8) | 0x05
+	IocPopWB          = (2 << 30) | (uint32(unsafe.Sizeof(WBEvent{})) << 16) | (0xE3 << 8) | 0x11
 	IocReadDirty      = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
 	IocMarkDirty      = (1 << 30) | (uint32(unsafe.Sizeof(MarkDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
 	IocStats          = (3 << 30) | (uint32(unsafe.Sizeof(StatsArg{})) << 16) | (0xE3 << 8) | 0x08
 	IocSignalFlush    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x0A
 	IocPopFlushWait   = (2 << 30) | (uint32(unsafe.Sizeof(FlushEvent{})) << 16) | (0xE3 << 8) | 0x0D
-	IocPopDelete      = (2 << 30) | (uint32(unsafe.Sizeof(DeleteEvent{})) << 16) | (0xE3 << 8) | 0x0B
-	IocPopRename      = (2 << 30) | (uint32(unsafe.Sizeof(RenameEvent{})) << 16) | (0xE3 << 8) | 0x0C
 	IocDirtyLayout    = (3 << 30) | (uint32(unsafe.Sizeof(DirtyLayoutArg{})) << 16) | (0xE3 << 8) | 0x0F
 	IocReadDirtyRange = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyRangeArg{})) << 16) | (0xE3 << 8) | 0x10
 	IocSyncEntries    = (1 << 30) | (uint32(unsafe.Sizeof(SyncEntriesArg{})) << 16) | (0xE3 << 8) | 0x04

@@ -640,23 +640,41 @@ static void s3k_local_entry_promotion_needs_applied(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_entries_replace(NULL, 0), 0);
 }
 
+/* Pop the oldest write-back event; a flush comes back as a flush event.  -EINVAL
+ * when the head is a delete or rename (the caller expected a flush). */
+static int s3k_pop_flush(struct s3fs_flush_event *out)
+{
+	struct s3fs_wb_event *w = kmalloc(sizeof(*w), GFP_KERNEL);
+	int err;
+
+	if (!w)
+		return -ENOMEM;
+	err = s3fs_ebpf_wb_pop(w);
+	if (!err && w->type != S3FS_WB_FLUSH)
+		err = -EINVAL;
+	if (!err) {
+		memset(out, 0, sizeof(*out));
+		out->ino = w->ino;
+		out->parent_ino = w->parent_ino;
+		out->size = w->size;
+		out->seq = w->seq;
+		out->name_len = w->name_len;
+		out->flags = w->flags;
+		memcpy(out->name, w->name, w->name_len);
+	}
+	kfree(w);
+	return err;
+}
+
 /* flush / delete / rename events share one strictly increasing seq (AC-84), and
  * s3fs_ebpf_event_seq() is the highest handed out. */
 static void s3k_event_seq_is_shared_and_increasing(struct kunit *test)
 {
-	struct s3fs_flush_event *fe = kunit_kzalloc(test, sizeof(*fe), GFP_KERNEL);
-	struct s3fs_delete_event *de = kunit_kzalloc(test, sizeof(*de), GFP_KERNEL);
-	struct s3fs_rename_event *re = kunit_kzalloc(test, sizeof(*re), GFP_KERNEL);
+	struct s3fs_wb_event *w = kunit_kzalloc(test, sizeof(*w), GFP_KERNEL);
 	u64 s1, s2, s3, s4;
 
-	KUNIT_ASSERT_NOT_NULL(test, fe);
-	KUNIT_ASSERT_NOT_NULL(test, de);
-	KUNIT_ASSERT_NOT_NULL(test, re);
-	while (s3fs_ebpf_flush_pop(fe) == 0)
-		;
-	while (s3fs_ebpf_delete_pop(de) == 0)
-		;
-	while (s3fs_ebpf_rename_pop(re) == 0)
+	KUNIT_ASSERT_NOT_NULL(test, w);
+	while (s3fs_ebpf_wb_pop(w) == 0)
 		;
 
 	s1 = flush_enqueue(5000001, 0, 0, "f", 1, 0);
@@ -669,15 +687,24 @@ static void s3k_event_seq_is_shared_and_increasing(struct kunit *test)
 	KUNIT_EXPECT_LT(test, s3, s4);
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_event_seq(), s4);
 
-	/* each queue hands its event back with the seq it was given */
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(fe), 0);
-	KUNIT_EXPECT_EQ(test, fe->seq, s1);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_rename_pop(re), 0);
-	KUNIT_EXPECT_EQ(test, re->seq, s2);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_delete_pop(de), 0);
-	KUNIT_EXPECT_EQ(test, de->seq, s3);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(fe), 0);
-	KUNIT_EXPECT_EQ(test, fe->seq, s4);
+	/* one FIFO: the events come back in the order they were queued, with
+	 * their seq and their own fields */
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_FLUSH);
+	KUNIT_EXPECT_EQ(test, w->seq, s1);
+	KUNIT_EXPECT_STREQ(test, w->name, "f");
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_RENAME);
+	KUNIT_EXPECT_EQ(test, w->seq, s2);
+	KUNIT_EXPECT_STREQ(test, w->name, "f");
+	KUNIT_EXPECT_STREQ(test, w->new_name, "g");
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_DELETE);
+	KUNIT_EXPECT_EQ(test, w->seq, s3);
+	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_FLUSH);
+	KUNIT_EXPECT_EQ(test, w->seq, s4);
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_wb_pop(w), -EAGAIN);
 
 	/* nothing queued: no seq */
 	KUNIT_EXPECT_EQ(test, flush_enqueue(5000004, 0, 0, "", 0, 0), 0ull);
@@ -774,11 +801,12 @@ static void s3k_miss_queue_fifo(struct kunit *test)
 
 static void s3k_drain_flush_queues(void)
 {
-	struct s3fs_flush_event ev;
+	struct s3fs_wb_event *w = kmalloc(sizeof(*w), GFP_KERNEL);
 	struct s3fs_flush_item *f, *tmp;
 
-	while (!s3fs_ebpf_flush_pop(&ev))
+	while (w && !s3fs_ebpf_wb_pop(w))
 		;
+	kfree(w);
 	spin_lock(&s3fs_flush_wait_lock);
 	list_for_each_entry_safe(f, tmp, &s3fs_flush_wait_queue, link) {
 		list_del(&f->link);
@@ -796,16 +824,18 @@ static void s3k_flush_queue_f1(struct kunit *test)
 	s3k_drain_flush_queues();
 	flush_enqueue(a, 1, 0, "a.txt", 5, 0);		/* .create placeholder */
 	flush_enqueue(b, 1, 3, "b.txt", 5, 0);
+	rename_enqueue(a, 1, 1, "a.txt", 5, "c.txt", 5);	/* F1 must not drop this */
 	flush_enqueue(a, 1, 9, "a.txt", 5, S3FS_FLUSH_FLAG_WAIT);
 	flush_enqueue(a, 1, 9, "", 0, 0);		/* rejected: no name */
 	flush_enqueue(a, 1, 9, "x", S3FS_SYNC_NAME_MAX + 1, 0);
 
 	/* F1: the WAIT event dropped a's queued item, b's stays */
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
 	KUNIT_EXPECT_EQ(test, ev->ino, b);
 	KUNIT_EXPECT_EQ(test, ev->size, 3ull);
 	KUNIT_EXPECT_STREQ(test, ev->name, "b.txt");
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_flush_pop(ev), -EAGAIN);
+	KUNIT_EXPECT_EQ(test, s3k_pop_flush(ev), -EINVAL);	/* the rename, not a flush */
+	KUNIT_EXPECT_EQ(test, s3k_pop_flush(ev), -EAGAIN);
 
 	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), 0);
 	KUNIT_EXPECT_EQ(test, ev->ino, a);
@@ -1052,7 +1082,7 @@ static void s3k_vfs_close_flush(struct kunit *test)
 	ihold(inode);
 	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 0, "J", 1), 1L);
 	s3k_close(f);	/* .release: fire-and-forget flush */
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
 	KUNIT_EXPECT_EQ(test, ev->ino, (u64)inode->i_ino);
 	KUNIT_EXPECT_EQ(test, ev->size, 17ull);
 	KUNIT_EXPECT_EQ(test, ev->parent_ino, (u64)S3FS_ROOT_INO);
@@ -1105,7 +1135,7 @@ static void s3k_vfs_fsync_waits_for_its_put(struct kunit *test)
 	/* close #1: the daemon pops it and reads the buffer (PUT 1 starts) */
 	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 0, "1", 1), 1L);
 	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
 	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 32, NULL), 17L);
 
 	/* a second write, then fsync blocks on its own flush */
@@ -1875,7 +1905,7 @@ static void s3k_vfs_signal_flush_keeps_chunks(struct kunit *test)
 	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 2 * C, "x", 1), 1L);
 	KUNIT_EXPECT_FALSE(test, s3k_is_resident(ino, NULL));	/* dirty: not a candidate */
 	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
 	mutex_lock(&fd->lock);
 	fd->flush_read_seq = fd->flush_seq;	/* the daemon read the buffer */
 	mutex_unlock(&fd->lock);
@@ -1889,7 +1919,7 @@ static void s3k_vfs_signal_flush_keeps_chunks(struct kunit *test)
 
 	/* the retry's PUT succeeded */
 	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop(ev), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
 	mutex_lock(&fd->lock);
 	fd->flush_read_seq = fd->flush_seq;
 	mutex_unlock(&fd->lock);

@@ -73,18 +73,6 @@ func markDirty(devFd int, ino uint64) error {
 	return nil
 }
 
-// popFlush pulls one event or returns unix.EAGAIN when the queue is
-// empty. The dev fd must be R/W.
-func popFlush(devFd int, out *flushEvent) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(devFd), uintptr(s3fsIocPopFlush),
-		uintptr(unsafe.Pointer(out)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
 // popFlushWait blocks up to 200 ms for a WAIT-flagged flush event.
 // Returns nil on success, unix.EAGAIN on timeout, unix.EINTR on signal,
 // unix.ENODEV on kmod shutdown. The dev fd must be R/W.
@@ -268,10 +256,8 @@ func drainFlushOnShutdown(d *orderedDrain, coal *coalescer, devFd int, devPath s
 	// fires. handleFlush issues the PUT (and signal_flush for WAIT events)
 	// in-line; the order is still kmod's (drainOrdered).
 	d.runWith(orderedOps{
-		popFlush:  func(ev *flushEvent) error { return popFlush(devFd, ev) },
-		popDelete: func(ev *deleteEvent) error { return popDelete(devFd, ev) },
-		popRename: func(ev *renameEvent) error { return popRename(devFd, ev) },
-		flush:     func(ev *flushEvent) { handleFlush(ctx, devFd, devPath, s3c, ev); drained++ },
+		popWB: func(ev *wbEvent) error { return popWB(devFd, ev) },
+		flush: func(ev *flushEvent) { handleFlush(ctx, devFd, devPath, s3c, ev); drained++ },
 		// the flushes parked in the debounce window are older than these: let them
 		// reach S3 first, as in the running daemon (flushQueueOps)
 		delete: func(ev *deleteEvent) {
@@ -318,9 +304,7 @@ func flushQueueOps(ctx context.Context, devFd int, devPath string,
 		}
 	}
 	return orderedOps{
-		popFlush:  func(ev *flushEvent) error { return popFlush(devFd, ev) },
-		popDelete: func(ev *deleteEvent) error { return popDelete(devFd, ev) },
-		popRename: func(ev *renameEvent) error { return popRename(devFd, ev) },
+		popWB: func(ev *wbEvent) error { return popWB(devFd, ev) },
 		flush: func(ev *flushEvent) {
 			// fsync-triggered (WAIT flag): fire straight through so the
 			// blocked caller returns as soon as PUT completes. All other

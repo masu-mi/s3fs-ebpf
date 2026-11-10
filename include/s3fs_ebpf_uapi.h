@@ -174,7 +174,7 @@ struct s3fs_sync_entries {
  *
  * kmod's .release / .fsync on a dirty regular file enqueues a
  * flush event; the daemon periodically drains this queue via
- * S3FS_IOC_POP_FLUSH and PUTs the current buffer bytes back to S3.
+ * S3FS_IOC_POP_WB and PUTs the current buffer bytes back to S3.
  * A .create fop enqueues an empty flush (size=0) so `touch` results
  * in a zero-byte PUT.
  *
@@ -182,7 +182,7 @@ struct s3fs_sync_entries {
  * daemon can resolve it back to an S3 key even for freshly-created
  * inos that haven't hit an ino allocator yet.
  *
- * POP_FLUSH returns 0 with `event` populated on success, or -EAGAIN
+ * POP_WB returns 0 with the event populated on success, or -EAGAIN
  * when the queue is empty (non-blocking; daemon polls on a ticker).
  */
 /*
@@ -193,15 +193,12 @@ struct s3fs_sync_entries {
 #define S3FS_FLUSH_FLAG_WAIT 0x1U
 
 /*
- * AC-84: flush, rename and delete events carry one kmod-wide, strictly
- * increasing `seq`, assigned under the same lock that queues the event, so
- * once the daemon has popped an event with seq S from one queue, every event
- * with a smaller seq is already visible in its own queue.  The daemon merges
- * the three queues by seq and handles them in that order; with independent
- * loops a rename can overtake the flush of a file created just before it (S3
- * then holds the old name), or a flush of a re-created name can overtake the
- * rename of the old file (the old object is overwritten, then moved).
- * See docs/design/file-lifecycle-state-machine.md.
+ * AC-84: write-back events (S3FS_IOC_POP_WB) and fsync's WAIT flushes carry one
+ * kmod-wide, strictly increasing `seq`, assigned under the same lock that queues
+ * the event, so once the daemon has popped an event with seq S, every event with
+ * a smaller seq is already visible in the WB queue.  WB events are in seq order
+ * by construction (one FIFO); a WAIT flush with seq S is handled after every WB
+ * event with seq < S.  See docs/design/file-lifecycle-state-machine.md.
  */
 
 struct s3fs_flush_event {
@@ -214,8 +211,8 @@ struct s3fs_flush_event {
 	char  name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
 };
 
-#define S3FS_IOC_POP_FLUSH \
-	_IOR(S3FS_IOC_MAGIC, 0x05, struct s3fs_flush_event)
+/* nr 0x05 was POP_FLUSH, 0x0B POP_DELETE, 0x0C POP_RENAME: replaced by POP_WB
+ * (one FIFO for the three kinds of write-back event); do not reuse. */
 
 /*
  * S3FS_IOC_READ_DIRTY — pull `size` bytes from kmod's per-inode
@@ -314,61 +311,54 @@ struct s3fs_stats {
 	_IOW(S3FS_IOC_MAGIC, 0x0A, struct s3fs_signal_admit)
 
 /*
- * S3FS_IOC_POP_DELETE — pop one queued delete event (E-02).
+ * S3FS_IOC_POP_WB — pop the oldest write-back event: a flush (.release /
+ * .create placeholder), a delete (.unlink) or a rename.  One FIFO, so the order
+ * the daemon sees is the order the operations happened (AC-84, v2 Phase 4):
+ * a rename can no longer overtake the flush of a file created just before it,
+ * and a flush of a re-created name can no longer overtake the rename of the old
+ * file.  Non-blocking: -EAGAIN when empty (the daemon polls on a ticker).
+ * fsync's WAIT flush is a separate blocking queue (POP_FLUSH_WAIT) and is
+ * ordered against this one by `seq`.
  *
- * kmod's .unlink enqueues here with the ino + basename. Daemon
- * drains the queue and issues S3 DELETE on the key.
- *
- * -EAGAIN when the queue is empty (daemon polls on a ticker).
- * .name shape matches s3fs_flush_event so daemon can reuse the
- * name→key resolution helper.
+ * Field use by type:
+ *   FLUSH : ino, parent_ino, size, name (basename), flags (S3FS_FLUSH_FLAG_*)
+ *   DELETE: ino, parent_ino, name
+ *   RENAME: ino, parent_ino (old) / new_parent_ino, name (old) / new_name
+ * Unused fields are 0.
  */
-struct s3fs_delete_event {
+#define S3FS_WB_FLUSH  1U
+#define S3FS_WB_DELETE 2U
+#define S3FS_WB_RENAME 3U
+
+struct s3fs_wb_event {
+	__u32 type;            /* S3FS_WB_* */
+	__u32 flags;           /* FLUSH: S3FS_FLUSH_FLAG_* */
 	__u64 ino;
-	__u64 parent_ino; /* G-01: dir the file lived under. 0 == root. */
-	__u64 seq;        /* AC-84: kmod-wide event order */
+	__u64 parent_ino;      /* 0 == root. RENAME: source dir */
+	__u64 new_parent_ino;  /* RENAME: destination dir */
+	__u64 size;            /* FLUSH: buffer size at enqueue time */
+	__u64 seq;             /* kmod-wide event order (WB events and WAIT flushes) */
 	__u32 name_len;
-	__u32 _pad;
-	char  name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
-};
-
-#define S3FS_IOC_POP_DELETE \
-	_IOR(S3FS_IOC_MAGIC, 0x0B, struct s3fs_delete_event)
-
-/*
- * S3FS_IOC_POP_RENAME — pop one queued rename event (E-02).
- *
- * kmod's .rename enqueues here with both names. Daemon implements
- * S3-side rename as CopyObject(old → new) + Delete(old).
- *
- * -EAGAIN when the queue is empty.
- */
-struct s3fs_rename_event {
-	__u64 ino;
-	__u64 old_parent_ino; /* G-01: source dir. 0 == root. */
-	__u64 new_parent_ino; /* G-01: destination dir. Equal to old_parent for in-place rename. */
-	__u64 seq;            /* AC-84: kmod-wide event order */
-	__u32 old_name_len;
 	__u32 new_name_len;
-	char  old_name[S3FS_SYNC_NAME_MAX + 1];
+	char  name[S3FS_SYNC_NAME_MAX + 1];
 	char  new_name[S3FS_SYNC_NAME_MAX + 1];
 };
 
-#define S3FS_IOC_POP_RENAME \
-	_IOR(S3FS_IOC_MAGIC, 0x0C, struct s3fs_rename_event)
+#define S3FS_IOC_POP_WB \
+	_IOR(S3FS_IOC_MAGIC, 0x11, struct s3fs_wb_event)
 
 /*
- * S3FS_IOC_POP_FLUSH_WAIT — blocking variant of POP_FLUSH for the
+ * S3FS_IOC_POP_FLUSH_WAIT — blocking pop of WAIT flushes, the
  * fsync path (S-08).
  *
  * Blocks until a flush event with FLUSH_FLAG_WAIT is available, then
  * pops and returns it. Returns -ERESTARTSYS on signal interruption, or
  * -ENODEV when the module is being unloaded. The daemon runs one
  * goroutine blocked here so fsync() callers are serviced immediately
- * instead of waiting up to one POP_FLUSH ticker period (~100 ms).
+ * instead of waiting up to one POP_WB ticker period (~100 ms).
  *
  * Non-WAIT events (close/release path) are unaffected; they remain on
- * the regular POP_FLUSH queue and are handled by the coalesced 100 ms
+ * the WB queue (POP_WB) and are handled by the coalesced 100 ms
  * ticker in runFlushLoop.
  */
 #define S3FS_IOC_POP_FLUSH_WAIT \

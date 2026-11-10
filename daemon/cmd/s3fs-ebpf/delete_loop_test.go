@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
-	"golang.org/x/sys/unix"
 )
 
 // opRecorder records Delete / Rename calls; it is the whole Backend as far as
@@ -87,42 +86,4 @@ func TestHandleRenameErrorKeepsTheOldMapping(t *testing.T) {
 		t.Error("a failed rename still registered the new key")
 	}
 	handleRename(context.Background(), nil, renEv(7103, kmodRootIno, kmodRootIno, "a", "b")) // no backend: no panic
-}
-
-func TestDrainDeletesUntilEAGAIN(t *testing.T) {
-	queue := []*deleteEvent{delEv(7201, kmodRootIno, "d1"), delEv(7202, kmodRootIno, "d2")}
-	pop := func(out *deleteEvent) error {
-		if len(queue) == 0 {
-			return unix.EAGAIN
-		}
-		*out, queue = *queue[0], queue[1:]
-		return nil
-	}
-	o := &opRecorder{}
-	drainDeletesWith(context.Background(), pop, o)
-	if want := []string{"d1", "d2"}; !reflect.DeepEqual(o.deleted, want) {
-		t.Errorf("deleted %v, want %v", o.deleted, want)
-	}
-	// A pop error other than EAGAIN stops the drain.
-	o = &opRecorder{}
-	drainDeletesWith(context.Background(), func(*deleteEvent) error { return errors.New("ioctl broke") }, o)
-	if len(o.deleted) != 0 {
-		t.Error("deleted after a pop error")
-	}
-}
-
-func TestDrainRenamesUntilEAGAIN(t *testing.T) {
-	queue := []*renameEvent{renEv(7301, kmodRootIno, kmodRootIno, "r1", "r1n"), renEv(7302, kmodRootIno, kmodRootIno, "r2", "r2n")}
-	pop := func(out *renameEvent) error {
-		if len(queue) == 0 {
-			return unix.EAGAIN
-		}
-		*out, queue = *queue[0], queue[1:]
-		return nil
-	}
-	o := &opRecorder{}
-	drainRenamesWith(context.Background(), pop, o)
-	if want := [][2]string{{"r1", "r1n"}, {"r2", "r2n"}}; !reflect.DeepEqual(o.renamed, want) {
-		t.Errorf("renamed %v, want %v", o.renamed, want)
-	}
 }

@@ -348,8 +348,7 @@ static void s3fs_ebpf_put_super(struct super_block *sb)
 	/* Queued flush / delete / rename events reference inos on this
 	 * sb; drop them so a later mount doesn't see them. */
 	flush_queue_drain();
-	delete_queue_drain();
-	rename_queue_drain();
+	wb_queue_drain();
 	/* W1: evict_inodes already skipped pinned inodes; drop their pin
 	 * refs here so the busy-inodes check after put_super passes. */
 	s3fs_flush_pins_release_all();

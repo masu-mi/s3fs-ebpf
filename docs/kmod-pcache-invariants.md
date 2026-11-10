@@ -5,7 +5,8 @@
 ## ロック順 (外 → 内)
 (lockdep 付きカーネルで確認済み、2026-10-28: `make test-lockdep` が `test-regression` と evict-race で報告 0 件。`docs/dev-notes/lockdep-kernel.md`)
 - `s3fs_policy_evict_lock` (mutex、容量パス `s3fs_ebpf_capacity_pass`) → `fd->lock` (mutex、per-inode `s3fs_file_data`) → `s3fs_resident_lock` (spinlock、resident 索引、最内)。容量パスは `fd->lock` を持たずに入り、候補の収集は `s3fs_resident_lock` だけを取る (fd の `cap` / `dirty` / `flushing` は `READ_ONCE`)。`s3fs_resident_lock` の中では他の lock を取らず、確保もしない。
-- `s3fs_evseq_lock` (spinlock) は flush / delete / rename の 3 つのキューの lock の**外側**: イベントの `seq` の採番と、キューへの `list_add` を同じ lock の下で行う (AC-84)。その中で取ってよいのは `s3fs_flush_lock` / `s3fs_flush_wait_lock` / `s3fs_delete_lock` / `s3fs_rename_lock` だけ。daemon は「seq S のイベントを pop したら、S より小さい seq のイベントはもう各キューに見えている」ことに依存して 3 つのキューを seq 順にマージする (`event_order.go`)。
+- **write-back のキューは 2 本** (v2 Phase 4 の途中、2026-11-10): `s3fs_wb_queue` (flush・delete・rename を 1 本の FIFO、`S3FS_IOC_POP_WB`、`wb_queue.inc.c`) と `s3fs_flush_wait_queue` (fsync の WAIT flush、blocking の `POP_FLUSH_WAIT`)。miss のキューを足して kmod → daemon は 3 本 (以前は 5 本)。
+- `s3fs_evseq_lock` (spinlock) は `s3fs_wb_lock` / `s3fs_flush_wait_lock` の**外側**: イベントの `seq` の採番と、キューへの `list_add` を同じ lock の下で行う (AC-84)。その中で取ってよいのは `s3fs_wb_lock` / `s3fs_flush_wait_lock` だけ。WB の順序は FIFO そのもの (3 本の seq マージは不要になった)。daemon が seq に依存するのは WAIT flush だけ: 「seq S の WAIT を pop したら、S より小さい seq の WB event はもう FIFO に見えている」ので `orderedBefore(S)` が頭から seq < S を処理する (`event_order.go`)。F1 (WAIT が同じ ino の queue 中の flush を捨てる) は WB queue の `S3FS_WB_FLUSH` だけを見る (delete / rename は捨てない)。
 - `s3fs_pending_lock` / `s3fs_miss_lock` / `s3fs_flush_*_lock` / `s3fs_flush_pins_lock` は spinlock で末端 (`flush_pins_lock` は fd->lock 下で取る)。保持中に `fd->lock` を取らない。
 - `admit_evict_ino` は `s3fs_file_data_reset` (`fd->lock`) を呼び、それを離したあとで `s3fs_evict_page_cache` を呼ぶ。
 - (2026-11-05 v2 Phase 3c: `s3fs_admits_lock` と admit hash は削除した。下の R1 / S1 の節は、なぜ要らなくなったかの記録。)

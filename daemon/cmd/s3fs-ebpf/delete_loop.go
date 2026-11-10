@@ -2,46 +2,13 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"time"
-	"unsafe"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
-	"golang.org/x/sys/unix"
 )
-
-func popDelete(devFd int, out *deleteEvent) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(devFd), uintptr(s3fsIocPopDelete),
-		uintptr(unsafe.Pointer(out)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func drainDeletes(ctx context.Context, devFd int, s3c objstore.Backend) {
-	drainDeletesWith(ctx, func(ev *deleteEvent) error { return popDelete(devFd, ev) }, s3c)
-}
-
-// drainDeletesWith services delete events from pop until the queue is empty
-// (EAGAIN) or pop fails.
-func drainDeletesWith(ctx context.Context, pop func(*deleteEvent) error, s3c objstore.Backend) {
-	for {
-		var ev deleteEvent
-		if err := pop(&ev); err != nil {
-			if errors.Is(err, unix.EAGAIN) {
-				return
-			}
-			fmt.Fprintf(os.Stderr, "[delete] pop: %v\n", err)
-			return
-		}
-		handleDelete(ctx, s3c, &ev)
-	}
-}
 
 func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	name := string(ev.Name[:ev.NameLen])
@@ -62,36 +29,6 @@ func handleDelete(ctx context.Context, s3c objstore.Backend, ev *deleteEvent) {
 	}
 	fpebpf.DropRecorded(ev.Ino) // the key RecordKey recorded for it is gone
 	fmt.Printf("[delete] ino=%d s3://%s deleted\n", ev.Ino, s3key)
-}
-
-func popRename(devFd int, out *renameEvent) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(devFd), uintptr(s3fsIocPopRename),
-		uintptr(unsafe.Pointer(out)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func drainRenames(ctx context.Context, devFd int, s3c objstore.Backend) {
-	drainRenamesWith(ctx, func(ev *renameEvent) error { return popRename(devFd, ev) }, s3c)
-}
-
-// drainRenamesWith services rename events from pop until the queue is empty
-// (EAGAIN) or pop fails.
-func drainRenamesWith(ctx context.Context, pop func(*renameEvent) error, s3c objstore.Backend) {
-	for {
-		var ev renameEvent
-		if err := pop(&ev); err != nil {
-			if errors.Is(err, unix.EAGAIN) {
-				return
-			}
-			fmt.Fprintf(os.Stderr, "[rename] pop: %v\n", err)
-			return
-		}
-		handleRename(ctx, s3c, &ev)
-	}
 }
 
 func handleRename(ctx context.Context, s3c objstore.Backend, ev *renameEvent) {

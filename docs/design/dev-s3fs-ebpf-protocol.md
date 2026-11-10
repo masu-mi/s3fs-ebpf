@@ -78,15 +78,13 @@ struct s3fs_read_miss_event {
 
 | nr | 名前 | 方向 | 構造体 | フィールド | 備考 |
 |---:|---|---|---|---|---|
-| 0x05 | `POP_FLUSH` | ←kmod | `s3fs_flush_event` | `ino`、`parent_ino`、`size` (enqueue 時のバッファの大きさ)、`name_len`、`name`、`flags` | `.release` / `.fsync` / `.create` が積む。空なら `-EAGAIN`。100 ms ごと |
-| 0x0D | `POP_FLUSH_WAIT` | ←kmod | `s3fs_flush_event` | 同上 | blocking 版。`S3FS_FLUSH_FLAG_WAIT` (fsync が待っている) の event だけを返す。シグナルで `-ERESTARTSYS`、unload で `-ENODEV` (S-08) |
+| 0x11 | `POP_WB` | ←kmod | `s3fs_wb_event` (568 B) | `type` (`S3FS_WB_FLUSH` 1 / `DELETE` 2 / `RENAME` 3)、`flags`、`ino`、`parent_ino` (rename は旧)、`new_parent_ino`、`size` (flush)、`seq`、`name_len` / `new_name_len`、`name` / `new_name` (rename は旧 / 新) | `.release` / `.create` (flush)、`.unlink`、`.rename` が 1 本の FIFO に積む。積まれた順に返る。空なら `-EAGAIN`。100 ms ごと。以前の `POP_FLUSH` (0x05)・`POP_DELETE` (0x0B)・`POP_RENAME` (0x0C) の置き換え (番号は再利用しない) |
+| 0x0D | `POP_FLUSH_WAIT` | ←kmod | `s3fs_flush_event` | 同上 | `s3fs_flush_event` の blocking 版 (WB queue とは別の queue)。`S3FS_FLUSH_FLAG_WAIT` (fsync が待っている) の event だけを返す。シグナルで `-ERESTARTSYS`、unload で `-ENODEV` (S-08) |
 | 0x06 | `READ_DIRTY` | ↔kmod | `s3fs_read_dirty` | in: `ino`、`uaddr`、`size` (バッファの容量)。out: `out_bytes` | dirty なバッファを daemon にコピーする |
 | 0x0F | `DIRTY_LAYOUT` | ↔kmod | `s3fs_dirty_layout` | in: `ino`、`states_uaddr`、`cap`。out: `nr_chunks`、`size`、`chunk_size`。`states` は chunk ごとに 1 byte で `DATA` (0)、`HOLE` (1)、`REMOTE` (2) | `--partial-modify` の flush。`cap` が足りなければ `-ENOSPC` と `nr_chunks` (AC-51) |
 | 0x10 | `READ_DIRTY_RANGE` | ↔kmod | `s3fs_read_dirty_range` | in: `ino`、`uaddr`、`offset`、`size`。out: `out_bytes` | `READ_DIRTY` の offset 指定版。DATA と HOLE の chunk だけ読む (AC-51) |
 | 0x0A | `SIGNAL_FLUSH` | →kmod | `s3fs_signal_admit` (流用) | `ino`、`err` (PUT の結果) | 待っている fsync を起こす。待ちがなければ `-ENOENT` (daemon は無視) |
 | 0x07 | `MARK_DIRTY` | →kmod | `s3fs_mark_dirty` | `ino` | PUT に失敗したとき dirty に戻し、次の close / fsync で積み直させる |
-| 0x0B | `POP_DELETE` | ←kmod | `s3fs_delete_event` | `ino`、`parent_ino`、`name_len`、`name` | `.unlink` が積む。daemon は S3 の DELETE。空なら `-EAGAIN` |
-| 0x0C | `POP_RENAME` | ←kmod | `s3fs_rename_event` | `ino`、`old_parent_ino`、`new_parent_ino`、`old_name_len`、`new_name_len`、`old_name`、`new_name` | `.rename` が積む。daemon は CopyObject + Delete。空なら `-EAGAIN` |
 
 ### 3.4 統計と eviction
 

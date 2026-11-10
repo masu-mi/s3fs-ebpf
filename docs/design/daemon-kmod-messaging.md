@@ -15,9 +15,8 @@ flowchart LR
     subgraph Q["kmod: キュー"]
       direction TB
       ME[("s3fs_miss_events<br/>FIFO + s3fs_miss_wq")]
-      FQ[("s3fs_flush_queue<br/>FIFO")]
+      WQ[("s3fs_wb_queue<br/>flush / delete / rename の FIFO")]
       FW[("s3fs_flush_wait_queue<br/>FIFO + s3fs_flush_wait_wq")]
-      DQ[("s3fs_delete_queue<br/>s3fs_rename_queue<br/>FIFO")]
     end
 
     DEV["/dev/s3fs_ebpf<br/>read / poll / ioctl"]
@@ -35,9 +34,8 @@ flowchart LR
     FS -->|"呼び出し: enqueue"| Q
     FS -.->|"参照: 表と chunk を読む<br/>completion で待つ"| T
     ME ==>|"① event: read(2) 24 B"| DEV
-    FQ ==>|"② event: POP_FLUSH"| DEV
+    WQ ==>|"② event: POP_WB"| DEV
     FW ==>|"② event: POP_FLUSH_WAIT"| DEV
-    DQ ==>|"② event: POP_DELETE / POP_RENAME"| DEV
     DEV ==> D
     D -->|"③ 呼び出し: SYNC_ENTRIES"| EN
     D -->|"③ 呼び出し: POPULATE_PAGES"| CH
@@ -78,10 +76,10 @@ flowchart LR
 | E1 | **read の miss** | `.read_folio` で chunk がない | kmod → `s3fs_miss_events` | `read(2)` (push) | `s3fs_read_miss_event` (ino, offset, count, flags=0) | `runReadMissLoop` → `handleReadMiss` (S3 の range GET) | `POPULATE_PAGES` で中身を入れ、`SIGNAL_ADMIT` | **同期** |
 | E2 | 変更の前の読み込み | write / truncate の前に、持っていない部分が要る (AC-50) | 同上 | 同上 | flags に `FOR_WRITE` (0x1) | 同上。4 MiB の chunk を入れる | 同上 | **同期** |
 | E3 | open の存在確認 | `open(2)` (O_CREAT なし) で `open_check=1` | 同上 | 同上 | flags に `OPEN_CHECK` (0x4)。pending のキーは `chunk_offset = ~0` | `handleOpenCheck` (HEAD) | `SIGNAL_ADMIT` の `err` (0 / `-ENOENT` / `-EIO`) | **同期** |
-| E4 | close の書き戻し | `.release` と `.create` の dirty な fd | kmod → `s3fs_flush_queue` | `POP_FLUSH` (100 ms ticker) | `s3fs_flush_event` (ino, parent_ino, size, name, flags=0) | `runFlushLoop` → coalescer (200 ms) → `handleFlush` (PUT) | なし。失敗は `MARK_DIRTY` で dirty に戻す | **非同期** |
+| E4 | close の書き戻し | `.release` と `.create` の dirty な fd | kmod → `s3fs_wb_queue` | `POP_WB` (100 ms ticker) | `s3fs_wb_event` (type=FLUSH, ino, parent_ino, size, name) | `runFlushLoop` → coalescer (200 ms) → `handleFlush` (PUT) | なし。失敗は `MARK_DIRTY` で dirty に戻す | **非同期** |
 | E5 | fsync の書き戻し | `.fsync` | kmod → `s3fs_flush_wait_queue` + `s3fs_flush_pending` | `POP_FLUSH_WAIT` (blocking) | `s3fs_flush_event` (flags に `WAIT` 0x1) | `runFlushWaitLoop` → `handleFlush` (PUT) | `SIGNAL_FLUSH` の `err` | **同期** (30 秒で `-EIO`) |
-| E6 | 削除 | `.unlink` | kmod → `s3fs_delete_queue` | `POP_DELETE` (100 ms) | `s3fs_delete_event` (ino, parent_ino, name) | `runDeleteLoop` (S3 の DELETE) | なし | **非同期** |
-| E7 | 名前の変更 | `.rename` | kmod → `s3fs_rename_queue` | `POP_RENAME` (100 ms) | `s3fs_rename_event` (ino, 旧 / 新の parent_ino と name) | `runRenameLoop` (CopyObject + DELETE) | なし | **非同期** |
+| E6 | 削除 | `.unlink` | kmod → `s3fs_wb_queue` | `POP_WB` (100 ms) | `s3fs_wb_event` (type=DELETE, ino, parent_ino, name) | `runFlushLoop` の drain → `handleDelete` (S3 の DELETE) | なし | **非同期** |
+| E7 | 名前の変更 | `.rename` | kmod → `s3fs_wb_queue` | `POP_WB` (100 ms) | `s3fs_wb_event` (type=RENAME, ino, 旧 / 新の parent_ino と name) | `runFlushLoop` の drain → `handleRename` (CopyObject + DELETE) | なし | **非同期** |
 | E8 | ディレクトリの更新 | 約 30 秒ごと (`--sync-every`) と起動時 | daemon が S3 を LIST | `SYNC_ENTRIES` (daemon → kmod) | `s3fs_sync_entry[]` (ino, parent_ino, size, mode, name) | `runSyncLoop` | ioctl の戻り値 | (なし) |
 | E10 | 統計の取得 | 5 秒ごと | kmod の counter | `STATS` | `values[]` (evictions_total、folio_hits、…) | `runStatsLoop` → `/metrics` | ioctl の戻り値 | (なし) |
 
@@ -99,10 +97,9 @@ flowchart LR
 |---|---|---|---|---|---|
 | `s3fs_miss_events` (`kmod/vfs/read_miss.inc.c`) | list (FIFO) | なし | 24 B の `s3fs_read_miss_event` | `read(2)` が 1 件 pop | `s3fs_miss_lock` |
 | `s3fs_pending` | hash (16 bucket) | `(ino, chunk_offset)`。bucket は ino だけで決める | reader 1 人以上が待つ completion | `SIGNAL_ADMIT` が `complete` したあと、最後の reader が参照を離す | `s3fs_pending_lock` |
-| `s3fs_flush_queue` | list (FIFO) | なし | close の書き戻し (`flags=0`) | `POP_FLUSH` が pop | `s3fs_flush_lock` |
+| `s3fs_wb_queue` | list (FIFO) | なし | close の書き戻し (type=FLUSH)、unlink (DELETE)、rename (RENAME)。積んだ順に pop される | `POP_WB` が pop | `s3fs_wb_lock` |
 | `s3fs_flush_wait_queue` | list (FIFO) + wait queue | なし | fsync の書き戻し (`flags=WAIT`) | `POP_FLUSH_WAIT` が pop。unload で `-ENODEV` | `s3fs_flush_wait_lock` |
 | `s3fs_flush_pending` | hash (16 bucket) | `ino` | fsync 1 回につき 1 つの completion | `SIGNAL_FLUSH` が起こしたとき | `s3fs_flush_pending_lock` |
-| `s3fs_delete_queue` / `s3fs_rename_queue` | list (FIFO) | なし | unlink / rename の記録 | `POP_DELETE` / `POP_RENAME` が pop | 各 spinlock |
 
 「待つ側」の構造 (`s3fs_pending`、`s3fs_flush_pending`) は、**どちらも「1 つの completion を、複数の待ち手が参照カウントで共有する」** 同じ形。fsync の方が `ino` だけで引くのは、同じファイルの fsync は 1 つずつしか進まないため。
 
@@ -167,7 +164,7 @@ sequenceDiagram
     autonumber
     participant App as アプリ
     participant K as kmod
-    participant FQ as s3fs_flush_queue
+    participant FQ as s3fs_wb_queue
     participant FW as s3fs_flush_wait_queue
     participant FP as s3fs_flush_pending
     participant D as daemon
@@ -179,7 +176,7 @@ sequenceDiagram
     K->>FQ: flush_enqueue(flags=0)
     K-->>App: すぐ返る
     loop 100 ms ごと
-        D->>K: ioctl POP_FLUSH
+        D->>K: ioctl POP_WB
         K-->>D: s3fs_flush_event (空なら -EAGAIN)
     end
     D->>D: coalescer に預ける (200 ms の debounce)<br/>連続した close を 1 PUT にまとめる
@@ -221,7 +218,7 @@ sequenceDiagram
 sequenceDiagram
     participant App as アプリ
     participant K as kmod
-    participant Q as delete / rename queue
+    participant Q as s3fs_wb_queue
     participant D as daemon
     participant S3 as S3
     App->>K: unlink / rename
@@ -229,7 +226,7 @@ sequenceDiagram
     K->>Q: delete_enqueue / rename_enqueue
     K-->>App: すぐ返る
     loop 100 ms ごと
-        D->>K: ioctl POP_DELETE / POP_RENAME
+        D->>K: ioctl POP_WB
         K-->>D: event (空なら -EAGAIN)
     end
     D->>S3: DELETE (rename は CopyObject + DELETE)
@@ -304,7 +301,7 @@ daemon の正常終了では `SYNC_ENTRIES (count=0)` を送って表を起動�
 
 この doc は **コードを読んで書いたもので、kmod をロードした実機では動かしていない。** 図は mermaid (Chrome で描画) の構文と見た目を確認した。
 
-**コードで確認した:** キューと pending の構造とロック (`read_miss.inc.c`、`flush_queue.inc.c`、`delete_rename_queue.inc.c`、`admit_table.inc.c`)、ioctl の一覧と `OPEN_CHECK` (uapi)、daemon のループと周期 (`fastpath.go`)、worker 16 (`readmiss.go`)、`S3FS_UPCALL_WAIT_JIFFIES` 2 秒、`S3FS_UPCALL_MAX_RETRIES` 3、`S3FS_FSYNC_WAIT_JIFFIES` 30 秒、`S3FS_EVICT_LOG_CAP` 512、F1 の捨て方。
+**コードで確認した:** キューと pending の構造とロック (`read_miss.inc.c`、`wb_queue.inc.c`、`flush_queue.inc.c`、`admit_table.inc.c`)、ioctl の一覧と `OPEN_CHECK` (uapi)、daemon のループと周期 (`fastpath.go`)、worker 16 (`readmiss.go`)、`S3FS_UPCALL_WAIT_JIFFIES` 2 秒、`S3FS_UPCALL_MAX_RETRIES` 3、`S3FS_FSYNC_WAIT_JIFFIES` 30 秒、`S3FS_EVICT_LOG_CAP` 512、F1 の捨て方。
 
 **未確認:**
 - 実機での動作 (特に §4 の `VERIFY_POPULATED` の再 populate、§5 の fsync と close の順序)。回帰テスト (`make test-regression`) は走らせていない。

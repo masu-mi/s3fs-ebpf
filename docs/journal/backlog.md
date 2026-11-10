@@ -140,6 +140,7 @@
 | AC-90 | `s3fs_ebpf_capacity_pass` の時間が、キャッシュ済み inode の数に対して超線形: p50 は 100 件で 49 µs、1,000 件で 730 µs、10,000 件で 36.3 ms (100 倍で約 740 倍)。`sb->s_inodes` の収集か policy への受け渡しのどちらかが O(n²) 気味。`br §18.55` | P2 | ✅ 解決: 線形化 (10,000 件 36.3 → 4.5 ms)。`br §18.55` 続き |
 | AC-91 | `scripts/bench-policy-cost.sh` が `set -e` のため、最初の arm (none) の後で終わる (2 つ目の arm の daemon が起動する前)。`br §18.55` | P3 | ✅ 解決: パイプに `|| true` |
 | AC-92 | `test-policy-conformance` の wtinylfu が、v2 の 3e (A) の後、確率的に FAIL した (v2 の前は 0/10、3e の後は約 4〜5 割)。原因: evict した ino の page cache が `invalidate_mapping_pages` に飛ばされて取り残され、chunk がないので誰も落とさず、以後その ino が page cache から読まれ続ける。`br §18.55` 続き | P2 | ✅ 解決: 取り残された ino を `s3fs_pc_retry[]` に覚え、次の pass の先頭で落とし直す。conformance 12/12 が決定的、`test-regression` 全件 PASS |
+| AC-94 | v2 Phase 4 (queue 統合) の残り: miss と WAIT flush も 1 本の `reqq` にし、`s3fs_pending` / `s3fs_flush_pending` / `s3fs_flush_pins` を `inflight` 1 つにして `DONE {seq, err}` で完了させる。今は kmod → daemon のキューが 3 本 (miss / WB / WAIT flush)、待ち手の表が 3 つ | P3 | 🔶 WB 1 本化まで済 (2026-11-10、`docs/design/redesign-v2-simplify.md` §9)。残りは高リスク (daemon との同時変更、F-1 の flush 枠) |
 | AC-93 | object staging の残り: ① 外部の更新は TTL 5 秒の間は古い写しを返しうる (daemon に通知がない)。ETag を listing から持って照合できるか ② 名前順以外 (ロケールの照合、`find` の readdir 順、ランダム) の予測 ③ 大きい directory での index の memory (50 万件で off) ④ `ls -l` の後の `cat` など、stat 済みの inode を使った先読み。`docs/design/object-staging.md` | P3 | ⏳ 未着手 |
 
 ### AC-06 調査計画 (未着手)

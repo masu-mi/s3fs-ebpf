@@ -10,6 +10,7 @@ type (
 	readDirtyArg      = kmodio.ReadDirtyArg
 	markDirtyArg      = kmodio.MarkDirtyArg
 	statsArg          = kmodio.StatsArg
+	wbEvent           = kmodio.WBEvent
 	deleteEvent       = kmodio.DeleteEvent
 	renameEvent       = kmodio.RenameEvent
 	dirtyLayoutArg    = kmodio.DirtyLayoutArg
@@ -22,14 +23,12 @@ const (
 	s3fsIocPopulatePages  = kmodio.IocPopulatePages
 	s3fsIocEval           = kmodio.IocEval
 	s3fsIocSignalAdmit    = kmodio.IocSignalAdmit
-	s3fsIocPopFlush       = kmodio.IocPopFlush
+	s3fsIocPopWB          = kmodio.IocPopWB
 	s3fsIocReadDirty      = kmodio.IocReadDirty
 	s3fsIocMarkDirty      = kmodio.IocMarkDirty
 	s3fsIocStats          = kmodio.IocStats
 	s3fsIocSignalFlush    = kmodio.IocSignalFlush
 	s3fsIocPopFlushWait   = kmodio.IocPopFlushWait
-	s3fsIocPopDelete      = kmodio.IocPopDelete
-	s3fsIocPopRename      = kmodio.IocPopRename
 	s3fsIocDirtyLayout    = kmodio.IocDirtyLayout
 	s3fsIocReadDirtyRange = kmodio.IocReadDirtyRange
 	s3fsIocSyncEntries    = kmodio.IocSyncEntries

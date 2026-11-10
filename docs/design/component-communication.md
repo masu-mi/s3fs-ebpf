@@ -37,14 +37,12 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 | 0x02 | `EVAL` | user→kmod | kmod の容量 / policy パスを今走らせる (旧 `ADMIT_ARENA`、nr を引き継いだ。引数なし) | `POST /policy/eval` だけ (miss の populate のあとの容量パスは kmod が `POPULATE_PAGES` の中で走らせる) |
 | 0x03 | `SIGNAL_ADMIT` | user→kmod | `.read_folio` の pending waiter を wake (err code 付き) | 各 miss の後 |
 | 0x04 | `SYNC_ENTRIES` | user→kmod | entry table (dir listing) の replace-all | ~30s / boot 時 |
-| 0x05 | `POP_FLUSH` | user←kmod | write-back flush queue から 1 event pop | 100ms ticker |
+| 0x11 | `POP_WB` | user←kmod | write-back FIFO (flush / delete / rename) から最も古い 1 event を pop (旧 `POP_FLUSH` / `POP_DELETE` / `POP_RENAME`) | 100ms ticker |
 | 0x06 | `READ_DIRTY` | user↔kmod | per-inode dirty buffer 内容を daemon の uaddr へコピー | 各 flush |
 | 0x07 | `MARK_DIRTY` | user→kmod | PUT 失敗時に ino を dirty に戻す (retry) | 稀 (PUT err 時) |
 | 0x08 | `STATS` | user↔kmod | kmod 側 counter (evictions_total, folio_hits) を read | 5s ticker |
 | 0x0A | `SIGNAL_FLUSH` | user→kmod | `.fsync` の pending waiter を wake | 各 flush の後 |
-| 0x0B | `POP_DELETE` | user←kmod | `.unlink` から来た delete event を pop | 100ms ticker |
-| 0x0C | `POP_RENAME` | user←kmod | `.rename` から来た rename event を pop | 100ms ticker |
-| 0x0D | `POP_FLUSH_WAIT` | user←kmod | `POP_FLUSH` の blocking 版。fsync (FLUSH_FLAG_WAIT) の event だけを待って pop (S-08) | fsync ごと |
+| 0x0D | `POP_FLUSH_WAIT` | user←kmod | WAIT flush 専用の blocking pop。fsync (FLUSH_FLAG_WAIT) の event だけを待って pop (S-08) | fsync ごと |
 | 0x0E | `POPULATE_PAGES` | user→kmod | pcache モード: 取得した範囲を fd の chunk にコピーし、PCACHE の admit entry を入れる (AB-04) | 各 miss の後 |
 | 0x0F | `DIRTY_LAYOUT` | user↔kmod | dirty な file の chunk ごとの状態 (data / hole / remote) を読む (AC-51 の partial flush) | 各 flush (`--partial-modify`) |
 | 0x10 | `READ_DIRTY_RANGE` | user↔kmod | `READ_DIRTY` の offset 指定版。data / hole の chunk だけを読む (AC-51) | 各 flush (`--partial-modify`) |
@@ -124,7 +122,7 @@ flowchart LR
     SyncLoop -->|"T6: bpf(MAP_UPDATE)<br/>via cilium/ebpf"| Idx
     %% T7 ioctl (daemon → kmod)
     MissLoop -->|"T7: POPULATE_PAGES<br/>EVAL / SIGNAL_ADMIT"| Miscdev
-    FlushLoop -->|"T7: POP_FLUSH READ_DIRTY<br/>SIGNAL_FLUSH MARK_DIRTY"| Miscdev
+    FlushLoop -->|"T7: POP_WB READ_DIRTY<br/>SIGNAL_FLUSH MARK_DIRTY"| Miscdev
     SyncLoop -->|"T7: SYNC_ENTRIES"| Miscdev
     DrainLoop -->|"T7: STATS"| Miscdev
     Miscdev <-.-> Fops
@@ -223,7 +221,7 @@ sequenceDiagram
     Kmod->>FQ: .release が flush_enqueue (flags=0)
     Kmod-->>App: すぐ返る
     loop 100 ms ごと (runFlushLoop)
-      Daemon->>Kmod: ioctl POP_FLUSH (T7)
+      Daemon->>Kmod: ioctl POP_WB (T7)
       FQ-->>Daemon: s3fs_flush_event (空なら -EAGAIN)
     end
     Daemon->>Coal: submit (連続した close を 1 PUT に集約)
@@ -273,10 +271,10 @@ E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が�
 |---|---|---|---|---|
 | kmod `.read_folio` / `.open` (`open_check`) | daemon | miscdev `read(2)` (T8) | `s3fs_read_miss_event` (flags に `OPEN_CHECK`) | read の miss と同じ待ち手の形 (`s3fs_pending`) |
 | kmod `.read_folio` | daemon | miscdev `read(2)` blocking (T8) | `s3fs_read_miss_event` | 単発 event の blocking read で自然に back-pressure |
-| kmod `.release` | daemon | miscdev `ioctl POP_FLUSH` (T7、100 ms) | `s3fs_flush_event` | 再登録 (MARK_DIRTY) と waiter wake (SIGNAL_FLUSH) の対称 API が必要 |
+| kmod `.release` | daemon | miscdev `ioctl POP_WB` (T7、100 ms) | `s3fs_flush_event` | 再登録 (MARK_DIRTY) と waiter wake (SIGNAL_FLUSH) の対称 API が必要 |
 | kmod `.fsync` | daemon | miscdev `ioctl POP_FLUSH_WAIT` (T7、blocking) | `s3fs_flush_event` (WAIT) | ticker の遅れを避ける。専用の queue と wait queue |
-| kmod `.unlink` | daemon | miscdev `ioctl POP_DELETE` (T7) | delete event | flush と同じ理由 (再登録は不要だが対称性優先) |
-| kmod `.rename` | daemon | miscdev `ioctl POP_RENAME` (T7) | rename event | 同上 |
+| kmod `.unlink` | daemon | miscdev `ioctl POP_WB` (T7) | delete event (WB の type) | flush と同じ FIFO。順序は積んだ順 |
+| kmod `.rename` | daemon | miscdev `ioctl POP_WB` (T7) | rename event (WB の type) | 同上 |
 
 **統一の余地**: flush / delete / rename の queue を 1 本の message queue に寄せる案は [`redesign-v2-simplify.md`](redesign-v2-simplify.md)。
 

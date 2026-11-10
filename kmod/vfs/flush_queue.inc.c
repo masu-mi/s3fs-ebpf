@@ -2,32 +2,15 @@
 /* write-back flush queue.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
-/* -- Write-back flush queue --------------------------------------------- */
+/* -- fsync (WAIT) flush queue --------------------------------------------- */
 /*
- * .release / .fsync on a dirty inode appends here; the daemon drains
- * via S3FS_IOC_POP_FLUSH. Single global list — one mount, one daemon.
- * name[] carries the dentry's basename so the daemon can PUT even for
- * inos that were minted locally by .create and haven't hit the ino
- * allocator's S3Key map yet.
+ * .fsync on a dirty inode appends here (FLUSH_FLAG_WAIT); the daemon pops it
+ * blocking via S3FS_IOC_POP_FLUSH_WAIT.  The non-WAIT flushes (.release,
+ * .create placeholder) go to the WB queue (wb_queue.inc.c), which also carries
+ * deletes and renames; this queue's events are ordered against it by `seq`.
+ * name[] carries the dentry's basename so the daemon can PUT even for inos
+ * minted locally by .create that have no S3 key yet.
  */
-/* AC-84: one order for the flush, rename and delete queues.  `seq` is taken
- * under s3fs_evseq_lock together with the list_add, so an event with a smaller
- * seq is always already queued when one with a larger seq can be popped.  The
- * lock is outer to the three queue locks (it is held while they are taken). */
-static DEFINE_SPINLOCK(s3fs_evseq_lock);
-static u64 s3fs_evseq;
-
-/* The highest seq handed out so far (S3FS_IOC_STATS slot 15). */
-u64 s3fs_ebpf_event_seq(void)
-{
-	u64 seq;
-
-	spin_lock(&s3fs_evseq_lock);
-	seq = s3fs_evseq;
-	spin_unlock(&s3fs_evseq_lock);
-	return seq;
-}
-
 struct s3fs_flush_item {
 	struct list_head link;
 	u64 ino;
@@ -38,9 +21,6 @@ struct s3fs_flush_item {
 	u32 flags;  /* S3FS_FLUSH_FLAG_* (E-03) */
 	char name[S3FS_SYNC_NAME_MAX + 1];
 };
-
-static LIST_HEAD(s3fs_flush_queue);
-static DEFINE_SPINLOCK(s3fs_flush_lock);
 
 /* Separate queue + wait-queue for FLUSH_FLAG_WAIT events (S-08).
  * These are fsync()-triggered; the daemon goroutine blocks on
@@ -238,10 +218,21 @@ static u64 flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 			  const char *name, size_t name_len, u32 flags)
 {
 	struct s3fs_flush_item *f;
+	struct s3fs_wb_item *w;
 	u64 seq;
 
 	if (name_len == 0 || name_len > S3FS_SYNC_NAME_MAX)
 		return 0;
+	if (!(flags & S3FS_FLUSH_FLAG_WAIT)) {
+		w = wb_item_new(S3FS_WB_FLUSH, ino, parent_ino);
+		if (!w)
+			return 0;
+		w->size = size;
+		w->flags = flags;
+		w->name_len = name_len;
+		memcpy(w->name, name, name_len);
+		return wb_enqueue(w);
+	}
 	f = kzalloc(sizeof(*f), GFP_KERNEL);
 	if (!f)
 		return 0;
@@ -251,63 +242,35 @@ static u64 flush_enqueue(u64 ino, u64 parent_ino, u64 size,
 	f->name_len = name_len;
 	f->flags = flags;
 	memcpy(f->name, name, name_len);
-	if (flags & S3FS_FLUSH_FLAG_WAIT) {
-		struct s3fs_flush_item *q, *tmp;
+	{
+		struct s3fs_wb_item *q, *tmp;
 		LIST_HEAD(stale);
 
-		/* The wait queue is served at once, the normal queue by the
-		 * daemon's ticker, so a normal item for this ino that is still
-		 * queued (typically the empty placeholder .create enqueues) would
-		 * be handled after this fsync's PUT and overwrite it with older
+		/* The WB queue is served by the daemon's ticker, the WAIT queue at
+		 * once, so a flush for this ino that is still queued there
+		 * (typically the empty placeholder .create enqueues) would be
+		 * handled after this fsync's PUT and overwrite it with older
 		 * state.  The PUT reads the buffer when it runs, so this event
-		 * covers those items: drop them. */
-		spin_lock(&s3fs_flush_lock);
-		list_for_each_entry_safe(q, tmp, &s3fs_flush_queue, link)
-			if (q->ino == ino)
+		 * covers those items: drop them.  Deletes and renames stay. */
+		spin_lock(&s3fs_wb_lock);
+		list_for_each_entry_safe(q, tmp, &s3fs_wb_queue, link)
+			if (q->type == S3FS_WB_FLUSH && q->ino == ino)
 				list_move(&q->link, &stale);
-		spin_unlock(&s3fs_flush_lock);
+		spin_unlock(&s3fs_wb_lock);
 		list_for_each_entry_safe(q, tmp, &stale, link) {
 			list_del(&q->link);
 			kfree(q);
 		}
-		spin_lock(&s3fs_evseq_lock);
-		f->seq = ++s3fs_evseq;
-		seq = f->seq;
-		spin_lock(&s3fs_flush_wait_lock);
-		list_add_tail(&f->link, &s3fs_flush_wait_queue);
-		spin_unlock(&s3fs_flush_wait_lock);
-		spin_unlock(&s3fs_evseq_lock);
-		wake_up_interruptible(&s3fs_flush_wait_wq);
-	} else {
-		spin_lock(&s3fs_evseq_lock);
-		f->seq = ++s3fs_evseq;
-		seq = f->seq;
-		spin_lock(&s3fs_flush_lock);
-		list_add_tail(&f->link, &s3fs_flush_queue);
-		spin_unlock(&s3fs_flush_lock);
-		spin_unlock(&s3fs_evseq_lock);
 	}
+	spin_lock(&s3fs_evseq_lock);
+	f->seq = ++s3fs_evseq;
+	seq = f->seq;
+	spin_lock(&s3fs_flush_wait_lock);
+	list_add_tail(&f->link, &s3fs_flush_wait_queue);
+	spin_unlock(&s3fs_flush_wait_lock);
+	spin_unlock(&s3fs_evseq_lock);
+	wake_up_interruptible(&s3fs_flush_wait_wq);
 	return seq;
-}
-
-/* Pop one item into *out; returns true if queue had something.
- * Caller owns the copy; the internal item is freed here. */
-static bool flush_dequeue(struct s3fs_flush_item *out)
-{
-	struct s3fs_flush_item *f = NULL;
-
-	spin_lock(&s3fs_flush_lock);
-	if (!list_empty(&s3fs_flush_queue)) {
-		f = list_first_entry(&s3fs_flush_queue,
-				     struct s3fs_flush_item, link);
-		list_del(&f->link);
-	}
-	spin_unlock(&s3fs_flush_lock);
-	if (!f)
-		return false;
-	*out = *f;
-	kfree(f);
-	return true;
 }
 
 /* Called from unregister / put_super to drop any queued events so
@@ -316,13 +279,6 @@ static bool flush_dequeue(struct s3fs_flush_item *out)
 static void flush_queue_drain(void)
 {
 	struct s3fs_flush_item *f, *tmp;
-
-	spin_lock(&s3fs_flush_lock);
-	list_for_each_entry_safe(f, tmp, &s3fs_flush_queue, link) {
-		list_del(&f->link);
-		kfree(f);
-	}
-	spin_unlock(&s3fs_flush_lock);
 
 	WRITE_ONCE(s3fs_flush_wait_shutdown, true);
 	spin_lock(&s3fs_flush_wait_lock);
@@ -339,26 +295,8 @@ static void flush_wait_reopen(void)
 	WRITE_ONCE(s3fs_flush_wait_shutdown, false);
 }
 
-int s3fs_ebpf_flush_pop(struct s3fs_flush_event *out)
-{
-	struct s3fs_flush_item item;
-
-	if (!flush_dequeue(&item))
-		return -EAGAIN;
-	memset(out, 0, sizeof(*out));
-	out->ino        = item.ino;
-	out->parent_ino = item.parent_ino;
-	out->size       = item.size;
-	out->seq        = item.seq;
-	out->name_len   = item.name_len;
-	out->flags      = item.flags;
-	memcpy(out->name, item.name, item.name_len);
-	out->name[item.name_len] = '\0';
-	return 0;
-}
-
 /*
- * Blocking variant of flush_pop for WAIT-flagged events (S-08).
+ * Blocking pop of the WAIT-flagged flush queue (S-08).
  * Waits up to 200 ms per call; returns:
  *   0        — item dequeued into *out
  *  -EAGAIN   — timeout (no item arrived); caller should re-check ctx

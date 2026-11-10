@@ -6,40 +6,39 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/kmodio"
 	"golang.org/x/sys/unix"
 )
 
-// orderedOps is what drainOrdered needs: a pop and a handler per kind of kmod
-// write-back event (flush, delete, rename).
+// orderedOps is what drainOrdered needs: a pop of kmod's write-back FIFO and a
+// handler per kind of event (flush, delete, rename).
 type orderedOps struct {
-	popFlush  func(*flushEvent) error
-	popDelete func(*deleteEvent) error
-	popRename func(*renameEvent) error
-	flush     func(*flushEvent)
-	delete    func(*deleteEvent)
-	rename    func(*renameEvent)
-	stop      func() bool // optional: checked after every event (shutdown budget)
+	popWB  func(*wbEvent) error
+	flush  func(*flushEvent)
+	delete func(*deleteEvent)
+	rename func(*renameEvent)
+	stop   func() bool // optional: checked after every event (shutdown budget)
 }
 
-// orderedDrain handles kmod's flush, delete and rename events in the order kmod
-// queued them (AC-84).
+// orderedDrain handles kmod's write-back events (flush, delete, rename) in the
+// order kmod queued them (AC-84).
 //
-// kmod keeps three queues, but gives every event one strictly increasing seq,
-// assigned under the lock that queues it. Handling the queues independently
-// (three tickers, as before) lets a later event of one kind overtake an earlier
-// event of another, and that corrupts S3 (specs/tla/FileLifecycle.tla):
+// kmod keeps them in one FIFO (S3FS_IOC_POP_WB), so the pop order is the order
+// the operations happened. Handling them independently (three queues and three
+// tickers, as before v2 Phase 4) let a later event of one kind overtake an
+// earlier event of another, and that corrupts S3 (specs/tla/FileLifecycle.tla):
 //
 //   - create b, rename b->c: the rename ran first, found no b in S3 and was
 //     dropped; the flush then PUT the old name b while the user sees c.
 //   - rename a->b, create a: the flush of the new a overwrote the old a before
 //     the rename moved it, so the rename moved the new bytes to b and deleted a.
 //
-// Merging by seq is safe because of the lock: once an event with seq S has been
-// popped, every event with a smaller seq is already queued. So after the last
-// pop, an empty queue holds nothing older than any held event. The drain keeps
-// one popped head per queue (they stay held between runs), polls the empty
-// slots until a whole pass finds nothing new, then handles the smallest seq.
+// Every event also has a kmod-wide seq, assigned under the lock that queues it
+// (the WAIT-flush queue shares the counter): once an event with seq S exists,
+// every WB event with a smaller seq is already in the FIFO. The drain keeps one
+// popped head (it stays held between runs when its seq is past the limit).
 //
 // run(limit) handles only events with seq < limit. The ticker runs it with no
 // limit. An fsync (WAIT) flush is handled at once by its own goroutine; it calls
@@ -50,9 +49,7 @@ type orderedDrain struct {
 	handled atomic.Uint64 // seq of the last event passed to the handlers
 	mu      sync.Mutex
 	ops     orderedOps
-	hf      *flushEvent
-	hd      *deleteEvent
-	hr      *renameEvent
+	head    *wbEvent
 }
 
 const noSeqLimit = ^uint64(0)
@@ -83,94 +80,72 @@ func (d *orderedDrain) runWith(ops orderedOps, limit uint64) {
 	}
 }
 
-// step handles the smallest-seq event (if its seq < limit) and reports whether
-// there may be more.
+// step handles the oldest event (if its seq < limit) and reports whether there
+// may be more.
 func (d *orderedDrain) step(ops orderedOps, limit uint64) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	failed := false
-	pop := func(err error) { // a real error stops the drain; EAGAIN is just "empty"
-		if !errors.Is(err, unix.EAGAIN) {
-			fmt.Fprintf(os.Stderr, "[events] pop: %v\n", err)
-			failed = true
-		}
-	}
-	fill := func() bool {
-		got := false
-		if d.hf == nil {
-			var ev flushEvent
-			if err := ops.popFlush(&ev); err == nil {
-				d.hf, got = &ev, true
-			} else {
-				pop(err)
+	if d.head == nil {
+		var ev wbEvent
+		if err := ops.popWB(&ev); err != nil {
+			// a real error stops the drain; EAGAIN is just "empty"
+			failed := !errors.Is(err, unix.EAGAIN)
+			if failed {
+				fmt.Fprintf(os.Stderr, "[events] pop: %v\n", err)
 			}
+			d.failed.Store(failed)
+			return false
 		}
-		if d.hd == nil {
-			var ev deleteEvent
-			if err := ops.popDelete(&ev); err == nil {
-				d.hd, got = &ev, true
-			} else {
-				pop(err)
-			}
-		}
-		if d.hr == nil {
-			var ev renameEvent
-			if err := ops.popRename(&ev); err == nil {
-				d.hr, got = &ev, true
-			} else {
-				pop(err)
-			}
-		}
-		return got && !failed
+		d.head = &ev
 	}
-	for fill() {
+	d.failed.Store(false)
+	if d.head.Seq >= limit {
+		return false // nothing older than limit is left (the head waits for a later run)
 	}
-	d.failed.Store(failed)
-	if failed {
-		return false
-	}
-	sf, sd, sr := noSeqLimit, noSeqLimit, noSeqLimit
-	if d.hf != nil {
-		sf = d.hf.Seq
-	}
-	if d.hd != nil {
-		sd = d.hd.Seq
-	}
-	if d.hr != nil {
-		sr = d.hr.Seq
-	}
-	if min3(sf, sd, sr) >= limit {
-		return false // nothing older than limit is left (held events wait for a later run)
-	}
-	switch {
-	case sf <= sd && sf <= sr:
-		ev := d.hf
-		d.hf = nil
+	ev := d.head
+	d.head = nil
+	switch ev.Type {
+	case kmodio.WBFlush:
+		fe := wbToFlush(ev)
 		trackFlush(ev.Ino, ev.Seq)
-		ops.flush(ev)
-		d.noteHandled(ev.Seq)
-	case sr <= sd:
-		ev := d.hr
-		d.hr = nil
-		ops.rename(ev)
-		d.noteHandled(ev.Seq)
+		ops.flush(fe)
+	case kmodio.WBRename:
+		ops.rename(wbToRename(ev))
+	case kmodio.WBDelete:
+		ops.delete(wbToDelete(ev))
 	default:
-		ev := d.hd
-		d.hd = nil
-		ops.delete(ev)
-		d.noteHandled(ev.Seq)
+		fmt.Fprintf(os.Stderr, "[events] unknown write-back event type %d (seq %d)\n", ev.Type, ev.Seq)
 	}
+	d.noteHandled(ev.Seq)
 	return ops.stop == nil || !ops.stop()
 }
 
-func min3(a, b, c uint64) uint64 {
-	if b < a {
-		a = b
+func wbToFlush(w *wbEvent) *flushEvent {
+	return &flushEvent{Ino: w.Ino, ParentIno: w.ParentIno, Size: w.Size, Seq: w.Seq,
+		NameLen: w.NameLen, Flags: w.Flags, Name: w.Name}
+}
+
+func wbToDelete(w *wbEvent) *deleteEvent {
+	return &deleteEvent{Ino: w.Ino, ParentIno: w.ParentIno, Seq: w.Seq,
+		NameLen: w.NameLen, Name: w.Name}
+}
+
+func wbToRename(w *wbEvent) *renameEvent {
+	return &renameEvent{Ino: w.Ino, OldParentIno: w.ParentIno, NewParentIno: w.NewParentIno,
+		Seq: w.Seq, OldNameLen: w.NameLen, NewNameLen: w.NewNameLen,
+		OldName: w.Name, NewName: w.NewName}
+}
+
+// popWB pulls the oldest write-back event or returns unix.EAGAIN when the queue
+// is empty. The dev fd must be R/W.
+func popWB(devFd int, out *wbEvent) error {
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
+		uintptr(devFd), uintptr(s3fsIocPopWB),
+		uintptr(unsafe.Pointer(out)))
+	if errno != 0 {
+		return errno
 	}
-	if c < a {
-		a = c
-	}
-	return a
+	return nil
 }
 
 func (d *orderedDrain) noteHandled(seq uint64) {

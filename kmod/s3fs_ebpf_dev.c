@@ -140,23 +140,24 @@ out_free_ubuf:
 }
 
 /*
- * S3FS_IOC_POP_FLUSH — daemon pulls one write-back event.
+ * S3FS_IOC_POP_WB — daemon pulls the oldest write-back event (flush, delete or
+ * rename, one FIFO).
  *
- * Returns -EAGAIN if the queue is empty. Non-blocking; the daemon
- * polls this on a ticker (typically 100ms) and drains all pending
- * events per tick.
+ * Returns -EAGAIN if the queue is empty. Non-blocking; the daemon polls this
+ * on a ticker (typically 100ms) and drains all pending events per tick.
  */
-static long s3fs_dev_pop_flush(void __user *uarg)
+static long s3fs_dev_pop_wb(void __user *uarg)
 {
-	struct s3fs_flush_event ev;
-	int err;
+	struct s3fs_wb_event *ev = kmalloc(sizeof(*ev), GFP_KERNEL);
+	long err;
 
-	err = s3fs_ebpf_flush_pop(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
+	if (!ev)
+		return -ENOMEM;
+	err = s3fs_ebpf_wb_pop(ev);
+	if (!err && copy_to_user(uarg, ev, sizeof(*ev)))
+		err = -EFAULT;
+	kfree(ev);
+	return err;
 }
 
 /*
@@ -170,42 +171,6 @@ static long s3fs_dev_pop_flush_wait(void __user *uarg)
 	int err;
 
 	err = s3fs_ebpf_flush_pop_wait(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
-}
-
-/*
- * S3FS_IOC_POP_DELETE — daemon drains queued delete events (E-02).
- * Symmetric with POP_FLUSH: -EAGAIN on empty, 0 with event copied
- * out on success.
- */
-static long s3fs_dev_pop_delete(void __user *uarg)
-{
-	struct s3fs_delete_event ev;
-	int err;
-
-	err = s3fs_ebpf_delete_pop(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
-}
-
-/*
- * S3FS_IOC_POP_RENAME — daemon drains queued rename events (E-02).
- * Same pattern as pop_delete but carries both names for the
- * CopyObject + Delete pair.
- */
-static long s3fs_dev_pop_rename(void __user *uarg)
-{
-	struct s3fs_rename_event ev;
-	int err;
-
-	err = s3fs_ebpf_rename_pop(&ev);
 	if (err)
 		return err;
 	if (copy_to_user(uarg, &ev, sizeof(ev)))
@@ -294,14 +259,10 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_signal_admit(uarg);
 	case S3FS_IOC_SIGNAL_FLUSH:
 		return s3fs_dev_signal_flush(uarg);
-	case S3FS_IOC_POP_DELETE:
-		return s3fs_dev_pop_delete(uarg);
-	case S3FS_IOC_POP_RENAME:
-		return s3fs_dev_pop_rename(uarg);
 	case S3FS_IOC_SYNC_ENTRIES:
 		return s3fs_dev_sync_entries(uarg);
-	case S3FS_IOC_POP_FLUSH:
-		return s3fs_dev_pop_flush(uarg);
+	case S3FS_IOC_POP_WB:
+		return s3fs_dev_pop_wb(uarg);
 	case S3FS_IOC_POP_FLUSH_WAIT:
 		return s3fs_dev_pop_flush_wait(uarg);
 	case S3FS_IOC_READ_DIRTY:
