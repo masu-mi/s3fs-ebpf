@@ -22,6 +22,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`user/getting-started.md`](user/getting-started.md) | 新入 dev | 環境構築 / ビルド / 起動 / テスト / ベンチの手順 |
 | [`user/motivation.md`](user/motivation.md) | 全員 | プロジェクトの前提と Meetup narrative (概要と数値) |
 | [`design/component-communication.md`](design/component-communication.md) | 全員 | VFS / kmod / BPF / daemon / backend の全 11 通信路の mermaid 図 (最初にこれを見るのが最短) |
+| [`design/object-staging.md`](design/object-staging.md) | 設計を読む dev | 小さいファイルの先読み (staging): 状態遷移図、TLA+ (`ObjStaging`) の変種と反例、コードとの対応、上限 |
 | [`design/daemon-kmod-messaging.md`](design/daemon-kmod-messaging.md) | 全員 | daemon と kmod の間でどんなメッセージがどのキューを通るか、基本イベントごとの流れ (上の全景の次に) |
 | [`kmod-pcache-invariants.md`](kmod-pcache-invariants.md) | kmod 実装者 | pcache のロック順 / R1 / pending key / chunk の pin / reset 条件の要約。`vfs_ops.c` を読む前に |
 
