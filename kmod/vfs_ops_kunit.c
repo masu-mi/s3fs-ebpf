@@ -730,59 +730,180 @@ static void s3k_drain_miss_events(void)
 		;
 }
 
+/* Thin wrappers so the tests read like the protocol: a plain-read record, DONE for a
+ * chunk (seq 0 = by key) and for a flush. */
+static struct s3fs_inflight *s3k_miss_rec(u64 ino, u64 chunk)
+{
+	return inflight_get_or_create(S3FS_REQ_MISS, ino, chunk, 0, NULL);
+}
+
+static int s3k_done_miss(u64 ino, u64 chunk, int err, u32 flags)
+{
+	struct s3fs_done d = { .type = S3FS_REQ_MISS, .flags = flags, .ino = ino,
+			       .chunk_offset = chunk, .err = err };
+
+	return s3fs_ebpf_done(&d);
+}
+
+static int s3k_done_flush(u64 ino, int err)
+{
+	struct s3fs_done d = { .type = S3FS_REQ_FLUSH, .ino = ino, .err = err };
+
+	return s3fs_ebpf_done(&d);
+}
+
+/* Q-1 / Q-2 (docs/design/v2-spec RM-4): only the creator of a record queues its
+ * request, the record keeps that request's seq, and a DONE that names another seq
+ * cannot complete it. */
+static void s3k_inflight_creator_queues_once(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 40;
+	struct s3fs_req_event ev;
+	struct s3fs_inflight *a, *b;
+	struct s3fs_done d = { .type = S3FS_REQ_MISS, .ino = ino, .chunk_offset = 0 };
+	bool ca, cb;
+
+	reqq_drain(0);
+	a = inflight_get_or_create(S3FS_REQ_MISS, ino, 0, 0, &ca);
+	b = inflight_get_or_create(S3FS_REQ_MISS, ino, 0, 0, &cb);
+	KUNIT_ASSERT_NOT_NULL(test, a);
+	KUNIT_EXPECT_PTR_EQ(test, a, b);
+	KUNIT_EXPECT_TRUE(test, ca);
+	KUNIT_EXPECT_FALSE(test, cb);
+
+	KUNIT_ASSERT_EQ(test, inflight_queue_miss(a, ca, 0, 4096, 0, NULL), 0);
+	KUNIT_ASSERT_EQ(test, inflight_queue_miss(b, cb, 0, 4096, 0, NULL), 0);	/* joiner: nothing */
+	KUNIT_ASSERT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)sizeof(ev));
+	KUNIT_EXPECT_EQ(test, ev.type, S3FS_REQ_MISS);
+	KUNIT_EXPECT_TRUE(test, ev.seq & S3FS_REQ_SEQ_MISS);
+	KUNIT_EXPECT_EQ(test, ev.seq, a->seq);
+	KUNIT_EXPECT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)-EAGAIN);	/* one request only */
+
+	/* a stale handler (another seq) does not complete the record */
+	d.seq = a->seq + 1;
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_done(&d), -ENOENT);
+	KUNIT_EXPECT_FALSE(test, completion_done(&a->done));
+	/* the right seq does, once */
+	d.seq = a->seq;
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_done(&d), 0);
+	KUNIT_EXPECT_TRUE(test, completion_done(&a->done));
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_done(&d), -ENOENT);
+	inflight_put(b);
+	inflight_put(a);
+}
+
+/* A load for write and a plain read of the same chunk are two records (the daemon
+ * answers them differently); seq 0 means the plain one. */
+static void s3k_inflight_classes_are_separate(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 41;
+	struct s3fs_inflight *rd, *wr;
+	struct s3fs_done d = { .type = S3FS_REQ_MISS, .ino = ino, .chunk_offset = 0 };
+	bool c1, c2;
+
+	rd = inflight_get_or_create(S3FS_REQ_MISS, ino, 0, 0, &c1);
+	wr = inflight_get_or_create(S3FS_REQ_MISS, ino, 0, S3FS_MISS_FLAG_FOR_WRITE, &c2);
+	KUNIT_ASSERT_NOT_NULL(test, rd);
+	KUNIT_ASSERT_NOT_NULL(test, wr);
+	KUNIT_EXPECT_PTR_NE(test, rd, wr);
+	KUNIT_EXPECT_TRUE(test, c1 && c2);
+	wr->seq = S3FS_REQ_SEQ_MISS | 77;
+
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_done(&d), 0);	/* seq 0: the plain read */
+	KUNIT_EXPECT_TRUE(test, completion_done(&rd->done));
+	KUNIT_EXPECT_FALSE(test, completion_done(&wr->done));
+	d.seq = wr->seq;
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_done(&d), 0);
+	KUNIT_EXPECT_TRUE(test, completion_done(&wr->done));
+	inflight_put(wr);
+	inflight_put(rd);
+}
+
+/* A flush waiter is in the same table but is not a miss: it does not keep the
+ * inode from being evicted (inflight_miss_exists), and the shutdown wakes it. */
+static void s3k_inflight_flush_waiter_is_not_a_miss(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 42;
+	struct s3fs_inflight *f = inflight_get_or_create(S3FS_REQ_FLUSH, ino, S3FS_FLUSH_KEY, 0, NULL);
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_EXPECT_FALSE(test, inflight_miss_exists(ino));
+	s3fs_ebpf_upcall_shutdown();
+	KUNIT_EXPECT_TRUE(test, completion_done(&f->done));
+	KUNIT_EXPECT_EQ(test, f->err, -EIO);
+	inflight_put(f);
+}
+
+/* If the creator cannot queue its request, the record is failed, so joiners do not
+ * sleep until their timeout. */
+static void s3k_inflight_fail_wakes_joiners(struct kunit *test)
+{
+	const u64 ino = S3K_INO_BASE + 43;
+	struct s3fs_inflight *a = inflight_get_or_create(S3FS_REQ_MISS, ino, 0, 0, NULL);
+	struct s3fs_inflight *b = inflight_get_or_create(S3FS_REQ_MISS, ino, 0, 0, NULL);
+
+	KUNIT_ASSERT_NOT_NULL(test, a);
+	inflight_fail(a, -ENOMEM);
+	KUNIT_EXPECT_TRUE(test, completion_done(&b->done));
+	KUNIT_EXPECT_EQ(test, b->err, -ENOMEM);
+	KUNIT_EXPECT_FALSE(test, inflight_miss_exists(ino));	/* unhashed */
+	inflight_put(b);
+	inflight_put(a);
+}
+
 static void s3k_pending_per_chunk(struct kunit *test)
 {
 	const u64 ino = S3K_INO_BASE + 3, C = S3FS_CHUNK_SIZE;
-	struct s3fs_pending *p0, *p0b, *p1;
+	struct s3fs_inflight *p0, *p0b, *p1;
 
-	KUNIT_EXPECT_FALSE(test, pending_exists(ino));
-	p0 = pending_get_or_create(ino, 0);
-	p0b = pending_get_or_create(ino, 0);
-	p1 = pending_get_or_create(ino, C);
+	KUNIT_EXPECT_FALSE(test, inflight_miss_exists(ino));
+	p0 = s3k_miss_rec(ino, 0);
+	p0b = s3k_miss_rec(ino, 0);
+	p1 = s3k_miss_rec(ino, C);
 	KUNIT_ASSERT_NOT_NULL(test, p0);
 	KUNIT_ASSERT_NOT_NULL(test, p1);
 	KUNIT_EXPECT_PTR_EQ(test, p0, p0b);	/* readers share a completion */
 	KUNIT_EXPECT_PTR_NE(test, p0, p1);	/* chunks do not */
 	KUNIT_EXPECT_EQ(test, refcount_read(&p0->refs), 3u);
-	KUNIT_EXPECT_TRUE(test, pending_exists(ino));
+	KUNIT_EXPECT_TRUE(test, inflight_miss_exists(ino));
 
-	/* completing chunk 1 leaves chunk 0 waiting, and pending_exists(ino)
+	/* completing chunk 1 leaves chunk 0 waiting, and inflight_miss_exists(ino)
 	 * still sees it (P1: all chunks of an ino share a bucket) */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_admit(ino, C, -EIO, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_miss(ino, C, -EIO, 0), 0);
 	KUNIT_EXPECT_TRUE(test, completion_done(&p1->done));
 	KUNIT_EXPECT_EQ(test, p1->err, -EIO);
 	KUNIT_EXPECT_FALSE(test, completion_done(&p0->done));
-	KUNIT_EXPECT_TRUE(test, pending_exists(ino));
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_admit(ino, C, 0, 0), -ENOENT);
-	pending_put(p1);
+	KUNIT_EXPECT_TRUE(test, inflight_miss_exists(ino));
+	KUNIT_EXPECT_EQ(test, s3k_done_miss(ino, C, 0, 0), -ENOENT);
+	inflight_put(p1);
 
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_admit(ino, 0, 0, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_miss(ino, 0, 0, 0), 0);
 	KUNIT_EXPECT_TRUE(test, completion_done(&p0->done));
 	KUNIT_EXPECT_EQ(test, p0->err, 0);
-	KUNIT_EXPECT_FALSE(test, pending_exists(ino));
+	KUNIT_EXPECT_FALSE(test, inflight_miss_exists(ino));
 	/* H-06: the waiters' references keep it alive after the unhash */
 	KUNIT_EXPECT_EQ(test, refcount_read(&p0->refs), 2u);
-	pending_put(p0b);
-	pending_put(p0);
+	inflight_put(p0b);
+	inflight_put(p0);
 }
 
 static void s3k_pending_verify_populated(struct kunit *test)
 {
 	const u64 ino = S3K_INO_BASE + 4;
-	struct s3fs_pending *p = pending_get_or_create(ino, 0);
+	struct s3fs_inflight *p = s3k_miss_rec(ino, 0);
 
 	KUNIT_ASSERT_NOT_NULL(test, p);
 	/* AC-45 C2: a verified success without a populated chunk (here: no
 	 * inode at all) leaves the reader waiting */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_admit(ino, 0, 0,
-						     S3FS_SIGNAL_VERIFY_POPULATED),
+	KUNIT_EXPECT_EQ(test, s3k_done_miss(ino, 0, 0,
+						     S3FS_DONE_VERIFY_POPULATED),
 			-EAGAIN);
 	KUNIT_EXPECT_FALSE(test, completion_done(&p->done));
 	/* an error is never verified */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_admit(ino, 0, -EIO,
-						     S3FS_SIGNAL_VERIFY_POPULATED), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_miss(ino, 0, -EIO,
+						     S3FS_DONE_VERIFY_POPULATED), 0);
 	KUNIT_EXPECT_TRUE(test, completion_done(&p->done));
-	pending_put(p);
+	inflight_put(p);
 }
 
 static void s3k_miss_queue_fifo(struct kunit *test)
@@ -794,7 +915,7 @@ static void s3k_miss_queue_fifo(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)-EAGAIN);
 	for (i = 0; i < 3; i++)
 		KUNIT_ASSERT_EQ(test, miss_enqueue(S3K_INO_BASE + i, i * 4096,
-						   (size_t)U32_MAX + 5, i, NULL), 0);
+						   (size_t)U32_MAX + 5, i, NULL, 0), 0);
 	for (i = 0; i < 3; i++) {
 		KUNIT_ASSERT_EQ(test, s3fs_req_dequeue(&ev, true),
 				(ssize_t)sizeof(ev));
@@ -1076,12 +1197,12 @@ static void s3k_vfs_close_flush(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, list_empty(&fd->pin_link));	/* W1 pin */
 
 	/* W1: a signal for a PUT that never read the buffer covers nothing */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(inode->i_ino, 0), -ENOENT);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(inode->i_ino, 0), -ENOENT);
 	KUNIT_EXPECT_TRUE(test, fd->flushing);
 	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(inode->i_ino, v->ubuf, 32, NULL), 17L);
 	KUNIT_ASSERT_EQ(test, copy_from_user(out, v->ubuf, 17), 0ul);
 	KUNIT_EXPECT_STREQ(test, out, "Jello, s3fs-ebpf\n");
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(inode->i_ino, 0), -ENOENT);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(inode->i_ino, 0), -ENOENT);
 	KUNIT_EXPECT_FALSE(test, fd->flushing);
 	KUNIT_EXPECT_TRUE(test, list_empty(&fd->pin_link));
 	KUNIT_EXPECT_TRUE(test, fd->chunks[0].populated);
@@ -1135,14 +1256,14 @@ static void s3k_vfs_fsync_waits_for_its_put(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ev->flags, S3FS_FLUSH_FLAG_WAIT);
 
 	/* PUT 1 finishes: it holds "1ello", not the "2" fsync is waiting for */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, 0), 0);
 	msleep(50);
 	KUNIT_EXPECT_FALSE_MSG(test, completion_done(&c->done),
 			       "fsync returned %d before its data was read", c->ret);
 
 	/* the fsync's own PUT */
 	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 32, NULL), 17L);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, 0), 0);
 	KUNIT_ASSERT_GT(test, wait_for_completion_timeout(&c->done, 5 * HZ), 0ul);
 	KUNIT_EXPECT_EQ(test, c->ret, 0);
 	s3k_close(f);
@@ -1181,7 +1302,7 @@ static void s3k_vfs_read_dirty_short_buffer_claims_nothing(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_read_dirty(ino, NULL, 0, &size), (long)-ENOSPC);
 	KUNIT_EXPECT_EQ(test, size, 17ull);
 	KUNIT_EXPECT_NE(test, fd->flush_read_seq, fd->flush_seq);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, 0), 0);
 	msleep(50);
 	KUNIT_EXPECT_FALSE_MSG(test, completion_done(&c->done),
 			       "fsync returned %d on a PUT that read no data", c->ret);
@@ -1189,7 +1310,7 @@ static void s3k_vfs_read_dirty_short_buffer_claims_nothing(struct kunit *test)
 	/* the fsync's own read: exactly the content */
 	KUNIT_ASSERT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 17, NULL), 17L);
 	KUNIT_EXPECT_EQ(test, fd->flush_read_seq, fd->flush_seq);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, 0), 0);
 	KUNIT_ASSERT_GT(test, wait_for_completion_timeout(&c->done, 5 * HZ), 0ul);
 	KUNIT_EXPECT_EQ(test, c->ret, 0);
 	s3k_close(f);
@@ -1220,7 +1341,7 @@ static void s3k_vfs_fsync_empty_file(struct kunit *test)
 	KUNIT_ASSERT_LT(test, i, 100);
 	KUNIT_EXPECT_EQ(test, ev->size, 0ull);
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_read_dirty(ino, NULL, 0, NULL), 0L);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, 0), 0);
 	KUNIT_ASSERT_GT(test, wait_for_completion_timeout(&c->done, 5 * HZ), 0ul);
 	KUNIT_EXPECT_EQ(test, c->ret, 0);
 	KUNIT_EXPECT_FALSE(test, fd->flushing);
@@ -1409,13 +1530,13 @@ static int s3k_pend_thread(void *arg)
 		u64 co = (u64)get_random_u32_below(4) << S3FS_PCACHE_CHUNK_SHIFT;
 
 		if (s->signaler) {
-			s3fs_ebpf_signal_admit(s->ino, co, 0, 0);
+			s3k_done_miss(s->ino, co, 0, 0);
 		} else {
-			struct s3fs_pending *p = pending_get_or_create(s->ino, co);
+			struct s3fs_inflight *p = s3k_miss_rec(s->ino, co);
 
 			if (p) {
 				wait_for_completion_timeout(&p->done, 1);
-				pending_put(p);
+				inflight_put(p);
 			}
 		}
 		cond_resched();
@@ -1448,8 +1569,8 @@ static void s3k_pending_concurrent(struct kunit *test)
 	for (i = 0; i < n; i++)
 		wait_for_completion(&st[i].done);
 	for (i = 0; i < 4; i++)
-		s3fs_ebpf_signal_admit(ino, (u64)i << S3FS_PCACHE_CHUNK_SHIFT, 0, 0);
-	KUNIT_EXPECT_FALSE(test, pending_exists(ino));
+		s3k_done_miss(ino, (u64)i << S3FS_PCACHE_CHUNK_SHIFT, 0, 0);
+	KUNIT_EXPECT_FALSE(test, inflight_miss_exists(ino));
 }
 
 /* -- Issue #22: hit accumulation ------------------------------------------ */
@@ -1659,19 +1780,19 @@ static void s3k_dyn_entries_equal(struct kunit *test)
 static void s3k_policy_trackable(struct kunit *test)
 {
 	const u64 ino = S3K_INO_BASE + 33;
-	struct s3fs_pending *p;
+	struct s3fs_inflight *p;
 
 	KUNIT_EXPECT_TRUE(test, s3fs_policy_trackable(ino));
-	p = pending_get_or_create(ino, 0);
+	p = s3k_miss_rec(ino, 0);
 	KUNIT_ASSERT_NOT_NULL(test, p);
 	/* A pending miss keeps the kmod from evicting the ino; a policy that picked it
 	 * would already have moved it to its ghost / hand.  Phase 1 skips on_insert,
 	 * on_size and the hit collect for it until the miss completes. */
 	KUNIT_EXPECT_FALSE(test, s3fs_policy_trackable(ino));
 	KUNIT_EXPECT_TRUE(test, s3fs_policy_trackable(ino + 1));	/* other inos unaffected */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_admit(ino, 0, 0, 0), 0);
+	KUNIT_EXPECT_EQ(test, s3k_done_miss(ino, 0, 0, 0), 0);
 	KUNIT_EXPECT_TRUE(test, s3fs_policy_trackable(ino));
-	pending_put(p);
+	inflight_put(p);
 }
 
 static struct kunit_case s3k_data_cases[] = {
@@ -1728,6 +1849,10 @@ static struct kunit_case s3k_table_cases[] = {
 	KUNIT_CASE(s3k_miss_queue_fifo),
 	KUNIT_CASE(s3k_flush_queue_f1),
 	KUNIT_CASE(s3k_pending_concurrent),
+	KUNIT_CASE(s3k_inflight_creator_queues_once),
+	KUNIT_CASE(s3k_inflight_classes_are_separate),
+	KUNIT_CASE(s3k_inflight_flush_waiter_is_not_a_miss),
+	KUNIT_CASE(s3k_inflight_fail_wakes_joiners),
 	{}
 };
 
@@ -1872,6 +1997,74 @@ static bool s3k_is_resident(u64 ino, u64 *bytes)
 	return found;
 }
 
+/* AC-95: DONE(err) makes the file dirty again and clears flushing in one step: a
+ * close() racing the failure (queued before or after) cannot leave flushing = 0,
+ * dirty = 0 with a request pending. */
+static void s3k_vfs_done_err_restores_dirty(struct kunit *test)
+{
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
+	struct s3fs_file_data *fd = s3k_fd_of(f);
+	u64 ino = file_inode(f)->i_ino;
+
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 0, "1", 1), 1L);
+	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
+	KUNIT_EXPECT_TRUE(test, fd->flushing);
+	KUNIT_EXPECT_FALSE(test, fd->dirty);
+
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, -EIO), -ENOENT);
+	KUNIT_EXPECT_TRUE(test, fd->dirty);
+	KUNIT_EXPECT_FALSE(test, fd->flushing);
+
+	/* the retry: close() queues again */
+	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
+	KUNIT_EXPECT_TRUE(test, fd->flushing);
+	s3k_close(f);
+}
+
+/* AC-96 (model FE-5 / FE-6): an fsync of a clean file whose close() flush is still
+ * in flight waits for it, and queues its own request. */
+static void s3k_vfs_fsync_of_clean_file_waits_for_inflight_flush(struct kunit *test)
+{
+	struct s3k_vfs *v = test->priv;
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3k_fsync_ctx *c = kunit_kzalloc(test, sizeof(*c), GFP_KERNEL);
+	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
+	struct s3fs_file_data *fd = s3k_fd_of(f);
+	u64 ino = file_inode(f)->i_ino;
+	struct task_struct *t;
+
+	KUNIT_ASSERT_NOT_NULL(test, ev);
+	KUNIT_ASSERT_NOT_NULL(test, c);
+	KUNIT_ASSERT_EQ(test, s3k_write(test, f, 0, "1", 1), 1L);
+	KUNIT_ASSERT_EQ(test, s3fs_maybe_enqueue_flush(f, false), 0);	/* close(): flush in flight */
+	KUNIT_ASSERT_EQ(test, s3k_pop_flush(ev), 0);
+	KUNIT_EXPECT_FALSE(test, fd->dirty);
+	KUNIT_EXPECT_TRUE(test, fd->flushing);
+
+	c->f = f;
+	init_completion(&c->done);
+	t = kthread_run(s3k_fsync_thread, c, "s3k_fsync_clean");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(t));
+	KUNIT_ASSERT_EQ(test, s3k_pop_wait(ev), 0);	/* it queued its own WAIT request */
+	KUNIT_EXPECT_EQ(test, ev->ino, ino);
+	KUNIT_EXPECT_FALSE(test, try_wait_for_completion(&c->done));	/* ... and sleeps */
+
+	/* the daemon reads the buffer for it and the PUT lands */
+	KUNIT_EXPECT_EQ(test, s3fs_ebpf_read_dirty(ino, v->ubuf, 32, NULL), 17L);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, 0), 0);
+	KUNIT_EXPECT_TRUE(test, wait_for_completion_timeout(&c->done, HZ));
+	KUNIT_EXPECT_EQ(test, c->ret, 0);
+
+	/* a clean file with nothing in flight is still a no-op */
+	KUNIT_EXPECT_EQ(test, s3fs_maybe_enqueue_flush(f, true), 0);
+	KUNIT_EXPECT_EQ(test, s3fs_req_dequeue(ev, true), (ssize_t)-EAGAIN);
+	s3k_close(f);
+}
+
 static void s3k_vfs_signal_flush_keeps_chunks(struct kunit *test)
 {
 	const u64 C = S3FS_CHUNK_SIZE;
@@ -1893,9 +2086,11 @@ static void s3k_vfs_signal_flush_keeps_chunks(struct kunit *test)
 	mutex_unlock(&fd->lock);
 	KUNIT_EXPECT_FALSE(test, fd->chunks[2].populated);
 
-	/* PUT failed: the daemon marks it dirty again; nothing is kept as clean */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, -EIO), -ENOENT);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_mark_dirty(ino), 0);
+	/* PUT failed: DONE(err) makes it dirty again; nothing is kept as clean */
+	KUNIT_EXPECT_FALSE(test, fd->dirty);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, -EIO), -ENOENT);	/* nobody waits */
+	KUNIT_EXPECT_TRUE(test, fd->dirty);
+	KUNIT_EXPECT_FALSE(test, fd->flushing);
 	KUNIT_EXPECT_FALSE(test, fd->chunks[2].populated);
 	KUNIT_EXPECT_FALSE(test, s3k_is_resident(ino, NULL));
 
@@ -1905,7 +2100,7 @@ static void s3k_vfs_signal_flush_keeps_chunks(struct kunit *test)
 	mutex_lock(&fd->lock);
 	fd->flush_read_seq = fd->flush_seq;
 	mutex_unlock(&fd->lock);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_signal_flush(ino, 0), -ENOENT);
+	KUNIT_EXPECT_EQ(test, s3k_done_flush(ino, 0), -ENOENT);
 
 	KUNIT_EXPECT_TRUE(test, fd->chunks[0].populated);
 	KUNIT_EXPECT_NULL(test, fd->chunks[1].p);		/* the hole */
@@ -1961,12 +2156,12 @@ static void s3k_vfs_read_pattern(struct kunit *test)
 	/* the miss event of a read carries it; one that is not a read does not */
 	while (s3fs_req_dequeue(&ev, true) > 0)
 		;
-	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 4096, 0, fd), 0);
+	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 4096, 0, fd, 0), 0);
 	KUNIT_ASSERT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)sizeof(ev));
 	KUNIT_EXPECT_EQ(test, ev.ino, ino);
 	KUNIT_EXPECT_EQ(test, ev.seq_count, 3u);
 	KUNIT_EXPECT_EQ(test, ev.rand_count, 2u);
-	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK, NULL), 0);
+	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK, NULL, 0), 0);
 	KUNIT_ASSERT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)sizeof(ev));
 	KUNIT_EXPECT_EQ(test, ev.seq_count, 0u);
 	KUNIT_EXPECT_EQ(test, ev.rand_count, 0u);
@@ -2132,6 +2327,8 @@ static struct kunit_case s3k_vfs_cases[] = {
 	KUNIT_CASE(s3k_vfs_read_pattern),
 	KUNIT_CASE(s3k_vfs_reset_counts_unallocated_pin),
 	KUNIT_CASE(s3k_vfs_signal_flush_keeps_chunks),
+	KUNIT_CASE(s3k_vfs_done_err_restores_dirty),
+	KUNIT_CASE(s3k_vfs_fsync_of_clean_file_waits_for_inflight_flush),
 	KUNIT_CASE(s3k_vfs_capacity_pass_evicts_to_capacity),
 	KUNIT_CASE(s3k_vfs_populate_runs_capacity_pass),
 	KUNIT_CASE(s3k_vfs_forget_on_evict),

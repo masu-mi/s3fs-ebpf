@@ -25,8 +25,7 @@ flowchart LR
       direction TB
       EN[("entry 表<br/>ディレクトリの内容")]
       CH[("fd の chunk 表<br/>ファイルの中身")]
-      PD[("s3fs_pending<br/>(ino, chunk) → completion")]
-      FP[("s3fs_flush_pending<br/>ino → completion")]
+      PD[("s3fs_inflight<br/>MISS: (ino, chunk, cls) → completion<br/>FLUSH: ino → completion")]
     end
 
     FS -->|"呼び出し: enqueue"| Q
@@ -35,10 +34,8 @@ flowchart LR
     DEV ==> D
     D -->|"③ 呼び出し: SYNC_ENTRIES"| EN
     D -->|"③ 呼び出し: POPULATE_PAGES"| CH
-    D -->|"③ 呼び出し: SIGNAL_ADMIT"| PD
-    D -->|"③ 呼び出し: SIGNAL_FLUSH / MARK_DIRTY"| FP
+    D -->|"③ 呼び出し: DONE (MISS / FLUSH)"| PD
     PD ==>|"complete: 待ち手が起きる"| FS
-    FP ==>|"complete: 待ち手が起きる"| FS
 ```
 
 **矢印の凡例** (この doc の全フローチャートで共通。シーケンス図は `->>` が呼び出し・操作、`-->>` が戻り・イベント・データ):
@@ -57,7 +54,7 @@ flowchart LR
 要点は 3 つ。(②は廃止: 以前の pull 型の `POP_*` はない)
 
 - kmod から daemon への要求は **全部 `reqq` に積まれて `read(2)` で押される**: miss、write-back、unlink、rename。daemon は 1 つの reader (`runReqLoop`) が読んだ順に振り分ける (MISS は worker、それ以外は executor が 1 件ずつ)。
-- 呼んだプロセスを待たせるのは 2 種類だけ (read の miss と open の確認は `s3fs_pending`、fsync は `s3fs_flush_pending`)。どちらも完了は ③ の ioctl で起こす。
+- 呼んだプロセスを待たせるのは 2 種類だけ (read の miss と open の確認は `s3fs_inflight` の MISS record、fsync は同じ表の FLUSH record)。どちらも完了は ③ の ioctl で起こす。
 - キューは **全部 kmod のメモリ**。件数の上限はなく (`kmalloc` / `kzalloc` で 1 件ずつ。flush・delete・rename の event は、確保に失敗すると黙って捨てられる。miss は `-ENOMEM` を返す)、daemon が落ちると未処理分は失われる。上限があるのは `s3fs_evict_log` だけ (512 件、溢れたら `overflow` を数える)。
 
 ---
@@ -68,11 +65,11 @@ flowchart LR
 
 | # | イベント | きっかけ | 積む側 → キュー | 取り出し | メッセージ | 処理する daemon 側 | 完了の知らせ | 待ち |
 |---|---|---|---|---|---|---|---|---|
-| E1 | **read の miss** | `.read_folio` で chunk がない | kmod → `s3fs_reqq` | `read(2)` (push) | `s3fs_req_event` (type=MISS, ino, offset, count, flags=0) | `runReqLoop` → worker → `handleReadMiss` (S3 の range GET) | `POPULATE_PAGES` で中身を入れ、`SIGNAL_ADMIT` | **同期** |
+| E1 | **read の miss** | `.read_folio` で chunk がない | kmod → `s3fs_reqq` | `read(2)` (push) | `s3fs_req_event` (type=MISS, ino, offset, count, flags=0) | `runReqLoop` → worker → `handleReadMiss` (S3 の range GET) | `POPULATE_PAGES` で中身を入れ、`DONE` (MISS) | **同期** |
 | E2 | 変更の前の読み込み | write / truncate の前に、持っていない部分が要る (AC-50) | 同上 | 同上 | flags に `FOR_WRITE` (0x1) | 同上。4 MiB の chunk を入れる | 同上 | **同期** |
-| E3 | open の存在確認 | `open(2)` (O_CREAT なし) で `open_check=1` | 同上 | 同上 | flags に `OPEN_CHECK` (0x4)。pending のキーは `chunk_offset = ~0` | `handleOpenCheck` (HEAD) | `SIGNAL_ADMIT` の `err` (0 / `-ENOENT` / `-EIO`) | **同期** |
-| E4 | close の書き戻し | `.release` と `.create` の dirty な fd | kmod → `s3fs_reqq` | `read(2)` (push) | `s3fs_req_event` (type=FLUSH, ino, parent_ino, size, name) | `runReqLoop` → executor → coalescer (200 ms) → `handleFlush` (PUT) | なし。失敗は `MARK_DIRTY` で dirty に戻す | **非同期** |
-| E5 | fsync の書き戻し | `.fsync` | kmod → `s3fs_reqq` + `s3fs_flush_pending` | `read(2)` (push) | `s3fs_req_event` (type=FLUSH、flags に `WAIT` 0x1) | `runReqLoop` → executor (PUT は別 goroutine) → `handleFlush` | `SIGNAL_FLUSH` の `err` | **同期** (30 秒で `-EIO`) |
+| E3 | open の存在確認 | `open(2)` (O_CREAT なし) で `open_check=1` | 同上 | 同上 | flags に `OPEN_CHECK` (0x4)。pending のキーは `chunk_offset = ~0` | `handleOpenCheck` (HEAD) | `DONE` (MISS) の `err` (0 / `-ENOENT` / `-EIO`) | **同期** |
+| E4 | close の書き戻し | `.release` と `.create` の dirty な fd | kmod → `s3fs_reqq` | `read(2)` (push) | `s3fs_req_event` (type=FLUSH, ino, parent_ino, size, name) | `runReqLoop` → executor → coalescer (200 ms) → `handleFlush` (PUT) | なし。失敗は `DONE` (FLUSH、err) で dirty に戻す | **非同期** |
+| E5 | fsync の書き戻し | `.fsync` | kmod → `s3fs_reqq` + `s3fs_inflight` (FLUSH) | `read(2)` (push) | `s3fs_req_event` (type=FLUSH、flags に `WAIT` 0x1) | `runReqLoop` → executor (PUT は別 goroutine) → `handleFlush` | `DONE` (FLUSH) の `err` | **同期** (30 秒で `-EIO`) |
 | E6 | 削除 | `.unlink` | kmod → `s3fs_reqq` | `read(2)` (push) | `s3fs_req_event` (type=DELETE, ino, parent_ino, name) | executor → `handleDelete` (S3 の DELETE) | なし | **非同期** |
 | E7 | 名前の変更 | `.rename` | kmod → `s3fs_reqq` | `read(2)` (push) | `s3fs_req_event` (type=RENAME, ino, 旧 / 新の parent_ino と name) | executor → `handleRename` (CopyObject + DELETE) | なし | **非同期** |
 | E8 | ディレクトリの更新 | 約 30 秒ごと (`--sync-every`) と起動時 | daemon が S3 を LIST | `SYNC_ENTRIES` (daemon → kmod) | `s3fs_sync_entry[]` (ino, parent_ino, size, mode, name) | `runSyncLoop` | ioctl の戻り値 | (なし) |
@@ -80,7 +77,7 @@ flowchart LR
 
 - E1〜E7 は、kmod が **FS の操作の途中で** 積む。E8 と E10 は daemon が **時計で** 起こす。(E9 は削除した。)
 - 「ioctl の戻り値」とは、daemon が叩いた ioctl がそのまま結果を返すこと (別の完了通知はない)。
-- E1〜E3 が同じ `s3fs_read_miss_event` に相乗りしているのは、「kmod が待っていて、daemon が答える」という形が同じだから。区別は `flags` だけ。
+- E1〜E3 が同じ `s3fs_req_event` (MISS) に相乗りしているのは、「kmod が待っていて、daemon が答える」という形が同じだから。区別は `flags` だけ。
 
 ---
 
@@ -91,10 +88,9 @@ flowchart LR
 | 構造 | 種類 | 鍵 | 入るもの | 消えるとき | ロック |
 |---|---|---|---|---|---|
 | `s3fs_reqq` (`kmod/vfs/reqq.inc.c`) | list (FIFO) + wait queue | なし | 592 B の `s3fs_req_event`: MISS / FLUSH (close は非 WAIT、fsync は WAIT) / DELETE / RENAME。積んだ順に pop される | `read(2)` が 1 件 pop (blocking / `poll` / `O_NONBLOCK`)。umount で全部捨てる | `s3fs_reqq_lock` (FLUSH / DELETE / RENAME は外側に `s3fs_evseq_lock`) |
-| `s3fs_pending` | hash (16 bucket) | `(ino, chunk_offset)`。bucket は ino だけで決める | reader 1 人以上が待つ completion | `SIGNAL_ADMIT` が `complete` したあと、最後の reader が参照を離す | `s3fs_pending_lock` |
-| `s3fs_flush_pending` | hash (16 bucket) | `ino` | fsync 1 回につき 1 つの completion | `SIGNAL_FLUSH` が起こしたとき | `s3fs_flush_pending_lock` |
+| `s3fs_inflight` | hash (16 bucket) | `ino` の bucket。MISS: `(ino, chunk_offset, cls)`、FLUSH: ino ごとに 1 つ | MISS: reader 1 人以上が待つ completion (record を作った reader だけが request を積み、record は request の seq を持つ)。FLUSH: fsync が待つ completion | `DONE` が `complete` したあと、最後の waiter が参照を離す。timeout した waiter は MISS record を外す。umount で全部落とす | `s3fs_inflight_lock` |
 
-「待つ側」の構造 (`s3fs_pending`、`s3fs_flush_pending`) は、**どちらも「1 つの completion を、複数の待ち手が参照カウントで共有する」** 同じ形。fsync の方が `ino` だけで引くのは、同じファイルの fsync は 1 つずつしか進まないため。
+「待つ側」の構造 (`s3fs_inflight`) は、**どちらも「1 つの completion を、複数の待ち手が参照カウントで共有する」** 同じ形。fsync の方が `ino` だけで引くのは、同じファイルの fsync は 1 つずつしか進まないため。
 
 ---
 
@@ -108,7 +104,7 @@ sequenceDiagram
     participant App as アプリ (read)
     participant K as kmod (.read_folio)
     participant ME as s3fs_reqq
-    participant PD as s3fs_pending
+    participant PD as s3fs_inflight
     participant D as daemon<br/>(runReqLoop)
     participant S3 as S3
 
@@ -123,15 +119,15 @@ sequenceDiagram
     S3-->>D: bytes
     D->>K: ioctl POPULATE_PAGES (ino, offset, size, data_ptr)
     Note over K: fd の chunk 表にコピー<br/>+ PCACHE の admit entry
-    D->>K: ioctl SIGNAL_ADMIT (ino, chunk_offset, err, VERIFY_POPULATED)
+    D->>K: ioctl DONE (MISS, ino, chunk_offset, seq, err, VERIFY_POPULATED)
     K->>PD: complete(done)
     PD-->>K: reader が目を覚ます
     K-->>App: chunk から folio を埋めて返す
 ```
 
-- 同じ chunk を同時に読む reader は 1 つの pending を共有し、`SIGNAL_ADMIT` 1 回で全員が起きる。違う chunk の reader は別の pending で、互いに待たない。
+- 同じ chunk を同時に読む reader は 1 つの inflight record を共有し (積む request も 1 つ)、`DONE` 1 回で全員が起きる。違う chunk の reader は別の pending で、互いに待たない。
 - daemon は `read(2)` で受けた event を worker に渡す。worker が 16 全部使われているときは `read` を止めて待つ (kmod 側のキューが伸びるだけで、event は失われない)。
-- `SIGNAL_ADMIT` の `err` が負なら、reader にそのエラーが返る。待ち手がいなければ `-ENOENT`。`VERIFY_POPULATED` を付けると、chunk が実際に入っているときだけ起こし、なければ `-EAGAIN` (AC-45)。
+- `DONE` の `err` が負なら、reader にそのエラーが返る。待ち手がいなければ `-ENOENT`。`VERIFY_POPULATED` を付けると、chunk が実際に入っているときだけ起こし、なければ `-EAGAIN` (AC-45)。
 - daemon が応えないと、kmod は 2 秒待って再試行し (最大 3 回)、そのあと手元の chunk で埋めるか失敗する (`S3FS_UPCALL_WAIT_JIFFIES`、`S3FS_UPCALL_MAX_RETRIES`)。
 
 ### 4.2 変更の前の読み込み (E2) と open の確認 (E3)
@@ -158,7 +154,7 @@ sequenceDiagram
     participant App as アプリ
     participant K as kmod
     participant FQ as s3fs_reqq
-    participant FP as s3fs_flush_pending
+    participant FP as s3fs_inflight
     participant D as daemon
     participant S3 as S3
 
@@ -172,7 +168,6 @@ sequenceDiagram
     D->>K: ioctl READ_DIRTY (dirty な中身を daemon にコピー)
     D->>S3: PUT
     alt 失敗
-        D->>K: ioctl MARK_DIRTY (dirty に戻す)
     end
     end
 
@@ -187,7 +182,7 @@ sequenceDiagram
     D->>D: executor が読んだ順に処理: 前に積まれたイベントは処理済み<br/>同じ ino の預かり分を取り消す
     D->>K: ioctl READ_DIRTY
     D->>S3: PUT
-    D->>K: ioctl SIGNAL_FLUSH (err)
+    D->>K: ioctl DONE (FLUSH, ino, err)  — err なら kmod が dirty に戻す
     K->>FP: complete(done)
     K-->>App: fsync が返る
     end
@@ -198,7 +193,7 @@ sequenceDiagram
   - kmod: `flush_enqueue` が WAIT event を積むとき、同じ ino の `reqq` に残った非 WAIT の flush を捨てる (F1)。
   - daemon: executor が先に処理して coalescer に預けた分は kmod から見えないので、WAIT event を処理した時点で取り消し、取り消し後に発火した分は捨てる (executor は読んだ順なので、WAIT より前のイベントは必ず処理済み)。同じ ino の `handleFlush` は直列にする (`flush_order.go`)。
   - 詳細は `docs/kmod-pcache-invariants.md` の F1 / W3、経緯は `docs/journal/benchmark-results.md` §18.48。
-- `SIGNAL_FLUSH` が起こせるのは、fsync が書いた中身を読んだ `READ_DIRTY` のあとの signal だけ (W3)。close の古い PUT の完了で fsync を早く返してはいけないため。
+- FLUSH の `DONE` が起こせるのは、fsync が書いた中身を読んだ `READ_DIRTY` のあとの signal だけ (W3)。close の古い PUT の完了で fsync を早く返してはいけないため。
 
 ### 5.2 unlink と rename
 
@@ -263,7 +258,7 @@ BPF map を daemon が書く経路は、policy の差し替え (`BPF_LINK_UPDATE
 ---|---|---|
 | E1 の「中身を渡す」 | `POPULATE_PAGES` (ioctl でバッファを渡す) | daemon が arena に mmap で書き、`ADMIT_ARENA` で番地を登録 |
 | admit 表の `uaddr` | 0 (`S3FS_ADMIT_FLAG_PCACHE`) | daemon の arena 上の番地 |
-| 起こす | `SIGNAL_ADMIT` | `SIGNAL_ADMIT` |
+| 起こす | `DONE` (MISS) | `DONE` (MISS) |
 | E2〜E10 | 同じ | 同じ |
 
 メッセージの種類は、`POPULATE_PAGES` と `ADMIT_ARENA` のどちらを使うかだけが違う。
@@ -291,12 +286,12 @@ daemon の正常終了では `SYNC_ENTRIES (count=0)` を送って表を起動�
 - 実機での動作 (特に §4 の `VERIFY_POPULATED` の再 populate、§5 の fsync と close の順序)。回帰テスト (`make test-regression`) は走らせていない。
 - §4.2 の `PINNED` を「修飾」と書いたのは uapi のコメントと daemon 側の扱いからの解釈で、kmod 側の全呼び出し元は追っていない。
 - §4 の worker が全部使われているときの back-pressure (`read` が止まり kmod のキューが伸びる) はコードの読み。キューが実際にどこまで伸びるかは未計測。
-- flush の PUT のあとの read (AC-82): kmod が `SIGNAL_FLUSH` の成功で PCACHE entry を入れ直す。コードを読んで書いたもので、`make test-regression` は通るが、書いた直後の read の遅延と GET 数は未計測。
+- flush の PUT のあとの read (AC-82): kmod が FLUSH の `DONE` の成功で PCACHE entry を入れ直す。コードを読んで書いたもので、`make test-regression` は通るが、書いた直後の read の遅延と GET 数は未計測。
 - E8 の約 30 秒は `--sync-every` の既定。他のループの周期はコード内の定数で、設定からは変えられないと見ているが、全部の呼び出しは追っていない。
 
 ## 11. 変えるとき
 
 - 新しいイベントを足すときは、この doc の §2 の表と §1 の図、`dev-s3fs-ebpf-protocol.md` の §3、`component-communication.md` の §1.1 を同じ変更で直す。
 - 構造体のサイズを変えたら kmod と daemon を同時にビルドし直す (バージョン交渉はない)。
-- 「待たせる」イベントを足すなら、`s3fs_pending` / `s3fs_flush_pending` と同じ形 (参照カウントつきの completion) に合わせ、タイムアウトと daemon 不在時の動きを §9 に書く。
+- 「待たせる」イベントを足すなら、`s3fs_inflight` の record と同じ形 (参照カウントつきの completion) に合わせ、タイムアウトと daemon 不在時の動きを §9 に書く。
 - 数字 (100 ms、200 ms、2 秒、30 秒、16 worker、512 件) は 2026-11-05 時点のコードの値。変えたらこの doc も直す。

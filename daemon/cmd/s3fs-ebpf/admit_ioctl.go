@@ -5,6 +5,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/kmodio"
 	"golang.org/x/sys/unix"
 )
 
@@ -64,26 +65,29 @@ func evalPass(devPath string) (int, error) {
 
 // -- C: read-miss upcall reader + handler ---------------------------------
 
-// s3fsSignalVerifyPopulated mirrors S3FS_SIGNAL_VERIFY_POPULATED: kmod only
-// wakes the waiter if the chunk is cached, else returns EAGAIN (AC-45).
-const s3fsSignalVerifyPopulated = 0x1
+// s3fsDoneVerifyPopulated mirrors S3FS_DONE_VERIFY_POPULATED: kmod only wakes
+// the waiter if the chunk is cached, else returns EAGAIN (AC-45).
+const s3fsDoneVerifyPopulated = 0x1
 
-func signalAdmit(devPath string, ino uint64, chunkOffset int64, errCode int32) error {
-	return signalAdmitFlags(devPath, ino, chunkOffset, errCode, 0)
+// signalAdmit answers a MISS: wake the waiters of the chunk. seq is the seq of the
+// request being answered (0: whichever plain-read record is live for the chunk, a
+// chunk load signalling a chunk whose request it did not see).
+func signalAdmit(devPath string, ino uint64, chunkOffset int64, seq uint64, errCode int32) error {
+	return signalAdmitFlags(devPath, ino, chunkOffset, seq, errCode, 0)
 }
 
-// signalAdmitFlags is signalAdmit with S3FS_SIGNAL_* flags.
-func signalAdmitFlags(devPath string, ino uint64, chunkOffset int64, errCode int32, flags uint32) error {
+// signalAdmitFlags is signalAdmit with S3FS_DONE_* flags.
+func signalAdmitFlags(devPath string, ino uint64, chunkOffset int64, seq uint64, errCode int32, flags uint32) error {
 	f, closeFn, err := devFileOrOpen(devPath)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
-	arg := signalAdmitArg{Ino: ino, ChunkOffset: uint64(chunkOffset), Err: errCode, Flags: flags}
+	arg := doneArg{Type: kmodio.ReqMiss, Flags: flags, Ino: ino, ChunkOffset: uint64(chunkOffset), Seq: seq, Err: errCode}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		f.Fd(), uintptr(s3fsIocSignalAdmit),
+		f.Fd(), uintptr(s3fsIocDone),
 		uintptr(unsafe.Pointer(&arg))); errno != 0 {
-		return fmt.Errorf("ioctl SIGNAL_ADMIT: %w", errno)
+		return fmt.Errorf("ioctl DONE: %w", errno)
 	}
 	return nil
 }

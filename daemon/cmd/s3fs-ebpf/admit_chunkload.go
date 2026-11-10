@@ -88,7 +88,7 @@ func (l *chunkLoad) populateAndSignal(ops chunkLoadOps, i int, data []byte) erro
 		if err := ops.populate(off, data); err != nil {
 			return err
 		}
-		err := ops.signal(off, 0, s3fsSignalVerifyPopulated)
+		err := ops.signal(off, 0, s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return nil
 		}
@@ -201,7 +201,7 @@ func (l *chunkLoad) follow(ctx context.Context, ops chunkLoadOps, ci int) {
 		return
 	}
 	for attempt := 0; ; attempt++ {
-		err := ops.signal(off, 0, s3fsSignalVerifyPopulated)
+		err := ops.signal(off, 0, s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return
 		}
@@ -235,7 +235,13 @@ func serveChunkLoad(ctx context.Context, devPath string, s3c objstore.Backend,
 			return populatePagesFn(devPath, ev.Ino, off, data)
 		},
 		signal: func(off int64, errCode int32, flags uint32) error {
-			return signalAdmitFlagsFn(devPath, ev.Ino, off, errCode, flags)
+			// The request this handler answers is the one of its own chunk; the
+			// other chunks of the load are signalled by key (seq 0).
+			seq := uint64(0)
+			if off == missChunkOffset {
+				seq = ev.Seq
+			}
+			return signalAdmitFlagsFn(devPath, ev.Ino, off, seq, errCode, flags)
 		},
 	}
 	mine := newChunkLoad(fullSize)

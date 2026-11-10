@@ -10,6 +10,7 @@
 import sys
 import time
 
+import flush_events_model as fe
 import flush_model as fm
 import readmiss_model as rm
 from modelcheck import show
@@ -51,6 +52,21 @@ SCENARIOS = [
      "no flush_read_seq check on DONE: a write after the PUT's read is lost (W3 class)"),
     ("FL-4", fm, fm.Cfg(requeue=False), False,
      "slot merged but no re-queue on seq mismatch: an fsync waiter sleeps forever / write lost"),
+    # The message flow that is implemented (AC-94): one message per enqueue, DONE(ino, err).
+    ("FE-1", fe, fe.Cfg(), True,
+     "one FLUSH message per enqueue, unified DONE(ino, err): close/fsync/write/PUT-failure interleavings"),
+    ("FE-2", fe, fe.Cfg(writes=3, closes=3, fsyncs=2, fails=2), True,
+     "same, larger bounds"),
+    ("FE-3", fe, fe.Cfg(drop_on_start=False), True,
+     "the daemon does not collapse messages (one PUT per message): also safe"),
+    ("FE-4", fe, fe.Cfg(check_seq=False), False,
+     "no flush_read_seq check on DONE ok: a write after the PUT's read is lost (W3)"),
+    ("FE-5", fe, fe.Cfg(queue_when_clean=False), False,
+     "fsync of a clean file with a flush in flight queues no message: a DONE that does not cover leaves it asleep (model finding)"),
+    ("FE-6", fe, fe.Cfg(fsync_waits_flushing=False), False,
+     "fsync of a clean file returns at once while its flush is in flight (the code before AC-96): not durable"),
+    ("FE-7", fe, fe.Cfg(split_done=True), False,
+     "old protocol, MARK_DIRTY and SIGNAL_FLUSH(err) as two steps: a close in between leaves flushing=0 dirty=0 with a message queued (AC-95); one DONE(err) closes the window"),
 ]
 
 

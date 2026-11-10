@@ -39,37 +39,52 @@ typedef uint64_t __u64;
 	_IO(S3FS_IOC_MAGIC, 0x02)
 
 /*
- * S3FS_IOC_SIGNAL_ADMIT — wake a pending .read waiter.
+ * S3FS_IOC_DONE — the daemon is done with a request (v2 Phase 4).  The one
+ * completion ioctl: it replaces SIGNAL_ADMIT (0x03), SIGNAL_FLUSH (0x0A) and
+ * MARK_DIRTY (0x07), which must not be reused.
  *
- * The daemon calls this after fetching an unadmitted object from S3
- * and issuing an admit-arena. kmod's blocked read finds its pending
- * entry keyed by (ino, chunk_offset), records the err code, and
- * completes the waiter. err==0 signals success (the caller should
- * retry the admit lookup and serve from arena/pcache); err<0
- * propagates the error to the read syscall.
- * chunk_offset must be aligned to S3FS_PCACHE_CHUNK_SIZE (4 MiB).
- * Full-file admits (small files) use chunk_offset=0.
+ *   type MISS : wake the waiters of the record for (ino, chunk_offset).  err == 0:
+ *               the chunk is there, the reader retries its lookup; err < 0 goes to
+ *               the read syscall.  chunk_offset is aligned to
+ *               S3FS_PCACHE_CHUNK_SIZE (4 MiB; 0 for a full-file admit) or
+ *               all-ones for an open check.  `seq` is the seq of the MISS request
+ *               being answered: a record queued for another seq is not completed
+ *               (-ENOENT).  seq == 0 means "the plain-read record live for this
+ *               chunk" (a chunk load signalling a chunk it did not see the request
+ *               of).  -ENOENT: no such record (normal: the waiter gave up).
+ *   type FLUSH: the daemon finished the PUT of the file's flush.  err == 0: when
+ *               the PUT's read covered the latest flush request (flush_read_seq ==
+ *               flush_seq, W3) the flush is over: flushing is cleared, the chunks
+ *               are marked populated, the inode is unpinned when clean, and a
+ *               blocked fsync() returns 0.  err < 0: the PUT failed: kmod sets the
+ *               file dirty again (so the next close / fsync retries; this was
+ *               MARK_DIRTY), clears flushing, keeps the pin, and fsync() returns
+ *               err.  By ino: the daemon's debounce collapses several close()
+ *               flushes into one PUT, so DONE is not 1:1 with requests.  -ENOENT:
+ *               the inode is gone.  A DELETE / RENAME needs no DONE.
  */
-struct s3fs_signal_admit {
+struct s3fs_done {
+	__u32 type;           /* S3FS_REQ_MISS | S3FS_REQ_FLUSH */
+	__u32 flags;          /* S3FS_DONE_* */
 	__u64 ino;
-	__u64 chunk_offset;   /* chunk boundary; 0 for full-file admits */
+	__u64 chunk_offset;   /* MISS */
+	__u64 seq;            /* MISS: seq of the request, or 0 */
 	__s32 err;
-	__u32 flags;          /* S3FS_SIGNAL_* */
+	__u32 _pad;
 };
 
 /*
- * AC-45: with err == 0, only wake the waiter if the 4 MiB chunk at
- * chunk_offset is actually cached (allocated and populated) in the ino's
- * fd; otherwise leave the waiter asleep and return -EAGAIN so the daemon
- * can populate again.  Without this a handler whose data was evicted
- * between its populate and its signal wakes the reader with nothing to
- * read, and under frequent eviction the reader burns its retries on such
- * stale wakeups (pcache mode only: arena admits keep no chunk).
+ * AC-45: with a MISS and err == 0, only wake the waiter if the 4 MiB chunk at
+ * chunk_offset is actually cached (allocated and populated) in the ino's fd;
+ * otherwise leave the waiter asleep and return -EAGAIN so the daemon can
+ * populate again.  Without this a handler whose data was evicted between its
+ * populate and its signal wakes the reader with nothing to read, and under
+ * frequent eviction the reader burns its retries on such stale wakeups.
  */
-#define S3FS_SIGNAL_VERIFY_POPULATED	0x1u
+#define S3FS_DONE_VERIFY_POPULATED	0x1u
 
-#define S3FS_IOC_SIGNAL_ADMIT \
-	_IOW(S3FS_IOC_MAGIC, 0x03, struct s3fs_signal_admit)
+#define S3FS_IOC_DONE \
+	_IOW(S3FS_IOC_MAGIC, 0x12, struct s3fs_done)
 
 /*
  * Request stream (v2 Phase 4): everything kmod asks of the daemon arrives as
@@ -80,12 +95,13 @@ struct s3fs_signal_admit {
  * queued.
  *
  *   MISS  : a .read_folio / .open / write-prep that needs the daemon and waits
- *           for it (see s3fs_signal_admit).  ino, offset (where the miss was),
+ *           for it (see s3fs_done).  ino, offset (where the miss was),
  *           count (bytes requested), flags (S3FS_MISS_FLAG_*), seq_count /
  *           rand_count (read pattern so far; 0 for a miss that is not a read).
- *           No seq.
+ *           seq has bit 63 set (S3FS_REQ_SEQ_MISS): its own space, the seq of the
+ *           inflight record, echoed in DONE.
  *   FLUSH : .release / .create placeholder (async) or .fsync (flags has
- *           S3FS_FLUSH_FLAG_WAIT; the caller waits for SIGNAL_FLUSH).  ino,
+ *           S3FS_FLUSH_FLAG_WAIT; the caller waits for DONE).  ino,
  *           parent_ino (0 == root), size (buffer size at enqueue time), name
  *           (basename), seq.
  *   DELETE: .unlink.  ino, parent_ino, name, seq.
@@ -100,6 +116,10 @@ struct s3fs_signal_admit {
  */
 /* longest basename (and name in a request); see also struct s3fs_sync_entry */
 #define S3FS_SYNC_NAME_MAX 255
+
+/* MISS seqs live in their own space (bit 63), apart from the FLUSH / DELETE / RENAME
+ * seqs that order write-back. */
+#define S3FS_REQ_SEQ_MISS (1ULL << 63)
 
 #define S3FS_REQ_MISS   1U
 #define S3FS_REQ_FLUSH  2U
@@ -234,25 +254,6 @@ struct s3fs_read_dirty {
 	_IOWR(S3FS_IOC_MAGIC, 0x06, struct s3fs_read_dirty)
 
 /*
- * S3FS_IOC_MARK_DIRTY — daemon → kmod: re-mark the ino's fd as dirty.
- *
- * Called by the daemon flush loop when a S3 PUT fails. Without this,
- * .release cleared the dirty flag before enqueue, so a failed PUT
- * would silently lose the write until the next user-driven write().
- * Marking dirty again lets the next .release / .fsync re-enqueue.
- *
- * No completion signalling — the mark is fire-and-forget. If the
- * inode has been evicted between .release and the PUT, kmod
- * silently ignores the request (ino not in inode_hashtable).
- */
-struct s3fs_mark_dirty {
-	__u64 ino;
-};
-
-#define S3FS_IOC_MARK_DIRTY \
-	_IOW(S3FS_IOC_MAGIC, 0x07, struct s3fs_mark_dirty)
-
-/*
  * S3FS_IOC_STATS — read misc kmod-side counters that don't fit into
  * the existing per-event streams. Extensible via `count` (in) /
  * `filled` (out); daemon reads the first `filled` slots.
@@ -288,25 +289,6 @@ struct s3fs_stats {
 
 /* nr 0x09 was DRAIN_EVICTIONS (the daemon no longer keeps an admit snapshot
  * that a kmod eviction could oscillate with); do not reuse. */
-
-/*
- * S3FS_IOC_SIGNAL_FLUSH — wake a pending .fsync waiter (E-01).
- *
- * Blocking .fsync registers a completion under (ino), then dispatches
- * a flush event to the daemon. After the daemon's S3 PUT resolves
- * (success or failure) it calls this ioctl with the PUT result. kmod
- * finds the pending entry and signals the fsync waiter to return.
- *
- * When no waiter exists (eager .release path — the default for
- * close(2)) the daemon still calls this after PUT so the same code
- * path handles both flush completion signals. Missing waiter returns
- * -ENOENT which the daemon ignores.
- *
- * err semantics match signal_admit: err==0 = PUT succeeded, negative
- * errno propagates to the fsync() return value.
- */
-#define S3FS_IOC_SIGNAL_FLUSH \
-	_IOW(S3FS_IOC_MAGIC, 0x0A, struct s3fs_signal_admit)
 
 /* nr 0x05 POP_FLUSH, 0x0B POP_DELETE, 0x0C POP_RENAME, 0x0D POP_FLUSH_WAIT, 0x11 POP_WB:
  * replaced by read(2) of struct s3fs_req_event; do not reuse. */

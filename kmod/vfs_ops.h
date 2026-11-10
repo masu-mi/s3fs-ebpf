@@ -65,7 +65,7 @@ struct file;
 struct poll_table_struct;
 ssize_t s3fs_req_dequeue(struct s3fs_req_event *out, bool nonblocking);
 __poll_t s3fs_req_poll(struct file *filp, struct poll_table_struct *pt);
-int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err, u32 flags);
+int s3fs_ebpf_done(const struct s3fs_done *d);
 
 /*
  * Write-back data path: kmod → daemon.
@@ -79,15 +79,6 @@ long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap, u64 *size);
 long s3fs_ebpf_read_dirty_range(u64 ino, void __user *uaddr, u64 offset, u64 cap);
 long s3fs_ebpf_dirty_layout(u64 ino, u8 __user *states, u32 cap, u64 *size,
 			    u32 *nr);
-int  s3fs_ebpf_mark_dirty(u64 ino);
-
-/*
- * Blocking fsync completion signal (E-01). Daemon calls this after
- * a PUT finishes (err=0 on success, negative errno on failure) to
- * wake the fsync() caller blocked in .fsync. -ENOENT (no waiter) is
- * an expected outcome for the .release fire-and-forget path.
- */
-int s3fs_ebpf_signal_flush(u64 ino, int err);
 
 /* Cumulative policy-driven evictions from the admit table. Exposed
  * via a new stats ioctl for daemon-side Prometheus export. */

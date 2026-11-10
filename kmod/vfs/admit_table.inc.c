@@ -188,7 +188,7 @@ static DEFINE_SPINLOCK(s3fs_pc_retry_lock);	/* leaf */
 static u64 s3fs_pc_retry[S3FS_PC_RETRY_MAX];
 static unsigned int s3fs_pc_retry_n;
 static u64 s3fs_ino_buf_bytes(u64 ino);	/* fd_chunks.inc.c */
-static bool pending_exists(u64 ino);	/* read_miss.inc.c */
+static bool inflight_miss_exists(u64 ino);	/* read_miss.inc.c */
 
 static void s3fs_pc_retry_add(u64 ino)
 {
@@ -238,14 +238,14 @@ static void s3fs_pc_retry_run(void)
 	for (i = 0; i < n; i++) {
 		if (s3fs_ino_buf_bytes(inos[i]))
 			continue;
-		if (pending_exists(inos[i]))
+		if (inflight_miss_exists(inos[i]))
 			s3fs_pc_retry_add(inos[i]);
 		else
 			s3fs_evict_page_cache(inos[i]);
 	}
 }
 
-static bool pending_exists(u64 ino); /* defined with the upcall machinery */
+static bool inflight_miss_exists(u64 ino); /* defined with the upcall machinery */
 
 /* P3 / Q1: defined after struct s3fs_file_data; frees fd->buf for non-dirty
  * inodes so capacity_bytes bounds actual allocations. */

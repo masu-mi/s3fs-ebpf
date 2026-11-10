@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/kmodio"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"golang.org/x/sys/unix"
@@ -18,15 +19,15 @@ import (
 // flushFlagWait matches S3FS_FLUSH_FLAG_WAIT in the UAPI header.
 const flushFlagWait uint32 = 0x1
 
-// signalFlush notifies kmod that a flush PUT completed with `err`.
-// -ENOENT (no waiter) is a normal outcome for the .release path; we
-// call this after every PUT so both fire-and-forget and blocking
-// fsync go through the same completion signal. See E-01 in
-// docs/journal/backlog.md and struct s3fs_flush_pending in kmod/vfs_ops.c.
-func signalFlush(devFd int, ino uint64, errCode int32) error {
-	arg := signalAdmitArg{Ino: ino, Err: errCode}
+// doneFlush tells kmod the PUT of `ino` finished with `errCode` (S3FS_IOC_DONE,
+// type FLUSH). Err != 0 also makes kmod set the file dirty again so the next
+// close / fsync retries (this was a separate MARK_DIRTY ioctl). -ENOENT (no
+// waiting fsync, or the inode is gone) is a normal outcome for the .release path:
+// we call this after every PUT.
+func doneFlush(devFd int, ino uint64, errCode int32) error {
+	arg := doneArg{Type: kmodio.ReqFlush, Ino: ino, Err: errCode}
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(devFd), uintptr(s3fsIocSignalFlush),
+		uintptr(devFd), uintptr(s3fsIocDone),
 		uintptr(unsafe.Pointer(&arg))); errno != 0 {
 		if errno == unix.ENOENT {
 			return nil // no fsync() caller waiting — fire-and-forget path
@@ -60,18 +61,6 @@ func readStats(devPath string) ([]uint64, error) {
 	}
 	defer f.Close()
 	return readStatsOn(int(f.Fd()))
-}
-
-// markDirty tells kmod to re-set fd->dirty for `ino` after a PUT
-// failure so the next .release/.fsync re-enqueues the flush event.
-func markDirty(devFd int, ino uint64) error {
-	arg := markDirtyArg{Ino: ino}
-	if _, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(devFd), uintptr(s3fsIocMarkDirty),
-		uintptr(unsafe.Pointer(&arg))); errno != 0 {
-		return errno
-	}
-	return nil
 }
 
 // dirtyTooSmallError is the kmod refusing READ_DIRTY with -ENOSPC (AC-71): buf is
@@ -212,11 +201,10 @@ func flushQueueOps(ctx context.Context, devFd int, devPath string,
 // flushKmod is what handleFlush asks of the kernel module for one event, so
 // the flush path can be exercised without a device.
 type flushKmod interface {
-	// SignalFlush wakes the fsync() waiter with the PUT outcome (-ENOENT, no
-	// waiter, is not an error).
-	SignalFlush(ino uint64, errCode int32) error
-	// MarkDirty restores the dirty flag so the next close/fsync retries.
-	MarkDirty(ino uint64) error
+	// Done tells kmod the PUT finished: it wakes the fsync() waiter with the
+	// outcome (-ENOENT, no waiter, is not an error) and, for errCode != 0,
+	// restores the dirty flag so the next close/fsync retries.
+	Done(ino uint64, errCode int32) error
 	// ReadDirty copies the inode's dirty bytes into buf.
 	ReadDirty(ino uint64, buf []byte) (int, error)
 	// TryPartial flushes a file that has remote chunks with a multipart copy
@@ -227,8 +215,7 @@ type flushKmod interface {
 // devKmod is flushKmod over the /dev/s3fs_ebpf fd.
 type devKmod struct{ fd int }
 
-func (d devKmod) SignalFlush(ino uint64, errCode int32) error { return signalFlush(d.fd, ino, errCode) }
-func (d devKmod) MarkDirty(ino uint64) error                  { return markDirty(d.fd, ino) }
+func (d devKmod) Done(ino uint64, errCode int32) error { return doneFlush(d.fd, ino, errCode) }
 func (d devKmod) ReadDirty(ino uint64, buf []byte) (int, error) {
 	return readDirty(d.fd, ino, buf)
 }
@@ -258,9 +245,9 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 	putErr := int32(0)
 	defer func() {
 		metrics.FlushLatency.Observe(time.Since(flush_started))
-		if err := k.SignalFlush(ev.Ino, putErr); err != nil {
+		if err := k.Done(ev.Ino, putErr); err != nil {
 			fmt.Fprintf(os.Stderr,
-				"[flush] ino=%d signal_flush: %v\n", ev.Ino, err)
+				"[flush] ino=%d done: %v\n", ev.Ino, err)
 		}
 	}()
 	name := string(ev.Name[:ev.NameLen])
@@ -292,9 +279,6 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 			if perr != nil {
 				fmt.Fprintf(os.Stderr, "[flush] ino=%d s3://%s partial put: %v\n", ev.Ino, s3key, perr)
 				metrics.Global.FlushErrors.Add(1)
-				if mderr := k.MarkDirty(ev.Ino); mderr != nil {
-					fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n", ev.Ino, mderr)
-				}
 				putErr = -5 /* -EIO */
 				return
 			}
@@ -314,11 +298,7 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d read dirty: %v\n",
 			ev.Ino, err)
 		metrics.Global.FlushErrors.Add(1)
-		// Restore dirty flag so the next close/fsync will re-try.
-		if mderr := k.MarkDirty(ev.Ino); mderr != nil {
-			fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
-				ev.Ino, mderr)
-		}
+		// DONE(err) restores the dirty flag so the next close/fsync will re-try.
 		putErr = -5 /* -EIO — kmod-side buffer copy failed */
 		return
 	}
@@ -328,10 +308,6 @@ func handleFlushWith(ctx context.Context, k flushKmod, devPath string,
 		fmt.Fprintf(os.Stderr, "[flush] ino=%d s3://%s put: %v\n",
 			ev.Ino, s3key, err)
 		metrics.Global.FlushErrors.Add(1)
-		if mderr := k.MarkDirty(ev.Ino); mderr != nil {
-			fmt.Fprintf(os.Stderr, "[flush] ino=%d mark dirty: %v\n",
-				ev.Ino, mderr)
-		}
 		putErr = -5 /* -EIO — S3 PUT failed */
 		return
 	}

@@ -12,7 +12,8 @@ python3 docs/design/v2-spec/run.py -v   # 反例の trace も出す
 | `modelcheck.py` | BFS の探索器。不変条件違反、deadlock、最終状態の検査、最短の反例 |
 | `readmiss_model.py` | read の miss: reader / daemon の handler / evictor。現行と v2 の設定、pin / verify などの変異 |
 | `flush_model.py` | flush: writer / close / fsync / daemon。枠 (slot) と `flush_read_seq`、変異 |
-| `run.py` | 14 シナリオと期待の結果 (`ok` か `VIOLATION`)。反例が出るべきものが ok になったら、モデルが弱くなったので失敗にする |
+| `flush_events_model.py` | flush: **実装した形** (enqueue ごとに 1 件の message、完了は `DONE(ino, err)`)。`flush_read_seq` の判定、clean で飛行中の fsync、`MARK_DIRTY` と `SIGNAL` を分けた旧形、daemon の畳み込み (FE-1〜FE-7) |
+| `run.py` | 21 シナリオと期待の結果 (`ok` か `VIOLATION`)。反例が出るべきものが ok になったら、モデルが弱くなったので失敗にする |
 
 `python3 -I` は使わない (`-I` はスクリプトと同じディレクトリの import も外す)。
 

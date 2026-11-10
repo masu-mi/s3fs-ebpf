@@ -27,36 +27,16 @@
 #include "vfs_ops.h"
 
 /*
- * S3FS_IOC_SIGNAL_ADMIT — daemon → kmod completion signal for a
- * previously enqueued read-miss. `err` is written into the pending
- * entry before completion; 0 means "admit table now has this ino,
- * please retry".
+ * S3FS_IOC_DONE — daemon → kmod: the daemon is done with a request (a miss it
+ * populated or failed, a flush it PUT or failed).  See struct s3fs_done.
  */
-static long s3fs_dev_signal_admit(void __user *uarg)
+static long s3fs_dev_done(void __user *uarg)
 {
-	struct s3fs_signal_admit sig;
+	struct s3fs_done d;
 
-	if (copy_from_user(&sig, uarg, sizeof(sig)))
+	if (copy_from_user(&d, uarg, sizeof(d)))
 		return -EFAULT;
-	return s3fs_ebpf_signal_admit(sig.ino, sig.chunk_offset, sig.err,
-				       sig.flags);
-}
-
-/*
- * S3FS_IOC_SIGNAL_FLUSH — daemon → kmod completion signal for a
- * previously enqueued flush event (E-01). Reuses the signal_admit
- * struct because the payload shape is identical {ino, err}. Returns
- * -ENOENT when no fsync() caller is waiting on this ino, which is
- * a normal outcome for the fire-and-forget .release path — daemon
- * signals unconditionally after every PUT.
- */
-static long s3fs_dev_signal_flush(void __user *uarg)
-{
-	struct s3fs_signal_admit sig;
-
-	if (copy_from_user(&sig, uarg, sizeof(sig)))
-		return -EFAULT;
-	return s3fs_ebpf_signal_flush(sig.ino, sig.err);
+	return s3fs_ebpf_done(&d);
 }
 
 /*
@@ -216,10 +196,8 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	switch (cmd) {
 	case S3FS_IOC_EVAL:
 		return s3fs_ebpf_capacity_pass();
-	case S3FS_IOC_SIGNAL_ADMIT:
-		return s3fs_dev_signal_admit(uarg);
-	case S3FS_IOC_SIGNAL_FLUSH:
-		return s3fs_dev_signal_flush(uarg);
+	case S3FS_IOC_DONE:
+		return s3fs_dev_done(uarg);
 	case S3FS_IOC_SYNC_ENTRIES:
 		return s3fs_dev_sync_entries(uarg);
 	case S3FS_IOC_READ_DIRTY:
@@ -228,13 +206,6 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_read_dirty_range(uarg);
 	case S3FS_IOC_DIRTY_LAYOUT:
 		return s3fs_dev_dirty_layout(uarg);
-	case S3FS_IOC_MARK_DIRTY: {
-		struct s3fs_mark_dirty req;
-
-		if (copy_from_user(&req, uarg, sizeof(req)))
-			return -EFAULT;
-		return s3fs_ebpf_mark_dirty(req.ino);
-	}
 	case S3FS_IOC_STATS: {
 		struct s3fs_stats st;
 

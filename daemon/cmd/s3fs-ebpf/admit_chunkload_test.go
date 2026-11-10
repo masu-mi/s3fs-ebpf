@@ -84,7 +84,7 @@ func TestChunkLoad_PopulatesAllStartingAtMiss(t *testing.T) {
 		t.Fatal("populated bytes differ from source")
 	}
 	// The workers start with the miss chunk; it is among the first signals.
-	want := fmt.Sprintf("3:0:%d", s3fsSignalVerifyPopulated)
+	want := fmt.Sprintf("3:0:%d", s3fsDoneVerifyPopulated)
 	found := false
 	for _, s := range k.signals[:chunkLoadWorkers] {
 		found = found || s == want

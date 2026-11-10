@@ -24,12 +24,18 @@ type PopulatePagesArg struct {
 	DataPtr uint64 // user pointer to data bytes (unsafe.Pointer value)
 }
 
-// SignalAdmitArg mirrors `struct s3fs_signal_admit` (U13: added ChunkOffset).
-type SignalAdmitArg struct {
+// DoneArg mirrors `struct s3fs_done`: the daemon is done with a request (v2
+// Phase 4). Type is ReqMiss (wake the waiters of the chunk record, Seq names the
+// request answered, 0 = the plain-read record) or ReqFlush (the PUT of Ino is
+// finished; Err != 0 makes kmod mark the file dirty again). Flags: DoneVerifyPopulated.
+type DoneArg struct {
+	Type        uint32
+	Flags       uint32
 	Ino         uint64
 	ChunkOffset uint64
+	Seq         uint64
 	Err         int32
-	Flags       uint32
+	_pad        uint32
 }
 
 // FlushEvent is the flush form of a ReqEvent, as the handlers take it.
@@ -51,11 +57,6 @@ type ReadDirtyArg struct {
 	Uaddr    uint64
 	Size     uint64
 	OutBytes uint64
-}
-
-// MarkDirtyArg mirrors `struct s3fs_mark_dirty`.
-type MarkDirtyArg struct {
-	Ino uint64
 }
 
 type StatsArg struct {
@@ -156,11 +157,9 @@ type SyncEntriesArg struct {
 const (
 	IocPopulatePages  = (1 << 30) | (uint32(unsafe.Sizeof(PopulatePagesArg{})) << 16) | (0xE3 << 8) | 0x0E
 	IocEval           = (0 << 30) | (0 << 16) | (0xE3 << 8) | 0x02 // _IO(0xE3, 0x02)
-	IocSignalAdmit    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
+	IocDone           = (1 << 30) | (uint32(unsafe.Sizeof(DoneArg{})) << 16) | (0xE3 << 8) | 0x12
 	IocReadDirty      = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
-	IocMarkDirty      = (1 << 30) | (uint32(unsafe.Sizeof(MarkDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
 	IocStats          = (3 << 30) | (uint32(unsafe.Sizeof(StatsArg{})) << 16) | (0xE3 << 8) | 0x08
-	IocSignalFlush    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x0A
 	IocDirtyLayout    = (3 << 30) | (uint32(unsafe.Sizeof(DirtyLayoutArg{})) << 16) | (0xE3 << 8) | 0x0F
 	IocReadDirtyRange = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyRangeArg{})) << 16) | (0xE3 << 8) | 0x10
 	IocSyncEntries    = (1 << 30) | (uint32(unsafe.Sizeof(SyncEntriesArg{})) << 16) | (0xE3 << 8) | 0x04

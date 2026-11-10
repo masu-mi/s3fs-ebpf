@@ -65,7 +65,7 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: test-nocache-signal test-cold-signal test-staging test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
+.PHONY: test-fsync-inflight test-nocache-signal test-cold-signal test-staging test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
         vmlinux vmlinux-clean compose-up compose-down compose-logs \
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
@@ -355,7 +355,7 @@ test-splice-hits: kmod daemon ## sendfile / splice reads are counted as hits (hi
 	@echo "==> test-splice-hits"
 	@$(SCRIPTS_DIR)/test-splice-hits.sh
 
-test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-open-check test-parity test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-nocache-signal test-cold-signal test-staging test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
+test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-fsync-inflight test-open-check test-parity test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-nocache-signal test-cold-signal test-staging test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"
@@ -464,6 +464,10 @@ test-spec: ## TLA+ models (specs/tla) with TLC in a throwaway container: every v
 test-parity: kmod daemon ## differential test: the same operations on s3fs-fuse and s3fs-ebpf give the same result (known gaps listed in scripts/lib/parity-known-diff.sh)
 	@echo "==> test-parity"
 	@sudo $(SCRIPTS_DIR)/test-parity.sh
+
+test-fsync-inflight: kmod daemon ## fsync of a clean file whose close flush is in flight waits for S3 (AC-96)
+	@echo "==> test-fsync-inflight"
+	@sudo $(SCRIPTS_DIR)/test-fsync-inflight.sh
 
 test-fsync-new-file: kmod daemon ## a new file written + fsync'ed is not truncated by the create placeholder flush
 	@echo "==> test-fsync-new-file"

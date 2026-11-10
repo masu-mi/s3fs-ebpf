@@ -53,8 +53,8 @@ struct s3fs_req_event {
 
 | type | 起こす操作 | 待つか | daemon の処理 |
 |---|---|---|---|
-| MISS | `.read_folio` / `.open` (`open_check`) / write の前の読み込み | 同期 (`SIGNAL_ADMIT` まで) | S3 から取って `POPULATE_PAGES`、`SIGNAL_ADMIT` |
-| FLUSH | `.release` / `.create` (非同期)、`.fsync` (flags に `WAIT`、`SIGNAL_FLUSH` まで同期) | WAIT のみ | READ_DIRTY して PUT。WAIT は即時、それ以外は 200 ms の debounce (coalescer) |
+| MISS | `.read_folio` / `.open` (`open_check`) / write の前の読み込み | 同期 (`DONE` まで) | S3 から取って `POPULATE_PAGES`、`DONE` (MISS) |
+| FLUSH | `.release` / `.create` (非同期)、`.fsync` (flags に `WAIT`、`DONE` まで同期) | WAIT のみ | READ_DIRTY して PUT。WAIT は即時、それ以外は 200 ms の debounce (coalescer) |
 | DELETE | `.unlink` | 非同期 | S3 の DELETE |
 | RENAME | `.rename` | 非同期 | CopyObject + DELETE |
 
@@ -64,9 +64,9 @@ struct s3fs_req_event {
 
 | flags | 意味 |
 |---|---|
-| `0` | 普通の read の miss。daemon は取得して populate (pcache) か admit (arena) し、`SIGNAL_ADMIT` で起こす |
-| `S3FS_MISS_FLAG_FOR_WRITE` (0x1) | read ではなく変更 (write、truncate) の前の読み込み (AC-50)。daemon は `offset` を含む 4 MiB の chunk を `POPULATE_PAGES` で入れて `SIGNAL_ADMIT` する。arena モードでも arena には入れない |
-| `S3FS_MISS_FLAG_OPEN_CHECK` (0x4) | read ではなく、`open(2)` (O_CREAT なし) が S3 に存在を確かめる要求。kmod の module param `open_check=1` (既定) のときだけ送る (既定 1)。daemon は HEAD して `SIGNAL_ADMIT` の `err` に 0 / `-ENOENT` (404) / `-EIO` を入れる。何も populate しない。pending の `chunk_offset` は all ones (`S3FS_OPEN_CHECK_KEY`) |
+| `0` | 普通の read の miss。daemon は取得して populate (pcache) か admit (arena) し、`DONE` で起こす |
+| `S3FS_MISS_FLAG_FOR_WRITE` (0x1) | read ではなく変更 (write、truncate) の前の読み込み (AC-50)。daemon は `offset` を含む 4 MiB の chunk を `POPULATE_PAGES` で入れて `DONE` する。arena モードでも arena には入れない |
+| `S3FS_MISS_FLAG_OPEN_CHECK` (0x4) | read ではなく、`open(2)` (O_CREAT なし) が S3 に存在を確かめる要求。kmod の module param `open_check=1` (既定) のときだけ送る (既定 1)。daemon は HEAD して `DONE` の `err` に 0 / `-ENOENT` (404) / `-EIO` を入れる。何も populate しない。pending の `chunk_offset` は all ones (`S3FS_OPEN_CHECK_KEY`) |
 | `S3FS_MISS_FLAG_PINNED` (0x2) | fd の中身が、固定した ETag のオブジェクトに依存している (dirty、flush 中、remote chunk を持つ)。オブジェクトが変わっていたら衝突として扱う。付いていなければ daemon は古い pin を捨てて Stat し直してよい (AC-51) |
 
 - `read(2)` のバッファが `sizeof(struct s3fs_req_event)` (592 B) より小さいと `-EINVAL`。1 回の `read` で 1 件だけ返す。
@@ -84,7 +84,7 @@ struct s3fs_req_event {
 |---:|---|---|---|---|---|
 | 0x02 | `EVAL` | →kmod | (なし) | kmod の容量 / policy パスを今走らせる。旧 `ADMIT_ARENA` (arena の範囲の登録) の nr を引き継いだ。デバイスを open すると upcall が有効になる | 0 |
 | 0x0E | `POPULATE_PAGES` | →kmod | `s3fs_populate_pages` | `ino`、`offset` (データの開始位置)、`size` (バイト数)、`data_ptr` (daemon のバッファ) | pcache モード。kmod は fd の chunk 表にコピーし、`S3FS_ADMIT_FLAG_PCACHE` の admit entry を入れる。以降の read は `generic_file_read_iter` が page cache から返す |
-| 0x03 | `SIGNAL_ADMIT` | →kmod | `s3fs_signal_admit` | `ino`、`chunk_offset` (4 MiB 境界、小さいファイルは 0)、`err` (0 = 成功、負の errno は read に返る)、`flags` | 待っている reader がなければ `-ENOENT`。`S3FS_SIGNAL_VERIFY_POPULATED` (0x1) を付けると、chunk が実際に入っているときだけ起こし、なければ `-EAGAIN` (AC-45) |
+| 0x12 | `DONE` | →kmod | `s3fs_done` (40 B) | `type` (`S3FS_REQ_MISS` / `FLUSH`)、`flags` (`S3FS_DONE_VERIFY_POPULATED`)、`ino`、`chunk_offset`、`seq`、`err` | daemon が request を終えた知らせ。**MISS**: `(ino, chunk_offset)` の record の待ち手を起こす。`seq` が request の seq なら**その record だけ** (別の seq は `-ENOENT`)、0 なら普通の read の record (chunk load が自分の request ではない chunk を key で知らせる)。`err == 0` + `VERIFY_POPULATED` で、chunk が populated でなければ起こさず `-EAGAIN` (AC-45)。**FLUSH**: PUT が終わった。`err == 0` で、PUT の read が最新の flush request を覆っていれば (W3) flushing を下ろして fsync を起こす。`err < 0` は kmod が dirty を戻して (旧 `MARK_DIRTY`)、flushing を下ろし、fsync に err を返す。ino 単位 (daemon の debounce が複数の close を 1 回の PUT にまとめるため)。旧 `SIGNAL_ADMIT` (0x03)・`SIGNAL_FLUSH` (0x0A)・`MARK_DIRTY` (0x07) の置き換え (番号は再利用しない) |
 
 ### 3.2 ディレクトリの内容
 
@@ -99,8 +99,6 @@ struct s3fs_req_event {
 | 0x06 | `READ_DIRTY` | ↔kmod | `s3fs_read_dirty` | in: `ino`、`uaddr`、`size` (バッファの容量)。out: `out_bytes` | dirty なバッファを daemon にコピーする |
 | 0x0F | `DIRTY_LAYOUT` | ↔kmod | `s3fs_dirty_layout` | in: `ino`、`states_uaddr`、`cap`。out: `nr_chunks`、`size`、`chunk_size`。`states` は chunk ごとに 1 byte で `DATA` (0)、`HOLE` (1)、`REMOTE` (2) | `--partial-modify` の flush。`cap` が足りなければ `-ENOSPC` と `nr_chunks` (AC-51) |
 | 0x10 | `READ_DIRTY_RANGE` | ↔kmod | `s3fs_read_dirty_range` | in: `ino`、`uaddr`、`offset`、`size`。out: `out_bytes` | `READ_DIRTY` の offset 指定版。DATA と HOLE の chunk だけ読む (AC-51) |
-| 0x0A | `SIGNAL_FLUSH` | →kmod | `s3fs_signal_admit` (流用) | `ino`、`err` (PUT の結果) | 待っている fsync を起こす。待ちがなければ `-ENOENT` (daemon は無視) |
-| 0x07 | `MARK_DIRTY` | →kmod | `s3fs_mark_dirty` | `ino` | PUT に失敗したとき dirty に戻し、次の close / fsync で積み直させる |
 
 ### 3.4 統計と eviction
 
@@ -121,7 +119,7 @@ sequenceDiagram
     K->>K: wait_for_completion
     D->>D: S3 から range GET
     D->>K: ioctl POPULATE_PAGES (ino, offset, size, data_ptr)
-    D->>K: ioctl SIGNAL_ADMIT (ino, chunk_offset, err=0, VERIFY_POPULATED)
+    D->>K: ioctl DONE (MISS, ino, chunk_offset, seq, err=0, VERIFY_POPULATED)
     K-->>App: chunk から folio を埋めて返す
 ```
 

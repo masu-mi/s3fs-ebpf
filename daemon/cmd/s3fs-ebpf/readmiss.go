@@ -24,12 +24,14 @@ type readMissEvent struct {
 	// kmod in .read_iter (what the read_iter fentry used to keep in a BPF map).
 	SeqCount  uint32
 	RandCount uint32
+	// Seq identifies the request (kmod's inflight record); DONE echoes it.
+	Seq uint64
 }
 
 // readMissFromReq is the MISS form of a request read from kmod.
 func readMissFromReq(r *reqEvent) readMissEvent {
 	return readMissEvent{Ino: r.Ino, Offset: r.Offset, Count: r.Count, Flags: r.Flags,
-		SeqCount: r.SeqCount, RandCount: r.RandCount}
+		SeqCount: r.SeqCount, RandCount: r.RandCount, Seq: r.Seq}
 }
 
 // seqRatio returns the fraction of sequential reads [0, 1]; 0 when no read
@@ -64,7 +66,7 @@ const openCheckKey int64 = -1 // uint64(openCheckKey) is all ones
 // as an upcall nor observed in the miss latency histogram.
 func handleOpenCheck(ctx context.Context, devPath string, s3c objstore.Backend, ev readMissEvent) {
 	metrics.Global.OpenChecks.Add(1)
-	signal := func(code int32) { _ = signalAdmitFn(devPath, ev.Ino, openCheckKey, code) }
+	signal := func(code int32) { _ = signalAdmitFn(devPath, ev.Ino, openCheckKey, ev.Seq, code) }
 	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
 		metrics.Global.OpenCheckMissing.Add(1)
@@ -101,7 +103,7 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d load-for-write: "+format+"\n",
 			append([]any{ev.Ino}, a...)...)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, code)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, code)
 	}
 	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
@@ -148,12 +150,12 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 		}
 		fmt.Printf("[upcall] ino=%d %s load-for-write [%d,%d)\n",
 			ev.Ino, entry.Name, missChunkOffset, missChunkOffset+int64(len(body)))
-		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0, s3fsSignalVerifyPopulated)
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0, s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return // woken, or nobody is waiting (ENOENT)
 		}
 		if attempt >= signalVerifyRetries {
-			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0)
 			return
 		}
 		metrics.Global.ReadMissRepopulates.Add(1)
@@ -235,14 +237,14 @@ func handleReadMiss(ctx context.Context, devPath string,
 	if entry == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d unknown — signaling ENOENT\n", ev.Ino)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -2 /* -ENOENT */)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -2 /* -ENOENT */)
 		return
 	}
 	if s3c == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: no S3 backend — signaling ENODATA\n",
 			ev.Ino, entry.Name)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -61 /* -ENODATA */)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -61 /* -ENODATA */)
 		return
 	}
 	// AC-68: after this miss is served, read ahead the next siblings the
@@ -281,7 +283,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	if !useFullAdmit && readaheadWait(ctx, ev.Ino, missChunkOffset) {
 		// AC-89: the chunk was being read ahead; it is in, so just wake the
 		// reader (EAGAIN: it was shed meanwhile, fetch it below).
-		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0, s3fsSignalVerifyPopulated)
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0, s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return
 		}
@@ -315,7 +317,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s get: %v\n",
 			ev.Ino, entry.S3Key, err)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -5 /* -EIO */)
 		return
 	}
 	if !useFullAdmit {
@@ -337,7 +339,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 			if err := populatePagesFn(devPath, ev.Ino, off, rem[:n]); err != nil {
 				fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
 				metrics.Global.ReadMissErrors.Add(1)
-				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
+				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -5 /* -EIO */)
 				return
 			}
 			off += int64(n)
@@ -351,15 +353,15 @@ func handleReadMiss(ctx context.Context, devPath string,
 		// cached.  Concurrent handlers for one ino and the capacity
 		// pass can evict what we just populated; populate again
 		// (bounded) instead of waking the reader with nothing to read.
-		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0,
-			s3fsSignalVerifyPopulated)
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0,
+			s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return // woken, or nobody is waiting (ENOENT)
 		}
 		if attempt >= signalVerifyRetries {
 			// Give up verifying: wake the waiter so its own retry /
 			// fallback path takes over rather than hanging.
-			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0)
 			return
 		}
 		metrics.Global.ReadMissRepopulates.Add(1)

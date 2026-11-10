@@ -104,7 +104,7 @@ static bool s3fs_folio_fill_from_kmalloc(struct folio *folio, size_t fs_size,
  * resuming to check the fast paths.  Each retry re-creates the pending,
  * which blocks eviction of this ino while the daemon re-populates.
  * U8: buf_readers on fd extends this protection to cover the window
- * between pending_unhash and the gen=0 fallback taking fd->lock. */
+ * between inflight_unhash and the gen=0 fallback taking fd->lock. */
 #define S3FS_UPCALL_MAX_RETRIES 3
 
 static int s3fs_ebpf_read_folio(struct file *file, struct folio *folio)
@@ -163,7 +163,7 @@ retry:
 	if (armed && upcall_retries < S3FS_UPCALL_MAX_RETRIES) {
 		u64 chunk_offset = ((u64)pos >> S3FS_PCACHE_CHUNK_SHIFT)
 				   << S3FS_PCACHE_CHUNK_SHIFT;
-		struct s3fs_pending *p;
+		struct s3fs_inflight *p;
 
 		/* U8: protect fd->buf against eviction for the whole retry
 		 * window (set once; later retries reuse it).  AC-45: register
@@ -175,14 +175,13 @@ retry:
 			pinned = s3fs_fd_chunk_pin(fd, pin_ci);
 			mutex_unlock(&fd->lock);
 		}
-		p = pending_get_or_create(inode->i_ino, chunk_offset);
-
-		if (p) {
+		{
 			int err;
 			long remaining;
 			loff_t mpos = pos;
 			size_t mcount = fs_size;
 			u32 mflags = 0;
+			bool created;
 
 			/* AC-51: a remote chunk of a dirty fd is the S3
 			 * object's own bytes that the fd does not hold: have
@@ -208,7 +207,12 @@ retry:
 				}
 				mutex_unlock(&fd->lock);
 			}
-			err = miss_enqueue(inode->i_ino, mpos, mcount, mflags, fd);
+			/* A load for write is another record than a plain read of the
+			 * same chunk (the daemon answers them differently). */
+			p = inflight_get_or_create(S3FS_REQ_MISS, inode->i_ino, chunk_offset,
+						   mflags & S3FS_MISS_FLAG_FOR_WRITE, &created);
+			err = p ? inflight_queue_miss(p, created, mpos, mcount, mflags, fd)
+				: -ENOMEM;
 			if (err == 0) {
 				/* Killable, not interruptible: a plain signal (a Go
 				 * runtime sends SIGURG to preempt goroutines, every few
@@ -219,7 +223,9 @@ retry:
 				remaining = wait_for_completion_killable_timeout(
 					&p->done, S3FS_UPCALL_WAIT_JIFFIES);
 				err = p->err;
-				pending_put(p);
+				if (remaining == 0)
+					inflight_unhash(p);	/* nobody answered: let the retry queue anew */
+				inflight_put(p);
 				if (remaining < 0) {
 					ret = -EINTR;	/* fatal signal: the task is going away */
 					goto done;
@@ -241,7 +247,7 @@ retry:
 					goto retry;
 				}
 			} else {
-				pending_put(p);
+				inflight_put(p);
 			}
 		}
 	}
@@ -414,7 +420,7 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 	struct s3fs_file_data *fd = inode->i_private;
 	struct dentry *dentry = file->f_path.dentry;
 	struct dentry *parent_dentry;
-	struct s3fs_flush_pending *p = NULL;
+	struct s3fs_inflight *p = NULL;
 	u64 size, ino, parent_ino;
 	char name[S3FS_SYNC_NAME_MAX + 1];
 	size_t name_len;
@@ -437,9 +443,14 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 				   : (u64)S3FS_ROOT_INO;
 
 	mutex_lock(&fd->lock);
-	if (!fd->dirty) {
+	/* AC-96: a clean file whose flush is still in flight (a close() queued it and
+	 * cleared dirty) is not durable yet: an fsync must wait for it, and queues its
+	 * own request because the in-flight PUT may have read the buffer before the
+	 * data the caller wrote (model FE-5/FE-6: a DONE that does not cover leaves
+	 * nobody to re-flush).  Only a clean file with nothing in flight is a no-op. */
+	if (!fd->dirty && !(wait && fd->flushing)) {
 		mutex_unlock(&fd->lock);
-		return 0; /* nothing to flush — fsync on clean file is a no-op */
+		return 0;
 	}
 	size = fd->size;
 	fd->dirty = false;
@@ -458,7 +469,7 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 
 	if (wait) {
 		/* Register BEFORE enqueue so a fast daemon can't miss us. */
-		p = flush_pending_get_or_create(ino);
+		p = inflight_get_or_create(S3FS_REQ_FLUSH, ino, S3FS_FLUSH_KEY, 0, NULL);
 		if (!p) {
 			/* Fall back to non-blocking on OOM — better a stale
 			 * dirty than a lost write. */
@@ -482,7 +493,7 @@ static int s3fs_maybe_enqueue_flush(struct file *file, bool wait)
 		} else {
 			err = p->err;
 		}
-		flush_pending_put(p);
+		inflight_put(p);
 	}
 	return err;
 }
@@ -575,9 +586,9 @@ MODULE_PARM_DESC(open_check,
 static int s3fs_open_verify(struct inode *inode)
 {
 	struct s3fs_file_data *fd = inode->i_private;
-	struct s3fs_pending *p;
+	struct s3fs_inflight *p;
 	long remaining;
-	bool local = false;
+	bool local = false, created;
 	int err;
 
 	if (!S_ISREG(inode->i_mode))
@@ -590,18 +601,20 @@ static int s3fs_open_verify(struct inode *inode)
 	if (local)
 		return 0;
 
-	p = pending_get_or_create(inode->i_ino, S3FS_OPEN_CHECK_KEY);
+	p = inflight_get_or_create(S3FS_REQ_MISS, inode->i_ino, S3FS_OPEN_CHECK_KEY, 0, &created);
 	if (!p)
 		return -ENOMEM;
-	err = miss_enqueue(inode->i_ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK, NULL);
+	err = inflight_queue_miss(p, created, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK, NULL);
 	if (err) {
-		pending_put(p);
+		inflight_put(p);
 		return err;
 	}
 	remaining = wait_for_completion_interruptible_timeout(
 		&p->done, S3FS_UPCALL_WAIT_JIFFIES);
 	err = p->err;
-	pending_put(p);
+	if (remaining == 0)
+		inflight_unhash(p);	/* nobody answered: the next open queues anew */
+	inflight_put(p);
 	if (remaining < 0)
 		return remaining;	/* -ERESTARTSYS */
 	if (remaining == 0)

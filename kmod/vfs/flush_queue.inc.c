@@ -7,110 +7,37 @@
  * completion an fsync() sleeps on until the daemon's PUT is done. */
 
 /*
- * Flush waiter — one per fsync() blocked on daemon PUT completion.
- * .release path does NOT register one (fire-and-forget for close(2)),
- * so signal_flush with no matching ino is a normal no-op.
+ * DONE for a FLUSH (type FLUSH): the daemon finished the PUT of `ino`'s flush with
+ * `err`.  Wakes any fsync caller blocked on this ino (an inflight FLUSH record) --
+ * -ENOENT only when the inode is gone: for the .release path (nobody waits) there
+ * is simply no record to wake.
  *
- * Shape mirrors s3fs_pending (read-miss upcall waiter). Refcount 2 on
- * create: one for the hash slot, one for the fsync caller. Hash drops
- * its ref on signal_flush; caller drops on wait return.
- */
-struct s3fs_flush_pending {
-	struct hlist_node node;
-	u64 ino;
-	struct completion done;
-	int err;
-	refcount_t refs;
-};
-
-#define S3FS_FLUSH_PENDING_HASH_BITS 4 /* 16 buckets — few concurrent fsyncs */
-static DEFINE_HASHTABLE(s3fs_flush_pending, S3FS_FLUSH_PENDING_HASH_BITS);
-static DEFINE_SPINLOCK(s3fs_flush_pending_lock);
-
-static struct s3fs_flush_pending *flush_pending_get_or_create(u64 ino)
-{
-	struct s3fs_flush_pending *p, *fresh;
-
-	spin_lock(&s3fs_flush_pending_lock);
-	hash_for_each_possible(s3fs_flush_pending, p, node, ino) {
-		if (p->ino == ino) {
-			refcount_inc(&p->refs);
-			spin_unlock(&s3fs_flush_pending_lock);
-			return p;
-		}
-	}
-	spin_unlock(&s3fs_flush_pending_lock);
-
-	fresh = kmalloc(sizeof(*fresh), GFP_KERNEL);
-	if (!fresh)
-		return NULL;
-	INIT_HLIST_NODE(&fresh->node);
-	fresh->ino = ino;
-	fresh->err = 0;
-	init_completion(&fresh->done);
-	refcount_set(&fresh->refs, 2);
-
-	spin_lock(&s3fs_flush_pending_lock);
-	hash_for_each_possible(s3fs_flush_pending, p, node, ino) {
-		if (p->ino == ino) {
-			refcount_inc(&p->refs);
-			spin_unlock(&s3fs_flush_pending_lock);
-			kfree(fresh);
-			return p;
-		}
-	}
-	hash_add(s3fs_flush_pending, &fresh->node, ino);
-	spin_unlock(&s3fs_flush_pending_lock);
-	return fresh;
-}
-
-static void flush_pending_put(struct s3fs_flush_pending *p)
-{
-	if (!p || !refcount_dec_and_test(&p->refs))
-		return;
-	kfree(p);
-}
-
-static void flush_pending_unhash(struct s3fs_flush_pending *p)
-{
-	spin_lock(&s3fs_flush_pending_lock);
-	if (!hlist_unhashed(&p->node)) {
-		hash_del(&p->node);
-		spin_unlock(&s3fs_flush_pending_lock);
-		flush_pending_put(p); /* drop hash's ref */
-		return;
-	}
-	spin_unlock(&s3fs_flush_pending_lock);
-}
-
-/*
- * Daemon → kmod signal: PUT completed with `err`. Wakes any fsync
- * caller blocked on this ino. -ENOENT (no waiter) is a normal outcome
- * for the .release path — daemon signals unconditionally and doesn't
- * care whether anyone was listening.
+ * W3: a successful PUT whose read_dirty predates the latest enqueue (the W1 seq
+ * check) does not hold what an fsync enqueued after it wrote, so it leaves the
+ * waiter alone: the fsync's own request signals it.  Before, the PUT of an earlier
+ * close(2) finishing while an fsync waited returned that fsync 0 before its data had
+ * been read.
  *
- * W3: a successful PUT whose read_dirty predates the latest enqueue (the
- * W1 seq check) does not hold what an fsync enqueued after it wrote, so
- * it leaves the waiter alone: the fsync's own WAIT event signals it.
- * Before, the PUT of an earlier close(2) finishing while an fsync waited
- * returned that fsync 0 before its data had been read.
+ * err != 0 (AC-95): the PUT failed.  The dirty flag goes back on in the same
+ * critical section that clears `flushing` (it was a separate MARK_DIRTY ioctl:
+ * a close() between the two left flushing = 0, dirty = 0 with a request queued, and
+ * a read miss in that window could overwrite fd->buf with S3's stale bytes -- model
+ * FE-7).  The pin stays: the data must survive until a later flush succeeds.
  */
-int s3fs_ebpf_signal_flush(u64 ino, int err)
+static int s3fs_done_flush(u64 ino, int err)
 {
-	struct s3fs_flush_pending *p, *target = NULL;
+	struct s3fs_inflight *p, *target = NULL;
 	struct inode *inode;
 	struct s3fs_file_data *fd;
 	bool covered = true;
 
-	spin_lock(&s3fs_flush_pending_lock);
-	hash_for_each_possible(s3fs_flush_pending, p, node, ino) {
-		if (p->ino == ino) {
-			target = p;
-			refcount_inc(&target->refs);
-			break;
-		}
+	spin_lock(&s3fs_inflight_lock);
+	p = inflight_find_locked(S3FS_REQ_FLUSH, ino, S3FS_FLUSH_KEY, 0);
+	if (p) {
+		target = p;
+		refcount_inc(&target->refs);
 	}
-	spin_unlock(&s3fs_flush_pending_lock);
+	spin_unlock(&s3fs_inflight_lock);
 
 	/* U5: clear the in-flight flush guard and mark bitmap bits now that
 	 * the daemon has confirmed the PUT.  Done for both fsync-wait and
@@ -128,11 +55,13 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 				/* W1: a successful PUT whose read_dirty predates
 				 * the latest enqueue does not cover it — keep
 				 * flushing (and the pin) until that one lands.
-				 * On error keep the pin: the daemon has restored
-				 * dirty and the data must survive until a later
-				 * flush succeeds (or umount releases it). */
+				 * On error keep the pin: the data must survive
+				 * until a later flush succeeds (or umount
+				 * releases it). */
 				covered = err != 0 ||
 					  fd->flush_read_seq == fd->flush_seq;
+				if (err != 0)
+					fd->dirty = true;	/* AC-95: was MARK_DIRTY */
 				if (covered) {
 					fd->flushing = false;
 					if (err == 0 && !fd->dirty && fd->size > 0) {
@@ -177,14 +106,13 @@ int s3fs_ebpf_signal_flush(u64 ino, int err)
 	if (!target)
 		return -ENOENT;
 	if (!covered) {
-		flush_pending_put(target);	/* W3: not this waiter's PUT */
+		inflight_put(target);	/* W3: not this waiter's PUT */
 		return 0;
 	}
 
 	target->err = err;
 	complete_all(&target->done);
-	flush_pending_unhash(target);
-	flush_pending_put(target);
+	inflight_unhash(target);
+	inflight_put(target);
 	return 0;
 }
-
