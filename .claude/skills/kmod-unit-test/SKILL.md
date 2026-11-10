@@ -1,6 +1,6 @@
 ---
 name: kmod-unit-test
-description: kmod の単体テスト (KUnit、UML / qemu、lockdep + KASAN)、カバレッジ、daemon の go test、静的検査 (check-invariants) を root なし・実機なしで回す手順と、KUnit のテストを足す手順。「KUnit を回して」「単体テストを足して」「カバレッジを見て」「go test」「check-invariants」「テストが足りるか」と言われたとき、または kmod のデータ構造・分岐、daemon のロジックを変えた直後 (実機の回帰試験の前) に使う。
+description: root・実機なしの単体テスト。KUnit (UML/qemu)・カバレッジ・go test・check-invariants を回し、KUnit を足す。「KUnit」「単体テスト」「カバレッジ」で使う。
 ---
 
 # 単体テスト (kmod KUnit / daemon go test / 静的検査)

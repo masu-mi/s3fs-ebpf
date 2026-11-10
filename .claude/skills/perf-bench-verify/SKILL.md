@@ -1,6 +1,6 @@
 ---
 name: perf-bench-verify
-description: s3fs-ebpf の性能試験 (A〜H と層ごとのレイテンシ) を実行し、Grafana で可視化し、benchmark-results.md に記録したうえで、結果に不審な点がないか検証し、バグや調査課題を backlog に起票する手順。「性能を測り直して」「ベンチを回して」「Grafana に出して」「計測結果を検証して」「backlog に起票して」と頼まれたとき、または性能に影響する変更 (kmod・daemon の read / write / flush・policy) のあとで使う。
+description: 性能試験 (A〜H・層ごとのレイテンシ) の実行・記録・結果の検証。「ベンチを回して」「性能を測り直して」「計測結果を検証」で使う。性能に効く変更のあとにも。
 ---
 
 # 性能試験 → 可視化 → 記録 → 検証 → backlog
@@ -75,6 +75,8 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 - **ログ**: `dmesg` に新しい warning / BUG が出ていないか、daemon のログに `put: ` `read dirty:` `mark dirty:` などのエラーがないか。
 
 ## 4b. 遅い行の原因を切り分ける (perf / bpftrace)
+
+(独立した手順は `perf-root-cause` skill。記録は `journal-record`。)
 
 層ごとのレイテンシなどで「ある層が想定より遅い」とき、**変更を入れる前に**、時間の内訳を取る。推測で入れた変更 (AC-76 の readahead) は、`.read_folio` の呼び出しを 0 にしても時間が変わらなかった。
 

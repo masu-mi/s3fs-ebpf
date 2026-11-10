@@ -1,6 +1,6 @@
 ---
 name: policy-develop
-description: キャッシュ policy (Layer 1 CEL / Layer 2 built-in eBPF pick_victim・on_hit / Layer 3 独自 eBPF) を書く・変える・検証する手順 — hit-rate 比較 (bench-hitrate)、simulator との一致 (test-policy-conformance)、verifier を通した Go model との照合、hot reload。「policy を書いて」「policy を変えた」「SIEVE / S3-FIFO / W-TinyLFU / LRU」「hit rate を比べて」「pick_victim」「policy を reload して」と言われたとき、または policies/*.cel / bpf/ の policy を触るときに使う。
+description: キャッシュ policy (CEL / eBPF) の開発と検証。hit rate・conformance・hot reload。「policy を書く/変えた」「SIEVE」「W-TinyLFU」「pick_victim」で使う。
 ---
 
 # policy の開発と検証

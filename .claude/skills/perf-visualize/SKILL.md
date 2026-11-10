@@ -1,6 +1,6 @@
 ---
 name: perf-visualize
-description: 性能の計測結果と実行中の daemon / kmod の状態を Grafana・Prometheus で可視化する手順 (compose-up、layer-latency ダッシュボードの取り込み、新しいダッシュボード / パネルの足し方、metrics の確認、スクリーンショット)。「Grafana に出して」「グラフにして」「ダッシュボードを作って」「metrics を見て」「Prometheus で確認」「計測結果を図にして」と言われたとき、または bench の結果を人に見せるとき、実行中の upcall / hit / latency を観察するときに使う。測定そのものは perf-bench-verify。
+description: 計測結果・metrics を Grafana / Prometheus で可視化。「Grafana に出して」「グラフにして」「ダッシュボード」「metrics を見て」で使う。
 ---
 
 # 性能の可視化 (Grafana / Prometheus)

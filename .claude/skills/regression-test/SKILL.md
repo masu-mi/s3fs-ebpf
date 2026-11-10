@@ -1,6 +1,6 @@
 ---
 name: regression-test
-description: 実機 (insmod した kmod + daemon + MinIO) の回帰試験・検証試験 — make test-regression、個別の test-*、s3fs-fuse との差分テスト (test-parity)、lockdep カーネルでの再実行 (test-lockdep) — を回す手順と、新しい test-*.sh を足す手順。「回帰試験を回して」「検証試験」「test-parity」「test-lockdep」「回帰テストを足して」「修正前で FAIL するか確かめて」「PASS したか」と言われたとき、またはバグ修正・kmod / daemon の振る舞いの変更のあとで使う。
+description: 実機の回帰・検証試験。test-regression・test-parity・test-lockdep を回し、新しい test-*.sh を足す。「回帰試験」「検証試験」「修正前で FAIL するか」で使う。
 ---
 
 # 実機の回帰試験 / 検証試験

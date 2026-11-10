@@ -15,6 +15,9 @@
 | kmod を変えて実機で試す、oops の復旧 | `kmod-change-verify` |
 | 性能試験 (A〜H、層ごとのレイテンシ)、記録、結果の検証、backlog 起票 | `perf-bench-verify` |
 | 計測結果・metrics の可視化 (Grafana / Prometheus) | `perf-visualize` |
+| 遅い行・不審な値の原因切り分け (perf / bpftrace) | `perf-root-cause` |
+| backlog 起票、benchmark-results・journal・INDEX への記録 | `journal-record` |
+| `include/s3fs_ebpf_uapi.h` の構造体・ioctl の変更 | `uapi-abi-change` |
 | cache policy の開発と検証 (CEL / eBPF、hit rate、conformance) | `policy-develop` |
 | 状態遷移図、TLA+ / TLC での設計検証 | `tlc-design-verification` |
 | Web ページ・Grafana の見た目の確認 | `isolated-browser` |

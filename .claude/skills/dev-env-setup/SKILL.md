@@ -1,6 +1,6 @@
 ---
 name: dev-env-setup
-description: 開発環境の構築と、build / 実行が失敗したときの切り分け (make doctor、setup-toolchain、カーネル 6.12 の導入、vmlinux / BTF、compose-up と MinIO の seed、umount / rmmod の後始末、s3fs-fuse の bench 依存)。「環境を作って」「make が通らない」「doctor が落ちる」「カーネルを入れ替えた」「MinIO が空」「mount が残った」「rmmod できない」「新しいマシンで動かして」と言われたとき、または新規セッションで最初に build / 実機実行をする前に使う。
+description: 環境構築と build・実行の切り分け。「make が通らない」「doctor」「MinIO が空」「mount が残った」「rmmod できない」「カーネル入れ替え」「新マシン」で使う。
 ---
 
 # 環境構築と build / 実行の切り分け
