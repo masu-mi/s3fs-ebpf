@@ -1,6 +1,6 @@
 ---
 name: kmod-change-verify
-description: kmod (kmod/vfs/*.inc.c, kmod/*.c) を変えて実機で試す前後の手順。ビルド、ロード、dmesg の確認、性能の測り直し、make test-regression / test-lockdep、invariants メモの更新、oops したときの復旧。「kmod を変えた」「read_folio / readahead / folio / page cache の変更」「実機で試して」「oops した」「rmmod できない」と言われたとき、または kmod の read / write / evict 経路を触るときに使う。
+description: kmod を変えて実機で試す前後の手順 (build・dmesg・回帰・invariants 更新) と oops 復旧。「kmod を変えた」「read_folio / folio 変更」「oops」「rmmod できない」で使う。
 ---
 
 # kmod の変更 → 実機で検証
