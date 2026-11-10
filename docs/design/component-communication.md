@@ -37,12 +37,10 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 | 0x02 | `EVAL` | user→kmod | kmod の容量 / policy パスを今走らせる (旧 `ADMIT_ARENA`、nr を引き継いだ。引数なし) | `POST /policy/eval` だけ (miss の populate のあとの容量パスは kmod が `POPULATE_PAGES` の中で走らせる) |
 | 0x03 | `SIGNAL_ADMIT` | user→kmod | `.read_folio` の pending waiter を wake (err code 付き) | 各 miss の後 |
 | 0x04 | `SYNC_ENTRIES` | user→kmod | entry table (dir listing) の replace-all | ~30s / boot 時 |
-| 0x11 | `POP_WB` | user←kmod | write-back FIFO (flush / delete / rename) から最も古い 1 event を pop (旧 `POP_FLUSH` / `POP_DELETE` / `POP_RENAME`) | 100ms ticker |
 | 0x06 | `READ_DIRTY` | user↔kmod | per-inode dirty buffer 内容を daemon の uaddr へコピー | 各 flush |
 | 0x07 | `MARK_DIRTY` | user→kmod | PUT 失敗時に ino を dirty に戻す (retry) | 稀 (PUT err 時) |
 | 0x08 | `STATS` | user↔kmod | kmod 側 counter (evictions_total, folio_hits) を read | 5s ticker |
 | 0x0A | `SIGNAL_FLUSH` | user→kmod | `.fsync` の pending waiter を wake | 各 flush の後 |
-| 0x0D | `POP_FLUSH_WAIT` | user←kmod | WAIT flush 専用の blocking pop。fsync (FLUSH_FLAG_WAIT) の event だけを待って pop (S-08) | fsync ごと |
 | 0x0E | `POPULATE_PAGES` | user→kmod | pcache モード: 取得した範囲を fd の chunk にコピーし、PCACHE の admit entry を入れる (AB-04) | 各 miss の後 |
 | 0x0F | `DIRTY_LAYOUT` | user↔kmod | dirty な file の chunk ごとの状態 (data / hole / remote) を読む (AC-51 の partial flush) | 各 flush (`--partial-modify`) |
 | 0x10 | `READ_DIRTY_RANGE` | user↔kmod | `READ_DIRTY` の offset 指定版。data / hole の chunk だけを読む (AC-51) | 各 flush (`--partial-modify`) |
@@ -88,8 +86,7 @@ flowchart LR
     end
 
     subgraph D["🦫 daemon (Go)"]
-      MissLoop["runReadMissLoop"]
-      FlushLoop["runFlushLoop"]
+      MissLoop["runReqLoop<br/>(MISS は worker、FLUSH / DELETE / RENAME は executor)"]
       SyncLoop["runSyncLoop"]
       DrainLoop["drainEvictionsLoop"]
       MetricsSrv["/metrics HTTP"]
@@ -122,7 +119,7 @@ flowchart LR
     SyncLoop -->|"T6: bpf(MAP_UPDATE)<br/>via cilium/ebpf"| Idx
     %% T7 ioctl (daemon → kmod)
     MissLoop -->|"T7: POPULATE_PAGES<br/>EVAL / SIGNAL_ADMIT"| Miscdev
-    FlushLoop -->|"T7: POP_WB READ_DIRTY<br/>SIGNAL_FLUSH MARK_DIRTY"| Miscdev
+    FlushLoop -->|"T7: read(2) の FLUSH / DELETE / RENAME、READ_DIRTY<br/>SIGNAL_FLUSH MARK_DIRTY"| Miscdev
     SyncLoop -->|"T7: SYNC_ENTRIES"| Miscdev
     DrainLoop -->|"T7: STATS"| Miscdev
     Miscdev <-.-> Fops
@@ -162,7 +159,7 @@ sequenceDiagram
     participant VFS as VFS
     participant Kmod as kmod (.read_folio)
     participant Pend as s3fs_pending
-    participant MQ as s3fs_miss_events
+    participant MQ as s3fs_reqq
     participant Daemon as daemon (runReadMissLoop)
     participant S3 as S3 backend
 
@@ -209,7 +206,6 @@ sequenceDiagram
     participant App as echo &gt;
     participant Kmod as kmod
     participant FQ as s3fs_flush_queue
-    participant FW as s3fs_flush_wait_queue
     participant FP as s3fs_flush_pending
     participant Daemon as daemon
     participant Coal as coalescer (200 ms)
@@ -220,10 +216,7 @@ sequenceDiagram
     App->>Kmod: open + write(2) + close(2)
     Kmod->>FQ: .release が flush_enqueue (flags=0)
     Kmod-->>App: すぐ返る
-    loop 100 ms ごと (runFlushLoop)
-      Daemon->>Kmod: ioctl POP_WB (T7)
-      FQ-->>Daemon: s3fs_flush_event (空なら -EAGAIN)
-    end
+    FQ-->>Daemon: read(2) が s3fs_req_event (FLUSH) を返す (runReqLoop → executor)
     Daemon->>Coal: submit (連続した close を 1 PUT に集約)
     Coal->>Daemon: 200 ms 後に fire
     end
@@ -232,11 +225,10 @@ sequenceDiagram
     Note over App,S3: fsync(2) — PUT の完了まで待つ
     App->>Kmod: .fsync
     Kmod->>FP: flush_pending_get_or_create(ino)
-    Kmod->>FQ: 同じ ino の未処理 item を捨てる (F1)
-    Kmod->>FW: flush_enqueue (flags=WAIT) + wake_up
+    Kmod->>FQ: 同じ ino の未処理の非 WAIT flush を捨てる (F1)
+    Kmod->>FQ: flush_enqueue (flags=WAIT) + wake_up
     Kmod->>FP: wait (30 秒で -EIO)
-    Daemon->>Kmod: ioctl POP_FLUSH_WAIT (blocking、runFlushWaitLoop)
-    FW-->>Daemon: s3fs_flush_event (WAIT)
+    FQ-->>Daemon: read(2) が s3fs_req_event (FLUSH, WAIT) を返す (runReqLoop → executor)
     Daemon->>Coal: 同じ ino の預かり分を取り消す (cancelParked)
     end
 
@@ -254,7 +246,7 @@ sequenceDiagram
     end
 ```
 
-fsync は専用の queue (`s3fs_flush_wait_queue`) と blocking の `POP_FLUSH_WAIT` で、ticker の遅れと coalescer の debounce を通らない。close の分と同じ ino の `handleFlush` は直列にし、`.create` の 0 byte の placeholder が fsync の PUT のあとに PUT されてオブジェクトを空にしないようにしている (F1、`flush_order.go`、`docs/kmod-pcache-invariants.md` の F1 / W3)。**PUT のあとの arena への書き直し (コードで確認、2026-11-05):** `handleFlush` (`flush_loop.go`) は、全体の PUT が成功すると、`--arena-metadata-only` かどうかに関係なく、書いた中身を arena にコピーして `ADMIT_ARENA` で admit し直す (`AdmitContent` + `replaceAdmit`)。省かれるのは `--partial-modify` で処理済みの flush (`dropAdmitIno` で arena の古い分を捨てる) と、`progs == nil` のときだけ。
+fsync も同じ `reqq` から `read(2)` で読む (専用の queue も blocking の ioctl もない) で、coalescer の debounce を通らない (executor が読んだ順に処理し、PUT は別 goroutine)。close の分と同じ ino の `handleFlush` は直列にし、`.create` の 0 byte の placeholder が fsync の PUT のあとに PUT されてオブジェクトを空にしないようにしている (F1、`flush_order.go`、`docs/kmod-pcache-invariants.md` の F1 / W3)。**PUT のあとの arena への書き直し (コードで確認、2026-11-05):** `handleFlush` (`flush_loop.go`) は、全体の PUT が成功すると、`--arena-metadata-only` かどうかに関係なく、書いた中身を arena にコピーして `ADMIT_ARENA` で admit し直す (`AdmitContent` + `replaceAdmit`)。省かれるのは `--partial-modify` で処理済みの flush (`dropAdmitIno` で arena の古い分を捨てる) と、`progs == nil` のときだけ。
 - **書いた直後の read を支える (AC-82、2026-11-05):** `SIGNAL_FLUSH` が成功したとき、kmod は chunk の `populated` を立て、**populated な chunk の連続した範囲ごとに PCACHE の admit entry を入れる** (`fd->lock` の下、R1)。書いた直後の `.read_folio` は chunk から返り、S3 への upcall は出ない。以前は daemon が PUT のあと中身を arena にコピーして `ADMIT_ARENA` で admit し直し (`AdmitContent`)、書いた直後の read はその arena のコピーを GUP で読んでいた。arena の消費と、満杯のときの `flush_errors_total` の誤計上は、削除で解消した。
 - 書いた直後の read の遅延と S3 の GET 数、新規 100 MiB の fsync の時間は**未計測** (`make test-regression` は通る)。
 
@@ -271,10 +263,10 @@ E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が�
 |---|---|---|---|---|
 | kmod `.read_folio` / `.open` (`open_check`) | daemon | miscdev `read(2)` (T8) | `s3fs_read_miss_event` (flags に `OPEN_CHECK`) | read の miss と同じ待ち手の形 (`s3fs_pending`) |
 | kmod `.read_folio` | daemon | miscdev `read(2)` blocking (T8) | `s3fs_read_miss_event` | 単発 event の blocking read で自然に back-pressure |
-| kmod `.release` | daemon | miscdev `ioctl POP_WB` (T7、100 ms) | `s3fs_flush_event` | 再登録 (MARK_DIRTY) と waiter wake (SIGNAL_FLUSH) の対称 API が必要 |
-| kmod `.fsync` | daemon | miscdev `ioctl POP_FLUSH_WAIT` (T7、blocking) | `s3fs_flush_event` (WAIT) | ticker の遅れを避ける。専用の queue と wait queue |
-| kmod `.unlink` | daemon | miscdev `ioctl POP_WB` (T7) | delete event (WB の type) | flush と同じ FIFO。順序は積んだ順 |
-| kmod `.rename` | daemon | miscdev `ioctl POP_WB` (T7) | rename event (WB の type) | 同上 |
+| kmod `.release` | daemon | miscdev `read(2)` (T7、push) | `s3fs_flush_event` | 再登録 (MARK_DIRTY) と waiter wake (SIGNAL_FLUSH) の対称 API が必要 |
+| kmod `.fsync` | daemon | miscdev `read(2)` (T7、push) | `s3fs_flush_event` (WAIT) | ticker の遅れを避ける。専用の queue と wait queue |
+| kmod `.unlink` | daemon | miscdev `read(2)` (T7) | delete event (WB の type) | flush と同じ FIFO。順序は積んだ順 |
+| kmod `.rename` | daemon | miscdev `read(2)` (T7) | rename event (WB の type) | 同上 |
 
 **統一の余地**: flush / delete / rename の queue を 1 本の message queue に寄せる案は [`redesign-v2-simplify.md`](redesign-v2-simplify.md)。
 

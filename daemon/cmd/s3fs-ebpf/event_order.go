@@ -1,151 +1,152 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
-	"unsafe"
+	"time"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/kmodio"
-	"golang.org/x/sys/unix"
 )
 
-// orderedOps is what drainOrdered needs: a pop of kmod's write-back FIFO and a
-// handler per kind of event (flush, delete, rename).
+// orderedOps are the handlers of the write-back executor: one per kind of
+// event (flush, delete, rename).
 type orderedOps struct {
-	popWB  func(*wbEvent) error
 	flush  func(*flushEvent)
 	delete func(*deleteEvent)
 	rename func(*renameEvent)
 	stop   func() bool // optional: checked after every event (shutdown budget)
 }
 
-// orderedDrain handles kmod's write-back events (flush, delete, rename) in the
-// order kmod queued them (AC-84).
+// orderedDrain is the daemon's write-back executor: it handles kmod's flush,
+// delete and rename requests one at a time, in the order kmod queued them
+// (AC-84).
 //
-// kmod keeps them in one FIFO (S3FS_IOC_POP_WB), so the pop order is the order
-// the operations happened. Handling them independently (three queues and three
-// tickers, as before v2 Phase 4) let a later event of one kind overtake an
-// earlier event of another, and that corrupts S3 (specs/tla/FileLifecycle.tla):
+// kmod keeps every request in one FIFO (reqq) that the dispatcher reads in
+// order and pushes here. Handling the kinds independently (before v2 Phase 4:
+// five queues, three tickers) let a later event of one kind overtake an earlier
+// event of another, and that corrupts S3 (specs/tla/FileLifecycle.tla):
 //
 //   - create b, rename b->c: the rename ran first, found no b in S3 and was
 //     dropped; the flush then PUT the old name b while the user sees c.
 //   - rename a->b, create a: the flush of the new a overwrote the old a before
 //     the rename moved it, so the rename moved the new bytes to b and deleted a.
 //
-// Every event also has a kmod-wide seq, assigned under the lock that queues it
-// (the WAIT-flush queue shares the counter): once an event with seq S exists,
-// every WB event with a smaller seq is already in the FIFO. The drain keeps one
-// popped head (it stays held between runs when its seq is past the limit).
+// An fsync's WAIT flush is in the same FIFO: when the executor reaches it,
+// every event queued before it has been handled, so a rename or delete queued
+// before the fsync is done before its PUT, never after. (The handler runs the
+// PUT on its own goroutine so a long PUT does not hold up later events.)
 //
-// run(limit) handles only events with seq < limit. The ticker runs it with no
-// limit. An fsync (WAIT) flush is handled at once by its own goroutine; it calls
-// run(its seq) first, so a rename or delete queued before it is done before its
-// PUT, never after.
+// `seq` is kmod's event number; handled is the highest one passed to a handler
+// (what a sync reports as applied, AC-85).
 type orderedDrain struct {
-	failed  atomic.Bool   // the last step stopped on a pop error
-	handled atomic.Uint64 // seq of the last event passed to the handlers
-	mu      sync.Mutex
+	handled atomic.Uint64 // seq of the last event passed to a handler
 	ops     orderedOps
-	head    *wbEvent
+
+	mu     sync.Mutex
+	cond   *sync.Cond
+	q      []*reqEvent
+	closed bool
 }
 
-const noSeqLimit = ^uint64(0)
+func newOrderedDrain(ops orderedOps) *orderedDrain {
+	d := &orderedDrain{ops: ops}
+	d.cond = sync.NewCond(&d.mu)
+	return d
+}
 
-func newOrderedDrain(ops orderedOps) *orderedDrain { return &orderedDrain{ops: ops} }
-
-// ordDrain is the daemon's drain, set by runFlushLoop; runFlushWaitLoop calls it.
+// ordDrain is the daemon's executor, set by runReqLoop; appliedSeq reads it.
 var ordDrain atomic.Pointer[orderedDrain]
 
-// orderedBefore makes every event queued before seq (an fsync's) be handled now.
-func orderedBefore(seq uint64) {
-	if d := ordDrain.Load(); d != nil && seq > 0 {
-		d.run(seq)
-	}
-}
-
-// drainOrdered is a one-shot drain with its own state (tests, shutdown).
-func drainOrdered(ops orderedOps) { newOrderedDrain(ops).run(noSeqLimit) }
-
-func (d *orderedDrain) run(limit uint64) { d.runWith(d.ops, limit) }
-
-// runWith handles events with seq < limit, one at a time. The lock is taken per
-// event, not for the whole run: an fsync that calls run(its seq) has to wait for
-// the event being handled (a rename or delete does S3 work), not for everything
-// the ticker's run has queued up.
-func (d *orderedDrain) runWith(ops orderedOps, limit uint64) {
-	for d.step(ops, limit) {
-	}
-}
-
-// step handles the oldest event (if its seq < limit) and reports whether there
-// may be more.
-func (d *orderedDrain) step(ops orderedOps, limit uint64) bool {
+// push queues a request (flush / delete / rename), in the order read from kmod.
+func (d *orderedDrain) push(ev *reqEvent) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.head == nil {
-		var ev wbEvent
-		if err := ops.popWB(&ev); err != nil {
-			// a real error stops the drain; EAGAIN is just "empty"
-			failed := !errors.Is(err, unix.EAGAIN)
-			if failed {
-				fmt.Fprintf(os.Stderr, "[events] pop: %v\n", err)
-			}
-			d.failed.Store(failed)
-			return false
+	d.q = append(d.q, ev)
+	d.mu.Unlock()
+	d.cond.Signal()
+}
+
+// close tells run to return once the queue is empty.
+func (d *orderedDrain) close() {
+	d.mu.Lock()
+	d.closed = true
+	d.mu.Unlock()
+	d.cond.Broadcast()
+}
+
+// run handles requests until close (and the queue is empty) or ops.stop says
+// stop (what is left stays in the queue).
+func (d *orderedDrain) run() {
+	for {
+		d.mu.Lock()
+		for len(d.q) == 0 && !d.closed {
+			d.cond.Wait()
 		}
-		d.head = &ev
+		if len(d.q) == 0 {
+			d.mu.Unlock()
+			return
+		}
+		ev := d.q[0]
+		d.q = d.q[1:]
+		d.mu.Unlock()
+		d.handle(ev)
+		if d.ops.stop != nil && d.ops.stop() {
+			return
+		}
 	}
-	d.failed.Store(false)
-	if d.head.Seq >= limit {
-		return false // nothing older than limit is left (the head waits for a later run)
-	}
-	ev := d.head
-	d.head = nil
+}
+
+func (d *orderedDrain) handle(ev *reqEvent) {
 	switch ev.Type {
-	case kmodio.WBFlush:
-		fe := wbToFlush(ev)
+	case kmodio.ReqFlush:
+		fe := reqToFlush(ev)
 		trackFlush(ev.Ino, ev.Seq)
-		ops.flush(fe)
-	case kmodio.WBRename:
-		ops.rename(wbToRename(ev))
-	case kmodio.WBDelete:
-		ops.delete(wbToDelete(ev))
+		d.ops.flush(fe)
+	case kmodio.ReqRename:
+		d.ops.rename(reqToRename(ev))
+	case kmodio.ReqDelete:
+		d.ops.delete(reqToDelete(ev))
 	default:
-		fmt.Fprintf(os.Stderr, "[events] unknown write-back event type %d (seq %d)\n", ev.Type, ev.Seq)
+		fmt.Fprintf(os.Stderr, "[events] unknown request type %d (seq %d)\n", ev.Type, ev.Seq)
 	}
 	d.noteHandled(ev.Seq)
-	return ops.stop == nil || !ops.stop()
 }
 
-func wbToFlush(w *wbEvent) *flushEvent {
+// pending is the number of requests queued and not yet handled.
+func (d *orderedDrain) pending() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.q)
+}
+
+// waitHandled blocks until an event with seq >= want has been handled, or the
+// timeout passes. It reports whether it was reached.
+func (d *orderedDrain) waitHandled(want uint64, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for d.handled.Load() < want {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return true
+}
+
+func reqToFlush(w *reqEvent) *flushEvent {
 	return &flushEvent{Ino: w.Ino, ParentIno: w.ParentIno, Size: w.Size, Seq: w.Seq,
 		NameLen: w.NameLen, Flags: w.Flags, Name: w.Name}
 }
 
-func wbToDelete(w *wbEvent) *deleteEvent {
+func reqToDelete(w *reqEvent) *deleteEvent {
 	return &deleteEvent{Ino: w.Ino, ParentIno: w.ParentIno, Seq: w.Seq,
 		NameLen: w.NameLen, Name: w.Name}
 }
 
-func wbToRename(w *wbEvent) *renameEvent {
+func reqToRename(w *reqEvent) *renameEvent {
 	return &renameEvent{Ino: w.Ino, OldParentIno: w.ParentIno, NewParentIno: w.NewParentIno,
 		Seq: w.Seq, OldNameLen: w.NameLen, NewNameLen: w.NewNameLen,
 		OldName: w.Name, NewName: w.NewName}
-}
-
-// popWB pulls the oldest write-back event or returns unix.EAGAIN when the queue
-// is empty. The dev fd must be R/W.
-func popWB(devFd int, out *wbEvent) error {
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(devFd), uintptr(s3fsIocPopWB),
-		uintptr(unsafe.Pointer(out)))
-	if errno != 0 {
-		return errno
-	}
-	return nil
 }
 
 func (d *orderedDrain) noteHandled(seq uint64) {
@@ -198,9 +199,9 @@ func untrackFlush(ino, upto uint64) {
 // been applied to S3 (AC-85). kmod's sync uses it to decide when a tombstone or
 // a local entry may go (docs/design/kmod-entry-table-state-machine.md).
 //
-// This is the conservative form that needs no device: the drain handles events
-// in seq order, so all events <= the last handled one have been handed on, and
-// any not yet popped have a larger seq. Renames and deletes are synchronous; a
+// This is the conservative form that needs no device: the executor handles
+// events in seq order, so all events <= the last handled one have been handed on, and
+// any not yet read have a larger seq. Renames and deletes are synchronous; a
 // flush only counts once its PUT has finished. It starts at 0 in a new daemon
 // (kmod's counter keeps counting); appliedSeqFor is what a sync uses.
 func appliedSeq() uint64 {
@@ -237,13 +238,14 @@ func kmodEventSeq(devPath string) (uint64, error) {
 	return st[15], nil
 }
 
-// appliedSeqFor is the W a sync reports: read kmod's current event seq C, handle
-// every queued event up to C (they are all visible: seq is assigned under the
-// lock that queues), and report C, held back by flushes whose PUT is still
-// running. Unlike appliedSeq it does not depend on how long this daemon has been
-// up: after a restart the local entries and tombstones kmod kept from before
-// still get promoted / dropped. Falls back to appliedSeq when the device cannot
-// say, or a pop failed and events up to C may be left.
+// appliedSeqFor is the W a sync reports: read kmod's current event seq C, wait
+// until the executor has handled every request up to C (the dispatcher reads them
+// in order, so they are on their way), and report C, held back by flushes whose
+// PUT is still running. Unlike appliedSeq it does not depend on how long this
+// daemon has been up: after a restart the local entries and tombstones kmod kept
+// from before still get promoted / dropped. Falls back to appliedSeq when the
+// device cannot say, or the executor does not catch up in time (a slow S3: the
+// conservative value only delays a promotion).
 func appliedSeqFor(devPath string) uint64 {
 	d := ordDrain.Load()
 	if d == nil {
@@ -253,9 +255,12 @@ func appliedSeqFor(devPath string) uint64 {
 	if err != nil {
 		return appliedSeq()
 	}
-	d.run(c + 1)
-	if d.failed.Load() {
+	if !d.waitHandled(c, appliedWaitBudget) {
 		return appliedSeq()
 	}
 	return capByUnfinishedFlushes(c)
 }
+
+// appliedWaitBudget bounds how long a sync waits for the executor to reach kmod's
+// current event seq.
+var appliedWaitBudget = 5 * time.Second

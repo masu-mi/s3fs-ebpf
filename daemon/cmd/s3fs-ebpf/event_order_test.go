@@ -1,12 +1,12 @@
 package main
 
 import (
-	"errors"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/kmodio"
-	"golang.org/x/sys/unix"
 )
 
 // resetFlushTracking forgets the flushes drainOrdered tracked: the fake handlers
@@ -23,62 +23,72 @@ func resetFlushTracking(t *testing.T) {
 	})
 }
 
-// fifo is a fake kmod: the write-back FIFO, whose events carry kmod's seq.
-type fifo struct {
-	q []wbEvent
-}
+func req(typ uint32, seq uint64) *reqEvent { return &reqEvent{Type: typ, Seq: seq} }
 
-func wb(typ uint32, seq uint64) wbEvent { return wbEvent{Type: typ, Seq: seq} }
-
-func (f *fifo) ops(log *[]string) orderedOps {
-	return orderedOps{
-		popWB: func(ev *wbEvent) error {
-			if len(f.q) == 0 {
-				return unix.EAGAIN
-			}
-			*ev, f.q = f.q[0], f.q[1:]
-			return nil
-		},
+// execLog builds an executor whose handlers append "kind#seq" to *log.
+func execLog(log *[]string) *orderedDrain {
+	return newOrderedDrain(orderedOps{
 		flush:  func(ev *flushEvent) { *log = append(*log, fmt.Sprintf("flush#%d", ev.Seq)) },
 		delete: func(ev *deleteEvent) { *log = append(*log, fmt.Sprintf("delete#%d", ev.Seq)) },
 		rename: func(ev *renameEvent) { *log = append(*log, fmt.Sprintf("rename#%d", ev.Seq)) },
-	}
+	})
 }
 
-// The drain handles events in the order kmod queued them, whatever their kind.
-func TestDrainOrderedFollowsFIFO(t *testing.T) {
+// runAll pushes the events, closes the executor and runs it to the end.
+func runAll(d *orderedDrain, evs ...*reqEvent) {
+	for _, e := range evs {
+		d.push(e)
+	}
+	d.close()
+	d.run()
+}
+
+// The executor handles events in the order kmod queued them, whatever their kind.
+func TestExecutorFollowsKmodOrder(t *testing.T) {
 	resetFlushTracking(t)
 	// Model counterexample 2: create b (flush #1), rename b->c (#2): flush first.
 	// Counterexample 3: rename a->b (#3), create a (flush #4): rename first.
-	f := &fifo{q: []wbEvent{wb(kmodio.WBFlush, 1), wb(kmodio.WBRename, 2), wb(kmodio.WBRename, 3),
-		wb(kmodio.WBFlush, 4), wb(kmodio.WBDelete, 5), wb(kmodio.WBFlush, 6)}}
 	var log []string
-	drainOrdered(f.ops(&log))
+	runAll(execLog(&log), req(kmodio.ReqFlush, 1), req(kmodio.ReqRename, 2), req(kmodio.ReqRename, 3),
+		req(kmodio.ReqFlush, 4), req(kmodio.ReqDelete, 5), req(kmodio.ReqFlush, 6))
 	want := []string{"flush#1", "rename#2", "rename#3", "flush#4", "delete#5", "flush#6"}
 	if fmt.Sprint(log) != fmt.Sprint(want) {
 		t.Errorf("order %v, want %v", log, want)
 	}
 }
 
-// The fields of a WB event reach the handler of its kind.
-func TestDrainOrderedConvertsFields(t *testing.T) {
+// A WAIT flush (fsync) is in the same queue: it is handled after every event
+// queued before it and before every event queued after it.
+func TestExecutorWaitFlushKeepsItsPlace(t *testing.T) {
 	resetFlushTracking(t)
-	fe := wbEvent{Type: kmodio.WBFlush, Ino: 7, ParentIno: 3, Size: 99, Seq: 1, Flags: 1, NameLen: 1}
+	var log []string
+	wait := req(kmodio.ReqFlush, 3)
+	wait.Flags = 1
+	runAll(execLog(&log), req(kmodio.ReqRename, 2), wait, req(kmodio.ReqDelete, 4))
+	if fmt.Sprint(log) != fmt.Sprint([]string{"rename#2", "flush#3", "delete#4"}) {
+		t.Errorf("order %v", log)
+	}
+}
+
+// The fields of a request reach the handler of its kind.
+func TestExecutorConvertsFields(t *testing.T) {
+	resetFlushTracking(t)
+	fe := reqEvent{Type: kmodio.ReqFlush, Ino: 7, ParentIno: 3, Size: 99, Seq: 1, Flags: 1, NameLen: 1}
 	fe.Name[0] = 'f'
-	re := wbEvent{Type: kmodio.WBRename, Ino: 8, ParentIno: 3, NewParentIno: 4, Seq: 2, NameLen: 1, NewNameLen: 2}
+	re := reqEvent{Type: kmodio.ReqRename, Ino: 8, ParentIno: 3, NewParentIno: 4, Seq: 2, NameLen: 1, NewNameLen: 2}
 	re.Name[0] = 'a'
 	copy(re.NewName[:], "bb")
-	de := wbEvent{Type: kmodio.WBDelete, Ino: 9, ParentIno: 5, Seq: 3, NameLen: 1}
+	de := reqEvent{Type: kmodio.ReqDelete, Ino: 9, ParentIno: 5, Seq: 3, NameLen: 1}
 	de.Name[0] = 'd'
-	f := &fifo{q: []wbEvent{fe, re, de}}
 	var gf *flushEvent
 	var gr *renameEvent
 	var gd *deleteEvent
-	ops := f.ops(new([]string))
-	ops.flush = func(e *flushEvent) { gf = e }
-	ops.rename = func(e *renameEvent) { gr = e }
-	ops.delete = func(e *deleteEvent) { gd = e }
-	drainOrdered(ops)
+	d := newOrderedDrain(orderedOps{
+		flush:  func(e *flushEvent) { gf = e },
+		rename: func(e *renameEvent) { gr = e },
+		delete: func(e *deleteEvent) { gd = e },
+	})
+	runAll(d, &fe, &re, &de)
 	if gf == nil || gf.Ino != 7 || gf.ParentIno != 3 || gf.Size != 99 || gf.Flags != 1 || gf.NameLen != 1 || gf.Name[0] != 'f' {
 		t.Errorf("flush = %+v", gf)
 	}
@@ -91,50 +101,60 @@ func TestDrainOrderedConvertsFields(t *testing.T) {
 	}
 }
 
-func TestDrainOrderedPopErrorStops(t *testing.T) {
+func TestExecutorStop(t *testing.T) {
 	resetFlushTracking(t)
 	var log []string
-	ops := (&fifo{q: []wbEvent{wb(kmodio.WBFlush, 1)}}).ops(&log)
-	ops.popWB = func(*wbEvent) error { return errors.New("ioctl broke") }
-	d := newOrderedDrain(ops)
-	d.run(noSeqLimit)
-	if len(log) != 0 {
-		t.Errorf("handled %v after a pop error, want nothing (the event stays for the next tick)", log)
-	}
-	if !d.failed.Load() {
-		t.Error("failed not set after a pop error")
-	}
-}
-
-func TestDrainOrderedStop(t *testing.T) {
-	resetFlushTracking(t)
-	f := &fifo{q: []wbEvent{wb(kmodio.WBFlush, 1), wb(kmodio.WBFlush, 2), wb(kmodio.WBFlush, 3)}}
-	var log []string
-	ops := f.ops(&log)
-	ops.stop = func() bool { return len(log) >= 2 }
-	drainOrdered(ops)
+	d := execLog(&log)
+	d.ops.stop = func() bool { return len(log) >= 2 }
+	runAll(d, req(kmodio.ReqFlush, 1), req(kmodio.ReqFlush, 2), req(kmodio.ReqFlush, 3))
 	if fmt.Sprint(log) != fmt.Sprint([]string{"flush#1", "flush#2"}) {
 		t.Errorf("order %v, want [flush#1 flush#2]", log)
 	}
+	if d.pending() != 1 {
+		t.Errorf("pending = %d, want 1 (left for the budget message)", d.pending())
+	}
 }
 
-// An fsync's flush (seq 5) is handled at once by its own goroutine. Before it
-// PUTs, run(5) must have handled the events queued before it (seq 2, 3) — and
-// must not touch the events queued after it, which stay held for the next run.
-func TestOrderedDrainRunLimitHoldsNewerEvents(t *testing.T) {
+// run blocks while the queue is empty, wakes on push, and returns after close.
+func TestExecutorWaitsForEvents(t *testing.T) {
 	resetFlushTracking(t)
-	f := &fifo{q: []wbEvent{wb(kmodio.WBFlush, 2), wb(kmodio.WBRename, 3), wb(kmodio.WBFlush, 6), wb(kmodio.WBRename, 8)}}
+	var mu sync.Mutex
 	var log []string
-	d := newOrderedDrain(f.ops(&log))
-
-	d.run(5)
-	if fmt.Sprint(log) != fmt.Sprint([]string{"flush#2", "rename#3"}) {
-		t.Fatalf("run(5) handled %v, want [flush#2 rename#3]", log)
+	d := newOrderedDrain(orderedOps{flush: func(ev *flushEvent) {
+		mu.Lock()
+		log = append(log, fmt.Sprintf("flush#%d", ev.Seq))
+		mu.Unlock()
+	}})
+	done := make(chan struct{})
+	go func() { d.run(); close(done) }()
+	time.Sleep(20 * time.Millisecond)
+	d.push(req(kmodio.ReqFlush, 1))
+	if !d.waitHandled(1, time.Second) {
+		t.Fatal("event 1 not handled")
 	}
-	d.run(noSeqLimit) // the held #6 and #8, in order, nothing lost
-	want := []string{"flush#2", "rename#3", "flush#6", "rename#8"}
-	if fmt.Sprint(log) != fmt.Sprint(want) {
-		t.Errorf("after the full run %v, want %v", log, want)
+	d.push(req(kmodio.ReqFlush, 2))
+	d.close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("run did not return after close")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(log) != "[flush#1 flush#2]" {
+		t.Errorf("log %v", log)
+	}
+}
+
+// waitHandled is what a sync uses before it reports kmod's event seq as applied.
+func TestWaitHandledTimesOut(t *testing.T) {
+	d := newOrderedDrain(orderedOps{})
+	if d.waitHandled(5, 20*time.Millisecond) {
+		t.Error("waitHandled(5) true with nothing handled")
+	}
+	d.noteHandled(5)
+	if !d.waitHandled(5, 20*time.Millisecond) {
+		t.Error("waitHandled(5) false after handled=5")
 	}
 }
 

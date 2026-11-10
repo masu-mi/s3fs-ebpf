@@ -477,8 +477,8 @@ func runFastpath(args []string) int {
 
 	// Read-miss upcall reader: services `cat` on any admitted entry with
 	// Prewarm=false, or any ino kmod knows about that daemon hasn't warmed yet.
-	go runReadMissLoop(ctx, *dev, s3c)
-	// AC-67: the prewarm reads block on upcalls, so start after runReadMissLoop.
+	go runReqLoop(ctx, *dev, s3c)
+	// AC-67: the prewarm reads block on upcalls, so start after runReqLoop.
 	if pcachePrewarmEnabled || prefetchPolicy != nil {
 		go runPcachePrewarm(ctx)
 	}
@@ -528,17 +528,6 @@ func runFastpath(args []string) int {
 			prewarmed[entry.Ino] = struct{}{}
 		}
 	})
-	// Week 4 (c): drain the kmod write-back queue and PUT bytes to
-	// S3. Runs even without --s3 so the queue doesn't grow unbounded
-	// (in offline mode it just logs and drops each event).
-	go runFlushLoop(ctx, *dev, s3c, 100*time.Millisecond)
-	// S-08: blocking goroutine for fsync-triggered (WAIT-flagged) flush
-	// events — eliminates the up-to-100 ms ticker latency for fsync.
-	go runFlushWaitLoop(ctx, *dev, s3c)
-	// E-02 / AC-84: kmod's delete and rename queues are drained by
-	// runFlushLoop too (drainOrdered), so the three kinds of event are
-	// handled in the order kmod queued them.
-
 	// Layer 2/3 policy program stats sampler. Reads the loaded BPF
 	// program's policy_stats map every N and mirrors into the
 	// metrics endpoint so Grafana can chart hook activity alongside

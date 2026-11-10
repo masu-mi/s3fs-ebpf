@@ -640,41 +640,50 @@ static void s3k_local_entry_promotion_needs_applied(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_ebpf_entries_replace(NULL, 0), 0);
 }
 
-/* Pop the oldest write-back event; a flush comes back as a flush event.  -EINVAL
- * when the head is a delete or rename (the caller expected a flush). */
-static int s3k_pop_flush(struct s3fs_flush_event *out)
+/* Pop the oldest request when it is a flush.  -EINVAL when the head is something
+ * else (the caller expected a flush; the request is consumed), -EAGAIN when the
+ * queue is empty. */
+static int s3k_pop_flush(struct s3fs_req_event *out)
 {
-	struct s3fs_wb_event *w = kmalloc(sizeof(*w), GFP_KERNEL);
-	int err;
+	ssize_t n = s3fs_req_dequeue(out, true);
 
-	if (!w)
-		return -ENOMEM;
-	err = s3fs_ebpf_wb_pop(w);
-	if (!err && w->type != S3FS_WB_FLUSH)
-		err = -EINVAL;
-	if (!err) {
-		memset(out, 0, sizeof(*out));
-		out->ino = w->ino;
-		out->parent_ino = w->parent_ino;
-		out->size = w->size;
-		out->seq = w->seq;
-		out->name_len = w->name_len;
-		out->flags = w->flags;
-		memcpy(out->name, w->name, w->name_len);
+	if (n < 0)
+		return (int)n;
+	return out->type == S3FS_REQ_FLUSH ? 0 : -EINVAL;
+}
+
+/* Pop requests until a WAIT flush (an fsync's) comes out, dropping the others;
+ * waits up to ~200 ms for one to be queued (the fsync runs in another thread),
+ * then -EAGAIN. */
+static int s3k_pop_wait(struct s3fs_req_event *out)
+{
+	int tries;
+
+	for (tries = 0; tries < 20;) {
+		ssize_t n = s3fs_req_dequeue(out, true);
+
+		if (n == -EAGAIN) {
+			msleep(10);
+			tries++;
+			continue;
+		}
+		if (n < 0)
+			return (int)n;
+		if (out->type == S3FS_REQ_FLUSH && (out->flags & S3FS_FLUSH_FLAG_WAIT))
+			return 0;
 	}
-	kfree(w);
-	return err;
+	return -EAGAIN;
 }
 
 /* flush / delete / rename events share one strictly increasing seq (AC-84), and
  * s3fs_ebpf_event_seq() is the highest handed out. */
 static void s3k_event_seq_is_shared_and_increasing(struct kunit *test)
 {
-	struct s3fs_wb_event *w = kunit_kzalloc(test, sizeof(*w), GFP_KERNEL);
+	struct s3fs_req_event *w = kunit_kzalloc(test, sizeof(*w), GFP_KERNEL);
 	u64 s1, s2, s3, s4;
 
 	KUNIT_ASSERT_NOT_NULL(test, w);
-	while (s3fs_ebpf_wb_pop(w) == 0)
+	while (s3fs_req_dequeue(w, true) > 0)
 		;
 
 	s1 = flush_enqueue(5000001, 0, 0, "f", 1, 0);
@@ -689,22 +698,22 @@ static void s3k_event_seq_is_shared_and_increasing(struct kunit *test)
 
 	/* one FIFO: the events come back in the order they were queued, with
 	 * their seq and their own fields */
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
-	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_FLUSH);
+	KUNIT_ASSERT_GT(test, s3fs_req_dequeue(w, true), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_REQ_FLUSH);
 	KUNIT_EXPECT_EQ(test, w->seq, s1);
 	KUNIT_EXPECT_STREQ(test, w->name, "f");
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
-	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_RENAME);
+	KUNIT_ASSERT_GT(test, s3fs_req_dequeue(w, true), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_REQ_RENAME);
 	KUNIT_EXPECT_EQ(test, w->seq, s2);
 	KUNIT_EXPECT_STREQ(test, w->name, "f");
 	KUNIT_EXPECT_STREQ(test, w->new_name, "g");
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
-	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_DELETE);
+	KUNIT_ASSERT_GT(test, s3fs_req_dequeue(w, true), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_REQ_DELETE);
 	KUNIT_EXPECT_EQ(test, w->seq, s3);
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_wb_pop(w), 0);
-	KUNIT_EXPECT_EQ(test, w->type, S3FS_WB_FLUSH);
+	KUNIT_ASSERT_GT(test, s3fs_req_dequeue(w, true), 0);
+	KUNIT_EXPECT_EQ(test, w->type, S3FS_REQ_FLUSH);
 	KUNIT_EXPECT_EQ(test, w->seq, s4);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_wb_pop(w), -EAGAIN);
+	KUNIT_EXPECT_EQ(test, s3fs_req_dequeue(w, true), (ssize_t)-EAGAIN);
 
 	/* nothing queued: no seq */
 	KUNIT_EXPECT_EQ(test, flush_enqueue(5000004, 0, 0, "", 0, 0), 0ull);
@@ -715,9 +724,9 @@ static void s3k_event_seq_is_shared_and_increasing(struct kunit *test)
 
 static void s3k_drain_miss_events(void)
 {
-	struct s3fs_read_miss_event ev;
+	struct s3fs_req_event ev;
 
-	while (s3fs_read_miss_dequeue(&ev, true) > 0)
+	while (s3fs_req_dequeue(&ev, true) > 0)
 		;
 }
 
@@ -778,47 +787,36 @@ static void s3k_pending_verify_populated(struct kunit *test)
 
 static void s3k_miss_queue_fifo(struct kunit *test)
 {
-	struct s3fs_read_miss_event ev;
+	struct s3fs_req_event ev;
 	int i;
 
 	s3k_drain_miss_events();
-	KUNIT_EXPECT_EQ(test, s3fs_read_miss_dequeue(&ev, true), (ssize_t)-EAGAIN);
+	KUNIT_EXPECT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)-EAGAIN);
 	for (i = 0; i < 3; i++)
 		KUNIT_ASSERT_EQ(test, miss_enqueue(S3K_INO_BASE + i, i * 4096,
 						   (size_t)U32_MAX + 5, i, NULL), 0);
 	for (i = 0; i < 3; i++) {
-		KUNIT_ASSERT_EQ(test, s3fs_read_miss_dequeue(&ev, true),
+		KUNIT_ASSERT_EQ(test, s3fs_req_dequeue(&ev, true),
 				(ssize_t)sizeof(ev));
 		KUNIT_EXPECT_EQ(test, ev.ino, S3K_INO_BASE + i);
 		KUNIT_EXPECT_EQ(test, ev.offset, (s64)i * 4096);
 		KUNIT_EXPECT_EQ(test, ev.count, U32_MAX);	/* clamped */
 		KUNIT_EXPECT_EQ(test, ev.flags, (u32)i);
 	}
-	KUNIT_EXPECT_EQ(test, s3fs_read_miss_dequeue(&ev, true), (ssize_t)-EAGAIN);
+	KUNIT_EXPECT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)-EAGAIN);
 }
 
 /* -- flush / evict queues (F1, E-03) -------------------------------------- */
 
 static void s3k_drain_flush_queues(void)
 {
-	struct s3fs_wb_event *w = kmalloc(sizeof(*w), GFP_KERNEL);
-	struct s3fs_flush_item *f, *tmp;
-
-	while (w && !s3fs_ebpf_wb_pop(w))
-		;
-	kfree(w);
-	spin_lock(&s3fs_flush_wait_lock);
-	list_for_each_entry_safe(f, tmp, &s3fs_flush_wait_queue, link) {
-		list_del(&f->link);
-		kfree(f);
-	}
-	spin_unlock(&s3fs_flush_wait_lock);
+	reqq_drain(0);
 }
 
 static void s3k_flush_queue_f1(struct kunit *test)
 {
 	const u64 a = S3K_INO_BASE + 10, b = S3K_INO_BASE + 11;
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
 
 	KUNIT_ASSERT_NOT_NULL(test, ev);
 	s3k_drain_flush_queues();
@@ -835,27 +833,13 @@ static void s3k_flush_queue_f1(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ev->size, 3ull);
 	KUNIT_EXPECT_STREQ(test, ev->name, "b.txt");
 	KUNIT_EXPECT_EQ(test, s3k_pop_flush(ev), -EINVAL);	/* the rename, not a flush */
-	KUNIT_EXPECT_EQ(test, s3k_pop_flush(ev), -EAGAIN);
 
-	KUNIT_ASSERT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), 0);
+	KUNIT_ASSERT_EQ(test, s3k_pop_wait(ev), 0);
 	KUNIT_EXPECT_EQ(test, ev->ino, a);
 	KUNIT_EXPECT_EQ(test, ev->size, 9ull);
 	KUNIT_EXPECT_EQ(test, ev->flags, S3FS_FLUSH_FLAG_WAIT);
 	KUNIT_EXPECT_STREQ(test, ev->name, "a.txt");
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), -EAGAIN);
-}
-
-static void s3k_flush_wait_reopen(struct kunit *test)
-{
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
-
-	KUNIT_ASSERT_NOT_NULL(test, ev);
-	flush_queue_drain();	/* what put_super does */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), -ENODEV);
-	flush_wait_reopen();	/* what fill_super does */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), -EAGAIN);
-	flush_enqueue(S3K_INO_BASE + 12, 1, 1, "c", 1, S3FS_FLUSH_FLAG_WAIT);
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), 0);
+	KUNIT_EXPECT_EQ(test, s3k_pop_wait(ev), -EAGAIN);
 }
 
 /* -- the filesystem, mounted in-kernel ------------------------------------ */
@@ -901,7 +885,6 @@ static void s3k_vfs_exit(struct kunit *test)
 	flush_delayed_fput();
 	kern_unmount(v->mnt);
 	s3fs_ebpf_entries_replace(NULL, 0);
-	flush_wait_reopen();	/* put_super shut the fsync queue */
 }
 
 static struct file *s3k_open(struct kunit *test, const char *name, int flags)
@@ -1072,7 +1055,7 @@ static void s3k_vfs_truncate(struct kunit *test)
 static void s3k_vfs_close_flush(struct kunit *test)
 {
 	struct s3k_vfs *v = test->priv;
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
 	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
 	struct inode *inode = file_inode(f);
 	struct s3fs_file_data *fd = inode->i_private;
@@ -1123,7 +1106,7 @@ static int s3k_fsync_thread(void *arg)
 static void s3k_vfs_fsync_waits_for_its_put(struct kunit *test)
 {
 	struct s3k_vfs *v = test->priv;
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
 	struct s3k_fsync_ctx *c = kunit_kzalloc(test, sizeof(*c), GFP_KERNEL);
 	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
 	u64 ino = file_inode(f)->i_ino;
@@ -1145,7 +1128,7 @@ static void s3k_vfs_fsync_waits_for_its_put(struct kunit *test)
 	t = kthread_run(s3k_fsync_thread, c, "s3k_fsync");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(t));
 	for (i = 0; i < 100; i++) {
-		if (s3fs_ebpf_flush_pop_wait(ev) == 0)
+		if (s3k_pop_wait(ev) == 0)
 			break;
 	}
 	KUNIT_ASSERT_LT(test, i, 100);
@@ -1173,7 +1156,7 @@ static void s3k_vfs_fsync_waits_for_its_put(struct kunit *test)
 static void s3k_vfs_read_dirty_short_buffer_claims_nothing(struct kunit *test)
 {
 	struct s3k_vfs *v = test->priv;
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
 	struct s3k_fsync_ctx *c = kunit_kzalloc(test, sizeof(*c), GFP_KERNEL);
 	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
 	struct s3fs_file_data *fd = s3k_fd_of(f);
@@ -1190,7 +1173,7 @@ static void s3k_vfs_read_dirty_short_buffer_claims_nothing(struct kunit *test)
 	t = kthread_run(s3k_fsync_thread, c, "s3k_fsync_short");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(t));
 	for (i = 0; i < 100; i++)
-		if (s3fs_ebpf_flush_pop_wait(ev) == 0)
+		if (s3k_pop_wait(ev) == 0)
 			break;
 	KUNIT_ASSERT_LT(test, i, 100);
 
@@ -1216,7 +1199,7 @@ static void s3k_vfs_read_dirty_short_buffer_claims_nothing(struct kunit *test)
  * so kmod knows the PUT covers the flush; the waiter and the pin go. */
 static void s3k_vfs_fsync_empty_file(struct kunit *test)
 {
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
 	struct s3k_fsync_ctx *c = kunit_kzalloc(test, sizeof(*c), GFP_KERNEL);
 	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
 	struct s3fs_file_data *fd = s3k_fd_of(f);
@@ -1232,7 +1215,7 @@ static void s3k_vfs_fsync_empty_file(struct kunit *test)
 	t = kthread_run(s3k_fsync_thread, c, "s3k_fsync0");
 	KUNIT_ASSERT_FALSE(test, IS_ERR(t));
 	for (i = 0; i < 100; i++)
-		if (s3fs_ebpf_flush_pop_wait(ev) == 0)
+		if (s3k_pop_wait(ev) == 0)
 			break;
 	KUNIT_ASSERT_LT(test, i, 100);
 	KUNIT_EXPECT_EQ(test, ev->size, 0ull);
@@ -1280,7 +1263,7 @@ static void s3k_vfs_remount_fsync_queue(struct kunit *test)
 {
 	struct s3k_vfs *v = test->priv;
 	struct file_system_type *type = get_fs_type("s3fs_ebpf");
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
 
 	KUNIT_ASSERT_NOT_NULL(test, type);
 	KUNIT_ASSERT_NOT_NULL(test, ev);
@@ -1288,8 +1271,8 @@ static void s3k_vfs_remount_fsync_queue(struct kunit *test)
 	v->mnt = kern_mount(type);
 	module_put(type->owner);	/* put_filesystem() is not exported */
 	KUNIT_ASSERT_FALSE(test, IS_ERR(v->mnt));
-	/* the fsync queue of the new mount is open: empty, not shut down */
-	KUNIT_EXPECT_EQ(test, s3fs_ebpf_flush_pop_wait(ev), -EAGAIN);
+	/* the request queue of the new mount is open and empty */
+	KUNIT_EXPECT_EQ(test, s3fs_req_dequeue(ev, true), (ssize_t)-EAGAIN);
 }
 
 /* -- concurrency ----------------------------------------------------------- */
@@ -1744,7 +1727,6 @@ static struct kunit_case s3k_table_cases[] = {
 	KUNIT_CASE(s3k_pending_verify_populated),
 	KUNIT_CASE(s3k_miss_queue_fifo),
 	KUNIT_CASE(s3k_flush_queue_f1),
-	KUNIT_CASE(s3k_flush_wait_reopen),
 	KUNIT_CASE(s3k_pending_concurrent),
 	{}
 };
@@ -1893,7 +1875,7 @@ static bool s3k_is_resident(u64 ino, u64 *bytes)
 static void s3k_vfs_signal_flush_keeps_chunks(struct kunit *test)
 {
 	const u64 C = S3FS_CHUNK_SIZE;
-	struct s3fs_flush_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
+	struct s3fs_req_event *ev = kunit_kzalloc(test, sizeof(*ev), GFP_KERNEL);
 	struct file *f = s3k_open(test, "hello.txt", O_RDWR);
 	u64 ino = file_inode(f)->i_ino, bytes = 0;
 	struct s3fs_file_data *fd = s3k_fd_of(f);
@@ -1944,7 +1926,7 @@ static void s3k_vfs_read_pattern(struct kunit *test)
 {
 	static const loff_t at[] = { 0, 4096, 12288, 49152, 0 };
 	const u64 ino = S3K_INO_BASE + 41, n = 64 * 1024;
-	struct s3fs_read_miss_event ev;
+	struct s3fs_req_event ev;
 	struct s3fs_file_data *fd;
 	u64 calls0 = s3fs_read_iter_calls(), pos0_0 = s3fs_read_iter_pos0();
 	char *buf = kunit_kzalloc(test, 4096, GFP_KERNEL);
@@ -1977,15 +1959,15 @@ static void s3k_vfs_read_pattern(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s3fs_read_iter_pos0() - pos0_0, 2ull);	/* the two reads at 0 */
 
 	/* the miss event of a read carries it; one that is not a read does not */
-	while (s3fs_read_miss_dequeue(&ev, true) > 0)
+	while (s3fs_req_dequeue(&ev, true) > 0)
 		;
 	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 4096, 0, fd), 0);
-	KUNIT_ASSERT_EQ(test, s3fs_read_miss_dequeue(&ev, true), (ssize_t)sizeof(ev));
+	KUNIT_ASSERT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)sizeof(ev));
 	KUNIT_EXPECT_EQ(test, ev.ino, ino);
 	KUNIT_EXPECT_EQ(test, ev.seq_count, 3u);
 	KUNIT_EXPECT_EQ(test, ev.rand_count, 2u);
 	KUNIT_ASSERT_EQ(test, miss_enqueue(ino, 0, 0, S3FS_MISS_FLAG_OPEN_CHECK, NULL), 0);
-	KUNIT_ASSERT_EQ(test, s3fs_read_miss_dequeue(&ev, true), (ssize_t)sizeof(ev));
+	KUNIT_ASSERT_EQ(test, s3fs_req_dequeue(&ev, true), (ssize_t)sizeof(ev));
 	KUNIT_EXPECT_EQ(test, ev.seq_count, 0u);
 	KUNIT_EXPECT_EQ(test, ev.rand_count, 0u);
 

@@ -72,24 +72,57 @@ struct s3fs_signal_admit {
 	_IOW(S3FS_IOC_MAGIC, 0x03, struct s3fs_signal_admit)
 
 /*
- * Read-miss event stream.
+ * Request stream (v2 Phase 4): everything kmod asks of the daemon arrives as
+ * one `struct s3fs_req_event` per read(2) of /dev/s3fs_ebpf, in the order kmod
+ * queued it (one FIFO, `reqq`).  A read needs a buffer of at least
+ * sizeof(struct s3fs_req_event) (a shorter one gets -EINVAL, never a partial
+ * event).  O_NONBLOCK is honored; poll(2) returns POLLIN when an event is
+ * queued.
  *
- * kmod's .read on an unadmitted ino appends an event of this shape to
- * an internal FIFO and wakes the char-dev read waitqueue. The daemon
- * reads /dev/s3fs_ebpf like a stream, one struct per event (short
- * reads return the current head atomically). O_NONBLOCK is honored;
- * poll(2) returns POLLIN when at least one event is queued.
+ *   MISS  : a .read_folio / .open / write-prep that needs the daemon and waits
+ *           for it (see s3fs_signal_admit).  ino, offset (where the miss was),
+ *           count (bytes requested), flags (S3FS_MISS_FLAG_*), seq_count /
+ *           rand_count (read pattern so far; 0 for a miss that is not a read).
+ *           No seq.
+ *   FLUSH : .release / .create placeholder (async) or .fsync (flags has
+ *           S3FS_FLUSH_FLAG_WAIT; the caller waits for SIGNAL_FLUSH).  ino,
+ *           parent_ino (0 == root), size (buffer size at enqueue time), name
+ *           (basename), seq.
+ *   DELETE: .unlink.  ino, parent_ino, name, seq.
+ *   RENAME: .rename.  ino, parent_ino (source dir) / new_parent_ino, name
+ *           (old) / new_name, seq.
+ *
+ * FLUSH / DELETE / RENAME carry one kmod-wide, strictly increasing `seq`,
+ * assigned under the lock that queues the event (AC-84), so they are in seq
+ * order in the FIFO and a daemon that handles them in read order cannot let a
+ * rename overtake the flush of a file created just before it.  Unused fields
+ * are 0.
  */
-struct s3fs_read_miss_event {
+/* longest basename (and name in a request); see also struct s3fs_sync_entry */
+#define S3FS_SYNC_NAME_MAX 255
+
+#define S3FS_REQ_MISS   1U
+#define S3FS_REQ_FLUSH  2U
+#define S3FS_REQ_DELETE 3U
+#define S3FS_REQ_RENAME 4U
+
+struct s3fs_req_event {
+	__u32 type;            /* S3FS_REQ_* */
+	__u32 flags;           /* MISS: S3FS_MISS_FLAG_*, FLUSH: S3FS_FLUSH_FLAG_* */
+	__u64 seq;
 	__u64 ino;
-	__s64 offset; /* where the miss was */
-	__u32 count;  /* bytes requested */
-	__u32 flags;  /* S3FS_MISS_FLAG_* */
-	/* Read access pattern of the file so far (sequential / random reads
-	 * counted in .read_iter, summed over the CPUs); 0 for a miss that is not
-	 * a read (open check, load for write). */
-	__u32 seq_count;
-	__u32 rand_count;
+	__u64 parent_ino;
+	__u64 new_parent_ino;
+	__u64 size;            /* FLUSH */
+	__s64 offset;          /* MISS */
+	__u32 count;           /* MISS */
+	__u32 seq_count;       /* MISS: sequential reads so far */
+	__u32 rand_count;      /* MISS: random reads so far */
+	__u32 name_len;
+	__u32 new_name_len;
+	__u32 _pad;
+	char  name[S3FS_SYNC_NAME_MAX + 1];
+	char  new_name[S3FS_SYNC_NAME_MAX + 1];
 };
 
 /*
@@ -132,7 +165,6 @@ struct s3fs_read_miss_event {
  * count == 0 restores the compile-time bootstrap table (used at
  * shutdown so the mount is still browsable if the daemon exits).
  */
-#define S3FS_SYNC_NAME_MAX 255
 /* G-01: struct s3fs_sync_entry v2 adds parent_ino for subdir support.
  *
  * ABI note: this is a size change vs the pre-G-01 layout. kmod and
@@ -170,49 +202,15 @@ struct s3fs_sync_entries {
 	_IOW(S3FS_IOC_MAGIC, 0x04, struct s3fs_sync_entries)
 
 /*
- * Write-back queue.
- *
- * kmod's .release / .fsync on a dirty regular file enqueues a
- * flush event; the daemon periodically drains this queue via
- * S3FS_IOC_POP_WB and PUTs the current buffer bytes back to S3.
- * A .create fop enqueues an empty flush (size=0) so `touch` results
- * in a zero-byte PUT.
- *
- * The event carries the file's name (basename in the mount) so the
- * daemon can resolve it back to an S3 key even for freshly-created
- * inos that haven't hit an ino allocator yet.
- *
- * POP_WB returns 0 with the event populated on success, or -EAGAIN
- * when the queue is empty (non-blocking; daemon polls on a ticker).
- */
-/*
- * flush flags (E-03):
+ * flush flags (E-03), in s3fs_req_event.flags of a FLUSH:
  *   FLUSH_FLAG_WAIT — fsync() caller is blocked on signal_flush.
  *                     daemon must PUT immediately (no coalescing).
+ * A .create fop enqueues an empty flush (size=0) so `touch` results in a
+ * zero-byte PUT.  The event carries the file's name (basename in the mount) so
+ * the daemon can resolve it back to an S3 key even for freshly-created inos
+ * that haven't hit an ino allocator yet.
  */
 #define S3FS_FLUSH_FLAG_WAIT 0x1U
-
-/*
- * AC-84: write-back events (S3FS_IOC_POP_WB) and fsync's WAIT flushes carry one
- * kmod-wide, strictly increasing `seq`, assigned under the same lock that queues
- * the event, so once the daemon has popped an event with seq S, every event with
- * a smaller seq is already visible in the WB queue.  WB events are in seq order
- * by construction (one FIFO); a WAIT flush with seq S is handled after every WB
- * event with seq < S.  See docs/design/file-lifecycle-state-machine.md.
- */
-
-struct s3fs_flush_event {
-	__u64 ino;
-	__u64 parent_ino; /* G-01: dir the file lives under. 0 == root. */
-	__u64 size;      /* current buffer size at enqueue time */
-	__u64 seq;       /* AC-84: kmod-wide event order (flush / rename / delete) */
-	__u32 name_len;
-	__u32 flags;     /* S3FS_FLUSH_FLAG_* (E-03) */
-	char  name[S3FS_SYNC_NAME_MAX + 1]; /* basename only */
-};
-
-/* nr 0x05 was POP_FLUSH, 0x0B POP_DELETE, 0x0C POP_RENAME: replaced by POP_WB
- * (one FIFO for the three kinds of write-back event); do not reuse. */
 
 /*
  * S3FS_IOC_READ_DIRTY — pull `size` bytes from kmod's per-inode
@@ -310,59 +308,8 @@ struct s3fs_stats {
 #define S3FS_IOC_SIGNAL_FLUSH \
 	_IOW(S3FS_IOC_MAGIC, 0x0A, struct s3fs_signal_admit)
 
-/*
- * S3FS_IOC_POP_WB — pop the oldest write-back event: a flush (.release /
- * .create placeholder), a delete (.unlink) or a rename.  One FIFO, so the order
- * the daemon sees is the order the operations happened (AC-84, v2 Phase 4):
- * a rename can no longer overtake the flush of a file created just before it,
- * and a flush of a re-created name can no longer overtake the rename of the old
- * file.  Non-blocking: -EAGAIN when empty (the daemon polls on a ticker).
- * fsync's WAIT flush is a separate blocking queue (POP_FLUSH_WAIT) and is
- * ordered against this one by `seq`.
- *
- * Field use by type:
- *   FLUSH : ino, parent_ino, size, name (basename), flags (S3FS_FLUSH_FLAG_*)
- *   DELETE: ino, parent_ino, name
- *   RENAME: ino, parent_ino (old) / new_parent_ino, name (old) / new_name
- * Unused fields are 0.
- */
-#define S3FS_WB_FLUSH  1U
-#define S3FS_WB_DELETE 2U
-#define S3FS_WB_RENAME 3U
-
-struct s3fs_wb_event {
-	__u32 type;            /* S3FS_WB_* */
-	__u32 flags;           /* FLUSH: S3FS_FLUSH_FLAG_* */
-	__u64 ino;
-	__u64 parent_ino;      /* 0 == root. RENAME: source dir */
-	__u64 new_parent_ino;  /* RENAME: destination dir */
-	__u64 size;            /* FLUSH: buffer size at enqueue time */
-	__u64 seq;             /* kmod-wide event order (WB events and WAIT flushes) */
-	__u32 name_len;
-	__u32 new_name_len;
-	char  name[S3FS_SYNC_NAME_MAX + 1];
-	char  new_name[S3FS_SYNC_NAME_MAX + 1];
-};
-
-#define S3FS_IOC_POP_WB \
-	_IOR(S3FS_IOC_MAGIC, 0x11, struct s3fs_wb_event)
-
-/*
- * S3FS_IOC_POP_FLUSH_WAIT — blocking pop of WAIT flushes, the
- * fsync path (S-08).
- *
- * Blocks until a flush event with FLUSH_FLAG_WAIT is available, then
- * pops and returns it. Returns -ERESTARTSYS on signal interruption, or
- * -ENODEV when the module is being unloaded. The daemon runs one
- * goroutine blocked here so fsync() callers are serviced immediately
- * instead of waiting up to one POP_WB ticker period (~100 ms).
- *
- * Non-WAIT events (close/release path) are unaffected; they remain on
- * the WB queue (POP_WB) and are handled by the coalesced 100 ms
- * ticker in runFlushLoop.
- */
-#define S3FS_IOC_POP_FLUSH_WAIT \
-	_IOR(S3FS_IOC_MAGIC, 0x0D, struct s3fs_flush_event)
+/* nr 0x05 POP_FLUSH, 0x0B POP_DELETE, 0x0C POP_RENAME, 0x0D POP_FLUSH_WAIT, 0x11 POP_WB:
+ * replaced by read(2) of struct s3fs_req_event; do not reuse. */
 
 /*
  * S3FS_IOC_POPULATE_PAGES — AB-04: write file data directly into the

@@ -10,13 +10,13 @@
  *                  refcounted so multiple concurrent readers on the
  *                  same ino share the same completion.
  *
- *   s3fs_miss_events — FIFO of read_miss_event drained by the daemon
- *                      via /dev/s3fs_ebpf's .read.
+ *   reqq (reqq.inc.c) — the MISS requests are queued there with the daemon's
+ *                      other requests and read via /dev/s3fs_ebpf's .read.
  *
  * .read on an unadmitted ino:  create pending  → enqueue event  →
  *                              wait_for_completion  → retry admit.
  * SIGNAL_ADMIT ioctl:          find pending  → complete + err.
- * Char dev .read (daemon):     pop event head, block if empty.
+ * Char dev .read (daemon):     pop the request at the head, block if empty.
  */
 
 struct s3fs_pending {
@@ -28,19 +28,10 @@ struct s3fs_pending {
 	refcount_t refs;
 };
 
-struct s3fs_miss_node {
-	struct list_head link;
-	struct s3fs_read_miss_event ev;
-};
-
 #define S3FS_PENDING_HASH_BITS 4  /* 16 buckets — few concurrent misses */
 
 static DEFINE_HASHTABLE(s3fs_pending, S3FS_PENDING_HASH_BITS);
 static DEFINE_SPINLOCK(s3fs_pending_lock);
-
-static LIST_HEAD(s3fs_miss_events);
-static DEFINE_SPINLOCK(s3fs_miss_lock);
-static DECLARE_WAIT_QUEUE_HEAD(s3fs_miss_wq);
 
 /* U13: readers for different chunks of the same ino get independent
  * completions — every lookup matches on (ino, chunk_offset).
@@ -144,63 +135,16 @@ static void s3fs_fd_read_pattern(struct s3fs_file_data *fd, u32 *seq, u32 *rnd);
 static int miss_enqueue(u64 ino, loff_t offset, size_t count, u32 flags,
 			struct s3fs_file_data *fd)
 {
-	struct s3fs_miss_node *node = kmalloc(sizeof(*node), GFP_KERNEL);
+	struct s3fs_req_item *node = req_item_new(S3FS_REQ_MISS, ino, 0);
 
 	if (!node)
 		return -ENOMEM;
-	INIT_LIST_HEAD(&node->link);
-	node->ev.ino    = ino;
 	node->ev.offset = offset;
 	node->ev.count  = (u32)min_t(size_t, count, U32_MAX);
 	node->ev.flags  = flags;
 	s3fs_fd_read_pattern(fd, &node->ev.seq_count, &node->ev.rand_count);
-
-	spin_lock(&s3fs_miss_lock);
-	list_add_tail(&node->link, &s3fs_miss_events);
-	spin_unlock(&s3fs_miss_lock);
-	wake_up_interruptible(&s3fs_miss_wq);
+	req_enqueue(node);
 	return 0;
-}
-
-ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
-			       bool nonblocking)
-{
-	struct s3fs_miss_node *node = NULL;
-	int err;
-
-	for (;;) {
-		spin_lock(&s3fs_miss_lock);
-		if (!list_empty(&s3fs_miss_events)) {
-			node = list_first_entry(&s3fs_miss_events,
-						struct s3fs_miss_node, link);
-			list_del(&node->link);
-		}
-		spin_unlock(&s3fs_miss_lock);
-		if (node)
-			break;
-		if (nonblocking)
-			return -EAGAIN;
-		err = wait_event_interruptible(s3fs_miss_wq,
-			!list_empty(&s3fs_miss_events));
-		if (err)
-			return err;
-	}
-
-	*out = node->ev;
-	kfree(node);
-	return sizeof(*out);
-}
-
-__poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt)
-{
-	__poll_t mask = 0;
-
-	poll_wait(filp, &s3fs_miss_wq, pt);
-	spin_lock(&s3fs_miss_lock);
-	if (!list_empty(&s3fs_miss_events))
-		mask |= POLLIN | POLLRDNORM;
-	spin_unlock(&s3fs_miss_lock);
-	return mask;
 }
 
 static bool s3fs_ino_chunk_populated(u64 ino, u64 chunk_offset); /* below */
@@ -255,7 +199,6 @@ static void s3fs_ebpf_upcall_shutdown(void)
 {
 	struct s3fs_pending *p;
 	struct hlist_node *tmp;
-	struct s3fs_miss_node *m, *mnext;
 	unsigned int i;
 
 	/* Fail every pending waiter so they wake up and return. */
@@ -268,13 +211,7 @@ static void s3fs_ebpf_upcall_shutdown(void)
 	}
 	spin_unlock(&s3fs_pending_lock);
 
-	spin_lock(&s3fs_miss_lock);
-	list_for_each_entry_safe(m, mnext, &s3fs_miss_events, link) {
-		list_del(&m->link);
-		kfree(m);
-	}
-	spin_unlock(&s3fs_miss_lock);
-	wake_up_all(&s3fs_miss_wq);
+	reqq_drain(S3FS_REQ_MISS);
 }
 
 /* Backward-compatible wrapper used by lookup: fills `out` from

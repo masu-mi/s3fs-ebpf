@@ -56,32 +56,25 @@ int s3fs_ebpf_entries_replace_applied(struct s3fs_entry_dyn *entries, u32 count,
 void s3fs_ebpf_entries_shutdown(void);
 
 /*
- * Read-miss upcall API — daemon-facing side.
- * s3fs_read_miss_dequeue removes the head event (blocking or
- * non-blocking) and copies it out. s3fs_read_miss_poll bridges the
- * miscdevice .poll to the internal waitqueue. signal_admit wakes a
- * pending .read waiter.
+ * Request queue (reqq) — daemon-facing side: misses, flushes, deletes and
+ * renames, one FIFO.  s3fs_req_dequeue removes the head request (blocking or
+ * non-blocking) and copies it out. s3fs_req_poll bridges the miscdevice .poll
+ * to the internal waitqueue. signal_admit wakes a pending .read waiter.
  */
 struct file;
 struct poll_table_struct;
-ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
-			       bool nonblocking);
-__poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt);
+ssize_t s3fs_req_dequeue(struct s3fs_req_event *out, bool nonblocking);
+__poll_t s3fs_req_poll(struct file *filp, struct poll_table_struct *pt);
 int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err, u32 flags);
 
 /*
- * Write-back queue (flush / delete / rename, one FIFO): kmod → daemon via
- * S3FS_IOC_POP_WB.
+ * Write-back data path: kmod → daemon.
  *
- * s3fs_ebpf_wb_pop: dequeue the oldest event; returns 0 on success (out
- * populated), -EAGAIN if empty.
  * s3fs_ebpf_read_dirty: copy ino's scratch buffer into user-space `uaddr`.
  * Returns bytes copied on success, negative errno on failure. -ENOSPC when
  * `cap` is smaller than the content (AC-71): nothing is copied and the flush
  * is not claimed; *size (optional) is the content size either way.
  */
-int  s3fs_ebpf_wb_pop(struct s3fs_wb_event *out);
-int  s3fs_ebpf_flush_pop_wait(struct s3fs_flush_event *out);
 long s3fs_ebpf_read_dirty(u64 ino, void __user *uaddr, u64 cap, u64 *size);
 long s3fs_ebpf_read_dirty_range(u64 ino, void __user *uaddr, u64 offset, u64 cap);
 long s3fs_ebpf_dirty_layout(u64 ino, u8 __user *states, u32 cap, u64 *size,

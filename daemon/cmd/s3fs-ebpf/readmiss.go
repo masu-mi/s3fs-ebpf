@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -15,8 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// readMissEvent mirrors `struct s3fs_read_miss_event` in
-// include/s3fs_ebpf_uapi.h. Layout is fixed by kmod's .read handler.
+// readMissEvent is the MISS form of a request (struct s3fs_req_event in
+// include/s3fs_ebpf_uapi.h).
 type readMissEvent struct {
 	Ino    uint64
 	Offset int64
@@ -28,25 +26,10 @@ type readMissEvent struct {
 	RandCount uint32
 }
 
-// readMissEventSize is sizeof(struct s3fs_read_miss_event): ino, offset,
-// count, flags, seq_count, rand_count.
-const readMissEventSize = 32
-
-// decodeReadMissEvent parses the kmod's event (little endian, as read from
-// /dev/s3fs_ebpf).  A buffer shorter than the struct (a pre-v2 kmod sent 24
-// bytes) is refused.
-func decodeReadMissEvent(buf []byte) (readMissEvent, bool) {
-	if len(buf) < readMissEventSize {
-		return readMissEvent{}, false
-	}
-	return readMissEvent{
-		Ino:       binary.LittleEndian.Uint64(buf[0:8]),
-		Offset:    int64(binary.LittleEndian.Uint64(buf[8:16])),
-		Count:     binary.LittleEndian.Uint32(buf[16:20]),
-		Flags:     binary.LittleEndian.Uint32(buf[20:24]),
-		SeqCount:  binary.LittleEndian.Uint32(buf[24:28]),
-		RandCount: binary.LittleEndian.Uint32(buf[28:32]),
-	}, true
+// readMissFromReq is the MISS form of a request read from kmod.
+func readMissFromReq(r *reqEvent) readMissEvent {
+	return readMissEvent{Ino: r.Ino, Offset: r.Offset, Count: r.Count, Flags: r.Flags,
+		SeqCount: r.SeqCount, RandCount: r.RandCount}
 }
 
 // seqRatio returns the fraction of sequential reads [0, 1]; 0 when no read
@@ -186,69 +169,6 @@ const signalVerifyRetries = 3
 // bursty kmod .read events (V-06). 16 workers overlap S3 round-trips
 // without overwhelming the S3 client or the arena allocator.
 const readMissWorkers = 16
-
-// runReadMissLoop reads /dev/s3fs_ebpf and services each event by
-// fetching the object from S3, admitting it, and signaling the
-// blocked kmod .read. Terminates when the device read returns EOF or
-// ctx is done.
-//
-// V-06: goroutine spawning is bounded by a semaphore channel with
-// readMissWorkers slots. A full semaphore back-pressures new events;
-// kmod's per-ino wait queue serializes them so no event is lost.
-func runReadMissLoop(ctx context.Context, devPath string,
-	s3c objstore.Backend) {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[upcall] open %s: %v\n", devPath, err)
-		return
-	}
-	defer f.Close()
-
-	// Cancel-triggered close so the blocked kmod-side .read wakes
-	// with EOF. The 5s deadline is an H-05 observability net: on any
-	// modern kernel .release drops the wait queue, but a stuck kmod
-	// (buggy hook, stale mm ref) could leave Read hanging forever.
-	// Emit an audible warning so bench harnesses and operators can
-	// tell whether shutdown actually completed.
-	loopExit := make(chan struct{})
-	go func() {
-		<-ctx.Done()
-		f.Close()
-		select {
-		case <-loopExit:
-		case <-time.After(readMissShutdownWarn):
-			fmt.Fprintf(os.Stderr,
-				"[upcall] SHUTDOWN WARN: read loop still blocked %s after close — check kmod .release path\n",
-				readMissShutdownWarn)
-		}
-	}()
-	defer close(loopExit)
-
-	sem := make(chan struct{}, readMissWorkers)
-
-	var buf [readMissEventSize]byte
-	for {
-		n, err := f.Read(buf[:])
-		if err != nil {
-			if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
-				fmt.Fprintf(os.Stderr, "[upcall] read: %v\n", err)
-			}
-			return
-		}
-		ev, ok := decodeReadMissEvent(buf[:n])
-		if !ok {
-			fmt.Fprintf(os.Stderr, "[upcall] short read: %d bytes\n", n)
-			continue
-		}
-		fmt.Printf("[upcall] miss ino=%d offset=%d count=%d\n",
-			ev.Ino, ev.Offset, ev.Count)
-		sem <- struct{}{}
-		go func(ev readMissEvent) {
-			defer func() { <-sem }()
-			handleReadMiss(ctx, devPath, s3c, ev)
-		}(ev)
-	}
-}
 
 // PartialAdmitThreshold — files above this size are admitted as a
 // single chunk covering just the miss offset (D-01). Below, we

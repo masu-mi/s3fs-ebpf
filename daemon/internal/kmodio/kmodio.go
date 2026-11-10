@@ -32,7 +32,7 @@ type SignalAdmitArg struct {
 	Flags       uint32
 }
 
-// FlushEvent mirrors `struct s3fs_flush_event` (G-01 layout).
+// FlushEvent is the flush form of a ReqEvent, as the handlers take it.
 // Flags carry S3FS_FLUSH_FLAG_* — currently only FLUSH_WAIT (fsync
 // path) which tells the coalescer to skip debounce.
 type FlushEvent struct {
@@ -64,29 +64,36 @@ type StatsArg struct {
 	Values [StatsMax]uint64
 }
 
-// WBEvent mirrors `struct s3fs_wb_event`: what S3FS_IOC_POP_WB returns, one of
-// a flush, a delete or a rename (Type), in the order kmod queued them.
-type WBEvent struct {
-	Type         uint32 // WBFlush / WBDelete / WBRename
-	Flags        uint32 // flush: FlushFlag*
+// ReqEvent mirrors `struct s3fs_req_event`: what read(2) of /dev/s3fs_ebpf
+// returns, one request per read, in the order kmod queued them. Type is
+// ReqMiss / ReqFlush / ReqDelete / ReqRename; unused fields are 0.
+type ReqEvent struct {
+	Type         uint32
+	Flags        uint32 // MISS: S3FS_MISS_FLAG_*, FLUSH: FlushFlag*
+	Seq          uint64 // flush / delete / rename: kmod-wide order (AC-84); 0 for a miss
 	Ino          uint64
 	ParentIno    uint64 // rename: source dir
 	NewParentIno uint64 // rename: destination dir
 	Size         uint64 // flush
-	Seq          uint64
+	Offset       int64  // miss
+	Count        uint32 // miss
+	SeqCount     uint32 // miss: sequential reads so far
+	RandCount    uint32 // miss: random reads so far
 	NameLen      uint32
 	NewNameLen   uint32
+	_pad         uint32
 	Name         [SyncNameMax + 1]byte
 	NewName      [SyncNameMax + 1]byte
 }
 
 const (
-	WBFlush  = 1
-	WBDelete = 2
-	WBRename = 3
+	ReqMiss   = 1
+	ReqFlush  = 2
+	ReqDelete = 3
+	ReqRename = 4
 )
 
-// DeleteEvent is the delete form of a WBEvent, as the handlers take it.
+// DeleteEvent is the delete form of a ReqEvent, as the handlers take it.
 type DeleteEvent struct {
 	Ino       uint64
 	ParentIno uint64 // G-01
@@ -96,7 +103,7 @@ type DeleteEvent struct {
 	Name      [SyncNameMax + 1]byte
 }
 
-// RenameEvent is the rename form of a WBEvent, as the handlers take it.
+// RenameEvent is the rename form of a ReqEvent, as the handlers take it.
 // Carries both names + their parent inos in one payload so daemon
 // resolves full S3 keys for a cross-dir CopyObject + Delete.
 type RenameEvent struct {
@@ -150,12 +157,10 @@ const (
 	IocPopulatePages  = (1 << 30) | (uint32(unsafe.Sizeof(PopulatePagesArg{})) << 16) | (0xE3 << 8) | 0x0E
 	IocEval           = (0 << 30) | (0 << 16) | (0xE3 << 8) | 0x02 // _IO(0xE3, 0x02)
 	IocSignalAdmit    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x03
-	IocPopWB          = (2 << 30) | (uint32(unsafe.Sizeof(WBEvent{})) << 16) | (0xE3 << 8) | 0x11
 	IocReadDirty      = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyArg{})) << 16) | (0xE3 << 8) | 0x06
 	IocMarkDirty      = (1 << 30) | (uint32(unsafe.Sizeof(MarkDirtyArg{})) << 16) | (0xE3 << 8) | 0x07
 	IocStats          = (3 << 30) | (uint32(unsafe.Sizeof(StatsArg{})) << 16) | (0xE3 << 8) | 0x08
 	IocSignalFlush    = (1 << 30) | (uint32(unsafe.Sizeof(SignalAdmitArg{})) << 16) | (0xE3 << 8) | 0x0A
-	IocPopFlushWait   = (2 << 30) | (uint32(unsafe.Sizeof(FlushEvent{})) << 16) | (0xE3 << 8) | 0x0D
 	IocDirtyLayout    = (3 << 30) | (uint32(unsafe.Sizeof(DirtyLayoutArg{})) << 16) | (0xE3 << 8) | 0x0F
 	IocReadDirtyRange = (3 << 30) | (uint32(unsafe.Sizeof(ReadDirtyRangeArg{})) << 16) | (0xE3 << 8) | 0x10
 	IocSyncEntries    = (1 << 30) | (uint32(unsafe.Sizeof(SyncEntriesArg{})) << 16) | (0xE3 << 8) | 0x04

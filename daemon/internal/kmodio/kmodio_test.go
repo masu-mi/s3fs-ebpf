@@ -48,14 +48,39 @@ func TestIoctlNumbersMatchUAPI(t *testing.T) {
 		{"MARK_DIRTY", IocMarkDirty, 0x4008e307},
 		{"STATS", IocStats, 0xc088e308},
 		{"SIGNAL_FLUSH", IocSignalFlush, 0x4018e30a},
-		{"POP_WB", IocPopWB, 0x8238e311},
-		{"POP_FLUSH_WAIT", IocPopFlushWait, 0x8128e30d},
 		{"POPULATE_PAGES", IocPopulatePages, 0x4020e30e},
 		{"DIRTY_LAYOUT", IocDirtyLayout, 0xc028e30f},
 		{"READ_DIRTY_RANGE", IocReadDirtyRange, 0xc028e310},
 	} {
 		if tt.got != tt.want {
 			t.Errorf("S3FS_IOC_%s = %#x, want %#x", tt.name, tt.got, tt.want)
+		}
+	}
+}
+
+// ReqEvent is what read(2) of /dev/s3fs_ebpf returns: its size and the offsets
+// of the fields the daemon reads must match `struct s3fs_req_event` (C: 592
+// bytes, name at 80, new_name at 336).
+func TestReqEventLayout(t *testing.T) {
+	var e ReqEvent
+	if got := unsafe.Sizeof(e); got != 592 {
+		t.Errorf("sizeof(ReqEvent) = %d, want 592", got)
+	}
+	for _, f := range []struct {
+		name      string
+		got, want uintptr
+	}{
+		{"Seq", unsafe.Offsetof(e.Seq), 8},
+		{"Ino", unsafe.Offsetof(e.Ino), 16},
+		{"Size", unsafe.Offsetof(e.Size), 40},
+		{"Offset", unsafe.Offsetof(e.Offset), 48},
+		{"Count", unsafe.Offsetof(e.Count), 56},
+		{"NameLen", unsafe.Offsetof(e.NameLen), 68},
+		{"Name", unsafe.Offsetof(e.Name), 80},
+		{"NewName", unsafe.Offsetof(e.NewName), 336},
+	} {
+		if f.got != f.want {
+			t.Errorf("offsetof(%s) = %d, want %d", f.name, f.got, f.want)
 		}
 	}
 }

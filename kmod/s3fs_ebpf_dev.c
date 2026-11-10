@@ -140,45 +140,6 @@ out_free_ubuf:
 }
 
 /*
- * S3FS_IOC_POP_WB — daemon pulls the oldest write-back event (flush, delete or
- * rename, one FIFO).
- *
- * Returns -EAGAIN if the queue is empty. Non-blocking; the daemon polls this
- * on a ticker (typically 100ms) and drains all pending events per tick.
- */
-static long s3fs_dev_pop_wb(void __user *uarg)
-{
-	struct s3fs_wb_event *ev = kmalloc(sizeof(*ev), GFP_KERNEL);
-	long err;
-
-	if (!ev)
-		return -ENOMEM;
-	err = s3fs_ebpf_wb_pop(ev);
-	if (!err && copy_to_user(uarg, ev, sizeof(*ev)))
-		err = -EFAULT;
-	kfree(ev);
-	return err;
-}
-
-/*
- * S3FS_IOC_POP_FLUSH_WAIT — blocking variant for WAIT-flagged flush
- * events (S-08). Returns 0 with event copied out; -EAGAIN on timeout
- * (200 ms); -EINTR on signal; -ENODEV on shutdown.
- */
-static long s3fs_dev_pop_flush_wait(void __user *uarg)
-{
-	struct s3fs_flush_event ev;
-	int err;
-
-	err = s3fs_ebpf_flush_pop_wait(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
-}
-
-/*
  * S3FS_IOC_READ_DIRTY — daemon reads the current scratch bytes for
  * `ino` into its own buffer. Returns 0 on success and writes
  * `out_bytes` back; returns -EAGAIN when the ino is unknown (raced
@@ -261,10 +222,6 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 		return s3fs_dev_signal_flush(uarg);
 	case S3FS_IOC_SYNC_ENTRIES:
 		return s3fs_dev_sync_entries(uarg);
-	case S3FS_IOC_POP_WB:
-		return s3fs_dev_pop_wb(uarg);
-	case S3FS_IOC_POP_FLUSH_WAIT:
-		return s3fs_dev_pop_flush_wait(uarg);
 	case S3FS_IOC_READ_DIRTY:
 		return s3fs_dev_read_dirty(uarg);
 	case S3FS_IOC_READ_DIRTY_RANGE:
@@ -335,31 +292,32 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 }
 
 /*
- * .read on /dev/s3fs_ebpf drains read-miss events one at a time.
- * Each read call must provide a buffer at least sizeof(event) bytes;
- * short buffers get -EINVAL rather than partial events (event
- * atomicity is easier to reason about than framing over a stream).
+ * .read on /dev/s3fs_ebpf hands the daemon the oldest request (reqq) one at a
+ * time.  Each read call must provide a buffer at least sizeof(struct
+ * s3fs_req_event) bytes; short buffers get -EINVAL rather than partial events
+ * (event atomicity is easier to reason about than framing over a stream).
  */
 static ssize_t s3fs_dev_read(struct file *filp, char __user *buf,
 			     size_t count, loff_t *ppos)
 {
-	struct s3fs_read_miss_event ev;
+	struct s3fs_req_event *ev;
 	ssize_t n;
 
-	if (count < sizeof(ev))
+	if (count < sizeof(*ev))
 		return -EINVAL;
-
-	n = s3fs_read_miss_dequeue(&ev, filp->f_flags & O_NONBLOCK);
-	if (n < 0)
-		return n;
-	if (copy_to_user(buf, &ev, sizeof(ev)))
-		return -EFAULT;
-	return sizeof(ev);
+	ev = kmalloc(sizeof(*ev), GFP_KERNEL);
+	if (!ev)
+		return -ENOMEM;
+	n = s3fs_req_dequeue(ev, filp->f_flags & O_NONBLOCK);
+	if (n >= 0 && copy_to_user(buf, ev, sizeof(*ev)))
+		n = -EFAULT;
+	kfree(ev);
+	return n;
 }
 
 static __poll_t s3fs_dev_poll(struct file *filp, struct poll_table_struct *pt)
 {
-	return s3fs_read_miss_poll(filp, pt);
+	return s3fs_req_poll(filp, pt);
 }
 
 /* AC-43: opening the device arms the read-miss upcall path (a daemon is
