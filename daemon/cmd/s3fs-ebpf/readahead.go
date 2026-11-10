@@ -17,12 +17,14 @@ import (
 // parallel and populates them without a pending (nobody waits for them): when the
 // reader arrives, the chunk is there and raises no miss.
 //
-// The window is capped at a quarter of the capacity (in chunks), so the chunks
-// ahead cannot push out the one being read; a chunk the capacity pass sheds anyway
+// The window is at most half the capacity (in chunks) minus the chunk being read
+// (32 MiB: 3 chunks; measured 2: 221 ms, 3: 200 ms, 4 and 6: no better, 100 MiB cold
+// read, no read-ahead 266 ms, unbounded cache 165 ms).  One range GET for the whole
+// window was slower (255 ms): the reader then waits for all of it; a chunk the capacity pass sheds anyway
 // costs one more miss, as before.
 
 // readaheadMaxChunks is the upper bound of the window.
-const readaheadMaxChunks = 3
+const readaheadMaxChunks = 4
 
 // readaheadState records, per ino, the first offset not yet requested.
 type readaheadState struct {
@@ -70,7 +72,10 @@ func readaheadWindow(capacity int64) int {
 	if capacity <= 0 {
 		return 0
 	}
-	k := int(capacity / partialAdmitChunk / 4)
+	k := int(capacity/partialAdmitChunk/2) - 1
+	if k < 0 {
+		k = 0
+	}
 	if k > readaheadMaxChunks {
 		k = readaheadMaxChunks
 	}

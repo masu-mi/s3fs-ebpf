@@ -251,7 +251,7 @@ step_E() {
 	local be mp t ms rep
 	for rep in $(seq "$E_REPS"); do for be in $BACKENDS; do
 		sync; sudo sysctl -q -w vm.drop_caches=3
-		start_be "$be" "E-$be.log" --softcap=20000
+		start_be "$be" "E-$be.log" --softcap=20000 ${E_EXTRA:-}
 		sync; sudo sysctl -q -w vm.drop_caches=3
 		mp=$BENCH_MP
 		local ph
