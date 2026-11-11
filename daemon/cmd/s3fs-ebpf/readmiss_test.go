@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
@@ -36,6 +37,7 @@ func (g *getBackend) GetRange(_ context.Context, key string, off, size int64) ([
 
 // upcall captures what the handler sent to the kmod.
 type upcall struct {
+	mu        sync.Mutex // populated is also written by the read-ahead goroutines
 	populated []struct {
 		off int64
 		n   int
@@ -53,6 +55,8 @@ func fakeUpcall(t *testing.T) *upcall {
 	origPop, origSig, origFlags := populatePagesFn, signalAdmitFn, signalAdmitFlagsFn
 	origCap := capacityBytesFn
 	populatePagesFn = func(_ string, _ uint64, off int64, data []byte) error {
+		u.mu.Lock()
+		defer u.mu.Unlock()
 		u.populated = append(u.populated, struct {
 			off int64
 			n   int

@@ -1,0 +1,12 @@
+new r1 unbounded: 136ms/up2 133ms/up2 132ms/up2 134ms/up2 140ms/up2
+new r1 cap32: 158ms/up13 148ms/up15 143ms/up15 143ms/up17 163ms/up13
+base r1 unbounded: 139ms/up2 137ms/up2 136ms/up2 137ms/up2 137ms/up2
+base r1 cap32: 184ms/up19 179ms/up23 171ms/up19 176ms/up20 174ms/up20
+new r2 unbounded: 142ms/up2 135ms/up2 139ms/up2 138ms/up2 135ms/up2
+new r2 cap32: 142ms/up18 154ms/up15 148ms/up18 157ms/up16 157ms/up14
+base r2 unbounded: 144ms/up2 132ms/up3 134ms/up2 128ms/up2 131ms/up2
+base r2 cap32: 170ms/up18 169ms/up20 164ms/up18 163ms/up18 177ms/up20
+new r3 unbounded: 135ms/up2 129ms/up2 134ms/up2 130ms/up2 132ms/up2
+new r3 cap32: 141ms/up16 150ms/up14 149ms/up13 149ms/up15 150ms/up16
+base r3 unbounded: 137ms/up2 132ms/up2 130ms/up2 139ms/up2 137ms/up2
+base r3 cap32: 173ms/up17 163ms/up19 179ms/up16 167ms/up19 171ms/up18

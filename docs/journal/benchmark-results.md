@@ -2829,3 +2829,31 @@ F (64 jobs、psync、bs=1、5 s、中央値の IOPS (M)): `ebpf-pcache` は基�
 - 出ているときは writeback の急増と io pressure の上昇が重なる。ディスクの I/O 待ちの揺れが有力だが、**原因は確定していない**。仮想ディスクの host 側の揺れか、ゲストの writeback か、メモリ reclaim か、分けられていない。
 - 対策 (測定の側): 書き込みの項目 (B / C / D) は、run の**中央値ではなく、揺れの少ない run を選ぶか、交互に 5 組以上測る** (§18.60 のやり方)。遅い区間が連続するので、n=10 の 1 run の中央値は区間に乗ると丸ごとずれる。
 - 未実施: `vm.dirty_*` を変えた比較、ゲストの disk の `iostat -x` (await / util) の記録、host 側の確認、メモリの少ない (8 GB) VM で page cache が足りるかの確認。
+
+### 18.62 AC-89: 容量 32 MiB の 100 MiB cold read、先読みの窓が 4 chunk に 1 回しか補充されていなかった (2026-11-11)
+
+§18.56 / §18.58 は「GET のまとめ方ではこれ以上縮まらない」で止まっていた。今回は構造を調べ直し、先読みの**補充の契機**に原因を見つけた。生データと script: `docs/journal/data/ac89-readahead-20261111/` (`ac89.sh` `chainAC.sh` `ac89-chain.log`)。
+
+**条件**: `6.12.0-061200-generic`、KVM 6 CPU、ローカル MinIO、100 MiB の object、`--cache-capacity=32 MiB`、cold read は `drop_caches=3` の後の `cat` (5 回 × 3 組)。基準は `6b66b70`。haltpoll は触っていない。
+
+**原因** (`handleReadMiss`): 先読み (`maybeReadahead`) は、miss の chunk **自分の GET が終わった後**にだけ呼ばれていた。さらに、先読み済みで飛行中の chunk を待つだけの miss (`readaheadWait` の分岐) は、先読みを呼ばずに return する。つまり窓は「本当の miss」のときにしか補充されない。窓が 3 chunk なので、4 chunk に 1 回、先読みのない状態で GET を 1 本ずつ直列に払い、その後に 3 chunk を並列に取る、という鋸歯になる。upcall は 25 chunk に対して 18〜20 回。
+
+**変更**: `maybeReadahead` を、自分の chunk の GET を待たずに、(`readaheadWait` の前で) 呼ぶ。待つだけの miss でも窓が 1 chunk 進む。
+
+**値** (cold read、ms、中央値。n=5 を 3 組、新・基準を交互)
+
+| | 基準 | 新 | 無制限 (同じ組) |
+|---|---:|---:|---:|
+| 容量 32 MiB | 174 / 169 / 171 | **148 / 154 / 149** | 135〜138 |
+
+- 無制限に対する比: 基準 +25〜28% → 新 **+8〜11%**。upcall は 18〜20 → 13〜17 回。
+- 窓の幅を振った (1〜6 chunk、n=5 × 2): 1 chunk 160〜171、2 chunk 145〜162、**3 chunk 135〜161 (中央値 約 145)**、4 chunk 148〜161、5〜6 chunk は 138〜183 で不安定 (先に evict される)。現行の式 (容量 / 4 MiB / 2 − 1 = 3) が最適に近い。式は変えない。
+- 残る +8〜11%: 無制限は 4 本の並列 range GET (handler 約 117 ms の中で 2 upcall)、容量付きは 4 MiB ごとに upcall と populate が入る。これ以上は未切り分け。
+- **GET の下限 (MinIO から 100 MiB を最短で取る時間) は測れていない。** 並列 range GET を署名付きの curl で測ろうとしたが、シェルの制約で取れなかった。
+
+**検証**
+- `go test -race ./cmd/...` PASS。新しい `TestReadMissKeepsTheReadaheadWindowFull` は、先読み済みの chunk (飛行中) への miss で窓が進むことを見る。**修正前のコードでは FAIL** することを確認した。
+- `make test-regression` は全件 (33 件) PASS。dmesg の BUG / WARNING なし。
+- `make check-invariants` OK。
+
+**同じ仕事か**: S3 への GET の本数は数えていない。先読みの本数 (窓の幅) と chunk の大きさは変えていないので、同じはずだが、確認はしていない。

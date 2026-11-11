@@ -123,6 +123,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`journal/data/v2-phase4-20261111/`](journal/data/v2-phase4-20261111/) | `benchmark-results.md` §18.59 の生データ: #63 (Phase 4) の前後 (`a60bdcb` と `852f666`) の A〜F、基準 → 新 → 新 → 基準 |
 | [`journal/data/c10-parallel-20261111/`](journal/data/c10-parallel-20261111/) | `benchmark-results.md` §18.60 の生データ: C の 10 MiB (load-for-write の並列化 + 中サイズの並列 PUT)、C と B の前後 (`436749d` と `d547f74`) |
 | [`journal/data/burst-analysis-20261111/`](journal/data/burst-analysis-20261111/) | `benchmark-results.md` §18.61 の生データ: 書き込みの遅い区間 (揺れ) の切り分け。MinIO への直接 PUT、削除の直後、fs 経由 (ebpf / fuse) |
+| [`journal/data/ac89-readahead-20261111/`](journal/data/ac89-readahead-20261111/) | `benchmark-results.md` §18.62 の生データ: AC-89 (容量 32 MiB の 100 MiB cold read、先読みの窓の補充の修正) の前後 |
 | [`journal/data/open-check-remeasure-20261104/`](journal/data/open-check-remeasure-20261104/) | `benchmark-results.md` §18.51 の生データ: open の存在確認 (`open_check`) 前後の A、silo への GET / HEAD 数 |
 | [`journal/data/open-check-cached-20261104/`](journal/data/open-check-cached-20261104/) | `benchmark-results.md` §18.52 の生データ: キャッシュあり同士 (fuse-cache / fuse-diskcache 対 ebpf-pcache / pcachedrop) の A を `open_check` 0/1 で |
 | [`design/file-lifecycle-state-machine.md`](design/file-lifecycle-state-machine.md) | ファイルの状態遷移図 (kmod / daemon / S3) と、TLA+ (`specs/tla/FileLifecycle.tla`) の検証結果 (反例 3 件、うち 1 件を実機で再現) |
