@@ -97,8 +97,13 @@ func (d *orderedDrain) run() {
 	}
 }
 
+// reqBarrier is a daemon-local request type (not kmod's): when the executor
+// reaches it, every request queued before it has been handled, so seq is applied.
+const reqBarrier = 0xFFFF
+
 func (d *orderedDrain) handle(ev *reqEvent) {
 	switch ev.Type {
+	case reqBarrier:
 	case kmodio.ReqFlush:
 		fe := reqToFlush(ev)
 		trackFlush(ev.Ino, ev.Seq)

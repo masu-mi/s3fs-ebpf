@@ -81,6 +81,7 @@ func runReqLoop(ctx context.Context, devPath string, s3c objstore.Backend) {
 	}()
 
 	sem := make(chan struct{}, readMissWorkers)
+	adoptKmodSeq(ctx, devPath, s3c, exec, sem)
 	var ev reqEvent
 	buf := unsafe.Slice((*byte)(unsafe.Pointer(&ev)), unsafe.Sizeof(ev))
 	for {
@@ -113,6 +114,44 @@ func runReqLoop(ctx context.Context, devPath string, s3c objstore.Backend) {
 	} else if n := drained.Load(); n > 0 {
 		fmt.Fprintf(os.Stderr, "[flush] shutdown drained %d event(s) from kmod queues\n", n)
 	}
+}
+
+// adoptKmodSeq gives the executor its starting point. kmod's event seq keeps
+// counting across daemon restarts, and the requests an earlier daemon already
+// handled never reach this one, so `handled` would stay below kmod's seq and every
+// sync would wait out appliedWaitBudget (5 s) for requests that do not exist.
+// Read C first, then read what kmod still queues (non-blocking): every request
+// with seq <= C is now either dispatched or gone, so a barrier at C, queued behind
+// the dispatched ones, makes `handled` reach C once those are done.
+func adoptKmodSeq(ctx context.Context, devPath string, s3c objstore.Backend,
+	exec *orderedDrain, sem chan struct{}) {
+	c, err := kmodEventSeq(devPath)
+	if err != nil || c == 0 {
+		return
+	}
+	fd, err := unix.Open(devPath, unix.O_RDWR|unix.O_NONBLOCK, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[events] adopt seq: open %s: %v\n", devPath, err)
+		return
+	}
+	defer unix.Close(fd)
+	var ev reqEvent
+	buf := unsafe.Slice((*byte)(unsafe.Pointer(&ev)), unsafe.Sizeof(ev))
+	for {
+		n, err := unix.Read(fd, buf)
+		if err != nil {
+			if !errors.Is(err, unix.EAGAIN) {
+				fmt.Fprintf(os.Stderr, "[events] adopt seq: read: %v\n", err)
+				return // no barrier: appliedSeqFor falls back to the conservative value
+			}
+			break
+		}
+		if n != len(buf) {
+			return
+		}
+		dispatchReq(ctx, devPath, s3c, exec, sem, &ev)
+	}
+	exec.push(&reqEvent{Type: reqBarrier, Seq: c})
 }
 
 // dispatchReq hands one request to its handler. It is called in kmod's order and

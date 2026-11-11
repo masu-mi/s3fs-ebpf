@@ -241,3 +241,22 @@ func TestFlushBarrierPredicates(t *testing.T) {
 		}
 	}
 }
+
+// A daemon that starts after kmod's seq has already advanced (a restart) must not
+// leave `handled` at 0: the barrier brings it to kmod's seq once what was queued
+// before it is done, and not earlier.
+func TestBarrierAdoptsKmodSeqAfterEarlierEvents(t *testing.T) {
+	resetFlushTracking(t)
+	var log []string
+	d := execLog(&log)
+	runAll(d, req(kmodio.ReqFlush, 21), req(reqBarrier, 23))
+	if got := d.handled.Load(); got != 23 {
+		t.Fatalf("handled = %d, want 23", got)
+	}
+	if len(log) != 1 || log[0] != "flush#21" {
+		t.Fatalf("barrier must not reach a handler; log = %v", log)
+	}
+	if !d.waitHandled(23, time.Millisecond) {
+		t.Fatal("waitHandled(23) should return at once after the barrier")
+	}
+}
