@@ -2810,3 +2810,22 @@ F (64 jobs、psync、bs=1、5 s、中央値の IOPS (M)): `ebpf-pcache` は基�
 **同じ仕事か**: S3 への GET / PUT の数は**数えていない**。変更前後で GET の本数 (chunk ごと) は同じはずだが、PUT は 1 回 → 2〜4 part + CompleteMultipartUpload に増えた (MinIO 側のリクエスト数は増える)。s3fs-fuse の PUT の方式 (multipart にするか) は確かめていない。
 
 **測っていないこと**: kick の先読み数 (8) と並列 part 数 (4) を振った値、`putParallelMin` を 2 × 5 MiB より下げた値、実 S3 (遠い遅延) での並列 PUT の効果、`C` の `partial_modify_min` (16 MiB) を下げる案の測定。
+
+### 18.61 「MinIO が遅い時間帯が連続する」揺れの切り分け (2026-11-11、途中)
+
+§18.59 / §18.60 の B / C / D で、同じ run の中に 1 秒〜数十秒の遅い区間が連続して出る (fuse-cache の 100 MiB で 28 秒、ebpf の 100 MiB で 4 秒など)。基準にも新にも、fuse にも ebpf にも出る。原因を探した。生データ: `docs/journal/data/burst-analysis-20261111/`。
+
+**条件**: KVM 6 CPU、RAM 8 GB、`6.12.0-061200-generic`、ローカル MinIO (silo)、ディスクは仮想の `sda` (140 GB、`ROTA=1`)。
+
+**やったことと結果**
+1. fs を通さず `mc pipe` で 100 MiB を 40 回連続で PUT: 435〜475 ms で安定、1 回だけ 653 ms。揺れなし (dirty は 100 → 1 MB と減る)。
+2. 2.4 GiB の object を `mc rm --recursive` で消した直後に 100 MiB を 30 回 PUT (2 回): 437〜506 ms。揺れなし。**MinIO の削除の後処理が遅さの原因、という仮説は外れ**。
+3. fs を通して `dd bs=1M conv=fsync` で 100 MiB を 40 回 (ebpf-pcache): 205〜1027 ms。反復 9 だけ 1027 ms で、そのときの writeback が 83 MB に跳び、io pressure (`some`) が 2.6 → 11% に上がり、vmstat の `wa` は 12〜35%。**後半は 250 → 約 495 ms と単調に遅くなる傾向があった**が、原因は未確認 (fuse で同じ傾向かは取れていない)。
+4. 同じ負荷を fuse-cache で: 反復 7〜9 が 1856 / 2672 / 1703 ms、他は 361〜431 ms。**ebpf と同じように、数反復の連続した遅い区間が出る**。反復 22 の途中で進まなくなり、40 まで完走していない (原因は未確認。s3fs の disk cache dir は約 2.2 GB で、ホストのディスクの空きは 18 GB あった)。
+5. 環境の状態: `/proc/pressure/io` の累計が大きい (`some` の avg300 が 3〜8%、total 約 550 秒)。`pgsteal_direct` 約 120 万、`allocstall_normal` 約 5,700 (メモリの reclaim も起きている)。MinIO は 17 万 object (主に sync-bench の bucket) を持つ。
+
+**読み**
+- 遅い区間は **fs の種類にも変更の有無にも依らず**、**書き込みの負荷を fs 経由で連続して流したときに**出る。MinIO への直接の PUT では 70 回の中に出なかった。
+- 出ているときは writeback の急増と io pressure の上昇が重なる。ディスクの I/O 待ちの揺れが有力だが、**原因は確定していない**。仮想ディスクの host 側の揺れか、ゲストの writeback か、メモリ reclaim か、分けられていない。
+- 対策 (測定の側): 書き込みの項目 (B / C / D) は、run の**中央値ではなく、揺れの少ない run を選ぶか、交互に 5 組以上測る** (§18.60 のやり方)。遅い区間が連続するので、n=10 の 1 run の中央値は区間に乗ると丸ごとずれる。
+- 未実施: `vm.dirty_*` を変えた比較、ゲストの disk の `iostat -x` (await / util) の記録、host 側の確認、メモリの少ない (8 GB) VM で page cache が足りるかの確認。
