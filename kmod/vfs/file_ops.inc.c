@@ -264,8 +264,8 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 		if (!s3fs_mop_needs_data(&op, ci))
 			continue;
 		for (;;) {
-			struct s3fs_pending *p;
-			bool have, bound;
+			struct s3fs_inflight *p;
+			bool have, bound, created;
 			long rem = 1;
 
 			err = 0;
@@ -281,7 +281,8 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 				err = -EIO; /* no daemon: cannot fetch the rest */
 				p = NULL;
 			} else {
-				p = pending_get_or_create(inode->i_ino, cs);
+				p = inflight_get_or_create(S3FS_REQ_MISS, inode->i_ino, cs,
+							   S3FS_MISS_FLAG_FOR_WRITE, &created);
 				/* Count = what the chunk must hold up to i_size.
 				 * The daemon's size for the object can be older
 				 * (appended + flushed, entry not re-synced); with
@@ -290,9 +291,9 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 				u64 want = min_t(u64, S3FS_CHUNK_SIZE,
 						 isz > cs ? isz - cs : 1);
 
-				err = p ? miss_enqueue(inode->i_ino, cs, want,
-						       S3FS_MISS_FLAG_FOR_WRITE |
-						       (bound ? S3FS_MISS_FLAG_PINNED : 0), NULL)
+				err = p ? inflight_queue_miss(p, created, cs, want,
+							      S3FS_MISS_FLAG_FOR_WRITE |
+							      (bound ? S3FS_MISS_FLAG_PINNED : 0), NULL)
 					: -ENOMEM;
 			}
 			if (!err) {
@@ -302,9 +303,11 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 					err = (int)rem;	/* -ERESTARTSYS */
 				else if (rem > 0)
 					err = p->err;	/* daemon-side failure */
+				else
+					inflight_unhash(p);	/* nobody answered: retry queues anew */
 			}
 			if (p)
-				pending_put(p);
+				inflight_put(p);
 			if (err == -ERESTARTSYS || err == -EINTR) {
 				s3fs_mpin_release(fd, mp);
 				return err;

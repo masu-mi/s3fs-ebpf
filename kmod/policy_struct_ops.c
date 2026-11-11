@@ -27,6 +27,13 @@
  * synchronize_rcu(). */
 static struct s3fs_policy_ops __rcu *s3fs_policy_active;
 
+/* AC-77: true while the active policy declares S3FS_POLICY_F_NO_ON_HIT (validate
+ * guarantees it has no on_hit).  .read_iter reads it with READ_ONCE to skip the
+ * hit signal.  Written under reg / update / unreg only; a read that races a swap
+ * sees either value, which is fine: the signal is advisory. */
+bool s3fs_policy_skip_hit __read_mostly;
+
+
 /*
  * Public entry point for kmod call sites. Returns the vtable's
  * decision when a policy is loaded, else the passed default. Kept
@@ -271,6 +278,7 @@ static int s3fs_policy_reg(void *kdata, struct bpf_link *link)
 	struct s3fs_policy_ops *ops = kdata;
 
 	rcu_assign_pointer(s3fs_policy_active, ops);
+	WRITE_ONCE(s3fs_policy_skip_hit, !!(ops->flags & S3FS_POLICY_F_NO_ON_HIT));
 	pr_info("s3fs_ebpf: policy struct_ops registered (ops=%p name=%s flags=0x%x)\n",
 		ops, ops->name[0] ? ops->name : "-", ops->flags);
 	return 0;
@@ -287,6 +295,7 @@ static void s3fs_policy_unreg(void *kdata, struct bpf_link *link)
 	cur = rcu_dereference_protected(s3fs_policy_active, 1);
 	if (cur == ops) {
 		rcu_assign_pointer(s3fs_policy_active, NULL);
+		WRITE_ONCE(s3fs_policy_skip_hit, false);
 		synchronize_rcu();
 		pr_info("s3fs_ebpf: policy struct_ops unregistered (was active)\n");
 	} else {
@@ -304,6 +313,7 @@ static int s3fs_policy_update(void *kdata, void *old_kdata,
 	struct s3fs_policy_ops *ops = kdata;
 
 	rcu_assign_pointer(s3fs_policy_active, ops);
+	WRITE_ONCE(s3fs_policy_skip_hit, !!(ops->flags & S3FS_POLICY_F_NO_ON_HIT));
 	synchronize_rcu();
 	pr_info("s3fs_ebpf: policy struct_ops updated (hot swap) name=%s flags=0x%x\n",
 		ops->name[0] ? ops->name : "-", ops->flags);

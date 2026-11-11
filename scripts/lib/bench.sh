@@ -118,6 +118,9 @@ ebpf_mount() {
 	local mp=$1
 	lsmod | grep -q "^${S3FS_KMOD_NAME} " || sudo insmod "$S3FS_KMOD"
 	ebpf_hit_params
+	# The kmod default is open_check=1 (AC-78); tests and benches count upcalls
+	# and HEADs, so they ask for it explicitly (BENCH_OPEN_CHECK=1).
+	ebpf_open_check "${BENCH_OPEN_CHECK:-0}"
 	mountpoint -q "$mp" || { sudo mkdir -p "$mp"; sudo mount -t s3fs_ebpf none "$mp"; }
 }
 

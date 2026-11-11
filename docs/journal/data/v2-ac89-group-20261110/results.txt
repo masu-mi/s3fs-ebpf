@@ -1,0 +1,6 @@
+# 100 MiB cold read (ms), 5 runs per row, 2 rounds, drop_caches=3 before each, open_check=0, window = 3
+# S3FS_RA_GROUP = how many contiguous read-ahead chunks one range GET fetches (experiment, reverted)
+unbounded (cap=0)    141 133 134 131 120   |  130 119 123 117 122
+cap 32 MiB, group 1  180 175 175 181 175   |  165 159 154 183 161     <- the code as merged
+cap 32 MiB, group 2  195 180 174 176 174   |  190 187 184 198 195
+cap 32 MiB, group 3  202 197 196 202 199   |  233 221 233 233 232

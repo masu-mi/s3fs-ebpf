@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -15,8 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// readMissEvent mirrors `struct s3fs_read_miss_event` in
-// include/s3fs_ebpf_uapi.h. Layout is fixed by kmod's .read handler.
+// readMissEvent is the MISS form of a request (struct s3fs_req_event in
+// include/s3fs_ebpf_uapi.h).
 type readMissEvent struct {
 	Ino    uint64
 	Offset int64
@@ -26,27 +24,14 @@ type readMissEvent struct {
 	// kmod in .read_iter (what the read_iter fentry used to keep in a BPF map).
 	SeqCount  uint32
 	RandCount uint32
+	// Seq identifies the request (kmod's inflight record); DONE echoes it.
+	Seq uint64
 }
 
-// readMissEventSize is sizeof(struct s3fs_read_miss_event): ino, offset,
-// count, flags, seq_count, rand_count.
-const readMissEventSize = 32
-
-// decodeReadMissEvent parses the kmod's event (little endian, as read from
-// /dev/s3fs_ebpf).  A buffer shorter than the struct (a pre-v2 kmod sent 24
-// bytes) is refused.
-func decodeReadMissEvent(buf []byte) (readMissEvent, bool) {
-	if len(buf) < readMissEventSize {
-		return readMissEvent{}, false
-	}
-	return readMissEvent{
-		Ino:       binary.LittleEndian.Uint64(buf[0:8]),
-		Offset:    int64(binary.LittleEndian.Uint64(buf[8:16])),
-		Count:     binary.LittleEndian.Uint32(buf[16:20]),
-		Flags:     binary.LittleEndian.Uint32(buf[20:24]),
-		SeqCount:  binary.LittleEndian.Uint32(buf[24:28]),
-		RandCount: binary.LittleEndian.Uint32(buf[28:32]),
-	}, true
+// readMissFromReq is the MISS form of a request read from kmod.
+func readMissFromReq(r *reqEvent) readMissEvent {
+	return readMissEvent{Ino: r.Ino, Offset: r.Offset, Count: r.Count, Flags: r.Flags,
+		SeqCount: r.SeqCount, RandCount: r.RandCount, Seq: r.Seq}
 }
 
 // seqRatio returns the fraction of sequential reads [0, 1]; 0 when no read
@@ -81,7 +66,7 @@ const openCheckKey int64 = -1 // uint64(openCheckKey) is all ones
 // as an upcall nor observed in the miss latency histogram.
 func handleOpenCheck(ctx context.Context, devPath string, s3c objstore.Backend, ev readMissEvent) {
 	metrics.Global.OpenChecks.Add(1)
-	signal := func(code int32) { _ = signalAdmitFn(devPath, ev.Ino, openCheckKey, code) }
+	signal := func(code int32) { _ = signalAdmitFn(devPath, ev.Ino, openCheckKey, ev.Seq, code) }
 	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
 		metrics.Global.OpenCheckMissing.Add(1)
@@ -118,7 +103,7 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d load-for-write: "+format+"\n",
 			append([]any{ev.Ino}, a...)...)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, code)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, code)
 	}
 	entry := fpebpf.LookupByIno(ev.Ino)
 	if entry == nil {
@@ -165,12 +150,12 @@ func handleLoadForWrite(ctx context.Context, devPath string, s3c objstore.Backen
 		}
 		fmt.Printf("[upcall] ino=%d %s load-for-write [%d,%d)\n",
 			ev.Ino, entry.Name, missChunkOffset, missChunkOffset+int64(len(body)))
-		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0, s3fsSignalVerifyPopulated)
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0, s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return // woken, or nobody is waiting (ENOENT)
 		}
 		if attempt >= signalVerifyRetries {
-			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0)
 			return
 		}
 		metrics.Global.ReadMissRepopulates.Add(1)
@@ -186,69 +171,6 @@ const signalVerifyRetries = 3
 // bursty kmod .read events (V-06). 16 workers overlap S3 round-trips
 // without overwhelming the S3 client or the arena allocator.
 const readMissWorkers = 16
-
-// runReadMissLoop reads /dev/s3fs_ebpf and services each event by
-// fetching the object from S3, admitting it, and signaling the
-// blocked kmod .read. Terminates when the device read returns EOF or
-// ctx is done.
-//
-// V-06: goroutine spawning is bounded by a semaphore channel with
-// readMissWorkers slots. A full semaphore back-pressures new events;
-// kmod's per-ino wait queue serializes them so no event is lost.
-func runReadMissLoop(ctx context.Context, devPath string,
-	s3c objstore.Backend) {
-	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[upcall] open %s: %v\n", devPath, err)
-		return
-	}
-	defer f.Close()
-
-	// Cancel-triggered close so the blocked kmod-side .read wakes
-	// with EOF. The 5s deadline is an H-05 observability net: on any
-	// modern kernel .release drops the wait queue, but a stuck kmod
-	// (buggy hook, stale mm ref) could leave Read hanging forever.
-	// Emit an audible warning so bench harnesses and operators can
-	// tell whether shutdown actually completed.
-	loopExit := make(chan struct{})
-	go func() {
-		<-ctx.Done()
-		f.Close()
-		select {
-		case <-loopExit:
-		case <-time.After(readMissShutdownWarn):
-			fmt.Fprintf(os.Stderr,
-				"[upcall] SHUTDOWN WARN: read loop still blocked %s after close — check kmod .release path\n",
-				readMissShutdownWarn)
-		}
-	}()
-	defer close(loopExit)
-
-	sem := make(chan struct{}, readMissWorkers)
-
-	var buf [readMissEventSize]byte
-	for {
-		n, err := f.Read(buf[:])
-		if err != nil {
-			if !errors.Is(err, io.EOF) && !errors.Is(err, os.ErrClosed) {
-				fmt.Fprintf(os.Stderr, "[upcall] read: %v\n", err)
-			}
-			return
-		}
-		ev, ok := decodeReadMissEvent(buf[:n])
-		if !ok {
-			fmt.Fprintf(os.Stderr, "[upcall] short read: %d bytes\n", n)
-			continue
-		}
-		fmt.Printf("[upcall] miss ino=%d offset=%d count=%d\n",
-			ev.Ino, ev.Offset, ev.Count)
-		sem <- struct{}{}
-		go func(ev readMissEvent) {
-			defer func() { <-sem }()
-			handleReadMiss(ctx, devPath, s3c, ev)
-		}(ev)
-	}
-}
 
 // PartialAdmitThreshold — files above this size are admitted as a
 // single chunk covering just the miss offset (D-01). Below, we
@@ -315,14 +237,14 @@ func handleReadMiss(ctx context.Context, devPath string,
 	if entry == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d unknown — signaling ENOENT\n", ev.Ino)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -2 /* -ENOENT */)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -2 /* -ENOENT */)
 		return
 	}
 	if s3c == nil {
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d %s: no S3 backend — signaling ENODATA\n",
 			ev.Ino, entry.Name)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -61 /* -ENODATA */)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -61 /* -ENODATA */)
 		return
 	}
 	// AC-68: after this miss is served, read ahead the next siblings the
@@ -361,7 +283,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 	if !useFullAdmit && readaheadWait(ctx, ev.Ino, missChunkOffset) {
 		// AC-89: the chunk was being read ahead; it is in, so just wake the
 		// reader (EAGAIN: it was shed meanwhile, fetch it below).
-		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0, s3fsSignalVerifyPopulated)
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0, s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return
 		}
@@ -395,7 +317,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 		fmt.Fprintf(os.Stderr, "[upcall] ino=%d s3://%s get: %v\n",
 			ev.Ino, entry.S3Key, err)
 		metrics.Global.ReadMissErrors.Add(1)
-		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
+		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -5 /* -EIO */)
 		return
 	}
 	if !useFullAdmit {
@@ -417,7 +339,7 @@ func handleReadMiss(ctx context.Context, devPath string,
 			if err := populatePagesFn(devPath, ev.Ino, off, rem[:n]); err != nil {
 				fmt.Fprintf(os.Stderr, "[upcall] ino=%d populate pages: %v\n", ev.Ino, err)
 				metrics.Global.ReadMissErrors.Add(1)
-				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, -5 /* -EIO */)
+				_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -5 /* -EIO */)
 				return
 			}
 			off += int64(n)
@@ -431,15 +353,15 @@ func handleReadMiss(ctx context.Context, devPath string,
 		// cached.  Concurrent handlers for one ino and the capacity
 		// pass can evict what we just populated; populate again
 		// (bounded) instead of waking the reader with nothing to read.
-		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, 0,
-			s3fsSignalVerifyPopulated)
+		err := signalAdmitFlagsFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0,
+			s3fsDoneVerifyPopulated)
 		if !errors.Is(err, unix.EAGAIN) {
 			return // woken, or nobody is waiting (ENOENT)
 		}
 		if attempt >= signalVerifyRetries {
 			// Give up verifying: wake the waiter so its own retry /
 			// fallback path takes over rather than hanging.
-			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, 0)
+			_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, 0)
 			return
 		}
 		metrics.Global.ReadMissRepopulates.Add(1)

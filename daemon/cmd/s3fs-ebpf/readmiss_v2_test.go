@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/binary"
+
 	"errors"
 	"os"
 	"sync/atomic"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	fpebpf "github.com/bbsakura/s3fs-ebpf/daemon/internal/ebpf"
+	"github.com/bbsakura/s3fs-ebpf/daemon/internal/kmodio"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/metrics"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
 	"golang.org/x/sys/unix"
@@ -155,34 +156,18 @@ func TestHandleFlushUpdatesTheMirrorSize(t *testing.T) {
 	}
 }
 
-// decodeReadMissEvent reads the 32-byte struct the kmod sends (little endian);
-// anything shorter - including the 24-byte pre-v2 event - is refused, and
-// trailing bytes are ignored.
-func TestDecodeReadMissEvent(t *testing.T) {
-	buf := make([]byte, readMissEventSize)
-	binary.LittleEndian.PutUint64(buf[0:], 0x1122334455667788)
-	binary.LittleEndian.PutUint64(buf[8:], uint64(1<<32+4096)) // offset past 4 GiB
-	binary.LittleEndian.PutUint32(buf[16:], 16384)
-	binary.LittleEndian.PutUint32(buf[20:], missFlagForWrite|missFlagOpenCheck)
-	binary.LittleEndian.PutUint32(buf[24:], 7)
-	binary.LittleEndian.PutUint32(buf[28:], 3)
-
+// A MISS request carries the miss as the fields the handler reads, including an
+// offset past 4 GiB and a negative one (a signed field in the struct).
+func TestReadMissFromReq(t *testing.T) {
+	r := reqEvent{Type: kmodio.ReqMiss, Ino: 0x1122334455667788, Offset: 1<<32 + 4096, Count: 16384,
+		Flags: missFlagForWrite | missFlagOpenCheck, SeqCount: 7, RandCount: 3}
 	want := readMissEvent{Ino: 0x1122334455667788, Offset: 1<<32 + 4096, Count: 16384,
 		Flags: missFlagForWrite | missFlagOpenCheck, SeqCount: 7, RandCount: 3}
-	if got, ok := decodeReadMissEvent(buf); !ok || got != want {
-		t.Errorf("decode = %+v, %v; want %+v, true", got, ok, want)
+	if got := readMissFromReq(&r); got != want {
+		t.Errorf("readMissFromReq = %+v, want %+v", got, want)
 	}
-	if got, ok := decodeReadMissEvent(append(buf, 0xff, 0xff)); !ok || got != want {
-		t.Errorf("trailing bytes changed the result: %+v, %v", got, ok)
-	}
-	for _, n := range []int{0, 24, 31} {
-		if _, ok := decodeReadMissEvent(buf[:n]); ok {
-			t.Errorf("%d-byte event accepted", n)
-		}
-	}
-	// A negative offset (a signed field in the struct) round-trips.
-	binary.LittleEndian.PutUint64(buf[8:], ^uint64(0))
-	if got, _ := decodeReadMissEvent(buf); got.Offset != -1 {
+	r.Offset = -1
+	if got := readMissFromReq(&r); got.Offset != -1 {
 		t.Errorf("offset = %d, want -1", got.Offset)
 	}
 }

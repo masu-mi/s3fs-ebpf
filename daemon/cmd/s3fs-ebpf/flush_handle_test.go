@@ -22,12 +22,13 @@ type fakeFlushKmod struct {
 	growEachRead bool
 }
 
-func (f *fakeFlushKmod) SignalFlush(_ uint64, errCode int32) error {
+// Done is DONE(FLUSH): it records the outcome, and for an error the kmod marks
+// the file dirty again (what MARK_DIRTY used to be asked for separately).
+func (f *fakeFlushKmod) Done(ino uint64, errCode int32) error {
 	f.signalled = append(f.signalled, errCode)
-	return nil
-}
-func (f *fakeFlushKmod) MarkDirty(ino uint64) error {
-	f.markedDirt = append(f.markedDirt, ino)
+	if errCode != 0 {
+		f.markedDirt = append(f.markedDirt, ino)
+	}
 	return nil
 }
 func (f *fakeFlushKmod) ReadDirty(_ uint64, buf []byte) (int, error) {

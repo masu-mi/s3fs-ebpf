@@ -49,7 +49,7 @@ static void s3fs_hit_set_base(struct s3fs_file_data *fd);
  * raw ops. */
 static bool s3fs_policy_trackable(u64 ino)
 {
-	return !pending_exists(ino);
+	return !inflight_miss_exists(ino);
 }
 
 static void s3fs_policy_track(u64 ino, u64 bytes, bool sized)
@@ -97,7 +97,7 @@ static void s3fs_capacity_evict_one(u64 ino, u64 *live_bytes, u32 *evicted,
 	u64 freed = 0;
 	u64 buf_before = s3fs_ino_buf_bytes(ino);
 
-	if (pending_exists(ino)) {
+	if (inflight_miss_exists(ino)) {
 		/* AC-45 C3: a miss is in flight, so the ino is not evicted
 		 * whole (the chunk being populated and its entries must reach
 		 * the waiting reader), but its idle chunks are shed —
@@ -325,7 +325,7 @@ int s3fs_ebpf_capacity_pass(void)
 			/* Legacy mode: pcache entries evictable once over softcap */
 			if (total_count <= softcap || !score)
 				continue;
-			if (pending_exists(ino))
+			if (inflight_miss_exists(ino))
 				continue;
 			if (admit_evict_ino(ino, NULL))
 				evicted++;

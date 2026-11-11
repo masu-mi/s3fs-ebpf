@@ -1,76 +1,88 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* read-miss upcall: pending completions + event queue.  Part of vfs_ops.c: included from there, one translation
+/* inflight table (what syscalls wait on) + MISS queueing + DONE; also the entry table helpers.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
-/* -- Read-miss upcall: pending completions + event queue ----------------- */
+/* -- inflight: what a waiting syscall sleeps on until the daemon's DONE ----- */
 /*
- * Two data structures collaborate:
+ * One table, one lock, for everything kmod makes a syscall wait for (v2 Phase 4):
  *
- *   s3fs_pending — one entry per ino currently waiting for admit.
- *                  refcounted so multiple concurrent readers on the
- *                  same ino share the same completion.
+ *   MISS  — a reader blocked on a chunk (.read_folio), an open check, or a load
+ *           for write.  Keyed by (ino, chunk_offset, cls); readers of the same key
+ *           share one record.  Only the reader that CREATES the record queues the
+ *           request (Q-1), and the record remembers its seq, so a DONE that names
+ *           another seq cannot complete it (Q-2).
+ *   FLUSH — fsync()s blocked on the daemon's PUT of an inode.  One record per ino;
+ *           fsyncs share it.  A flush DONE is by ino: the daemon's debounce
+ *           collapses several close() flushes into one PUT.
  *
- *   s3fs_miss_events — FIFO of read_miss_event drained by the daemon
- *                      via /dev/s3fs_ebpf's .read.
+ * The request itself is in reqq (reqq.inc.c).  Both kinds are completed by the one
+ * DONE ioctl (s3fs_ebpf_done): before this it was SIGNAL_ADMIT, SIGNAL_FLUSH and
+ * MARK_DIRTY, and two hash tables with two locks.
  *
- * .read on an unadmitted ino:  create pending  → enqueue event  →
- *                              wait_for_completion  → retry admit.
- * SIGNAL_ADMIT ioctl:          find pending  → complete + err.
- * Char dev .read (daemon):     pop event head, block if empty.
+ * .read on an uncached chunk:  get_or_create  → (creator) queue MISS  →
+ *                              wait_for_completion  → retry.
+ * DONE ioctl:                  find the record  → complete + err.
+ * Char dev .read (daemon):     pop the request at the head, block if empty.
  */
 
-struct s3fs_pending {
+struct s3fs_inflight {
 	struct hlist_node node;
 	u64 ino;
-	u64 chunk_offset;     /* U13: chunk boundary (0 = full-file) */
+	u64 chunk_offset;     /* MISS: chunk boundary (0 = full-file) or S3FS_OPEN_CHECK_KEY; FLUSH: S3FS_FLUSH_KEY */
+	u64 seq;              /* MISS: seq of the request queued for this record */
+	u32 type;             /* S3FS_REQ_MISS | S3FS_REQ_FLUSH */
+	u32 cls;              /* MISS: S3FS_MISS_FLAG_FOR_WRITE or 0 (separate records) */
 	struct completion done;
 	int err;
 	refcount_t refs;
 };
 
-struct s3fs_miss_node {
-	struct list_head link;
-	struct s3fs_read_miss_event ev;
-};
+/* pending key of a flush waiter: not a multiple of the chunk size, never an open
+ * check key (all ones) and never a chunk. */
+#define S3FS_FLUSH_KEY ((u64)-2)
 
-#define S3FS_PENDING_HASH_BITS 4  /* 16 buckets — few concurrent misses */
+/* MISS seqs: S3FS_REQ_SEQ_MISS | n, apart from the write-back seqs (AC-84, applied_seq). */
+static atomic64_t s3fs_miss_seq = ATOMIC64_INIT(0);
 
-static DEFINE_HASHTABLE(s3fs_pending, S3FS_PENDING_HASH_BITS);
-static DEFINE_SPINLOCK(s3fs_pending_lock);
+#define S3FS_INFLIGHT_HASH_BITS 4  /* 16 buckets — few concurrent misses and fsyncs */
 
-static LIST_HEAD(s3fs_miss_events);
-static DEFINE_SPINLOCK(s3fs_miss_lock);
-static DECLARE_WAIT_QUEUE_HEAD(s3fs_miss_wq);
+static DEFINE_HASHTABLE(s3fs_inflight, S3FS_INFLIGHT_HASH_BITS);
+static DEFINE_SPINLOCK(s3fs_inflight_lock);
 
-/* U13: readers for different chunks of the same ino get independent
- * completions — every lookup matches on (ino, chunk_offset).
- * P1: the bucket key is the ino alone so all chunks of an ino share a
- * bucket and pending_exists(ino) sees them.  The former
- * ino ^ (chunk_offset >> 22) key scattered chunk != 0 entries into other
- * buckets, letting eviction pick an ino with a reader still blocked on
- * a non-first chunk. */
-static u64 pending_hash_key(u64 ino, u64 chunk_offset __always_unused)
+/* P1: the bucket key is the ino alone so all records of an ino share a bucket
+ * and inflight_miss_exists(ino) sees them all.  (A key mixing in the chunk offset
+ * scattered chunk != 0 entries into other buckets, letting eviction pick an ino
+ * with a reader still blocked on a non-first chunk.) */
+static struct s3fs_inflight *inflight_find_locked(u32 type, u64 ino, u64 chunk_offset, u32 cls)
 {
-	return ino;
+	struct s3fs_inflight *p;
+
+	hash_for_each_possible(s3fs_inflight, p, node, ino)
+		if (p->ino == ino && p->type == type &&
+		    p->chunk_offset == chunk_offset && p->cls == cls)
+			return p;
+	return NULL;
 }
 
-/* Look up an existing pending entry for (ino, chunk_offset) and bump
- * its refcount, or allocate a new one. Caller owns one reference on
- * the returned entry (must pending_put on the way out). */
-static struct s3fs_pending *pending_get_or_create(u64 ino, u64 chunk_offset)
+/* Look up the record for (type, ino, chunk_offset, cls) and bump its refcount, or
+ * allocate a new one (*created = true).  The caller owns one reference on the
+ * returned record (must inflight_put on the way out).  Only the creator queues a
+ * request for it. */
+static struct s3fs_inflight *inflight_get_or_create(u32 type, u64 ino, u64 chunk_offset,
+						     u32 cls, bool *created)
 {
-	struct s3fs_pending *p, *fresh;
-	u64 key = pending_hash_key(ino, chunk_offset);
+	struct s3fs_inflight *p, *fresh;
 
-	spin_lock(&s3fs_pending_lock);
-	hash_for_each_possible(s3fs_pending, p, node, key) {
-		if (p->ino == ino && p->chunk_offset == chunk_offset) {
-			refcount_inc(&p->refs);
-			spin_unlock(&s3fs_pending_lock);
-			return p;
-		}
+	if (created)
+		*created = false;
+	spin_lock(&s3fs_inflight_lock);
+	p = inflight_find_locked(type, ino, chunk_offset, cls);
+	if (p) {
+		refcount_inc(&p->refs);
+		spin_unlock(&s3fs_inflight_lock);
+		return p;
 	}
-	spin_unlock(&s3fs_pending_lock);
+	spin_unlock(&s3fs_inflight_lock);
 
 	fresh = kmalloc(sizeof(*fresh), GFP_KERNEL);
 	if (!fresh)
@@ -78,61 +90,76 @@ static struct s3fs_pending *pending_get_or_create(u64 ino, u64 chunk_offset)
 	INIT_HLIST_NODE(&fresh->node);
 	fresh->ino          = ino;
 	fresh->chunk_offset = chunk_offset;
+	fresh->seq          = 0;
+	fresh->type         = type;
+	fresh->cls          = cls;
 	fresh->err          = 0;
 	init_completion(&fresh->done);
 	refcount_set(&fresh->refs, 2); /* one for hash, one for caller */
 
-	spin_lock(&s3fs_pending_lock);
+	spin_lock(&s3fs_inflight_lock);
 	/* Re-check for a racing insert. */
-	hash_for_each_possible(s3fs_pending, p, node, key) {
-		if (p->ino == ino && p->chunk_offset == chunk_offset) {
-			refcount_inc(&p->refs);
-			spin_unlock(&s3fs_pending_lock);
-			kfree(fresh);
-			return p;
-		}
+	p = inflight_find_locked(type, ino, chunk_offset, cls);
+	if (p) {
+		refcount_inc(&p->refs);
+		spin_unlock(&s3fs_inflight_lock);
+		kfree(fresh);
+		return p;
 	}
-	hash_add(s3fs_pending, &fresh->node, key);
-	spin_unlock(&s3fs_pending_lock);
+	hash_add(s3fs_inflight, &fresh->node, ino);
+	spin_unlock(&s3fs_inflight_lock);
+	if (created)
+		*created = true;
 	return fresh;
 }
 
-static void pending_put(struct s3fs_pending *p)
+static void inflight_put(struct s3fs_inflight *p)
 {
 	if (!p || !refcount_dec_and_test(&p->refs))
 		return;
 	kfree(p);
 }
 
-/* Remove pending entry from the hash. Called by SIGNAL_ADMIT after
- * completing it so subsequent misses on the same ino start fresh. */
-static void pending_unhash(struct s3fs_pending *p)
+/* Remove the record from the hash (if it is still there), so the next miss for the
+ * same key starts fresh.  Called by DONE after completing it, and by a waiter that
+ * gave up (the daemon never answered). */
+static void inflight_unhash(struct s3fs_inflight *p)
 {
-	spin_lock(&s3fs_pending_lock);
+	spin_lock(&s3fs_inflight_lock);
 	if (!hlist_unhashed(&p->node)) {
 		hash_del(&p->node);
-		spin_unlock(&s3fs_pending_lock);
-		pending_put(p); /* drop the hash's reference */
+		spin_unlock(&s3fs_inflight_lock);
+		inflight_put(p); /* drop the hash's reference */
 		return;
 	}
-	spin_unlock(&s3fs_pending_lock);
+	spin_unlock(&s3fs_inflight_lock);
 }
 
-/* True while a .read_folio is blocked on a miss upcall for `ino`
- * (the entry stays hashed until SIGNAL_ADMIT unhashes it). */
-static bool pending_exists(u64 ino)
+/* The creator could not queue its request: nobody will answer, so wake the
+ * joiners (and the creator) with err instead of letting them time out. */
+static void inflight_fail(struct s3fs_inflight *p, int err)
 {
-	struct s3fs_pending *p;
+	p->err = err;
+	complete_all(&p->done);
+	inflight_unhash(p);
+}
+
+/* True while a .read_folio is blocked on a miss upcall for `ino` (the record
+ * stays hashed until DONE unhashes it).  A flush waiter does not count: it does
+ * not read the inode's chunks. */
+static bool inflight_miss_exists(u64 ino)
+{
+	struct s3fs_inflight *p;
 	bool found = false;
 
-	spin_lock(&s3fs_pending_lock);
-	hash_for_each_possible(s3fs_pending, p, node, ino) {
-		if (p->ino == ino) {
+	spin_lock(&s3fs_inflight_lock);
+	hash_for_each_possible(s3fs_inflight, p, node, ino) {
+		if (p->ino == ino && p->type == S3FS_REQ_MISS) {
 			found = true;
 			break;
 		}
 	}
-	spin_unlock(&s3fs_pending_lock);
+	spin_unlock(&s3fs_inflight_lock);
 	return found;
 }
 
@@ -140,141 +167,131 @@ struct s3fs_file_data;
 static void s3fs_fd_read_pattern(struct s3fs_file_data *fd, u32 *seq, u32 *rnd);
 
 /* `fd` (may be NULL) supplies the read pattern the daemon uses to decide
- * between a chunk and the whole file. */
-static int miss_enqueue(u64 ino, loff_t offset, size_t count, u32 flags,
-			struct s3fs_file_data *fd)
+ * between a chunk and the whole file.  `seq` is the record's (inflight_new_seq). */
+static u64 inflight_new_seq(void)
 {
-	struct s3fs_miss_node *node = kmalloc(sizeof(*node), GFP_KERNEL);
+	return S3FS_REQ_SEQ_MISS | (u64)atomic64_inc_return(&s3fs_miss_seq);
+}
+
+static int miss_enqueue(u64 ino, loff_t offset, size_t count, u32 flags,
+			struct s3fs_file_data *fd, u64 seq)
+{
+	struct s3fs_req_item *node = req_item_new(S3FS_REQ_MISS, ino, 0);
 
 	if (!node)
 		return -ENOMEM;
-	INIT_LIST_HEAD(&node->link);
-	node->ev.ino    = ino;
+	node->ev.seq    = seq;
 	node->ev.offset = offset;
 	node->ev.count  = (u32)min_t(size_t, count, U32_MAX);
 	node->ev.flags  = flags;
 	s3fs_fd_read_pattern(fd, &node->ev.seq_count, &node->ev.rand_count);
-
-	spin_lock(&s3fs_miss_lock);
-	list_add_tail(&node->link, &s3fs_miss_events);
-	spin_unlock(&s3fs_miss_lock);
-	wake_up_interruptible(&s3fs_miss_wq);
+	req_enqueue(node);
 	return 0;
 }
 
-ssize_t s3fs_read_miss_dequeue(struct s3fs_read_miss_event *out,
-			       bool nonblocking)
+/* Queue the MISS for a record this caller created, or do nothing for a joiner
+ * (Q-1: one request per record).  The seq is stored in the record BEFORE the
+ * request is visible, so a fast DONE finds it. */
+static int inflight_queue_miss(struct s3fs_inflight *p, bool created, loff_t offset,
+			       size_t count, u32 flags, struct s3fs_file_data *fd)
 {
-	struct s3fs_miss_node *node = NULL;
 	int err;
 
-	for (;;) {
-		spin_lock(&s3fs_miss_lock);
-		if (!list_empty(&s3fs_miss_events)) {
-			node = list_first_entry(&s3fs_miss_events,
-						struct s3fs_miss_node, link);
-			list_del(&node->link);
-		}
-		spin_unlock(&s3fs_miss_lock);
-		if (node)
-			break;
-		if (nonblocking)
-			return -EAGAIN;
-		err = wait_event_interruptible(s3fs_miss_wq,
-			!list_empty(&s3fs_miss_events));
-		if (err)
-			return err;
-	}
-
-	*out = node->ev;
-	kfree(node);
-	return sizeof(*out);
-}
-
-__poll_t s3fs_read_miss_poll(struct file *filp, struct poll_table_struct *pt)
-{
-	__poll_t mask = 0;
-
-	poll_wait(filp, &s3fs_miss_wq, pt);
-	spin_lock(&s3fs_miss_lock);
-	if (!list_empty(&s3fs_miss_events))
-		mask |= POLLIN | POLLRDNORM;
-	spin_unlock(&s3fs_miss_lock);
-	return mask;
+	if (!created)
+		return 0;
+	p->seq = inflight_new_seq();
+	err = miss_enqueue(p->ino, offset, count, flags, fd, p->seq);
+	if (err)
+		inflight_fail(p, err);
+	return err;
 }
 
 static bool s3fs_ino_chunk_populated(u64 ino, u64 chunk_offset); /* below */
 
-int s3fs_ebpf_signal_admit(u64 ino, u64 chunk_offset, int err, u32 flags)
+/* DONE for a MISS.  The record is found by (ino, chunk_offset); with a seq it must
+ * be the record that seq was queued for (Q-2: a stale handler cannot complete a
+ * newer record, -ENOENT), without one (seq 0, a chunk load signalling a chunk
+ * whose own request it has not seen) the plain-read record is meant. */
+static int s3fs_done_miss(const struct s3fs_done *d)
 {
-	struct s3fs_pending *p, *target = NULL;
-	u64 key = pending_hash_key(ino, chunk_offset);
+	struct s3fs_inflight *p, *target = NULL;
 
-	spin_lock(&s3fs_pending_lock);
-	hash_for_each_possible(s3fs_pending, p, node, key) {
-		if (p->ino == ino && p->chunk_offset == chunk_offset) {
+	spin_lock(&s3fs_inflight_lock);
+	hash_for_each_possible(s3fs_inflight, p, node, d->ino) {
+		if (p->ino != d->ino || p->type != S3FS_REQ_MISS ||
+		    p->chunk_offset != d->chunk_offset)
+			continue;
+		if (d->seq ? p->seq == d->seq : p->cls == 0) {
 			target = p;
 			refcount_inc(&target->refs);
 			break;
 		}
 	}
-	spin_unlock(&s3fs_pending_lock);
+	spin_unlock(&s3fs_inflight_lock);
 
 	if (!target)
 		return -ENOENT;
 
 	/* AC-45: a success signal must mean the data is there.  The waiter
-	 * registered buf_readers before it created this pending, so once the
+	 * registered buf_readers before it created this record, so once the
 	 * chunk is seen populated here it stays until the waiter is done. */
-	if (err == 0 && (flags & S3FS_SIGNAL_VERIFY_POPULATED) &&
-	    !s3fs_ino_chunk_populated(ino, chunk_offset)) {
-		pending_put(target);
+	if (d->err == 0 && (d->flags & S3FS_DONE_VERIFY_POPULATED) &&
+	    !s3fs_ino_chunk_populated(d->ino, d->chunk_offset)) {
+		inflight_put(target);
 		return -EAGAIN;
 	}
 
-	target->err = err;
+	target->err = d->err;
 	complete_all(&target->done);
-	pending_unhash(target); /* drops the hash's ref */
-	pending_put(target);    /* drops our probe ref */
+	inflight_unhash(target); /* drops the hash's ref */
+	inflight_put(target);    /* drops our probe ref */
 	return 0;
+}
+
+static int s3fs_done_flush(u64 ino, int err);	/* flush_queue.inc.c */
+
+/* The one completion ioctl (S3FS_IOC_DONE): the daemon is done with a request. */
+int s3fs_ebpf_done(const struct s3fs_done *d)
+{
+	switch (d->type) {
+	case S3FS_REQ_MISS:
+		return s3fs_done_miss(d);
+	case S3FS_REQ_FLUSH:
+		return s3fs_done_flush(d->ino, d->err);
+	default:
+		return -EINVAL;
+	}
 }
 
 /* Drain state on module unload.
  *
- * H-06 invariant: pending_get_or_create hands the caller its own
+ * H-06 invariant: inflight_get_or_create hands the caller its own
  * refcount on p (refs=2 on create, refcount_inc on re-use). Shutdown
- * below only drops the HASH's ref (via pending_put after hash_del) —
+ * below only drops the HASH's ref (via inflight_put after hash_del) —
  * the caller's ref keeps p alive until the waiter wakes from
- * complete_all, reads p->err, and drops its own ref via pending_put.
+ * complete_all, reads p->err, and drops its own ref via inflight_put.
  * Two-ref protocol makes the classic "waker frees before waiter
  * wakes" UAF impossible: even if CPU A (shutdown) beats CPU B
- * (waiter) to pending_put, refs=caller-ref=1, so p stays live for
+ * (waiter) to inflight_put, refs=caller-ref=1, so p stays live for
  * B's p->err load.
  */
 static void s3fs_ebpf_upcall_shutdown(void)
 {
-	struct s3fs_pending *p;
+	struct s3fs_inflight *p;
 	struct hlist_node *tmp;
-	struct s3fs_miss_node *m, *mnext;
 	unsigned int i;
 
-	/* Fail every pending waiter so they wake up and return. */
-	spin_lock(&s3fs_pending_lock);
-	hash_for_each_safe(s3fs_pending, i, tmp, p, node) {
+	/* Fail every waiter (misses and fsyncs) so they wake up and return. */
+	spin_lock(&s3fs_inflight_lock);
+	hash_for_each_safe(s3fs_inflight, i, tmp, p, node) {
 		hash_del(&p->node);
-		p->err = -ESHUTDOWN;
+		p->err = p->type == S3FS_REQ_MISS ? -ESHUTDOWN : -EIO;
 		complete_all(&p->done);
-		pending_put(p);
+		inflight_put(p);
 	}
-	spin_unlock(&s3fs_pending_lock);
+	spin_unlock(&s3fs_inflight_lock);
 
-	spin_lock(&s3fs_miss_lock);
-	list_for_each_entry_safe(m, mnext, &s3fs_miss_events, link) {
-		list_del(&m->link);
-		kfree(m);
-	}
-	spin_unlock(&s3fs_miss_lock);
-	wake_up_all(&s3fs_miss_wq);
+	reqq_drain(S3FS_REQ_MISS);
 }
 
 /* Backward-compatible wrapper used by lookup: fills `out` from

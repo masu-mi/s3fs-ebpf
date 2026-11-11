@@ -59,11 +59,11 @@ func fakeUpcall(t *testing.T) *upcall {
 		}{off, len(data)})
 		return u.populateErr
 	}
-	signalAdmitFn = func(_ string, _ uint64, _ int64, code int32) error {
+	signalAdmitFn = func(_ string, _ uint64, _ int64, _ uint64, code int32) error {
 		u.signals = append(u.signals, code)
 		return nil
 	}
-	signalAdmitFlagsFn = func(string, uint64, int64, int32, uint32) error {
+	signalAdmitFlagsFn = func(string, uint64, int64, uint64, int32, uint32) error {
 		u.verifySignals++
 		return u.verifyResult
 	}

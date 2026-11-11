@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 
 	"cloud.google.com/go/storage"
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/objstore"
@@ -106,10 +108,36 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	return buf, nil
 }
 
-// GetRange skips the local disk cache — cache is keyed on whole
-// object.
+// GetRange fetches a byte range.  AC-75: when the disk cache is on and the
+// object's generation is known (List / Stat), the chunk is read from and
+// written to the cache under (key, offset, size) tagged with that generation,
+// and the fetch is pinned to it, so a cached chunk is always bytes of the
+// generation it names.  A generation that is gone (overwritten or deleted) is
+// served from the current object, uncached.
 func (c *Client) GetRange(ctx context.Context, key string, offset, size int64) ([]byte, error) {
-	r, err := c.bucket.Object(key).NewRangeReader(ctx, offset, size)
+	if tag, ok := c.cache.ETag(key); ok {
+		if gen, ok := parseGenTag(tag); ok {
+			if buf, hit := c.cache.ReadRange(key, offset, size, tag); hit {
+				return buf, nil
+			}
+			buf, err := c.readRange(ctx, c.bucket.Object(key).Generation(gen), key, offset, size)
+			if err == nil {
+				if int64(len(buf)) == size { // short = past the end: not a chunk
+					c.cache.WriteRangeAsync(key, offset, buf, tag)
+				}
+				return buf, nil
+			}
+			if !errors.Is(err, storage.ErrObjectNotExist) {
+				return nil, err
+			}
+			// Changed under us: fall through to the current bytes, uncached.
+		}
+	}
+	return c.readRange(ctx, c.bucket.Object(key), key, offset, size)
+}
+
+func (c *Client) readRange(ctx context.Context, obj *storage.ObjectHandle, key string, offset, size int64) ([]byte, error) {
+	r, err := obj.NewRangeReader(ctx, offset, size)
 	if err != nil {
 		return nil, fmt.Errorf("gcs range get %q [%d,%d): %w",
 			key, offset, offset+size, err)
@@ -120,6 +148,16 @@ func (c *Client) GetRange(ctx context.Context, key string, offset, size int64) (
 		return nil, fmt.Errorf("gcs range get %q read: %w", key, err)
 	}
 	return buf, nil
+}
+
+// parseGenTag inverts the "gen:<n>" tag of cacheTag.
+func parseGenTag(tag string) (int64, bool) {
+	s, ok := strings.CutPrefix(tag, "gen:")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	return n, err == nil && n != 0
 }
 
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {

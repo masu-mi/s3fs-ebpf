@@ -27,36 +27,16 @@
 #include "vfs_ops.h"
 
 /*
- * S3FS_IOC_SIGNAL_ADMIT — daemon → kmod completion signal for a
- * previously enqueued read-miss. `err` is written into the pending
- * entry before completion; 0 means "admit table now has this ino,
- * please retry".
+ * S3FS_IOC_DONE — daemon → kmod: the daemon is done with a request (a miss it
+ * populated or failed, a flush it PUT or failed).  See struct s3fs_done.
  */
-static long s3fs_dev_signal_admit(void __user *uarg)
+static long s3fs_dev_done(void __user *uarg)
 {
-	struct s3fs_signal_admit sig;
+	struct s3fs_done d;
 
-	if (copy_from_user(&sig, uarg, sizeof(sig)))
+	if (copy_from_user(&d, uarg, sizeof(d)))
 		return -EFAULT;
-	return s3fs_ebpf_signal_admit(sig.ino, sig.chunk_offset, sig.err,
-				       sig.flags);
-}
-
-/*
- * S3FS_IOC_SIGNAL_FLUSH — daemon → kmod completion signal for a
- * previously enqueued flush event (E-01). Reuses the signal_admit
- * struct because the payload shape is identical {ino, err}. Returns
- * -ENOENT when no fsync() caller is waiting on this ino, which is
- * a normal outcome for the fire-and-forget .release path — daemon
- * signals unconditionally after every PUT.
- */
-static long s3fs_dev_signal_flush(void __user *uarg)
-{
-	struct s3fs_signal_admit sig;
-
-	if (copy_from_user(&sig, uarg, sizeof(sig)))
-		return -EFAULT;
-	return s3fs_ebpf_signal_flush(sig.ino, sig.err);
+	return s3fs_ebpf_done(&d);
 }
 
 /*
@@ -140,80 +120,6 @@ out_free_ubuf:
 }
 
 /*
- * S3FS_IOC_POP_FLUSH — daemon pulls one write-back event.
- *
- * Returns -EAGAIN if the queue is empty. Non-blocking; the daemon
- * polls this on a ticker (typically 100ms) and drains all pending
- * events per tick.
- */
-static long s3fs_dev_pop_flush(void __user *uarg)
-{
-	struct s3fs_flush_event ev;
-	int err;
-
-	err = s3fs_ebpf_flush_pop(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
-}
-
-/*
- * S3FS_IOC_POP_FLUSH_WAIT — blocking variant for WAIT-flagged flush
- * events (S-08). Returns 0 with event copied out; -EAGAIN on timeout
- * (200 ms); -EINTR on signal; -ENODEV on shutdown.
- */
-static long s3fs_dev_pop_flush_wait(void __user *uarg)
-{
-	struct s3fs_flush_event ev;
-	int err;
-
-	err = s3fs_ebpf_flush_pop_wait(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
-}
-
-/*
- * S3FS_IOC_POP_DELETE — daemon drains queued delete events (E-02).
- * Symmetric with POP_FLUSH: -EAGAIN on empty, 0 with event copied
- * out on success.
- */
-static long s3fs_dev_pop_delete(void __user *uarg)
-{
-	struct s3fs_delete_event ev;
-	int err;
-
-	err = s3fs_ebpf_delete_pop(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
-}
-
-/*
- * S3FS_IOC_POP_RENAME — daemon drains queued rename events (E-02).
- * Same pattern as pop_delete but carries both names for the
- * CopyObject + Delete pair.
- */
-static long s3fs_dev_pop_rename(void __user *uarg)
-{
-	struct s3fs_rename_event ev;
-	int err;
-
-	err = s3fs_ebpf_rename_pop(&ev);
-	if (err)
-		return err;
-	if (copy_to_user(uarg, &ev, sizeof(ev)))
-		return -EFAULT;
-	return 0;
-}
-
-/*
  * S3FS_IOC_READ_DIRTY — daemon reads the current scratch bytes for
  * `ino` into its own buffer. Returns 0 on success and writes
  * `out_bytes` back; returns -EAGAIN when the ino is unknown (raced
@@ -290,33 +196,16 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 	switch (cmd) {
 	case S3FS_IOC_EVAL:
 		return s3fs_ebpf_capacity_pass();
-	case S3FS_IOC_SIGNAL_ADMIT:
-		return s3fs_dev_signal_admit(uarg);
-	case S3FS_IOC_SIGNAL_FLUSH:
-		return s3fs_dev_signal_flush(uarg);
-	case S3FS_IOC_POP_DELETE:
-		return s3fs_dev_pop_delete(uarg);
-	case S3FS_IOC_POP_RENAME:
-		return s3fs_dev_pop_rename(uarg);
+	case S3FS_IOC_DONE:
+		return s3fs_dev_done(uarg);
 	case S3FS_IOC_SYNC_ENTRIES:
 		return s3fs_dev_sync_entries(uarg);
-	case S3FS_IOC_POP_FLUSH:
-		return s3fs_dev_pop_flush(uarg);
-	case S3FS_IOC_POP_FLUSH_WAIT:
-		return s3fs_dev_pop_flush_wait(uarg);
 	case S3FS_IOC_READ_DIRTY:
 		return s3fs_dev_read_dirty(uarg);
 	case S3FS_IOC_READ_DIRTY_RANGE:
 		return s3fs_dev_read_dirty_range(uarg);
 	case S3FS_IOC_DIRTY_LAYOUT:
 		return s3fs_dev_dirty_layout(uarg);
-	case S3FS_IOC_MARK_DIRTY: {
-		struct s3fs_mark_dirty req;
-
-		if (copy_from_user(&req, uarg, sizeof(req)))
-			return -EFAULT;
-		return s3fs_ebpf_mark_dirty(req.ino);
-	}
 	case S3FS_IOC_STATS: {
 		struct s3fs_stats st;
 
@@ -374,31 +263,32 @@ static long s3fs_dev_ioctl(struct file *filp, unsigned int cmd, unsigned long ar
 }
 
 /*
- * .read on /dev/s3fs_ebpf drains read-miss events one at a time.
- * Each read call must provide a buffer at least sizeof(event) bytes;
- * short buffers get -EINVAL rather than partial events (event
- * atomicity is easier to reason about than framing over a stream).
+ * .read on /dev/s3fs_ebpf hands the daemon the oldest request (reqq) one at a
+ * time.  Each read call must provide a buffer at least sizeof(struct
+ * s3fs_req_event) bytes; short buffers get -EINVAL rather than partial events
+ * (event atomicity is easier to reason about than framing over a stream).
  */
 static ssize_t s3fs_dev_read(struct file *filp, char __user *buf,
 			     size_t count, loff_t *ppos)
 {
-	struct s3fs_read_miss_event ev;
+	struct s3fs_req_event *ev;
 	ssize_t n;
 
-	if (count < sizeof(ev))
+	if (count < sizeof(*ev))
 		return -EINVAL;
-
-	n = s3fs_read_miss_dequeue(&ev, filp->f_flags & O_NONBLOCK);
-	if (n < 0)
-		return n;
-	if (copy_to_user(buf, &ev, sizeof(ev)))
-		return -EFAULT;
-	return sizeof(ev);
+	ev = kmalloc(sizeof(*ev), GFP_KERNEL);
+	if (!ev)
+		return -ENOMEM;
+	n = s3fs_req_dequeue(ev, filp->f_flags & O_NONBLOCK);
+	if (n >= 0 && copy_to_user(buf, ev, sizeof(*ev)))
+		n = -EFAULT;
+	kfree(ev);
+	return n;
 }
 
 static __poll_t s3fs_dev_poll(struct file *filp, struct poll_table_struct *pt)
 {
-	return s3fs_read_miss_poll(filp, pt);
+	return s3fs_req_poll(filp, pt);
 }
 
 /* AC-43: opening the device arms the read-miss upcall path (a daemon is

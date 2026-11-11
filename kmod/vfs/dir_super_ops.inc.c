@@ -347,9 +347,7 @@ static void s3fs_ebpf_put_super(struct super_block *sb)
 		s3fs_active_sb = NULL;
 	/* Queued flush / delete / rename events reference inos on this
 	 * sb; drop them so a later mount doesn't see them. */
-	flush_queue_drain();
-	delete_queue_drain();
-	rename_queue_drain();
+	reqq_drain(0);
 	/* W1: evict_inodes already skipped pinned inodes; drop their pin
 	 * refs here so the busy-inodes check after put_super passes. */
 	s3fs_flush_pins_release_all();
@@ -662,9 +660,5 @@ int s3fs_ebpf_fill_super(struct super_block *sb, struct fs_context *fc)
 	/* Single-mount PoC: remember the sb so admit_replace can walk
 	 * cached inodes and refresh their i_size. Cleared in put_super. */
 	s3fs_active_sb = sb;
-	/* put_super of an earlier mount left the fsync queue shut down; a
-	 * remount without rmmod must reopen it, or POP_FLUSH_WAIT returns
-	 * -ENODEV at once and the daemon's fsync loop exits. */
-	flush_wait_reopen();
 	return 0;
 }

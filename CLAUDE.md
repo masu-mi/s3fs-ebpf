@@ -30,7 +30,7 @@
 
 ## kmod/vfs_ops.c の読み方
 - `kmod/vfs_ops.c` は include と `#include "vfs/*.inc.c"` を並べるだけの薄い入口。実装は `kmod/vfs/*.inc.c` に関心ごと別に分かれている（全体で約 5800 行、1 つの翻訳単位。static な状態を共有するので並べる順序に意味がある）。
-  - `entries` エントリ表 / `admit_table` admit 表・policy hook / `capacity_evict` 容量 evict・`admit_replace` / `read_miss` pending と upcall / `attr_override` / `fd_chunks` inode の chunk 表 / `hit_accum` / `fd_reset` / `flush_queue` / `delete_rename_queue` / `dirty_populate` / `file_ops` write・setattr / `aops_read` read_folio・open / `dir_super_ops`
+  - `entries` エントリ表 / `admit_table` admit 表・policy hook / `capacity_evict` 容量 evict・`admit_replace` / `read_miss` pending と upcall / `attr_override` / `fd_chunks` inode の chunk 表 / `hit_accum` / `fd_reset` / `reqq` miss・flush・delete・rename の 1 本の FIFO / `flush_queue` fsync の待ち手 / `dirty_populate` / `file_ops` write・setattr / `aops_read` read_folio・open / `dir_super_ops`
 - 全部を通して Read しない（offset/limit なしの全文 Read は禁止）。
 - 関数単位で読む: `scripts/fn.sh <func> [<func>...]`（行番号付き、`-c` で直前のコメントも出す。`vfs_ops.c` と `vfs/*.inc.c` を全部探す）。
 - 関数を探す: `scripts/fn.sh -l [PATTERN]` は `name start end file` を出力する。シンボル以外は `grep -n PATTERN kmod/vfs_ops.c kmod/vfs/*.inc.c` で探す。

@@ -20,17 +20,21 @@
 - `Put` / `Delete` / `Rename` は、その key の観測 ETag を忘れる。次の `List` / `Stat` が新しい ETag を教えるまで chunk は cache を使わない。
 - 古い ETag の chunk file は列挙できないので、読まれて捨てられるか、mtime 順の eviction (`--max-cache-bytes`) で消える。
 
+## GCS
+
+GCS の tag は `gen:<generation>`。`GetRange` は generation を固定して読む (`Object.Generation(gen)`)。その generation がもうない (上書き / 削除) と 404 になるので、現在の object を cache せずに返す。S3 の `If-Match` 412 と同じ扱い。
+
 ## 書き込み
 
 write-behind (`maxAsyncWrites` = 4)。全体 `Get` の `WriteAsync` は枠が埋まっていれば書き込みを捨てるが、chunk の `WriteRangeAsync` は枠が空くまで待つ。64 MiB は 16 chunk が同時に来るので、捨てると次の読みが S3 GET になる。待つ間は呼び出し側 (chunk の取得) が遅れる。
 
 ## 対象外
 
-- GCS の `GetRange` は未対応 (cache は全体 `Get` のみ)。
 - chunk のサイズを変えた (`partialAdmitChunk` を変えた) あとの古い chunk は、読まれず eviction で消えるのを待つ。
 
 ## テスト
 
 - `TestDiskCache_Range` (`daemon/internal/objstore`): ETag の不一致、別 chunk、Invalidate。
 - `TestGetRange_DiskCache` (MinIO 付き): object を消しても cache から返る、上書き後は新しい内容。
+- `TestParseGenTag` (`daemon/internal/gcs`): tag の解釈のみ。GCS 本体はエミュレータなしで未実行。
 - `TestGetRange_LargeObjectSecondReadNoGET` (MinIO 付き): 64 MiB を 4 MiB ずつ 2 回読み、2 回目の S3 GET が 0 回。
