@@ -1,0 +1,17 @@
+12:34:23 START r1 base a60bdcb
+12:40:04 A-E rc=0 r1
+12:43:24 F rc=0 r1
+0
+12:43:24 START r2 new 852f666
+12:49:22 A-E rc=0 r2
+12:52:56 F rc=0 r2
+0
+12:52:56 START r3 new 852f666
+12:58:49 A-E rc=0 r3
+13:02:06 F rc=0 r3
+0
+13:02:06 START r4 base a60bdcb
+13:07:42 A-E rc=0 r4
+13:10:59 F rc=0 r4
+0
+DONE

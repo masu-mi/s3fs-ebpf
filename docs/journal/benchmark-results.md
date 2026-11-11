@@ -2698,3 +2698,62 @@ AC-90 の変更の後に 1 回目が FAIL (live 1084 対 sim 969 hits、5.8 pt) 
 
 **計測の落とし穴**: この branch の `scripts/bench-pcache-remeasure.sh` に `E_EXTRA` がなく (別 PR #60)、`--staging-bytes=0` を渡した最初の「off」の run は実は staging が有効で、off が 2.1 s に見えた。log の `[staging] on:` の有無で確かめて、`E_EXTRA` を入れて取り直した。
 
+### 18.59 v2 Phase 4 (#63) の性能のゲート: `v2-staging` (`a60bdcb`) と #63 の先端 (`852f666`) (2026-11-11)
+
+#63 は kmod ↔ daemon の queue を 5 本から 3 本へ (POP_WB)、さらに 1 本の request queue (reqq) と 1 本の read(2) の口へまとめ (Phase 4 part 2)、inflight 表と DONE ioctl を 1 つにした (part 3)。あわせて AC-75 (GCS の disk cache)、AC-77 / AC-78 (NO_ON_HIT の hit 計上の省略、`open_check` の既定を 1 に)、AC-89 (記録のみ) と、sync の修正 (下記) を含む。基準は #63 の手前の `origin/v2-staging` (`a60bdcb`)、新は `852f666`。§18.54 と同じく**同じセッションで交互に測った** (基準 r1 → 新 r2 → 新 r3 → 基準 r4)。
+
+**条件**: `6.12.0-061200-generic` (lockdep なし)、KVM 6 CPU、ローカル MinIO、`bench-pcache-remeasure.sh` (A B C D E、`BACKENDS="fuse-cache ebpf-nocache ebpf-pcachedrop ebpf-pcache"`、`RUNS_W=5 RUNS_COLD=5 E_REPS=3`、microbench 5000 iters) と `bench-read-64jobs.sh` (F、5 reps、6 構成)。**`open_check=0` に固定** (`bench.sh` の既定。kmod の既定は 1 になったので、open でも S3 を確認する行は測っていない)。生データ: `docs/journal/data/v2-phase4-20261111/` (`r1-base` `r2-new` `r3-new` `r4-base`)。fuse-cache は対照。
+
+**測定の前に直したバグ**: lockdep カーネルの `make test-lockdep` で `test-sync-keeps-cache` が `too-few-sync-rounds(1)` で落ちた (lockdep の報告は 0 件)。原因: Phase 4 で executor が kmod の request の seq だけを `handled` に反映するようになったが、kmod の event seq はデーモンを再起動しても増え続け、前のデーモンが処理した seq は新しいデーモンに届かない。`handled` が 0 のままで、`appliedSeqFor` が `waitHandled(C, 5s)` を毎 sync 待ち切り、`--sync-every=2s` が約 5 秒間隔になっていた (sync 自体は List 約 2 ms + ioctl 約 0.1 ms)。副作用は、再起動後の sync が tombstone の消去と local entry の昇格を保守的な値でしか行わないこと。起動時に kmod の seq C を読み、キューに残る request を non-blocking で読み切ってから、C の barrier を executor に積むようにした (`852f666`、Go の単体テスト `TestBarrierAdoptsKmodSeqAfterEarlierEvents`)。修正後 `test-sync-keeps-cache` と lockdep 付きの `make test-lockdep` が PASS。この sync の周期は、測定した項目 (A〜F) には効かない (測定は daemon を起動してから行い、sync は 30 秒間隔の既定)。
+
+**値** (中央値。r1 / r4 = 基準、r2 / r3 = 新)
+
+A (open+read+close の p50、5000 iters、`open_check=0`)
+
+| 構成 | 基準 r1 / r4 | 新 r2 / r3 |
+|---|---:|---:|
+| ebpf-pcache | 2.995 / 3.024 µs | 3.006 / 3.016 µs |
+| ebpf-pcachedrop | 4.186 / 4.168 µs | 4.162 / 4.138 µs |
+| ebpf-nocache | 533.4 / 550.6 µs | 534.0 / 535.0 µs |
+| fuse-cache (対照) | 543.5 / 532.0 µs | 533.6 / 528.8 µs |
+
+B (新規ファイルの durable write、fsync の中央値 ms。`fsync-returned-early` は全 run で 0/5、verify は全 PASS)
+
+| サイズ | ebpf-pcache 基準 / 新 | ebpf-pcachedrop 基準 / 新 | fuse-cache (対照) 基準 / 新 |
+|---|---:|---:|---:|
+| 1 MiB | 13.6, 13.7 / 13.3, 13.4 | 13.7, 13.4 / 13.5, 13.7 | 21.7, 21.2 / 20.9, 20.8 |
+| 10 MiB | 48.9, 52.6 / 55.2, 55.1 | 50.4, 58.1 / 55.0, 53.0 | 73.3, 72.8 / 74.7, 72.4 |
+| 100 MiB | 246.0, 243.9 / 228.0, 243.0 | 260.5, 238.0 / 246.3, 258.0 | 361.7, 356.8 / 352.0, 342.3 |
+
+C (既存オブジェクトの途中に 4 KiB + fsync、fsync の中央値 ms)
+
+| サイズ | ebpf-pcache 基準 / 新 | fuse-cache (対照) 基準 / 新 |
+|---|---:|---:|
+| 1 MiB | 17.3, 17.6 / 18.0, 16.9 | 21.8, 21.8 / 20.4, 20.7 |
+| 10 MiB | 64.5, 60.3 / 59.6, 57.5 | 49.5, 48.2 / 44.2, 45.0 |
+| 100 MiB | 444.5\*, 177.0 / 169.1, 161.0 | 166.3, 159.7 / 159.5, 160.8 |
+
+\* 1 run の外れ値 (n=5 のうち 2 回が 1.4〜1.5 s で、四分位範囲 174〜1362 ms)。他にも、新 r2 の ebpf-pcachedrop (1 MiB 33.6 ms、10 MiB 199.2 ms) と新 r3 の ebpf-nocache (100 MiB 641.5 ms) に 1 セルだけの外れがある。**基準にも新にも同じ程度に出ていて、再測定 (同じセルの別 run) で戻る**ので、Phase 4 の影響とは読まない。原因は未切り分け。
+
+D (cold read、中央値 ms): 10 MiB は全構成 20.7〜27.5 (fuse-cache 22.2 / 27.5 / 27.4 / 21.5、ebpf-pcache 21.1 / 23.0 / 23.6 / 23.2)、100 MiB は全構成 90〜98 (ebpf-pcache 94.7 / 92.7 / 91.7 / 92.9)。300 MiB は不安定で結論を書かない (ebpf-pcache 479 / 522 / **1955** / 484、fuse-cache 490 / 537 / 493 / 431、ebpf-pcachedrop 469 / 433 / 437 / 808)。verify は全 object (15 個) PASS。
+
+E (10,000 個 × 4 KiB、3 回の中央値 ms)
+
+| 項目 | ebpf-pcache 基準 / 新 | ebpf-nocache 基準 / 新 | fuse-cache (対照) 基準 / 新 |
+|---|---:|---:|---:|
+| ls-cold | 62.0, 60.4 / 60.5, 61.7 | 70.4, 65.2 / 63.0, 65.7 | 3363, 3345 / 3325, 3322 |
+| cat-cold | 2063, 2049 / 2087, 2047 | 2020, 1965 / 1983, 1956 | 23839, 20704 / 21014, 23481 |
+| ls-warm | 22.6, 23.0 / 22.7, 22.7 | 23.0, 23.7 / 22.9, 22.8 | 1494, 1461 / 1487, 1468 |
+| cat-warm | 112.3, 118.0 / 139.5, 121.3 | 1636, 1647 / 1605, 1651 | 6442, 6481 / 6419, 6488 |
+
+F (64 jobs、psync、bs=1、5 s、中央値の IOPS (M)): `ebpf-pcache` は基準 6.10 / 6.11、新 6.06 / 6.04 (`ebpf-pcache ÷ fuse-raw` は基準 0.986 / 0.984、新 0.981 / 0.976)。fuse-raw は 6.19 / 6.21 / 6.18 / 6.19 で動かない。
+
+**同じ仕事か**: upcall の数は全 run で同じ (nocache の A は 1 → 6001、pcache / pcachedrop は 1 → 1)。`open_checks` は全 run で 0。S3 へのリクエスト (HEAD / GET) の数は**数えていない**ので、Phase 4 の前後で S3 の仕事が同じことは、cat-cold の時間が同じことと upcall の数が同じことからの推測にとどまる。
+
+**検証**: dmesg の BUG / WARNING / lockdep は 4 run とも 0 件。fuse-cache の対照は A / B / D (10・100 MiB) / E の ls・cat-warm / F で動かない (D 300 MiB と E の cat-cold は ±10% の揺れ)。B / D / E の正しさの検査 (verify、sha256) は全 PASS。
+
+**まとめ**
+- **Phase 4 の前後で、A〜F の値に有意な差はない** (A の ebpf-pcache p50 約 3.0 µs、E の cat-cold 約 2.05 s、cat-warm は ±15% の揺れ、F の `ebpf-pcache ÷ fuse-raw` は 0.98 前後)。queue の統合と reqq は、測った項目では速さを変えない。
+- E の cat-cold が §18.54 の 8.3 s から約 2.05 s になっているのは、基準 (`a60bdcb`) にすでに入っている object staging (§18.57、AC-88) による。今回の差分ではない。
+- 1 run だけ大きく外れたセルは、基準にも新にも出ていて、原因は未切り分け。
+- **測っていないこと**: `open_check=1` (kmod の新しい既定) での A / E、S3 の HEAD / GET の数、層ごとのレイテンシ、G (SQLite / ベクトル)、H (policy の hit rate)、通常カーネルでの `make test-regression` (lockdep カーネルでは通した)、実機 (KVM のみ)。

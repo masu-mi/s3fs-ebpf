@@ -1,0 +1,12 @@
+D cold  10 MiB fuse-cache      n=5 median=21.5 q1=20.9 q3=25.0 min=20.6 max=33.3
+D cold  10 MiB ebpf-nocache    n=5 median=23.4 q1=22.6 q3=25.2 min=19.2 max=28.4
+D cold  10 MiB ebpf-pcachedrop n=5 median=21.2 q1=19.8 q3=25.5 min=19.6 max=27.3
+D cold  10 MiB ebpf-pcache     n=5 median=23.2 q1=22.9 q3=26.6 min=19.8 max=27.3
+D cold 100 MiB fuse-cache      n=5 median=96.0 q1=94.9 q3=101.3 min=93.0 max=107.5
+D cold 100 MiB ebpf-nocache    n=5 median=92.5 q1=92.5 q3=92.9 min=92.4 max=94.3
+D cold 100 MiB ebpf-pcachedrop n=5 median=95.1 q1=94.4 q3=95.2 min=92.0 max=96.6
+D cold 100 MiB ebpf-pcache     n=5 median=92.9 q1=92.7 q3=93.0 min=90.8 max=98.8
+D cold 300 MiB fuse-cache      n=5 median=430.7 q1=421.6 q3=454.5 min=415.4 max=2646.7
+D cold 300 MiB ebpf-nocache    n=5 median=262.0 q1=243.8 q3=272.8 min=243.6 max=281.8
+D cold 300 MiB ebpf-pcachedrop n=5 median=808.4 q1=428.8 q3=3371.8 min=416.4 max=3462.0
+D cold 300 MiB ebpf-pcache     n=5 median=483.7 q1=442.0 q3=515.3 min=419.0 max=588.2

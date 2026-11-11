@@ -33,7 +33,7 @@ Linux 6.12 LTS の eBPF 機能 (**`struct_ops`**、**KFunc**) で S3 ファイ�
 
 既存の大きいオブジェクトの途中への書き込みは、既定で変更に触れる chunk だけを読み、残りを multipart の `UploadPartCopy` で運びます (`--partial-modify`、既定で有効、S3 のみ。16 MiB 未満は全体を読み書き)。`--partial-modify=false` で全体 GET + PUT (AC-50) に戻せます。
 
-**open の存在確認 (`open_check`)**: 既定では、O_CREAT なしの open は kmod の entry 表 (daemon の sync が更新する) だけで答え、S3 に聞きません。sync の後に S3 から消えたファイルも open は成功し、エラーは最初の read まで出ません。s3fs-fuse は open のたびに HEAD するので、kmod の module param `open_check=1` (`echo 1 > /sys/module/s3fs_kfunc/parameters/open_check`) にすると同じように HEAD し、404 なら `ENOENT` で失敗します。cache hit の open にも S3 の往復 (ローカル MinIO で約 420 µs) が乗るので、既定は 0 です。速度への影響は下の「性能」を参照。
+**open の存在確認 (`open_check`)**: 既定 (`open_check=1`) では、O_CREAT なしの open は s3fs-fuse と同じように S3 へ HEAD し、404 なら `ENOENT` で失敗します。cache hit の open にも S3 の往復 (ローカル MinIO で約 420 µs) が乗ります。kmod の module param を `open_check=0` にすると (`echo 0 > /sys/module/s3fs_kfunc/parameters/open_check`)、open は kmod の entry 表 (daemon の sync が更新する) だけで答え、S3 に聞きません。sync の後に S3 から消えたファイルも open は成功し、エラーは最初の read まで出ません。速度への影響は下の「性能」を参照 (下の表の測定は `open_check=0` の値と、`open_check=1` の値を分けて書いています)。
 
 詳しくは:
 - 技術要素 (bpf_arena / struct_ops / KFunc / KUnit / lockdep / kCFI / 閉じた MinIO など) を入門記事と一次資料から学ぶ: [`docs/user/learning-guide.md`](docs/user/learning-guide.md)。doc 全体の地図は [`docs/INDEX.md`](docs/INDEX.md)
@@ -71,8 +71,8 @@ make unmount            # daemon 停止 + umount + rmmod
 
 | 場面 | s3fs-fuse | s3fs-ebpf | 比 | 比べた相手 |
 |---|---:|---:|---:|---|
-| open+read+close (キャッシュあり、open で S3 を確認しない既定) | 520.1 µs | 2.9 µs | 180× | fuse-cache |
-| open+read+close (キャッシュあり、open でも S3 を確認: `open_check=1`) | 517 µs | 425 µs | 1.2× | fuse-cache |
+| open+read+close (キャッシュあり、open で S3 を確認しない: `open_check=0`。測定時の設定で、現在の既定は 1) | 520.1 µs | 2.9 µs | 180× | fuse-cache |
+| open+read+close (キャッシュあり、open でも S3 を確認: `open_check=1`、現在の既定) | 517 µs | 425 µs | 1.2× | fuse-cache |
 | 小さいファイル 10,000 個を cat (warm) | 6.42 s | 0.16 s | 39× | fuse-cache |
 | 小さいファイル 10,000 個を `ls -l` (cold) | 3.40 s | 68 ms | 50× | fuse-raw |
 | durable write 100 MiB (新規) | 346 ms | 337 ms | 1.03× (差なし) | fuse-raw |
@@ -80,11 +80,13 @@ make unmount            # daemon 停止 + umount + rmmod
 | 既存 10 MiB の途中に 4 KiB + fsync | 47.9 ms | 70.2 ms | 0.68× (負け) | fuse-raw |
 | cold read 300 MiB | 314.1 ms | 367.3 ms | 0.86× (負け) | fuse-raw |
 
-**180× の行の読み方**: s3fs-fuse は open のたびに S3 へ HEAD を 1 回投げます (キャッシュありでも、1000 回で HEAD 1001)。既定の s3fs-ebpf は投げないので、180× は「open で S3 を確認しない設計の値」です。確認を揃える (`open_check=1`) と、時間のほぼ全部が HEAD 1 往復になり、差は約 1.2× に縮みます (§18.52)。キャッシュなし同士の差も、3.2× と書いていたものは HEAD の分を含み、揃えると約 1.7× です (§18.51)。確認の頻度を下げて速くする案 (TTL、更新通知) は [`docs/journal/backlog.md`](docs/journal/backlog.md) の AC-78〜81 にあります。
+**180× の行の読み方**: s3fs-fuse は open のたびに S3 へ HEAD を 1 回投げます (キャッシュありでも、1000 回で HEAD 1001)。`open_check=0` の s3fs-ebpf は投げないので、180× は「open で S3 を確認しない設定の値」です (現在の既定の `open_check=1` では次の行の約 1.2×)。確認を揃える (`open_check=1`) と、時間のほぼ全部が HEAD 1 往復になり、差は約 1.2× に縮みます (§18.52)。キャッシュなし同士の差も、3.2× と書いていたものは HEAD の分を含み、揃えると約 1.7× です (§18.51)。確認の頻度を下げて速くする案 (TTL、更新通知) は [`docs/journal/backlog.md`](docs/journal/backlog.md) の AC-78〜81 にあります。
 
 open / `ls -l` / cat を何度も繰り返す小さいファイルの使い方で勝ち、大きいファイルの cold read と、`--partial-modify` の対象 (16 MiB) 未満の途中書き換えではまだ負けます。page cache のヒットで終わる warm の SQLite / ベクトル検索は fuse-cache と ±3% で差がつきません。新規ファイルの durable write は、fsync が PUT の完了前に返る不具合を直した後は 1 MiB / 10 MiB が 1.3〜1.5×、100 MiB は差がなくなりました。
 
-**v2 再設計後の再計測 (2026-11-07、§18.54)**: 再設計の前 (`03bb636`) と後 (#57 の先端) を同じセッションで交互に測りました。getattr の fentry・ringbuf・arena の経路を外した結果、**速くなったもの**は open+read+close の p50 (キャッシュあり 3.1 → 2.9 µs)、64 スレッドの並列 read (`ebpf-pcache ÷ fuse-raw` が 0.92〜0.94 から 0.98〜1.00)、小さいファイルの warm cat (143.7 → 109.8 ms) です。書き込み (新規・途中の書き換え) と cold read の 10・100 MiB は変わりません (±10%)。**遅くなったもの**は、小さいファイル 10,000 個の **cold cat** で、6.8 秒 → 8.3 秒 (+22%) です。S3 へのリクエスト (HEAD / GET) と upcall の数は同じで、1 回の miss が約 200 µs 遅くなっています。daemon が ringbuf の event を読まなくなった副作用で、機構は確かめていません (仮想環境のアイドルからの復帰が疑わしい)。上の表の「小さいファイル 10,000 個を cat (warm)」の s3fs-ebpf は 0.16 s、再計測では 0.11 s です。cold cat の s3fs-fuse との比 (21.5 s ÷ 8.3 s = 2.6×) は、この表にはまだ載せていません。
+**v2 再設計後の再計測 (2026-11-07、§18.54)**: 再設計の前 (`03bb636`) と後 (#57 の先端) を同じセッションで交互に測りました。getattr の fentry・ringbuf・arena の経路を外した結果、**速くなったもの**は open+read+close の p50 (キャッシュあり 3.1 → 2.9 µs)、64 スレッドの並列 read (`ebpf-pcache ÷ fuse-raw` が 0.92〜0.94 から 0.98〜1.00)、小さいファイルの warm cat (143.7 → 109.8 ms) です。書き込み (新規・途中の書き換え) と cold read の 10・100 MiB は変わりません (±10%)。**遅くなったもの**は、小さいファイル 10,000 個の **cold cat** で、6.8 秒 → 8.3 秒 (+22%) です。S3 へのリクエスト (HEAD / GET) と upcall の数は同じで、1 回の miss が約 200 µs 遅くなっています。daemon が ringbuf の event を読まなくなった副作用で、機構は確かめていません (仮想環境のアイドルからの復帰が疑わしい)。上の表の「小さいファイル 10,000 個を cat (warm)」の s3fs-ebpf は 0.16 s、再計測では 0.11 s です。**この cold cat の +22% は、その後の object staging (§18.57、AC-88) で解消し、約 2.05 秒になっています** (§18.59 でも同じ値)。cold cat の s3fs-fuse との比 (約 21〜23 s ÷ 2.05 s = 約 10×) は、`open_check=0` の値で、s3fs-fuse は open ごとに HEAD するのに s3fs-ebpf は HEAD しない分を含み、HEAD の数を揃えて数えていないので、この表には載せていません。
+
+**Phase 4 の前後 (2026-11-11、§18.59)**: kmod ↔ daemon の queue を 1 本の request queue と 1 本の read(2) にまとめた変更 (#63) の前 (`a60bdcb`) と後 (`852f666`) を、同じセッションで基準 → 新 → 新 → 基準の順に測りました。open+read+close の p50 (キャッシュあり約 3.0 µs)、64 スレッドの並列 read (`ebpf-pcache ÷ fuse-raw` が 0.98 前後)、新規ファイルの durable write、途中の書き換え、cold read、小さいファイル 10,000 個の `ls -l` / cat (cold 約 2.05 s、warm 約 0.12 s) の**どれも前後で有意な差はありません** (対照の fuse-cache も動いていません)。1 回だけ大きく外れたセルが基準にも新にもあり、原因は未切り分けです。測っていないのは、`open_check=1` での A / E、S3 の HEAD / GET の数、SQLite / ベクトル検索、policy の hit rate です。
 
 表と測り方は [`docs/journal/benchmark-results.md`](docs/journal/benchmark-results.md) の §18.48 (6 構成 × 8 項目の測り直し) と §18.49 (page cache / kmod の chunk 表 / daemon の disk cache / S3 の層ごとのレイテンシ)、試験の概要と測っている側面は [`docs/dev-notes/bench-suite-overview.md`](docs/dev-notes/bench-suite-overview.md)、ベンチの実行方法は [`docs/user/getting-started.md`](docs/user/getting-started.md#ベンチマーク) です。キャッシュ policy ごとの hit rate は [`docs/journal/hit-rate-bench.md`](docs/journal/hit-rate-bench.md) と §18.48 (open のたびに page cache を捨てる構成では、policy なしの 27.8% に対して W-TinyLFU が 50.9%) にあります。
 

@@ -1,0 +1,38 @@
+[read-64jobs] fuse-raw #1 IOPS=6251132
+[read-64jobs] fuse-raw #2 IOPS=6288313
+[read-64jobs] fuse-raw #3 IOPS=6166886
+[read-64jobs] fuse-raw #4 IOPS=6212966
+[read-64jobs] fuse-raw #5 IOPS=6124654
+[read-64jobs] fuse-diskcache #1 IOPS=6125826
+[read-64jobs] fuse-diskcache #2 IOPS=6207734
+[read-64jobs] fuse-diskcache #3 IOPS=5945066
+[read-64jobs] fuse-diskcache #4 IOPS=6201654
+[read-64jobs] fuse-diskcache #5 IOPS=6115497
+[read-64jobs] fuse-cache #1 IOPS=5908672
+[read-64jobs] fuse-cache #2 IOPS=5845081
+[read-64jobs] fuse-cache #3 IOPS=5897387
+[read-64jobs] fuse-cache #4 IOPS=5798345
+[read-64jobs] fuse-cache #5 IOPS=5833384
+[read-64jobs] ebpf-nocache #1 IOPS=6080978
+[read-64jobs] ebpf-nocache #2 IOPS=6087648
+[read-64jobs] ebpf-nocache #3 IOPS=6080620
+[read-64jobs] ebpf-nocache #4 IOPS=6037737
+[read-64jobs] ebpf-nocache #5 IOPS=6032555
+[read-64jobs] ebpf-pcachedrop #1 IOPS=6030159
+[read-64jobs] ebpf-pcachedrop #2 IOPS=6068461
+[read-64jobs] ebpf-pcachedrop #3 IOPS=6070937
+[read-64jobs] ebpf-pcachedrop #4 IOPS=6138958
+[read-64jobs] ebpf-pcachedrop #5 IOPS=6150741
+[read-64jobs] ebpf-pcache #1 IOPS=6110415
+[read-64jobs] ebpf-pcache #2 IOPS=6091720
+[read-64jobs] ebpf-pcache #3 IOPS=6168727
+[read-64jobs] ebpf-pcache #4 IOPS=6113222
+[read-64jobs] ebpf-pcache #5 IOPS=6001271
+
+backend               iops_median   iops_min   iops_max clat_p99_us
+fuse-raw         6212966  6124654  6288313  0.8
+fuse-diskcache   6125826  5945066  6207734  0.8
+fuse-cache       5845081  5798345  5908672  1
+ebpf-nocache     6080620  6032555  6087648  0.9
+ebpf-pcachedrop  6070937  6030159  6150741  0.8
+ebpf-pcache      6110415  6001271  6168727  0.8

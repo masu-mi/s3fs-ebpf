@@ -1,0 +1,177 @@
+[s18b] A: open+read+close p50/p99
+[microbench] fuse-cache
+  iters=5000 warmup=1000 total=2.755844015s ops/s=1814
+  min=431.676µs  p50=543.485µs  p95=617.395µs  p99=728.739µs  max=4.301315ms
+[microbench] ebpf-nocache
+  iters=5000 warmup=1000 total=2.722800179s ops/s=1836
+  min=412.84µs  p50=533.361µs  p95=634.532µs  p99=800.683µs  max=2.013809ms
+upcalls[ebpf-nocache]: 1 -> 6001
+open_checks[ebpf-nocache]: 0
+[microbench] ebpf-pcachedrop
+  iters=5000 warmup=1000 total=22.167845ms ops/s=225552
+  min=4.028µs  p50=4.186µs  p95=5.64µs  p99=7.579µs  max=22.951µs
+upcalls[ebpf-pcachedrop]: 1 -> 1
+open_checks[ebpf-pcachedrop]: 0
+[microbench] ebpf-pcache
+  iters=5000 warmup=1000 total=15.680259ms ops/s=318872
+  min=2.913µs  p50=2.995µs  p95=3.13µs  p99=5.829µs  max=16.876µs
+upcalls[ebpf-pcache]: 1 -> 1
+open_checks[ebpf-pcache]: 0
+[s18b] B: durable write, new file
+B write   1 MiB fuse-cache      fsync: n=5 median=21.7 q1=21.6 q3=21.9 min=21.0 max=23.2
+B write   1 MiB fuse-cache      object-complete: n=5 median=37.4 q1=37.1 q3=37.6 min=36.9 max=38.7  fsync-returned-early=0/5
+B write   1 MiB ebpf-nocache    fsync: n=5 median=13.6 q1=13.5 q3=13.6 min=13.5 max=14.1
+B write   1 MiB ebpf-nocache    object-complete: n=5 median=28.4 q1=28.1 q3=28.4 min=28.0 max=29.7  fsync-returned-early=0/5
+B write   1 MiB ebpf-pcachedrop fsync: n=5 median=13.7 q1=13.4 q3=13.9 min=13.0 max=14.1
+B write   1 MiB ebpf-pcachedrop object-complete: n=5 median=28.7 q1=28.6 q3=28.9 min=27.8 max=29.3  fsync-returned-early=0/5
+B write   1 MiB ebpf-pcache     fsync: n=5 median=13.6 q1=13.3 q3=15.0 min=13.2 max=15.2
+B write   1 MiB ebpf-pcache     object-complete: n=5 median=28.9 q1=28.5 q3=29.9 min=28.4 max=30.2  fsync-returned-early=0/5
+B write  10 MiB fuse-cache      fsync: n=5 median=73.3 q1=73.0 q3=73.9 min=72.3 max=74.8
+B write  10 MiB fuse-cache      object-complete: n=5 median=88.8 q1=87.8 q3=89.1 min=87.6 max=90.2  fsync-returned-early=0/5
+B write  10 MiB ebpf-nocache    fsync: n=5 median=49.8 q1=48.7 q3=50.2 min=47.8 max=50.4
+B write  10 MiB ebpf-nocache    object-complete: n=5 median=65.0 q1=63.9 q3=65.2 min=62.5 max=65.8  fsync-returned-early=0/5
+B write  10 MiB ebpf-pcachedrop fsync: n=5 median=50.4 q1=49.9 q3=50.9 min=49.0 max=51.8
+B write  10 MiB ebpf-pcachedrop object-complete: n=5 median=65.4 q1=65.1 q3=67.2 min=64.1 max=67.8  fsync-returned-early=0/5
+B write  10 MiB ebpf-pcache     fsync: n=5 median=48.9 q1=48.6 q3=49.3 min=47.5 max=51.7
+B write  10 MiB ebpf-pcache     object-complete: n=5 median=63.9 q1=63.8 q3=64.6 min=63.2 max=69.0  fsync-returned-early=0/5
+B write 100 MiB fuse-cache      fsync: n=5 median=361.7 q1=355.0 q3=362.4 min=351.9 max=364.3
+B write 100 MiB fuse-cache      object-complete: n=5 median=377.6 q1=371.0 q3=377.9 min=368.9 max=380.6  fsync-returned-early=0/5
+B write 100 MiB ebpf-nocache    fsync: n=5 median=235.7 q1=231.9 q3=238.4 min=228.7 max=247.8
+B write 100 MiB ebpf-nocache    object-complete: n=5 median=251.6 q1=247.4 q3=253.4 min=243.6 max=263.7  fsync-returned-early=0/5
+B write 100 MiB ebpf-pcachedrop fsync: n=5 median=260.5 q1=224.3 q3=284.0 min=209.3 max=463.4
+B write 100 MiB ebpf-pcachedrop object-complete: n=5 median=276.1 q1=239.6 q3=299.9 min=224.9 max=478.4  fsync-returned-early=0/5
+B write 100 MiB ebpf-pcache     fsync: n=5 median=246.0 q1=245.8 q3=248.4 min=233.1 max=257.3
+B write 100 MiB ebpf-pcache     object-complete: n=5 median=261.5 q1=261.1 q3=263.9 min=248.3 max=273.3  fsync-returned-early=0/5
+verify 1 fuse-cache PASS
+verify 10 fuse-cache PASS
+verify 100 fuse-cache PASS
+verify 1 ebpf-nocache PASS
+verify 10 ebpf-nocache PASS
+verify 100 ebpf-nocache PASS
+verify 1 ebpf-pcachedrop PASS
+verify 10 ebpf-pcachedrop PASS
+verify 100 ebpf-pcachedrop PASS
+verify 1 ebpf-pcache PASS
+verify 10 ebpf-pcache PASS
+verify 100 ebpf-pcache PASS
+[s18b] C: 4 KiB write into an existing object
+C mid-write   1 MiB fuse-cache      fsync: n=5 median=21.8 q1=21.3 q3=21.9 min=21.0 max=22.4
+C mid-write   1 MiB fuse-cache      object-replaced: n=5 median=37.1 q1=36.7 q3=37.5 min=36.1 max=37.7  fsync-returned-early=0/5
+C mid-write   1 MiB ebpf-nocache    fsync: n=5 median=18.1 q1=17.5 q3=18.5 min=17.0 max=18.5
+C mid-write   1 MiB ebpf-nocache    object-replaced: n=5 median=33.4 q1=32.9 q3=33.6 min=32.5 max=34.1  fsync-returned-early=0/5
+C mid-write   1 MiB ebpf-pcachedrop fsync: n=5 median=17.8 q1=17.2 q3=17.8 min=17.0 max=18.2
+C mid-write   1 MiB ebpf-pcachedrop object-replaced: n=5 median=32.8 q1=32.5 q3=33.2 min=32.2 max=33.3  fsync-returned-early=0/5
+C mid-write   1 MiB ebpf-pcache     fsync: n=5 median=17.3 q1=17.3 q3=17.3 min=16.8 max=18.2
+C mid-write   1 MiB ebpf-pcache     object-replaced: n=5 median=32.5 q1=32.4 q3=32.5 min=32.2 max=33.0  fsync-returned-early=0/5
+C mid-write  10 MiB fuse-cache      fsync: n=5 median=49.5 q1=49.5 q3=50.8 min=48.2 max=52.4
+C mid-write  10 MiB fuse-cache      object-replaced: n=5 median=65.3 q1=65.0 q3=68.8 min=63.3 max=69.2  fsync-returned-early=0/5
+C mid-write  10 MiB ebpf-nocache    fsync: n=5 median=66.6 q1=65.5 q3=67.7 min=65.0 max=74.4
+C mid-write  10 MiB ebpf-nocache    object-replaced: n=5 median=84.1 q1=80.7 q3=85.0 min=80.2 max=89.1  fsync-returned-early=0/5
+C mid-write  10 MiB ebpf-pcachedrop fsync: n=5 median=65.8 q1=63.1 q3=71.9 min=60.6 max=85.2
+C mid-write  10 MiB ebpf-pcachedrop object-replaced: n=5 median=81.3 q1=78.1 q3=87.7 min=75.4 max=100.1  fsync-returned-early=0/5
+C mid-write  10 MiB ebpf-pcache     fsync: n=5 median=64.5 q1=63.9 q3=66.4 min=63.9 max=70.1
+C mid-write  10 MiB ebpf-pcache     object-replaced: n=5 median=79.9 q1=79.6 q3=82.0 min=79.3 max=85.0  fsync-returned-early=0/5
+C mid-write 100 MiB fuse-cache      fsync: n=5 median=166.3 q1=163.6 q3=167.4 min=161.7 max=176.5
+C mid-write 100 MiB fuse-cache      object-replaced: n=5 median=181.4 q1=180.1 q3=182.4 min=176.8 max=191.8  fsync-returned-early=0/5
+C mid-write 100 MiB ebpf-nocache    fsync: n=5 median=177.0 q1=173.3 q3=180.9 min=168.5 max=201.3
+C mid-write 100 MiB ebpf-nocache    object-replaced: n=5 median=192.5 q1=188.4 q3=196.5 min=183.7 max=217.4  fsync-returned-early=0/5
+C mid-write 100 MiB ebpf-pcachedrop fsync: n=5 median=176.9 q1=174.1 q3=180.3 min=172.0 max=188.3
+C mid-write 100 MiB ebpf-pcachedrop object-replaced: n=5 median=192.5 q1=189.3 q3=195.6 min=186.6 max=203.3  fsync-returned-early=0/5
+C mid-write 100 MiB ebpf-pcache     fsync: n=5 median=444.5 q1=174.4 q3=1362.2 min=171.6 max=1502.8
+C mid-write 100 MiB ebpf-pcache     object-replaced: n=5 median=459.3 q1=189.1 q3=1377.4 min=186.8 max=1517.5  fsync-returned-early=0/5
+      5 1 ebpf-nocache rc=0 size_after='1.0 MiB'
+      5 1 ebpf-pcache rc=0 size_after='1.0 MiB'
+      5 1 ebpf-pcachedrop rc=0 size_after='1.0 MiB'
+      5 1 fuse-cache rc=0 size_after='1.0 MiB'
+      5 10 ebpf-nocache rc=0 size_after='10 MiB'
+      5 10 ebpf-pcache rc=0 size_after='10 MiB'
+      5 10 ebpf-pcachedrop rc=0 size_after='10 MiB'
+      5 10 fuse-cache rc=0 size_after='10 MiB'
+      5 100 ebpf-nocache rc=0 size_after='100 MiB'
+      5 100 ebpf-pcache rc=0 size_after='100 MiB'
+      5 100 ebpf-pcachedrop rc=0 size_after='100 MiB'
+      5 100 fuse-cache rc=0 size_after='100 MiB'
+[s18b] D: cold read
+D cold  10 MiB fuse-cache      n=5 median=22.2 q1=21.7 q3=24.3 min=20.9 max=31.3
+D cold  10 MiB ebpf-nocache    n=5 median=24.5 q1=20.0 q3=26.0 min=19.2 max=29.9
+D cold  10 MiB ebpf-pcachedrop n=5 median=21.7 q1=21.0 q3=22.3 min=20.8 max=26.9
+D cold  10 MiB ebpf-pcache     n=5 median=21.1 q1=21.0 q3=22.6 min=20.8 max=30.5
+D cold 100 MiB fuse-cache      n=5 median=94.5 q1=93.9 q3=94.9 min=91.8 max=95.0
+D cold 100 MiB ebpf-nocache    n=5 median=91.5 q1=91.5 q3=92.3 min=89.8 max=106.1
+D cold 100 MiB ebpf-pcachedrop n=5 median=97.6 q1=94.4 q3=101.2 min=91.7 max=103.1
+D cold 100 MiB ebpf-pcache     n=5 median=94.7 q1=93.2 q3=95.7 min=93.2 max=102.4
+D cold 300 MiB fuse-cache      n=5 median=490.2 q1=446.9 q3=524.8 min=401.9 max=2823.3
+D cold 300 MiB ebpf-nocache    n=5 median=266.8 q1=232.5 q3=268.7 min=227.7 max=288.0
+D cold 300 MiB ebpf-pcachedrop n=5 median=469.0 q1=444.4 q3=496.2 min=391.8 max=560.9
+D cold 300 MiB ebpf-pcache     n=5 median=479.1 q1=459.8 q3=525.2 min=401.6 max=621.1
+verify fuse-cache objects=15 bad=0 PASS
+verify ebpf-nocache objects=15 bad=0 PASS
+verify ebpf-pcachedrop objects=15 bad=0 PASS
+verify ebpf-pcache objects=15 bad=0 PASS
+[s18b] E: 10000 x 4 KiB files, 3 reps
+[s18b] bucket has: 10000 objects
+fuse-cache ls-cold 3426.3 sha=- files=10001 bytes= rep=1
+fuse-cache cat-cold 23838.8 sha=ok files=10001 bytes=40960000 rep=1
+fuse-cache ls-warm 1451.9 sha=- files=10001 bytes=40960000 rep=1
+fuse-cache cat-warm 6531.1 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-nocache ls-cold 69.2 sha=- files=10001 bytes=40960000 rep=1
+ebpf-nocache cat-cold 2019.5 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-nocache ls-warm 22.8 sha=- files=10001 bytes=40960000 rep=1
+ebpf-nocache cat-warm 1644.5 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-pcachedrop ls-cold 65.0 sha=- files=10001 bytes=40960000 rep=1
+ebpf-pcachedrop cat-cold 2097.3 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-pcachedrop ls-warm 23.0 sha=- files=10001 bytes=40960000 rep=1
+ebpf-pcachedrop cat-warm 132.2 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-pcache ls-cold 65.1 sha=- files=10001 bytes=40960000 rep=1
+ebpf-pcache cat-cold 2214.5 sha=ok files=10001 bytes=40960000 rep=1
+ebpf-pcache ls-warm 22.6 sha=- files=10001 bytes=40960000 rep=1
+ebpf-pcache cat-warm 130.8 sha=ok files=10001 bytes=40960000 rep=1
+fuse-cache ls-cold 3282.3 sha=- files=10001 bytes=40960000 rep=2
+fuse-cache cat-cold 26876.1 sha=ok files=10001 bytes=40960000 rep=2
+fuse-cache ls-warm 1493.9 sha=- files=10001 bytes=40960000 rep=2
+fuse-cache cat-warm 6404.3 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-nocache ls-cold 77.8 sha=- files=10001 bytes=40960000 rep=2
+ebpf-nocache cat-cold 2018.4 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-nocache ls-warm 23.6 sha=- files=10001 bytes=40960000 rep=2
+ebpf-nocache cat-warm 1611.5 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-pcachedrop ls-cold 69.1 sha=- files=10001 bytes=40960000 rep=2
+ebpf-pcachedrop cat-cold 2103.1 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-pcachedrop ls-warm 23.8 sha=- files=10001 bytes=40960000 rep=2
+ebpf-pcachedrop cat-warm 152.7 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-pcache ls-cold 60.9 sha=- files=10001 bytes=40960000 rep=2
+ebpf-pcache cat-cold 2023.9 sha=ok files=10001 bytes=40960000 rep=2
+ebpf-pcache ls-warm 21.9 sha=- files=10001 bytes=40960000 rep=2
+ebpf-pcache cat-warm 101.1 sha=ok files=10001 bytes=40960000 rep=2
+fuse-cache ls-cold 3363.1 sha=- files=10001 bytes=40960000 rep=3
+fuse-cache cat-cold 21659.1 sha=ok files=10001 bytes=40960000 rep=3
+fuse-cache ls-warm 1513.2 sha=- files=10001 bytes=40960000 rep=3
+fuse-cache cat-warm 6442.2 sha=ok files=10001 bytes=40960000 rep=3
+ebpf-nocache ls-cold 70.4 sha=- files=10001 bytes=40960000 rep=3
+ebpf-nocache cat-cold 2078.6 sha=ok files=10001 bytes=40960000 rep=3
+ebpf-nocache ls-warm 23.0 sha=- files=10001 bytes=40960000 rep=3
+ebpf-nocache cat-warm 1636.1 sha=ok files=10001 bytes=40960000 rep=3
+ebpf-pcachedrop ls-cold 62.1 sha=- files=10001 bytes=40960000 rep=3
+ebpf-pcachedrop cat-cold 2047.5 sha=ok files=10001 bytes=40960000 rep=3
+ebpf-pcachedrop ls-warm 23.1 sha=- files=10001 bytes=40960000 rep=3
+ebpf-pcachedrop cat-warm 132.5 sha=ok files=10001 bytes=40960000 rep=3
+ebpf-pcache ls-cold 62.0 sha=- files=10001 bytes=40960000 rep=3
+ebpf-pcache cat-cold 2062.6 sha=ok files=10001 bytes=40960000 rep=3
+ebpf-pcache ls-warm 22.8 sha=- files=10001 bytes=40960000 rep=3
+ebpf-pcache cat-warm 112.3 sha=ok files=10001 bytes=40960000 rep=3
+E fuse-cache      ls-cold   n=3 median=3363.1 q1=3282.3 q3=3363.1 min=3282.3 max=3426.3
+E fuse-cache      cat-cold  n=3 median=23838.8 q1=21659.1 q3=23838.8 min=21659.1 max=26876.1
+E fuse-cache      ls-warm   n=3 median=1493.9 q1=1451.9 q3=1493.9 min=1451.9 max=1513.2
+E fuse-cache      cat-warm  n=3 median=6442.2 q1=6404.3 q3=6442.2 min=6404.3 max=6531.1
+E ebpf-nocache    ls-cold   n=3 median=70.4 q1=69.2 q3=70.4 min=69.2 max=77.8
+E ebpf-nocache    cat-cold  n=3 median=2019.5 q1=2018.4 q3=2019.5 min=2018.4 max=2078.6
+E ebpf-nocache    ls-warm   n=3 median=23.0 q1=22.8 q3=23.0 min=22.8 max=23.6
+E ebpf-nocache    cat-warm  n=3 median=1636.1 q1=1611.5 q3=1636.1 min=1611.5 max=1644.5
+E ebpf-pcachedrop ls-cold   n=3 median=65.0 q1=62.1 q3=65.0 min=62.1 max=69.1
+E ebpf-pcachedrop cat-cold  n=3 median=2097.3 q1=2047.5 q3=2097.3 min=2047.5 max=2103.1
+E ebpf-pcachedrop ls-warm   n=3 median=23.1 q1=23.0 q3=23.1 min=23.0 max=23.8
+E ebpf-pcachedrop cat-warm  n=3 median=132.5 q1=132.2 q3=132.5 min=132.2 max=152.7
+E ebpf-pcache     ls-cold   n=3 median=62.0 q1=60.9 q3=62.0 min=60.9 max=65.1
+E ebpf-pcache     cat-cold  n=3 median=2062.6 q1=2023.9 q3=2062.6 min=2023.9 max=2214.5
+E ebpf-pcache     ls-warm   n=3 median=22.6 q1=21.9 q3=22.6 min=21.9 max=22.8
+E ebpf-pcache     cat-warm  n=3 median=112.3 q1=101.1 q3=112.3 min=101.1 max=130.8
+[s18b] done. /tmp/claude-1000/-home-masumi-dev-src-github-com-masu-mi-s3fs-ebpf/cede3734-bb3a-5725-8f09-e54ef51f92e8/scratchpad/r/r1-base/main

@@ -120,6 +120,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`journal/data/v2-gate-20261107/`](journal/data/v2-gate-20261107/) | `benchmark-results.md` §18.54 の生データ: v2 再設計の前 (`03bb636`) と #57 の先端の A〜F、E の cat-cold の切り分け (`diag/`) |
 | [`journal/data/v2-item2-20261108/`](journal/data/v2-item2-20261108/) | `benchmark-results.md` §18.55 の生データ: 100 MiB の warm cat、capacity モードの cold read、capacity pass とキャッシュ済み数、policy の有無 (AC-89 / AC-90) |
 | [`journal/data/v2-staging-20261110/`](journal/data/v2-staging-20261110/) | `benchmark-results.md` §18.57 の生データ: E の cat-cold (staging なし / depth 4・8・16・32)、handler の内訳 |
+| [`journal/data/v2-phase4-20261111/`](journal/data/v2-phase4-20261111/) | `benchmark-results.md` §18.59 の生データ: #63 (Phase 4) の前後 (`a60bdcb` と `852f666`) の A〜F、基準 → 新 → 新 → 基準 |
 | [`journal/data/open-check-remeasure-20261104/`](journal/data/open-check-remeasure-20261104/) | `benchmark-results.md` §18.51 の生データ: open の存在確認 (`open_check`) 前後の A、silo への GET / HEAD 数 |
 | [`journal/data/open-check-cached-20261104/`](journal/data/open-check-cached-20261104/) | `benchmark-results.md` §18.52 の生データ: キャッシュあり同士 (fuse-cache / fuse-diskcache 対 ebpf-pcache / pcachedrop) の A を `open_check` 0/1 で |
 | [`design/file-lifecycle-state-machine.md`](design/file-lifecycle-state-machine.md) | ファイルの状態遷移図 (kmod / daemon / S3) と、TLA+ (`specs/tla/FileLifecycle.tla`) の検証結果 (反例 3 件、うち 1 件を実機で再現) |

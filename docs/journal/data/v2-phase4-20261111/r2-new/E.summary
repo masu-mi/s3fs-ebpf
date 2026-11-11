@@ -1,0 +1,16 @@
+E fuse-cache      ls-cold   n=3 median=3325.2 q1=3276.9 q3=3325.2 min=3276.9 max=3448.4
+E fuse-cache      cat-cold  n=3 median=21014.2 q1=20908.0 q3=21014.2 min=20908.0 max=27783.0
+E fuse-cache      ls-warm   n=3 median=1486.5 q1=1447.5 q3=1486.5 min=1447.5 max=1555.3
+E fuse-cache      cat-warm  n=3 median=6418.7 q1=6402.3 q3=6418.7 min=6402.3 max=6427.9
+E ebpf-nocache    ls-cold   n=3 median=63.0 q1=62.3 q3=63.0 min=62.3 max=66.3
+E ebpf-nocache    cat-cold  n=3 median=1982.7 q1=1919.1 q3=1982.7 min=1919.1 max=2030.7
+E ebpf-nocache    ls-warm   n=3 median=22.9 q1=22.8 q3=22.9 min=22.8 max=23.1
+E ebpf-nocache    cat-warm  n=3 median=1604.7 q1=1600.3 q3=1604.7 min=1600.3 max=1613.0
+E ebpf-pcachedrop ls-cold   n=3 median=64.1 q1=63.5 q3=64.1 min=63.5 max=65.8
+E ebpf-pcachedrop cat-cold  n=3 median=2139.7 q1=2095.8 q3=2139.7 min=2095.8 max=2143.0
+E ebpf-pcachedrop ls-warm   n=3 median=23.3 q1=22.9 q3=23.3 min=22.9 max=23.3
+E ebpf-pcachedrop cat-warm  n=3 median=135.2 q1=130.3 q3=135.2 min=130.3 max=138.0
+E ebpf-pcache     ls-cold   n=3 median=60.5 q1=60.1 q3=60.5 min=60.1 max=61.6
+E ebpf-pcache     cat-cold  n=3 median=2087.3 q1=2039.7 q3=2087.3 min=2039.7 max=2129.5
+E ebpf-pcache     ls-warm   n=3 median=22.7 q1=22.3 q3=22.7 min=22.3 max=23.1
+E ebpf-pcache     cat-warm  n=3 median=139.5 q1=136.6 q3=139.5 min=136.6 max=144.6
