@@ -2757,3 +2757,56 @@ F (64 jobs、psync、bs=1、5 s、中央値の IOPS (M)): `ebpf-pcache` は基�
 - E の cat-cold が §18.54 の 8.3 s から約 2.05 s になっているのは、基準 (`a60bdcb`) にすでに入っている object staging (§18.57、AC-88) による。今回の差分ではない。
 - 1 run だけ大きく外れたセルは、基準にも新にも出ていて、原因は未切り分け。
 - **測っていないこと**: `open_check=1` (kmod の新しい既定) での A / E、S3 の HEAD / GET の数、層ごとのレイテンシ、G (SQLite / ベクトル)、H (policy の hit rate)、通常カーネルでの `make test-regression` (lockdep カーネルでは通した)、実機 (KVM のみ)。
+
+### 18.60 C の 10 MiB (既存 object の途中への 4 KiB + fsync): load-for-write の並列化と、中サイズの PUT の並列 part (2026-11-11)
+
+§18.59 まで C の 10 MiB は ebpf が fuse に負けていた (fsync の中央値 ebpf 57〜64 ms、fuse-cache 44〜50 ms で、fuse ÷ ebpf = 0.75〜0.8)。原因と、直した 2 つ、前後の値。変更は `d547f74`。生データ: `docs/journal/data/c10-parallel-20261111/` (`C/` `B/` `phase.sh` `wf.py` `chainB.sh` `chainB2.sh`)。
+
+**条件**: `6.12.0-061200-generic` (lockdep なし)、KVM 6 CPU、ローカル MinIO、`bench-pcache-remeasure.sh` (`STEPS=C` と `STEPS=B`、`RUNS_W=10`)。`open_check` は `bench.sh` の既定 (0)。基準は `436749d` (別 worktree に build)。
+
+**原因** (`kmod/vfs/file_ops.inc.c` の `s3fs_fd_load_for_modify`): `partial_modify_min` (16 MiB) 未満の object は最初の変更の前に全 chunk (4 MiB) を読み込む。この読み込みが「chunk ごとに upcall → 完了を待つ → 次の chunk」の直列で、10 MiB は 3 chunk の GET が 3 往復だった。もう 1 つ、`Client.Put` は minio-go の既定 (16 MiB 未満は 1 回の PUT) のままで、10 MiB の PUT が 1 本だった。
+
+**位相ごとの時間** (`phase.sh`、pwrite 1 回と fsync 1 回の時間。10 MiB、8 回)
+
+| 構成 | write (load) | fsync (PUT) |
+|---|---:|---:|
+| fuse-cache | 0.1 ms (読み込みは open で済む。open は測っていない) | 34〜35 ms |
+| ebpf (kick のみ) | 6.7〜9.5 ms | 37.5〜43.8 ms |
+| ebpf (kick + 並列 PUT) | 6.4〜8.2 ms | 29.3〜38.5 ms |
+
+(基準の位相別の値は取っていない。C の合計 63.2 ms と fsync 約 40 ms からの推定では load が約 20 ms 以下だが、**推定であって測定ではない**。)
+
+**変更**
+1. `s3fs_load_kick`: 待つ chunk の先 8 chunk まで、FOR_WRITE の upcall を待たずに先に queue する。待つ側は同じ inflight record を key で拾う (joiner)。daemon は `readMissWorkers=16` で並列に GET する。inflight の仕組みは変えていない。
+2. `Client.Put`: 10 MiB 以上 (`2 × MinPartSize`) は `PartSize = max(5 MiB, ceil(n / 4))`、`NumThreads = 4` の並列 part で送る。
+
+**C の値** (fsync の中央値 ms、n=10。同じセッションの fuse-cache が対照)
+
+| サイズ | 基準 ebpf-pcache | kick のみ | kick + 並列 PUT | fuse-cache (対照) |
+|---|---:|---:|---:|---:|
+| 1 MiB | 17.9 | 18.8 | 25.6\* | 20.6 / 22.5 / 27.6 |
+| 10 MiB | **63.2** | 58.7 | **50.8** | 44.4 / 48.9 / 49.4 |
+| 100 MiB | 177.6 | 174.8 | 172.6 | 162.2 / 174.6 / 173.1 |
+
+(fuse-cache は基準 / kick のみ / kick + 並列 PUT の各 run の値。\*1 MiB は同じ run の fuse も 27.6 に動いていて、環境の揺れ。1 MiB は変更の対象外で、kmod の経路も flush も同じ)
+
+- 10 MiB の fuse ÷ ebpf: 基準 0.70 → kick のみ 0.83 → **kick + 並列 PUT 0.97** (fuse 側が 44〜49 ms と run 間で動くので、1 前後と読む。「勝った」とは書かない)。
+- 100 MiB は変わらない (partial-modify の経路で、読み込みは触る chunk だけ)。
+
+**B (新規ファイルの durable write) への副作用の確認**: PUT の変更は B の 10 MiB 以上にも効く。交互に測った (新 r1 → 基準 r2 → 新 r3 → 基準 r4 → 新 r5 → 基準 r6 → 新 r7 → 基準 r8 → 新 r9 → 基準 r10、各 n=10)。run ごとの中央値 (fsync、ms):
+
+| サイズ・構成 | 新 (r1 / r3 / r5 / r7 / r9) | 基準 (r2 / r4 / r6 / r8 / r10) |
+|---|---|---|
+| 1 MiB ebpf-pcache | 14.2 / 13.8 / 13.6 / 13.1 / 13.6 | 13.8 / 13.8 / 14.0 / 29.8 / 38.3 |
+| **10 MiB ebpf-pcache** | **42.0 / 151.3 / 41.0 / 41.8 / 41.5** | 48.7 / 49.5 / 161.5 / 217.7 / 50.5 |
+| 10 MiB fuse-cache (対照) | 75.3 / 76.2 / 73.2 / 73.2 / 73.8 | 493.2 / 288.2 / 73.6 / 73.8 / 74.5 |
+| 100 MiB ebpf-pcache | 260.4 / 628.4 / 256.2 / 2049.8 / 244.8 | 298.1 / 254.8 / 268.3 / 265.2 / 281.0 |
+| 100 MiB fuse-cache (対照) | 363.4 / 361.6 / 353.7 / 366.1 / 382.2 | 951.5 / 361.8 / 367.2 / 354.9 / 367.9 |
+
+- 揺れの少ない run の 10 MiB は、新 約 41〜42 ms、基準 約 49〜50 ms (**約 -15%**)。fuse ÷ ebpf は約 1.5× → 約 1.8×。100 MiB の変化は読めない (新 約 245〜260、基準 約 255〜298 ms。差はあっても -5% 程度)。1 MiB は同じ。
+- **揺れ**: MinIO が遅い時間帯が連続して現れる (どの run にも、fuse-cache にも、基準にも新にもある: fuse の 100 MiB で 28 秒、新 r7 の ebpf 100 MiB で 4 秒)。10 MiB の ebpf で 150〜220 ms が連続した run が 新 r3 と 基準 r6 / r8 にあり、**新だけに出る劣化ではない**。ただし並列 part が揺れに弱いかは、この測定では分けられない (新で 1/5、基準で 2/5 の run)。原因は未切り分け。`mc admin trace` は残っていない。ディスクの空きは 20% 以上。
+- **正しさ**: 全 run で `fsync-returned-early=0`、B の verify は全 PASS (10 run の全 object)、C は `size_after` が全て元のサイズ。`make test-regression` は全件 (33 件) PASS、`go test -race ./internal/s3 ./internal/objstore` PASS、dmesg に BUG / WARNING なし。
+
+**同じ仕事か**: S3 への GET / PUT の数は**数えていない**。変更前後で GET の本数 (chunk ごと) は同じはずだが、PUT は 1 回 → 2〜4 part + CompleteMultipartUpload に増えた (MinIO 側のリクエスト数は増える)。s3fs-fuse の PUT の方式 (multipart にするか) は確かめていない。
+
+**測っていないこと**: kick の先読み数 (8) と並列 part 数 (4) を振った値、`putParallelMin` を 2 × 5 MiB より下げた値、実 S3 (遠い遅延) での並列 PUT の効果、`C` の `partial_modify_min` (16 MiB) を下げる案の測定。

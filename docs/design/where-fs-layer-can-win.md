@@ -68,6 +68,7 @@
 - 勝つのは open が繰り返される経路 (FUSE の往復がなくなる分)。ベクトル検索のように fd を保持して mmap や pread を繰り返す負荷では差がない。OLTP の差 (2.4〜2.5×) は fuse-diskcache の read が毎回 FUSE を通ることによる可能性があるが、切り分けていない。
 - 全体 (fuse-cache 対 ebpf-pcache) の warm OLTP / ベクトルは ±3% で、D1 のとおり差がつかない。
 - 新規ファイルの durable write は、計測中に fsync が PUT の完了前に返る不具合を見つけて直した (§18.48)。100 MiB の差は 0.97〜1.20× で、以前の「1.37× 速い」は取り下げる。
+- **2026-11-11 追記 (§18.60)**: 既存 object の途中への 4 KiB + fsync (C) の 10 MiB は負けていた (fuse ÷ ebpf = 0.70〜0.8)。原因は、最初の変更の前の全 chunk の読み込みが 1 chunk ずつの直列だったことと、10 MiB の PUT が 1 本だったこと。chunk の upcall を先に queue して並列にし、10 MiB 以上の PUT を並列 part にした結果、**約 1.0× (50.8 ms 対 fuse の 44〜49 ms) になった**。「勝った」ではなく同等。B の 10 MiB (新規ファイル) は約 -15% (約 49 → 41 ms)。1 MiB と 100 MiB は変わらない。MinIO が遅い時間帯が連続して出る環境の揺れが大きい (原因は未切り分け)。
 - **daemon の disk cache (`--cache-dir`) は 4 MiB を超える object には効かない** (§18.49): 大きい object の読みは range GET の経路で、disk cache を読みも書きもしない。chunk 表から落ちたあとの再読みは毎回 S3 に戻り、64 MiB は s3fs-fuse の disk cache (26.2 ms) の 0.58× (45.5 ms)。「S3 → disk cache → kmod」の段が大きい object には 1 段足りない (backlog AC-75)。
 - 層ごとのレイテンシ (§18.49、18 B): page cache 2.8 µs、kmod の chunk 表 3.8 µs、daemon の disk cache 62.4 µs、S3 (ローカル MinIO) 543 µs。upcall の固定費は約 59 µs。
 

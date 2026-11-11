@@ -1,0 +1,66 @@
+1 fuse-cache 22.0 36.8 0
+1 fuse-cache 20.4 35.1 0
+1 fuse-cache 21.0 36.1 0
+1 fuse-cache 21.3 35.8 0
+1 fuse-cache 21.6 36.7 0
+1 fuse-cache 24.3 39.1 0
+1 fuse-cache 22.3 36.8 0
+1 fuse-cache 21.0 35.4 0
+1 fuse-cache 20.5 35.3 0
+1 fuse-cache 22.1 36.5 0
+verify 1 fuse-cache PASS
+10 fuse-cache 73.4 88.5 0
+10 fuse-cache 76.4 94.3 0
+10 fuse-cache 94.3 109.4 0
+10 fuse-cache 73.0 88.2 0
+10 fuse-cache 75.3 90.6 0
+10 fuse-cache 73.3 87.8 0
+10 fuse-cache 73.8 88.2 0
+10 fuse-cache 73.9 88.6 0
+10 fuse-cache 73.0 87.6 0
+10 fuse-cache 73.4 88.2 0
+verify 10 fuse-cache PASS
+100 fuse-cache 350.1 365.0 0
+100 fuse-cache 1647.3 1661.9 0
+100 fuse-cache 2825.4 2839.9 0
+100 fuse-cache 2769.5 2784.9 0
+100 fuse-cache 365.6 381.2 0
+100 fuse-cache 353.3 369.3 0
+100 fuse-cache 353.6 368.7 0
+100 fuse-cache 368.8 384.4 0
+100 fuse-cache 353.3 368.1 0
+100 fuse-cache 1459.3 1541.0 0
+verify 100 fuse-cache PASS
+1 ebpf-pcache 29.1 43.8 0
+1 ebpf-pcache 23.3 37.8 0
+1 ebpf-pcache 30.0 44.5 0
+1 ebpf-pcache 34.4 49.0 0
+1 ebpf-pcache 32.6 47.3 0
+1 ebpf-pcache 29.4 44.4 0
+1 ebpf-pcache 22.2 36.5 0
+1 ebpf-pcache 29.6 44.7 0
+1 ebpf-pcache 32.9 47.7 0
+1 ebpf-pcache 29.9 44.2 0
+verify 1 ebpf-pcache PASS
+10 ebpf-pcache 161.1 175.8 0
+10 ebpf-pcache 157.9 172.9 0
+10 ebpf-pcache 161.2 175.8 0
+10 ebpf-pcache 166.7 181.1 0
+10 ebpf-pcache 162.6 177.2 0
+10 ebpf-pcache 175.5 189.8 0
+10 ebpf-pcache 160.3 174.9 0
+10 ebpf-pcache 161.8 176.2 0
+10 ebpf-pcache 158.2 172.7 0
+10 ebpf-pcache 176.8 191.3 0
+verify 10 ebpf-pcache PASS
+100 ebpf-pcache 1374.1 1393.0 0
+100 ebpf-pcache 272.9 288.1 0
+100 ebpf-pcache 253.5 273.6 0
+100 ebpf-pcache 250.5 265.4 0
+100 ebpf-pcache 249.2 265.0 0
+100 ebpf-pcache 278.2 292.8 0
+100 ebpf-pcache 309.9 325.4 0
+100 ebpf-pcache 277.6 292.4 0
+100 ebpf-pcache 263.7 280.3 0
+100 ebpf-pcache 250.9 265.5 0
+verify 100 ebpf-pcache PASS
