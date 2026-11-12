@@ -1,0 +1,466 @@
+[kmod] softcap=64
+[kmod] capacity_bytes=33554432
+[policy-bpf] loaded /home/masumi/dev/src/github.com/masu-mi/s3fs-ebpf/.claude/worktrees/bridge-cse_01Azpk8YZH5oNQ7CHFH2kHX1/bpf/policy_observe_ops.bpf.o (1 link attached, struct_ops)
+[metrics] WARN: --metrics-token not set; /policy/reload and /policy/eval are unauthenticated
+[metrics] serving on :9600/metrics
+[staging] on: 67108864 bytes, depth 16, objects <= 1048576 bytes
+[fastpath] object backend: bucket=s3fs-ac89
+[kmod] partial_modify=1
+[kmod] partial_modify=1
+[sync] initial: 1 entries
+[admit] 0 entries via /dev/s3fs_ebpf (armed)
+[fastpath] Ctrl+C to stop.
+[upcall] miss ino=104 offset=0 count=16384
+[tr]    0.00 miss           0
+[tr]    0.12 ra-get         4
+[tr]    0.15 ra-get         8
+[tr]    0.16 ra-get        12
+[tr]   14.52 ra-got         4
+[tr]   15.45 ra-got         8
+[tr]   15.62 ra-popd        4
+[tr]   16.05 ra-got        12
+[tr]   16.65 ra-popd        8
+[tr]   17.41 ra-popd       12
+[upcall] ino=104 big.bin pcache [0,4194304)
+[upcall] miss ino=104 offset=16777216 count=524288
+[tr]   22.97 miss          16
+[tr]   23.06 ra-get        20
+[tr]   23.09 ra-get        24
+[tr]   23.11 ra-get        28
+[upcall] ino=104 big.bin pcache [16777216,20971520)
+[tr]   36.31 ra-got        24
+[upcall] miss ino=104 offset=20971520 count=1048576
+[tr]   36.60 miss          20
+[tr]   36.76 ra-get        32
+[tr]   37.55 ra-got        20
+[tr]   37.64 ra-popd       24
+[tr]   38.29 ra-got        28
+[tr]   38.51 ra-popd       20
+[tr]   39.34 wake-ra       20
+[tr]   39.35 ra-popd       28
+[upcall] miss ino=104 offset=33554432 count=2097152
+[tr]   44.10 miss          32
+[tr]   44.19 ra-get        44
+[tr]   44.21 ra-get        36
+[tr]   44.23 ra-get        40
+[tr]   46.68 ra-got        32
+[tr]   48.24 ra-popd       32
+[tr]   48.28 wake-ra       32
+[upcall] miss ino=104 offset=37748736 count=262144
+[tr]   49.84 miss          36
+[tr]   49.93 ra-get        48
+[tr]   54.91 ra-got        44
+[tr]   55.66 ra-popd       44
+[tr]   56.55 ra-got        40
+[tr]   57.40 ra-popd       40
+[tr]   57.48 ra-got        36
+[tr]   58.11 ra-popd       36
+[tr]   58.14 wake-ra       36
+[upcall] miss ino=104 offset=50331648 count=1048576
+[tr]   62.09 miss          48
+[tr]   62.16 ra-got        48
+[tr]   62.19 ra-get        60
+[tr]   62.19 ra-get        52
+[tr]   62.23 ra-get        56
+[tr]   63.25 ra-popd       48
+[tr]   63.28 wake-ra       48
+[upcall] miss ino=104 offset=54525952 count=262144
+[tr]   64.88 miss          52
+[tr]   64.98 ra-get        64
+[tr]   71.91 ra-got        52
+[tr]   72.80 ra-popd       52
+[tr]   72.84 wake-ra       52
+[tr]   73.51 ra-got        60
+[tr]   74.48 ra-popd       60
+[upcall] miss ino=104 offset=58720256 count=1048576
+[tr]   75.20 miss          56
+[tr]   75.32 ra-get        68
+[tr]   77.32 ra-got        56
+[tr]   78.28 ra-popd       56
+[tr]   78.32 wake-ra       56
+[tr]   80.05 ra-got        64
+[tr]   81.48 ra-popd       64
+[upcall] miss ino=104 offset=66060288 count=16384
+[tr]   81.61 miss          60
+[tr]   81.77 ra-get        72
+[tr]   89.10 ra-got        68
+[tr]   89.93 ra-popd       68
+[upcall] ino=104 big.bin pcache [62914560,67108864)
+[upcall] miss ino=104 offset=67108864 count=65536
+[tr]   92.11 miss          64
+[tr]   92.28 ra-get        76
+[tr]   93.87 ra-got        72
+[tr]   94.77 ra-popd       72
+[upcall] ino=104 big.bin pcache [67108864,71303168)
+[tr]  101.20 ra-got        76
+[upcall] miss ino=104 offset=79691776 count=524288
+[tr]  101.29 miss          76
+[tr]  101.37 ra-get        88
+[tr]  101.37 ra-get        80
+[tr]  101.39 ra-get        84
+[tr]  102.12 ra-popd       76
+[tr]  102.15 wake-ra       76
+[upcall] miss ino=104 offset=83886080 count=1048576
+[tr]  104.07 miss          80
+[tr]  104.16 ra-get        92
+[tr]  111.22 ra-got        80
+[tr]  112.05 ra-popd       80
+[tr]  112.08 wake-ra       80
+[upcall] miss ino=104 offset=88080384 count=262144
+[tr]  113.77 miss          84
+[tr]  113.88 ra-get        96
+[tr]  114.34 ra-got        84
+[tr]  115.01 ra-popd       84
+[tr]  115.03 wake-ra       84
+[tr]  115.90 ra-got        88
+[tr]  116.73 ra-popd       88
+[upcall] miss ino=104 offset=96468992 count=1048576
+[tr]  118.51 miss          92
+[tr]  119.73 ra-got        92
+[tr]  120.60 ra-popd       92
+[tr]  120.63 wake-ra       92
+[upcall] miss ino=104 offset=100663296 count=262144
+[tr]  121.92 miss          96
+[tr]  122.95 ra-got        96
+[tr]  123.53 ra-popd       96
+[tr]  123.55 wake-ra       96
+[upcall] miss ino=104 offset=0 count=16384
+[tr]    0.00 miss           0
+[tr]    0.12 ra-get         8
+[tr]    0.14 ra-get        12
+[tr]    0.16 ra-get         4
+[tr]   13.74 ra-got         8
+[tr]   14.53 ra-got        12
+[tr]   14.54 ra-popd        8
+[tr]   15.29 ra-popd       12
+[tr]   15.77 ra-got         4
+[tr]   16.42 ra-popd        4
+[upcall] ino=104 big.bin pcache [0,4194304)
+[upcall] miss ino=104 offset=16777216 count=524288
+[tr]   21.73 miss          16
+[tr]   21.82 ra-get        20
+[tr]   21.84 ra-get        24
+[tr]   21.85 ra-get        28
+[upcall] ino=104 big.bin pcache [16777216,20971520)
+[tr]   35.53 ra-got        24
+[upcall] miss ino=104 offset=20971520 count=1048576
+[tr]   35.78 miss          20
+[tr]   35.88 ra-get        32
+[tr]   36.66 ra-popd       24
+[tr]   37.13 ra-got        20
+[tr]   37.95 ra-got        28
+[tr]   37.98 ra-popd       20
+[tr]   38.66 wake-ra       20
+[tr]   38.67 ra-popd       28
+[tr]   42.83 ra-got        32
+[upcall] miss ino=104 offset=33554432 count=2097152
+[tr]   42.88 miss          32
+[tr]   42.98 ra-get        36
+[tr]   42.99 ra-get        40
+[tr]   42.97 ra-get        44
+[tr]   44.10 ra-popd       32
+[tr]   44.13 wake-ra       32
+[upcall] miss ino=104 offset=37748736 count=262144
+[tr]   45.46 miss          36
+[tr]   45.59 ra-get        48
+[tr]   52.96 ra-got        36
+[tr]   53.62 ra-popd       36
+[tr]   53.65 wake-ra       36
+[tr]   54.84 ra-got        40
+[tr]   55.57 ra-popd       40
+[tr]   56.69 ra-got        44
+[tr]   57.55 ra-popd       44
+[upcall] miss ino=104 offset=50331648 count=2097152
+[tr]   59.42 miss          48
+[tr]   59.51 ra-get        60
+[tr]   59.53 ra-get        52
+[tr]   59.57 ra-get        56
+[tr]   60.95 ra-got        48
+[tr]   61.71 ra-popd       48
+[tr]   61.75 wake-ra       48
+[upcall] miss ino=104 offset=54525952 count=262144
+[tr]   62.82 miss          52
+[tr]   62.90 ra-get        64
+[tr]   66.76 ra-got        52
+[tr]   67.46 ra-popd       52
+[tr]   67.49 wake-ra       52
+[upcall] miss ino=104 offset=58720256 count=1048576
+[tr]   69.26 miss          56
+[tr]   69.38 ra-get        68
+[tr]   74.31 ra-got        60
+[tr]   75.15 ra-popd       60
+[tr]   75.21 ra-got        56
+[tr]   75.91 ra-popd       56
+[tr]   75.93 wake-ra       56
+[tr]   76.83 ra-got        64
+[tr]   78.27 ra-popd       64
+[upcall] miss ino=104 offset=63963136 count=16384
+[tr]   78.86 miss          60
+[tr]   78.96 ra-get        72
+[upcall] ino=104 big.bin pcache [62914560,67108864)
+[tr]   83.29 ra-got        68
+[tr]   84.14 ra-popd       68
+[tr]   87.62 ra-got        72
+[tr]   88.40 ra-popd       72
+[upcall] miss ino=104 offset=67108864 count=262144
+[tr]   90.68 miss          64
+[tr]   90.84 ra-get        76
+[upcall] ino=104 big.bin pcache [67108864,71303168)
+[upcall] miss ino=104 offset=79691776 count=4096
+[tr]   97.29 miss          76
+[tr]   97.41 ra-get        88
+[tr]   97.42 ra-get        80
+[tr]   97.44 ra-get        84
+[tr]   99.42 ra-got        76
+[tr]  100.49 ra-popd       76
+[tr]  100.53 wake-ra       76
+[upcall] miss ino=104 offset=83886080 count=4096
+[tr]  101.92 miss          80
+[tr]  102.00 ra-get        92
+[tr]  108.03 ra-got        80
+[tr]  109.07 ra-popd       80
+[tr]  109.11 wake-ra       80
+[tr]  110.41 ra-got        88
+[tr]  110.90 ra-got        84
+[tr]  111.56 ra-popd       88
+[upcall] miss ino=104 offset=88080384 count=4096
+[tr]  111.60 miss          84
+[tr]  111.68 ra-get        96
+[tr]  112.79 ra-popd       84
+[tr]  112.83 wake-ra       84
+[upcall] miss ino=104 offset=96468992 count=4096
+[tr]  115.43 miss          92
+[tr]  115.47 ra-got        92
+[tr]  117.43 ra-popd       92
+[tr]  117.46 wake-ra       92
+[upcall] miss ino=104 offset=100663296 count=4096
+[tr]  118.78 miss          96
+[tr]  119.11 ra-got        96
+[tr]  119.95 ra-popd       96
+[tr]  119.99 wake-ra       96
+[upcall] miss ino=104 offset=0 count=16384
+[tr]    0.00 miss           0
+[tr]    0.10 ra-get         4
+[tr]    0.11 ra-get         8
+[tr]    0.12 ra-get        12
+[tr]   14.50 ra-got         8
+[tr]   15.51 ra-got        12
+[tr]   15.63 ra-popd        8
+[tr]   16.25 ra-got         4
+[tr]   16.65 ra-popd       12
+[tr]   17.47 ra-popd        4
+[upcall] ino=104 big.bin pcache [0,4194304)
+[upcall] miss ino=104 offset=16777216 count=524288
+[tr]   23.09 miss          16
+[tr]   23.18 ra-get        20
+[tr]   23.18 ra-get        24
+[tr]   23.21 ra-get        28
+[upcall] ino=104 big.bin pcache [16777216,20971520)
+[upcall] miss ino=104 offset=20971520 count=1048576
+[tr]   35.80 miss          20
+[tr]   35.93 ra-get        32
+[tr]   36.29 ra-got        24
+[tr]   36.37 ra-got        20
+[tr]   37.47 ra-popd       24
+[tr]   38.14 ra-got        28
+[tr]   38.46 ra-popd       20
+[tr]   39.34 wake-ra       20
+[tr]   39.36 ra-popd       28
+[upcall] miss ino=104 offset=33554432 count=2097152
+[tr]   43.92 miss          32
+[tr]   44.01 ra-get        44
+[tr]   44.01 ra-get        36
+[tr]   44.05 ra-get        40
+[tr]   45.74 ra-got        32
+[tr]   47.03 ra-popd       32
+[tr]   47.07 wake-ra       32
+[upcall] miss ino=104 offset=37748736 count=262144
+[tr]   48.10 miss          36
+[tr]   48.17 ra-get        48
+[tr]   52.12 ra-got        36
+[tr]   52.81 ra-popd       36
+[tr]   52.83 wake-ra       36
+[upcall] miss ino=104 offset=41943040 count=1048576
+[tr]   54.49 miss          40
+[tr]   54.63 ra-get        52
+[tr]   58.22 ra-got        44
+[tr]   59.01 ra-popd       44
+[tr]   59.16 ra-got        40
+[tr]   59.89 ra-popd       40
+[tr]   59.91 wake-ra       40
+[tr]   61.65 ra-got        48
+[tr]   62.50 ra-popd       48
+[upcall] miss ino=104 offset=54525952 count=2097152
+[tr]   64.00 miss          52
+[tr]   64.08 ra-get        64
+[tr]   64.09 ra-get        56
+[tr]   64.10 ra-get        60
+[tr]   66.00 ra-got        52
+[tr]   66.73 ra-popd       52
+[tr]   66.75 wake-ra       52
+[upcall] miss ino=104 offset=58720256 count=262144
+[tr]   68.34 miss          56
+[tr]   68.41 ra-get        68
+[tr]   73.83 ra-got        64
+[tr]   74.48 ra-popd       64
+[tr]   75.42 ra-got        56
+[tr]   76.26 ra-popd       56
+[tr]   76.29 wake-ra       56
+[upcall] miss ino=104 offset=62914560 count=1048576
+[tr]   77.96 miss          60
+[tr]   78.06 ra-get        72
+[tr]   79.04 ra-got        60
+[tr]   79.91 ra-popd       60
+[tr]   79.94 wake-ra       60
+[tr]   81.15 ra-got        68
+[tr]   81.84 ra-popd       68
+[upcall] miss ino=104 offset=67108864 count=262144
+[tr]   81.93 miss          64
+[tr]   82.09 ra-get        76
+[upcall] ino=104 big.bin pcache [67108864,71303168)
+[tr]   87.53 ra-got        72
+[tr]   88.54 ra-popd       72
+[upcall] miss ino=104 offset=79691776 count=1048576
+[tr]   90.54 miss          76
+[tr]   90.67 ra-get        88
+[tr]   90.68 ra-get        80
+[tr]   90.69 ra-get        84
+[tr]   93.00 ra-got        76
+[tr]   93.81 ra-popd       76
+[tr]   93.84 wake-ra       76
+[upcall] miss ino=104 offset=83886080 count=262144
+[tr]   95.17 miss          80
+[tr]   95.26 ra-get        92
+[tr]  100.83 ra-got        80
+[tr]  101.61 ra-popd       80
+[tr]  101.64 wake-ra       80
+[tr]  103.46 ra-got        88
+[upcall] miss ino=104 offset=88080384 count=1048576
+[tr]  103.61 miss          84
+[tr]  103.75 ra-get        96
+[tr]  103.80 ra-got        84
+[tr]  104.38 ra-popd       88
+[tr]  105.03 ra-popd       84
+[tr]  105.05 wake-ra       84
+[upcall] miss ino=104 offset=96468992 count=524288
+[tr]  107.69 miss          92
+[tr]  108.62 ra-got        92
+[tr]  109.53 ra-popd       92
+[tr]  109.56 wake-ra       92
+[upcall] miss ino=104 offset=100663296 count=1048576
+[tr]  111.13 miss          96
+[tr]  111.64 ra-got        96
+[tr]  112.24 ra-popd       96
+[tr]  112.26 wake-ra       96
+[upcall] miss ino=104 offset=0 count=16384
+[tr]    0.00 miss           0
+[tr]    0.10 ra-get         4
+[tr]    0.14 ra-get         8
+[tr]    0.15 ra-get        12
+[tr]   13.40 ra-got         8
+[tr]   14.09 ra-popd        8
+[tr]   14.67 ra-got        12
+[tr]   15.16 ra-got         4
+[tr]   15.46 ra-popd       12
+[tr]   16.09 ra-popd        4
+[upcall] ino=104 big.bin pcache [0,4194304)
+[upcall] miss ino=104 offset=16777216 count=524288
+[tr]   21.99 miss          16
+[tr]   22.09 ra-get        20
+[tr]   22.12 ra-get        24
+[tr]   22.13 ra-get        28
+[upcall] ino=104 big.bin pcache [16777216,20971520)
+[upcall] miss ino=104 offset=20971520 count=1048576
+[tr]   35.66 miss          20
+[tr]   35.62 ra-got        24
+[tr]   35.76 ra-get        32
+[tr]   36.06 ra-got        20
+[tr]   36.61 ra-popd       24
+[tr]   37.26 ra-got        28
+[tr]   37.38 ra-popd       20
+[tr]   38.07 wake-ra       20
+[tr]   38.08 ra-popd       28
+[upcall] miss ino=104 offset=33554432 count=2097152
+[tr]   41.91 miss          32
+[tr]   42.00 ra-get        44
+[tr]   42.01 ra-get        36
+[tr]   42.03 ra-get        40
+[tr]   44.54 ra-got        32
+[tr]   45.44 ra-popd       32
+[tr]   45.46 wake-ra       32
+[upcall] miss ino=104 offset=37748736 count=262144
+[tr]   46.77 miss          36
+[tr]   46.90 ra-get        48
+[tr]   52.58 ra-got        36
+[tr]   53.30 ra-popd       36
+[tr]   53.33 wake-ra       36
+[tr]   54.74 ra-got        40
+[tr]   55.13 ra-got        44
+[tr]   55.54 ra-popd       40
+[tr]   56.46 ra-popd       44
+[upcall] miss ino=104 offset=50331648 count=2097152
+[tr]   58.84 miss          48
+[tr]   58.92 ra-get        60
+[tr]   58.93 ra-get        52
+[tr]   58.95 ra-get        56
+[tr]   60.90 ra-got        48
+[tr]   61.71 ra-popd       48
+[tr]   61.76 wake-ra       48
+[upcall] miss ino=104 offset=54525952 count=262144
+[tr]   62.96 miss          52
+[tr]   63.07 ra-get        64
+[tr]   68.94 ra-got        52
+[tr]   69.63 ra-popd       52
+[tr]   69.66 wake-ra       52
+[tr]   71.39 ra-got        56
+[tr]   72.12 ra-popd       56
+[tr]   72.53 ra-got        60
+[tr]   73.35 ra-popd       60
+[upcall] miss ino=104 offset=67108864 count=2097152
+[tr]   75.60 miss          64
+[tr]   75.70 ra-get        76
+[tr]   75.71 ra-get        68
+[tr]   75.73 ra-get        72
+[tr]   77.86 ra-got        64
+[tr]   78.87 ra-popd       64
+[tr]   78.90 wake-ra       64
+[upcall] miss ino=104 offset=71303168 count=262144
+[tr]   80.20 miss          68
+[tr]   80.29 ra-get        80
+[tr]   85.45 ra-got        68
+[tr]   86.21 ra-popd       68
+[tr]   86.24 wake-ra       68
+[upcall] miss ino=104 offset=75497472 count=1048576
+[tr]   88.15 miss          72
+[tr]   88.27 ra-get        84
+[tr]   88.31 ra-got        72
+[tr]   89.19 ra-got        76
+[tr]   89.39 ra-popd       72
+[tr]   89.97 wake-ra       72
+[tr]   89.98 ra-popd       76
+[upcall] miss ino=104 offset=83886080 count=524288
+[tr]   92.67 miss          80
+[tr]   92.78 ra-get        92
+[tr]   92.80 ra-get        88
+[tr]   94.43 ra-got        80
+[tr]   95.20 ra-popd       80
+[tr]   95.24 wake-ra       80
+[upcall] miss ino=104 offset=88080384 count=1048576
+[tr]   96.81 miss          84
+[tr]   96.89 ra-get        96
+[tr]   99.09 ra-got        84
+[tr]   99.73 ra-popd       84
+[tr]   99.76 wake-ra       84
+[upcall] miss ino=104 offset=92274688 count=262144
+[tr]  101.11 miss          88
+[tr]  104.82 ra-got        88
+[tr]  105.54 ra-popd       88
+[tr]  105.57 wake-ra       88
+[tr]  105.97 ra-got        92
+[tr]  106.70 ra-popd       92
+[tr]  108.52 ra-got        96
+[upcall] miss ino=104 offset=101711872 count=16384
+[tr]  109.32 miss          96
+[tr]  109.50 ra-popd       96
+[tr]  109.53 wake-ra       96
+[upcall] ino=104 big.bin pcache [100663296,104857600)

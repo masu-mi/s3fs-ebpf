@@ -199,12 +199,12 @@ func (r *offsetRecorder) has(off int64) bool {
 	return r.offs[off] > 0
 }
 
-// AC-89: with a capacity the file does not fit in, every miss of a sequential
-// reader keeps the read-ahead window full -- the first one starts it, and a
-// later one extends it by one chunk per chunk read (capacity 32 MiB: 3 ahead).
-// The window used to start only after the missed chunk's own GET and not at all
-// for a chunk that was being read ahead, so every fourth chunk was fetched with
-// an empty pipeline.
+// AC-89: with a capacity the file does not fit in, a sequential reader's read-ahead
+// is self-clocking: the first miss starts `window + 1` GETs, every finished one
+// requests the next chunk, and the range stops `ahead` chunks past the last miss
+// (capacity 32 MiB: 6).  A later miss -- here on a chunk whose read-ahead is still in
+// flight -- moves that limit.  The window used to be refilled only by a miss that
+// fetched its own chunk, so it drained after every 4 chunks.
 func TestReadMissKeepsTheReadaheadWindowFull(t *testing.T) {
 	const ino = 7301
 	chunk := int64(partialAdmitChunk)
@@ -230,22 +230,23 @@ func TestReadMissKeepsTheReadaheadWindowFull(t *testing.T) {
 		}
 	}
 	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: ino, Offset: 0, SeqCount: 20})
-	for _, c := range []int64{1, 2, 3} {
+	// Chunk 1 is held in flight; the others finish and refill up to chunk 6
+	// (last miss 0 + ahead 6) without any further miss.
+	for c := int64(1); c <= 6; c++ {
 		waitFor(c * chunk)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if b.has(4 * chunk) {
-		t.Fatal("a miss on chunk 0 read ahead past the window")
+	if b.has(7 * chunk) {
+		t.Fatal("read-ahead went past `ahead` chunks beyond the last miss")
 	}
-	// The reader reaches chunk 1, whose read-ahead is still in flight (held
-	// here): its miss only waits for it, and the window must move to chunk 4
-	// meanwhile.
+	// The reader reaches chunk 1, whose read-ahead is still in flight: its miss only
+	// waits for it, and the limit moves to chunk 7.
 	missDone := make(chan struct{})
 	go func() {
 		handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: ino, Offset: chunk, SeqCount: 20})
 		close(missDone)
 	}()
-	waitFor(4 * chunk)
+	waitFor(7 * chunk)
 	close(gate)
 	<-missDone
 	// Let the read-ahead goroutines finish before the fakes are restored.

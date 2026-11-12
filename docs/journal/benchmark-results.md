@@ -2857,3 +2857,48 @@ F (64 jobs、psync、bs=1、5 s、中央値の IOPS (M)): `ebpf-pcache` は基�
 - `make check-invariants` OK。
 
 **同じ仕事か**: S3 への GET の本数は数えていない。先読みの本数 (窓の幅) と chunk の大きさは変えていないので、同じはずだが、確認はしていない。
+
+### 18.63 AC-89 の残り (+8〜11%) の切り分け: 先読みが自己クロックでなく、hit で窓が進まなかった (2026-11-12)
+
+§18.62 の後も、容量 32 MiB の 100 MiB cold read は無制限より +8〜11% 遅かった。原因を切り分け、直した。生データと script: `docs/journal/data/ac89-selfclock-20261112/` (`ac89.sh` `ac89tr.sh` `ac89perf.sh` `ac89sweep.sh` `chainAC.sh` `ac89-chain2.log`、`timeline-*.log` は一時の時刻ログ)。
+
+**条件**: `6.12.0-061200-generic`、KVM 6 CPU、ローカル MinIO、100 MiB の object、`--cache-capacity=32 MiB`、cold read は `drop_caches=3` の後の `cat`。基準は `529bbd4` (§18.62)。
+
+**下限** (daemon の S3 client で 100 MiB を range GET、9 回の中央値): 25 MiB × 4 並列 29 ms、16 MiB × 4 並列 31 ms、4 MiB × 4 並列 38 ms、4 MiB × 8 並列 34 ms、4 MiB 直列 82 ms、1 MiB × 4 並列 60 ms。**S3 の取得は 137 ms の約 1/4 にすぎず**、残りは populate と page cache、cat 側。MinIO が object を page cache に持っているので、この値は MinIO の読みが速い場合の下限。
+
+**時系列** (一時の時刻ログ、100 MiB の 1 run):
+- 無制限: 最初の 16 MiB × 4 本の GET が返るまで約 51 ms。先頭 chunk が見えるのは約 60 ms。その後は 1 chunk あたり約 0.9 ms の populate が連続して流れる。
+- 容量 32 MiB (§18.62 の版): miss の chunk 0 で chunk 1〜3 を先読みし、約 17 ms で全部 populate される。reader はこの 3 chunk を page cache の hit で読み進めるが、**hit は daemon に見えないので窓は進まない**。reader が次の欠けた chunk (miss) に着いたとき (約 23 ms) に、ようやく次の 3 chunk を取りに行く。その間の約 5.6 ms は pipeline が空で、これが 4 chunk ごとに約 6 回ある。
+
+perf (`-a -g`) の CPU 配分は、silo 約 35%、daemon 約 22〜25%、docker-proxy 約 8%、cat 約 9% で、両者に大きな差はない (cat のサンプル数で割った daemon の CPU は容量付きで約 +10%、silo は約 +3%)。run 数を揃えていないので、内訳の差は結論に使っていない。
+
+**変更**: 先読みを自己クロックにした。先読みが 1 つ終わるたびに次の chunk を要求し、`window + 1` 個 (32 MiB で 4 個) の GET を飛行中に保つ。要求の範囲は、最後の miss から `ahead = 容量の chunk 数 − 2` chunk (32 MiB で 6、上限 8) まで。`ahead` は、要求済みでまだ読まれていない chunk が容量に収まるための上限。
+
+**掃引** (一時の環境変数、cap32、n=5 を 2 ラウンド、ms の中央値):
+
+| 設定 | 中央値 (2 ラウンド) |
+|---|---|
+| 旧 (窓 3、miss で補充) | 154 / 158 |
+| ahead 3 / conc 3 | 149 / 151 |
+| ahead 4 / conc 3 | 138 / 149 |
+| ahead 6 / conc 3 | 137 / 140 |
+| ahead 5 / conc 4 | 137 / 149 |
+| **ahead 6 / conc 4** | **138 / 140** |
+| 無制限 | 136 / 128 |
+
+**交互測定** (cold read の中央値 ms、n=5、新と基準を交互に 3 組):
+
+| | 基準 (`529bbd4`) | 新 | 無制限 (同じ組) |
+|---|---:|---:|---:|
+| 容量 32 MiB | 134 / 147 / 150 | **130 / 133 / 136** | 124〜132 |
+
+- 無制限に対する比: 基準 +6〜15% → 新 **約 +4%**。upcall は 14〜16 → 8〜14 回。
+- 昨日の run より全体が速い (無制限が 137 → 125〜130 ms)。環境の揺れで、同じセッションの対照で比べている。
+
+**検証**
+- `make test-regression` は全件 (33 件) PASS、dmesg の BUG / WARNING なし。`make check-invariants` OK。
+- `go test -race ./cmd/...` PASS。`TestReadMissKeepsTheReadaheadWindowFull` (飛行中の chunk を待つ miss で上限が動くこと、`ahead` を超えて先読みしないこと)、`TestReadaheadAhead`、`TestReadaheadRestart` を足した。旧の `readaheadRange` とそのテストは置き換えた。
+
+**同じ仕事か**: S3 への GET の本数 (先読みで取る chunk の数) は数えていない。chunk の大きさは同じ。先読みは「最後の miss + ahead」までなので、reader が止まった場合の取りすぎは最大 `ahead` chunk (24 MiB)。reader が進まないまま unread の chunk が容量を超えない設計だが、容量の小さい構成 (16 MiB 以下) の実機試験は `test-regression` の範囲のみ。
+
+**残り**: 約 +4%。無制限は最初の 51 ms を 16 MiB × 4 本の GET に使うが、その後の populate が連続して流れる。容量付きは 4 MiB ごとに upcall と populate が入る。これ以上は未切り分け。
