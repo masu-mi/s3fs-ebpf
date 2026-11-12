@@ -2829,6 +2829,7 @@ F (64 jobs、psync、bs=1、5 s、中央値の IOPS (M)): `ebpf-pcache` は基�
 - 出ているときは writeback の急増と io pressure の上昇が重なる。ディスクの I/O 待ちの揺れが有力だが、**原因は確定していない**。仮想ディスクの host 側の揺れか、ゲストの writeback か、メモリ reclaim か、分けられていない。
 - 対策 (測定の側): 書き込みの項目 (B / C / D) は、run の**中央値ではなく、揺れの少ない run を選ぶか、交互に 5 組以上測る** (§18.60 のやり方)。遅い区間が連続するので、n=10 の 1 run の中央値は区間に乗ると丸ごとずれる。
 - 未実施: `vm.dirty_*` を変えた比較、ゲストの disk の `iostat -x` (await / util) の記録、host 側の確認、メモリの少ない (8 GB) VM で page cache が足りるかの確認。
+- **続き (§18.64)**: 原因は VM の block デバイスの書き込み停止と確定した (fs・MinIO・cache-dir に依らない)。
 
 ### 18.62 AC-89: 容量 32 MiB の 100 MiB cold read、先読みの窓が 4 chunk に 1 回しか補充されていなかった (2026-11-11)
 
@@ -2902,3 +2903,38 @@ perf (`-a -g`) の CPU 配分は、silo 約 35%、daemon 約 22〜25%、docker-p
 **同じ仕事か**: S3 への GET の本数 (先読みで取る chunk の数) は数えていない。chunk の大きさは同じ。先読みは「最後の miss + ahead」までなので、reader が止まった場合の取りすぎは最大 `ahead` chunk (24 MiB)。reader が進まないまま unread の chunk が容量を超えない設計だが、容量の小さい構成 (16 MiB 以下) の実機試験は `test-regression` の範囲のみ。
 
 **残り**: 約 +4%。無制限は最初の 51 ms を 16 MiB × 4 本の GET に使うが、その後の populate が連続して流れる。容量付きは 4 MiB ごとに upcall と populate が入る。これ以上は未切り分け。
+
+### 18.64 書き込みの揺れの原因: VM の block デバイス (`QEMU HARDDISK`) の書き込み停止 (2026-11-12)
+
+§18.61 の続き。「fs 経由の書き込みで遅い区間が連続して出る」原因を、**fs・MinIO・daemon の disk cache のどれにも依らない、ゲストの block デバイスの停止**と確定した。生データと script: `docs/journal/data/disk-stall-20261112/` (`*.iters` は反復ごとの ms、`*.samples` は 1 秒ごとの `/proc/diskstats` ほか、`burst4.sh` `chain4.sh` `rawdisk.sh` `an4.py`)。
+
+**条件**: KVM 6 CPU、RAM 8 GB、`6.12.0-061200-generic`、disk は `QEMU HARDDISK` (140 GB、`ROTA=1`、`mq-deadline`、`nr_requests=256`)、ローカル MinIO。`vm.dirty_ratio=20`、`dirty_background_ratio=10`、`dirty_expire_centisecs=3000`。
+
+**実験**: 100 MiB の書き込みを 60 回、5 モード × 3 ラウンド。1 秒ごとに sda の書き込み MB/s、write await (ms/IO)、util、Dirty / Writeback、io PSI を採る。モード: `direct` (`docker exec mc pipe`、MinIO へ直接)、`direct+local` (直接 PUT + 同じ disk へ 100 MiB のローカル書き込み = daemon の disk cache の書き込みを模す)、`fuse-raw`、`ebpf-nocache` (cache-dir なし)、`ebpf-pcache`。最後に、MinIO も fs も使わない O_DIRECT の `dd` (100 MiB、150 回 × 2)。
+
+**結果** (反復が run の中央値の 2 倍を超えたものを「遅い」とした。n=60 / run)
+
+| モード・ラウンド | 中央値 ms | 遅い反復 | 遅い時間 / 全体 | 遅い窓の write await (最大) | util |
+|---|---:|---:|---:|---:|---:|
+| direct 1 | 458 | 9 | 40 / 64 s | 1742 ms | 100% |
+| direct 2 / 3 | 450 / 457 | 0 / 0 | — | (最大 29 / 52 ms) | — |
+| direct+local 1 / 2 / 3 | 578 / 574 / 572 | 0 / 16 / 10 | 0 / 52 / 23 s | 623 / 339 ms | 96 / 93% |
+| fuse-raw 1 / 2 / 3 | 381 / **2396** / **2467** | 6 / 2 / 6 | 13 / 17 / 48 s | 160〜1347 ms | 92〜103% |
+| ebpf-nocache 1 / 2 / 3 | 233 / 229 / 230 | 9 / 18 / 15 | 12 / 23 / 19 s | 389〜421 ms | 89〜92% |
+| ebpf-pcache 1 / 2 / 3 | 224 / 233 / 234 | 4 / 6 / 16 | 14 / 7 / 38 s | 462〜1621 ms | 86〜100% |
+| raw O_DIRECT dd 1 / 2 | 70 / 70 | 11 / 4 | 58 / 3.9 s | (最大 11977 / 1153 ms) | — |
+
+- **どのモードにも出る**: fs を通さない `direct` (MinIO へ直接) と、MinIO も fs も使わない O_DIRECT の `dd` にも出た。run によって出る / 出ないが分かれる (direct は 2・3 ラウンドが 0、1 ラウンドが 60 回中 9 回)。**fs の種類・cache-dir の有無・MinIO・変更の有無とは関係ない**。
+- **遅い反復は disk の write await が 400 ms〜3 秒、util が 86〜100% の窓と重なる**。遅い窓の書き込みスループットは 58〜190 MB/s で、正常な窓 (224〜374 MB/s) の約半分以下。
+- **周期的ではない**: 遅い区間は数秒〜数十秒続く連続した窓 (direct 1 は 14〜55 秒がほぼ全部遅い)。run 全体が一様に遅いことも (fuse-raw の 2 / 3 ラウンドは中央値が 2.4 s)。dirty の閾値に近い量ではなく (dirty は 100 MB 前後)、ゲスト側の writeback の閾値 (dirty_ratio) では説明できない。
+- **現時点でも続いている**: 実験後に `scripts/disk-stall-probe.sh` を流すと、中央値 1167 ms (全部遅い) や、中央値 268 ms で 4 回の停止、が出た。健全な状態は 100 MiB で約 70 ms。
+- **原因の層**: ゲストの block デバイス (QEMU のエミュレートされた disk) から先、つまりホストの I/O の競合か throttle。ゲストの設定 (`vm.dirty_*`、scheduler) を変える実験はしていない。ホスト側は確認していない。
+
+**これまでの記録への影響**
+- §18.59 / §18.60 の B / C / D、§18.61 の書き込みの run の遅い区間は、この停止で説明できる。fuse-cache の 100 MiB の 28 秒、ebpf の 100 MiB の 4 秒も同じ。
+- §18.61 に書いた「ebpf の連続書き込みで後半が 250 → 495 ms と遅くなる」傾向は、停止の窓と重なっただけの可能性が高い。fs 側の劣化とは書かない。
+- §18.60 の B の 10 MiB の改善 (約 -15%) は、揺れの少ない run を選んで比べた値。disk が止まっていない run だけで比べた値であることは、この実験の前は確認できていなかった。**停止の窓を除いた再測定はしていない** (今の disk は遅い)。
+
+**対策** (入れた)
+- `scripts/disk-stall-probe.sh`: 100 MiB の O_DIRECT 書き込みを 20 回 (約 2 秒)。中央値が 300 ms を超える (ディスク全体が遅い) か、中央値の 3 倍を超える反復がある (停止) と終了コード 1。
+- `perf-bench-verify` skill の §0 に 10 番として追加: 書き込みを伴う項目の前後に流し、1 が出たら間の run を捨てる。
