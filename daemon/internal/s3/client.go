@@ -79,15 +79,26 @@ func (c *Client) Stat(ctx context.Context, key string) (objstore.ObjectMeta, err
 	return toMeta(info), nil
 }
 
-// Put uploads `data` as a single-shot PUT. Wired to kmod's
+const (
+	putParallelMin   = 2 * objstore.MinPartSize
+	putParallelParts = 4
+)
+
+// Put uploads `data` as a single-shot PUT (parallel parts from
+// putParallelMin up). Wired to kmod's
 // .release/.fsync flush events so writes through the mount become
 // durable in the backing bucket.
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 	r := bytes.NewReader(data)
-	_, err := c.mc.PutObject(ctx, c.cfg.Bucket, key, r,
-		int64(len(data)), minio.PutObjectOptions{
-			ContentType: "application/octet-stream",
-		})
+	opts := minio.PutObjectOptions{ContentType: "application/octet-stream"}
+	// minio-go sends anything under its default 16 MiB part size as one PUT.
+	// Mid-sized objects go as parallel parts instead (S3's minimum part is
+	// 5 MiB): a 10 MiB object is 2 parts in flight.
+	if n := int64(len(data)); n >= putParallelMin {
+		opts.PartSize = uint64(max(objstore.MinPartSize, (n+putParallelParts-1)/putParallelParts))
+		opts.NumThreads = putParallelParts
+	}
+	_, err := c.mc.PutObject(ctx, c.cfg.Bucket, key, r, int64(len(data)), opts)
 	if err != nil {
 		return fmt.Errorf("s3 put %q: %w", key, err)
 	}

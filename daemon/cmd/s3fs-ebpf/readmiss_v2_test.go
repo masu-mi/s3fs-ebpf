@@ -5,6 +5,7 @@ import (
 
 	"errors"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -170,4 +171,93 @@ func TestReadMissFromReq(t *testing.T) {
 	if got := readMissFromReq(&r); got.Offset != -1 {
 		t.Errorf("offset = %d, want -1", got.Offset)
 	}
+}
+
+// offsetRecorder records the offsets GetRange was asked for.
+type offsetRecorder struct {
+	objstore.Backend
+	object []byte
+	mu     sync.Mutex
+	offs   map[int64]int
+	gate   map[int64]chan struct{} // a GetRange at this offset waits for the close
+}
+
+func (r *offsetRecorder) GetRange(_ context.Context, _ string, off, size int64) ([]byte, error) {
+	r.mu.Lock()
+	r.offs[off]++
+	g := r.gate[off]
+	r.mu.Unlock()
+	if g != nil {
+		<-g
+	}
+	return r.object[off : off+size], nil
+}
+
+func (r *offsetRecorder) has(off int64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.offs[off] > 0
+}
+
+// AC-89: with a capacity the file does not fit in, a sequential reader's read-ahead
+// is self-clocking: the first miss starts `window + 1` GETs, every finished one
+// requests the next chunk, and the range stops `ahead` chunks past the last miss
+// (capacity 32 MiB: 6).  A later miss -- here on a chunk whose read-ahead is still in
+// flight -- moves that limit.  The window used to be refilled only by a miss that
+// fetched its own chunk, so it drained after every 4 chunks.
+func TestReadMissKeepsTheReadaheadWindowFull(t *testing.T) {
+	const ino = 7301
+	chunk := int64(partialAdmitChunk)
+	size := 12 * chunk // more than the capacity, so no whole-file admit
+	fakeUpcall(t)
+	capacityBytesFn = func() (int64, bool) { return 32 << 20, true }
+	orig := patternAwareAdmitEnabled
+	patternAwareAdmitEnabled = true
+	t.Cleanup(func() { patternAwareAdmitEnabled = orig })
+	withEntry(t, fpebpf.Entry{Ino: ino, Name: "big", S3Key: "big", Fallback: uint64(size)})
+	t.Cleanup(func() { readaheads.Delete(uint64(ino)) })
+	gate := make(chan struct{})
+	b := &offsetRecorder{object: make([]byte, size), offs: map[int64]int{}, gate: map[int64]chan struct{}{chunk: gate}}
+
+	waitFor := func(off int64) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for !b.has(off) && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		if !b.has(off) {
+			t.Fatalf("chunk at %d MiB was never requested", off>>20)
+		}
+	}
+	handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: ino, Offset: 0, SeqCount: 20})
+	// Chunk 1 is held in flight; the others finish and refill up to chunk 6
+	// (last miss 0 + ahead 6) without any further miss.
+	for c := int64(1); c <= 6; c++ {
+		waitFor(c * chunk)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if b.has(7 * chunk) {
+		t.Fatal("read-ahead went past `ahead` chunks beyond the last miss")
+	}
+	// The reader reaches chunk 1, whose read-ahead is still in flight: its miss only
+	// waits for it, and the limit moves to chunk 7.
+	missDone := make(chan struct{})
+	go func() {
+		handleReadMiss(context.Background(), "/dev/x", b, readMissEvent{Ino: ino, Offset: chunk, SeqCount: 20})
+		close(missDone)
+	}()
+	waitFor(7 * chunk)
+	close(gate)
+	<-missDone
+	// Let the read-ahead goroutines finish before the fakes are restored.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		busy := false
+		raInflight.Range(func(any, any) bool { busy = true; return false })
+		if !busy {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("read-ahead did not finish")
 }

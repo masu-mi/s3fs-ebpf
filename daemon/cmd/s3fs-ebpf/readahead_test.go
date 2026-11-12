@@ -14,26 +14,33 @@ func TestReadaheadWindow(t *testing.T) {
 	}
 }
 
-func TestReadaheadRange(t *testing.T) {
-	const ch = partialAdmitChunk
-	cases := []struct {
-		name             string
-		miss, next, size int64
-		window           int
-		wantFrom, wantTo int64
-	}{
-		{"first miss", 0, 0, 100 * ch, 2, 1 * ch, 3 * ch},
-		{"reader caught up with the window", 1 * ch, 3 * ch, 100 * ch, 2, 3 * ch, 4 * ch},
-		{"nothing new", 2 * ch, 4 * ch, 100 * ch, 1, 0, 0},
-		{"clipped at eof", 98 * ch, 0, 100 * ch, 2, 99 * ch, 100 * ch},
-		{"short last chunk", 98 * ch, 0, 99*ch + 1, 2, 99 * ch, 99*ch + 1},
-		{"at eof", 99 * ch, 0, 100 * ch, 2, 0, 0},
-		{"reader went back", 0, 50 * ch, 100 * ch, 2, 1 * ch, 3 * ch},
+func TestReadaheadAhead(t *testing.T) {
+	const mib = 1 << 20
+	for _, c := range []struct {
+		cap  int64
+		want int
+	}{{0, 0}, {12 * mib, 0}, {16 * mib, 2}, {32 * mib, 6}, {64 * mib, readaheadMaxAhead}, {1024 * mib, readaheadMaxAhead}} {
+		if got := readaheadAhead(c.cap); got != c.want {
+			t.Errorf("readaheadAhead(%d) = %d, want %d", c.cap, got, c.want)
+		}
 	}
-	for _, c := range cases {
-		f, to := readaheadRange(c.miss, c.next, c.size, c.window)
-		if f != c.wantFrom || to != c.wantTo {
-			t.Errorf("%s: got [%d,%d), want [%d,%d)", c.name, f, to, c.wantFrom, c.wantTo)
+}
+
+func TestReadaheadRestart(t *testing.T) {
+	const ch = partialAdmitChunk
+	for _, c := range []struct {
+		name             string
+		next, miss, want int64
+		ahead            int
+	}{
+		{"reader inside the requested range", 7 * ch, 3 * ch, 7 * ch, 6},
+		{"reader caught up with the range", 4 * ch, 4 * ch, 5 * ch, 6},
+		{"reader jumped past it", 4 * ch, 40 * ch, 41 * ch, 6},
+		{"reader went back by more than ahead", 50 * ch, 10 * ch, 11 * ch, 6},
+		{"reader went back within ahead", 12 * ch, 6 * ch, 12 * ch, 6},
+	} {
+		if got := readaheadRestart(c.next, c.miss, c.ahead); got != c.want {
+			t.Errorf("%s: next = %d chunks, want %d", c.name, got/ch, c.want/ch)
 		}
 	}
 }

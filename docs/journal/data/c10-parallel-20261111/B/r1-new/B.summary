@@ -1,0 +1,18 @@
+B write   1 MiB fuse-cache      fsync: n=10 median=20.9 q1=20.5 q3=21.1 min=20.4 max=23.4
+B write   1 MiB fuse-cache      object-complete: n=10 median=35.3 q1=35.1 q3=35.3 min=34.7 max=37.7  fsync-returned-early=0/10
+B write   1 MiB ebpf-pcachedrop fsync: n=10 median=13.5 q1=13.3 q3=13.6 min=13.0 max=14.5
+B write   1 MiB ebpf-pcachedrop object-complete: n=10 median=28.1 q1=27.8 q3=28.5 min=27.4 max=29.0  fsync-returned-early=0/10
+B write   1 MiB ebpf-pcache     fsync: n=10 median=14.2 q1=13.6 q3=14.6 min=13.4 max=15.9
+B write   1 MiB ebpf-pcache     object-complete: n=10 median=29.4 q1=28.9 q3=29.8 min=28.5 max=35.5  fsync-returned-early=0/10
+B write  10 MiB fuse-cache      fsync: n=10 median=75.3 q1=74.3 q3=75.5 min=73.4 max=79.6
+B write  10 MiB fuse-cache      object-complete: n=10 median=90.3 q1=89.4 q3=90.5 min=88.2 max=95.1  fsync-returned-early=0/10
+B write  10 MiB ebpf-pcachedrop fsync: n=10 median=42.9 q1=41.5 q3=44.7 min=38.7 max=58.9
+B write  10 MiB ebpf-pcachedrop object-complete: n=10 median=57.9 q1=55.7 q3=58.9 min=53.0 max=73.8  fsync-returned-early=0/10
+B write  10 MiB ebpf-pcache     fsync: n=10 median=42.0 q1=41.3 q3=42.5 min=39.0 max=47.3
+B write  10 MiB ebpf-pcache     object-complete: n=10 median=57.5 q1=57.0 q3=58.4 min=54.3 max=63.4  fsync-returned-early=0/10
+B write 100 MiB fuse-cache      fsync: n=10 median=363.4 q1=349.2 q3=371.2 min=338.8 max=376.1
+B write 100 MiB fuse-cache      object-complete: n=10 median=384.2 q1=371.2 q3=387.0 min=353.9 max=400.3  fsync-returned-early=0/10
+B write 100 MiB ebpf-pcachedrop fsync: n=10 median=268.3 q1=262.5 q3=275.8 min=254.6 max=284.9
+B write 100 MiB ebpf-pcachedrop object-complete: n=10 median=282.8 q1=277.6 q3=289.9 min=269.9 max=299.8  fsync-returned-early=0/10
+B write 100 MiB ebpf-pcache     fsync: n=10 median=260.4 q1=228.7 q3=285.3 min=221.6 max=375.8
+B write 100 MiB ebpf-pcache     object-complete: n=10 median=276.2 q1=244.0 q3=301.2 min=236.8 max=393.3  fsync-returned-early=0/10
