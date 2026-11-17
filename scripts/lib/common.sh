@@ -74,8 +74,29 @@ apt_first_candidate() {
     return 1
 }
 
+# apt_get <apt-get args...> — apt-get hardened for unattended use:
+#   - waits for the dpkg/apt lock (unattended-upgrades holds it right after
+#     boot / kernel install) instead of failing with "Could not get lock"
+#   - never prompts (DEBIAN_FRONTEND, needrestart auto mode, keep conffiles)
+#   - retries transient mirror failures (APT_RETRIES, default 3)
+apt_get() {
+    local n=${APT_RETRIES:-3} i=1 rc=0
+    while :; do
+        run sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+            apt-get -o DPkg::Lock::Timeout="${APT_LOCK_TIMEOUT:-300}" \
+                    -o Acquire::Retries=3 \
+                    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+                    "$@" && return 0
+        rc=$?
+        [[ $i -ge $n ]] && return $rc
+        warn "apt-get $1 failed (rc=$rc), retry $i/$((n - 1)) in $((i * 5))s"
+        sleep $((i * 5))
+        i=$((i + 1))
+    done
+}
+
 # apt_install <pkg...> — idempotent apt-get install (skips when empty).
 apt_install() {
     [[ $# -eq 0 ]] && return 0
-    run sudo apt-get install -y "$@"
+    apt_get install -y "$@"
 }

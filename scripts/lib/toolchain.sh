@@ -80,6 +80,19 @@ kernel_pahole_version() {
     [[ -n "$v" && "$v" != 0 ]] && echo "$v"
 }
 
+# installed_krels — every kernel release with modules under /lib/modules
+# whose series is >= S3FS_MIN_KERNEL (the kmod #errors below it), version-sorted.
+# KRELS="a b" overrides the scan.
+installed_krels() {
+    if [[ -n "${KRELS:-}" ]]; then tr ' ,' '\n\n' <<<"$KRELS" | grep -v '^$'; return 0; fi
+    local d r
+    for d in /lib/modules/*/; do
+        r=$(basename "$d")
+        [[ "$r" =~ ^[0-9]+\.[0-9]+ ]] || continue
+        ver_ge "$(echo "${r%%-*}" | cut -d. -f1,2)" "$S3FS_MIN_KERNEL" && echo "$r"
+    done | sort -V
+}
+
 # --- compilers --------------------------------------------------------------
 
 # clang_major <cmd> — major version of a clang binary, empty if not runnable.

@@ -70,7 +70,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
-        doctor doctor-build toolchain setup-kernel setup-toolchain setup-kbuild \
+        doctor doctor-build toolchain kmod-matrix setup-kernel setup-toolchain setup-kbuild \
         lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
         test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-nocache-signal test-cold-signal test-staging test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
@@ -117,6 +117,9 @@ kmod: ## Build kernel module -> kmod/s3fs_kfunc.ko
 	  echo "==> s3fs_kfunc.ko has no BTF (stale build from before vmlinux/pahole were fixed?) — relinking once"; \
 	  $(KMOD_ENV) $(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS) && \
 	  $(SCRIPTS_DIR)/check-kmod-btf.sh $(KMOD_DIR)/s3fs_kfunc.ko; }
+
+kmod-matrix: ## Build + install-check kmod against every installed kernel >= 6.12 (KRELS=..., SETUP=1 to run headers/kbuild setup first)
+	$(SCRIPTS_DIR)/kmod-matrix.sh
 
 kmod-clean: ## Clean kernel module build artefacts
 	$(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS) clean

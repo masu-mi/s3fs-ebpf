@@ -141,3 +141,11 @@ scripts/setup-toolchain.sh   doctor が NG にする項目をステップ単位�
 - `s3fs-ebpf dev` 配下へ移った `test-arena` / `microbench` を旧名で呼んでいた (Makefile / bench)
 - コミット済み bpf2go object が clang < 19 生成で `addr_space_cast` 無し → verifier 拒否 (C-1、`arena_cast_test.go`)
 - `rmmod` が BPF prog の module 参照解放 (非同期) と競合して "in use" → `scripts/kmod-unload.sh` でリトライ
+
+## 複数バージョンのカーネル
+
+`KREL` (既定は `uname -r`) だけで `KDIR` / gcc / pahole の判定が決まるので、実行中でないカーネルにも同じ検査をかけられる。
+
+- `make kmod-matrix` (`scripts/kmod-matrix.sh`): `/lib/modules` にある 6.12 以上の全カーネルについて、(1) `doctor --only kmod` (2) 使い捨てコピーでの build (カーネル間でオブジェクトが混ざらない) (3) vermagic == そのカーネル (4) module BTF (5) 使い捨ての `INSTALL_MOD_PATH` への `modules_install` + `depmod` (`modules.dep` に載る) を確認し、1 つでも落ちたら exit 1。実 `/lib/modules` には何も入れず、insmod もしない。
+- `KRELS="a b"` か引数で対象を絞る。`SETUP=1` で各カーネルに `setup-toolchain.sh headers kbuild` を先に当てる。
+- apt は `apt_get` (`scripts/lib/common.sh`) 経由: dpkg ロック待ち (`APT_LOCK_TIMEOUT`、既定 300 秒)、非対話、ミラー失敗の再試行 (`APT_RETRIES`、既定 3)。mainline の deb 取得も curl を再試行する。

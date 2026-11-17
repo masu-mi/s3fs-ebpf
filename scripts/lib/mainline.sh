@@ -40,8 +40,8 @@ mainline_fetch_install() {
     arch=$(dpkg --print-architecture)
     tmp=$(mktemp -d)
     for f in "$@"; do
-        run curl -fL -o "$tmp/$f" "${MAINLINE_URL}/${vdir}/${arch}/${f}" || { rm -rf "$tmp"; return 1; }
+        run curl -fL --retry 3 --retry-delay 3 -o "$tmp/$f" "${MAINLINE_URL}/${vdir}/${arch}/${f}" || { rm -rf "$tmp"; return 1; }
     done
-    run "sudo dpkg -i $tmp/*.deb || sudo apt-get -f install -y"
+    run "sudo dpkg -i $tmp/*.deb" || apt_get -f install -y || { rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
 }
