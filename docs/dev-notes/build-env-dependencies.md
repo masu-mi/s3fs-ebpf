@@ -167,3 +167,5 @@ scripts/setup-toolchain.sh   doctor が NG にする項目をステップ単位�
 - 新しいカーネルを入れたら `make setup-kbuild && make deb` で、そのカーネル用の kmod パッケージが増える。
 
 - man ページ: `man/s3fs-ebpf.1` (手書きの概要・環境変数・ファイル) と、`scripts/gen-man.sh` が `s3fs-ebpf <command> --help` から作る `s3fs-ebpf-<command>.1` (フラグがバイナリとずれない)。`deb-check` は gzip・`.TH` 行・`groff -ww` の警告ゼロを確認し、doc パッケージは copyright・主要ファイル・未圧縮 `.md` の残りと journal の混入を確認する。
+
+公式相当 (Debian / Ubuntu / PPA / 自前 apt リポジトリ) にするために足りないもの: [`deb-packaging-official.md`](deb-packaging-official.md) (計画なし、backlog AC-98 に条件付きで記録)。

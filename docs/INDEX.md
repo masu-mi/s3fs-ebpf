@@ -150,6 +150,7 @@ docs/ はカテゴリ別のサブディレクトリに分かれている。初�
 | [`dev-notes/lessons-learned.md`](dev-notes/lessons-learned.md) | Week 1-4 横断の実装ハマりポイント (arena / new_inode / invalidate deadlock / rwlock sleep / pending race) |
 | [`dev-notes/ac75-ac76-lessons.md`](dev-notes/ac75-ac76-lessons.md) | AC-75 (4 MiB 超の object の disk cache) と AC-76 (chunk 表の read、large folio) で分かったこと。原因、試して効かなかった変更、perf の内訳、folio / readahead API の落とし穴。手順は `.claude/skills/kmod-change-verify/SKILL.md` |
 | [`dev-notes/build-env-dependencies.md`](dev-notes/build-env-dependencies.md) | ビルド・検証環境の依存箇所 (カーネル版 / ヘッダ / コンパイラ / ツール / テストツール) と解消方法。`make doctor` の ID 対応表 |
+| [`dev-notes/deb-packaging-official.md`](dev-notes/deb-packaging-official.md) | `make deb` を公式相当 (Debian / Ubuntu / PPA / 自前 apt リポジトリ) にするために足りないものと作業順。計画なし (backlog AC-98、条件付き) |
 | [`dev-notes/lockdep-kernel.md`](dev-notes/lockdep-kernel.md) | lockdep (`CONFIG_PROVE_LOCKING`) 付きカーネルを build して入れ、`make test-lockdep` で回帰テストを通す手順 (AC-42): config、grub、読み方、戻し方 |
 | [`dev-notes/kunit.md`](dev-notes/kunit.md) | kmod の KUnit テスト (`make test-kunit`): 実行方法、suite の対象、テストで見つけて直したバグ |
 | [`dev-notes/ebpf-ecosystem-gaps.md`](dev-notes/ebpf-ecosystem-gaps.md) | BPF_ARENA / STRUCT_OPS / KF_SLEEPABLE の upstream 未提供・改善案 (K-01/02 の根拠)。Week 4 時点の素材で、cilium/ebpf 側の最新は `dev-notes/cilium-ebpf-arena-and-struct-ops.md` |
