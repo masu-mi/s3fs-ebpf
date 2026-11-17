@@ -280,6 +280,12 @@ func handleReadMiss(ctx context.Context, devPath string,
 				ev.Ino, entry.Name, ev.seqRatio(), fullSize)
 		}
 	}
+	if !useFullAdmit {
+		// AC-89: keep the window full. Starting it only after this chunk's own
+		// GET (and not at all when the chunk was being read ahead) left every
+		// fourth chunk with an empty pipeline.
+		maybeReadahead(ctx, devPath, s3c, ev, entry.S3Key, fullSize, missChunkOffset)
+	}
 	if !useFullAdmit && readaheadWait(ctx, ev.Ino, missChunkOffset) {
 		// AC-89: the chunk was being read ahead; it is in, so just wake the
 		// reader (EAGAIN: it was shed meanwhile, fetch it below).
@@ -319,9 +325,6 @@ func handleReadMiss(ctx context.Context, devPath string,
 		metrics.Global.ReadMissErrors.Add(1)
 		_ = signalAdmitFn(devPath, ev.Ino, missChunkOffset, ev.Seq, -5 /* -EIO */)
 		return
-	}
-	if !useFullAdmit {
-		maybeReadahead(ctx, devPath, s3c, ev, entry.S3Key, fullSize, missChunkOffset)
 	}
 	// Send the data to kmod's chunk table (and page cache) via the
 	// POPULATE_PAGES ioctl.

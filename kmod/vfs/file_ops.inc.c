@@ -219,6 +219,41 @@ static int s3fs_fd_mark_remote_locked(struct inode *inode,
 	return 0;
 }
 
+/* Queue the FOR_WRITE upcall for chunk @ci without waiting, so the daemon
+ * fetches the chunks of one modify in parallel instead of one round trip per
+ * chunk (a 10 MiB object is three chunks).  The record stays in the inflight
+ * hash; the waiting loop in s3fs_fd_load_for_modify() joins it by key, or
+ * sees the chunk already there.  Best effort: any failure here is retried by
+ * that loop. */
+static void s3fs_load_kick(struct inode *inode, struct s3fs_file_data *fd,
+			   u32 ci, bool bound)
+{
+	struct s3fs_inflight *p;
+	u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
+	u64 isz = i_size_read(inode);
+	bool created, have;
+
+	if (!READ_ONCE(s3fs_daemon_armed))
+		return;
+	mutex_lock(&fd->lock);
+	have = s3fs_mop_chunk_ready(fd, ci);
+	mutex_unlock(&fd->lock);
+	if (have)
+		return;
+	p = inflight_get_or_create(S3FS_REQ_MISS, inode->i_ino, cs,
+				   S3FS_MISS_FLAG_FOR_WRITE, &created);
+	if (!p)
+		return;
+	inflight_queue_miss(p, created, cs,
+			    min_t(u64, S3FS_CHUNK_SIZE, isz > cs ? isz - cs : 1),
+			    S3FS_MISS_FLAG_FOR_WRITE |
+			    (bound ? S3FS_MISS_FLAG_PINNED : 0), NULL);
+	inflight_put(p);
+}
+
+/* How many chunks ahead of the one being waited for are kicked. */
+#define S3FS_LOAD_KICK_AHEAD 8
+
 /* AC-50: make the fd hold the parts of an existing object that a modification
  * leaves intact, before the modification is applied.
  *
@@ -242,7 +277,7 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 				   struct s3fs_mpin *mp)
 {
 	struct s3fs_mop op;
-	u32 ci, first, last;
+	u32 ci, first, last, kicked;
 	int err;
 
 	mutex_lock(&fd->lock);
@@ -257,12 +292,23 @@ static int s3fs_fd_load_for_modify(struct inode *inode,
 	if (err)
 		return err;
 
+	kicked = first;
 	for (ci = first; ci <= last; ci++) {
 		u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;
 		int tries = 0;
 
 		if (!s3fs_mop_needs_data(&op, ci))
 			continue;
+		for (; kicked <= last && kicked < ci + S3FS_LOAD_KICK_AHEAD; kicked++) {
+			bool kb;
+
+			if (kicked < ci || !s3fs_mop_needs_data(&op, kicked))
+				continue;
+			mutex_lock(&fd->lock);
+			kb = fd->dirty || fd->flushing || fd->nr_remote;
+			mutex_unlock(&fd->lock);
+			s3fs_load_kick(inode, fd, kicked, kb);
+		}
 		for (;;) {
 			struct s3fs_inflight *p;
 			bool have, bound, created;

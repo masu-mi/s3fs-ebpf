@@ -2757,3 +2757,184 @@ F (64 jobs、psync、bs=1、5 s、中央値の IOPS (M)): `ebpf-pcache` は基�
 - E の cat-cold が §18.54 の 8.3 s から約 2.05 s になっているのは、基準 (`a60bdcb`) にすでに入っている object staging (§18.57、AC-88) による。今回の差分ではない。
 - 1 run だけ大きく外れたセルは、基準にも新にも出ていて、原因は未切り分け。
 - **測っていないこと**: `open_check=1` (kmod の新しい既定) での A / E、S3 の HEAD / GET の数、層ごとのレイテンシ、G (SQLite / ベクトル)、H (policy の hit rate)、通常カーネルでの `make test-regression` (lockdep カーネルでは通した)、実機 (KVM のみ)。
+
+### 18.60 C の 10 MiB (既存 object の途中への 4 KiB + fsync): load-for-write の並列化と、中サイズの PUT の並列 part (2026-11-11)
+
+§18.59 まで C の 10 MiB は ebpf が fuse に負けていた (fsync の中央値 ebpf 57〜64 ms、fuse-cache 44〜50 ms で、fuse ÷ ebpf = 0.75〜0.8)。原因と、直した 2 つ、前後の値。変更は `d547f74`。生データ: `docs/journal/data/c10-parallel-20261111/` (`C/` `B/` `phase.sh` `wf.py` `chainB.sh` `chainB2.sh`)。
+
+**条件**: `6.12.0-061200-generic` (lockdep なし)、KVM 6 CPU、ローカル MinIO、`bench-pcache-remeasure.sh` (`STEPS=C` と `STEPS=B`、`RUNS_W=10`)。`open_check` は `bench.sh` の既定 (0)。基準は `436749d` (別 worktree に build)。
+
+**原因** (`kmod/vfs/file_ops.inc.c` の `s3fs_fd_load_for_modify`): `partial_modify_min` (16 MiB) 未満の object は最初の変更の前に全 chunk (4 MiB) を読み込む。この読み込みが「chunk ごとに upcall → 完了を待つ → 次の chunk」の直列で、10 MiB は 3 chunk の GET が 3 往復だった。もう 1 つ、`Client.Put` は minio-go の既定 (16 MiB 未満は 1 回の PUT) のままで、10 MiB の PUT が 1 本だった。
+
+**位相ごとの時間** (`phase.sh`、pwrite 1 回と fsync 1 回の時間。10 MiB、8 回)
+
+| 構成 | write (load) | fsync (PUT) |
+|---|---:|---:|
+| fuse-cache | 0.1 ms (読み込みは open で済む。open は測っていない) | 34〜35 ms |
+| ebpf (kick のみ) | 6.7〜9.5 ms | 37.5〜43.8 ms |
+| ebpf (kick + 並列 PUT) | 6.4〜8.2 ms | 29.3〜38.5 ms |
+
+(基準の位相別の値は取っていない。C の合計 63.2 ms と fsync 約 40 ms からの推定では load が約 20 ms 以下だが、**推定であって測定ではない**。)
+
+**変更**
+1. `s3fs_load_kick`: 待つ chunk の先 8 chunk まで、FOR_WRITE の upcall を待たずに先に queue する。待つ側は同じ inflight record を key で拾う (joiner)。daemon は `readMissWorkers=16` で並列に GET する。inflight の仕組みは変えていない。
+2. `Client.Put`: 10 MiB 以上 (`2 × MinPartSize`) は `PartSize = max(5 MiB, ceil(n / 4))`、`NumThreads = 4` の並列 part で送る。
+
+**C の値** (fsync の中央値 ms、n=10。同じセッションの fuse-cache が対照)
+
+| サイズ | 基準 ebpf-pcache | kick のみ | kick + 並列 PUT | fuse-cache (対照) |
+|---|---:|---:|---:|---:|
+| 1 MiB | 17.9 | 18.8 | 25.6\* | 20.6 / 22.5 / 27.6 |
+| 10 MiB | **63.2** | 58.7 | **50.8** | 44.4 / 48.9 / 49.4 |
+| 100 MiB | 177.6 | 174.8 | 172.6 | 162.2 / 174.6 / 173.1 |
+
+(fuse-cache は基準 / kick のみ / kick + 並列 PUT の各 run の値。\*1 MiB は同じ run の fuse も 27.6 に動いていて、環境の揺れ。1 MiB は変更の対象外で、kmod の経路も flush も同じ)
+
+- 10 MiB の fuse ÷ ebpf: 基準 0.70 → kick のみ 0.83 → **kick + 並列 PUT 0.97** (fuse 側が 44〜49 ms と run 間で動くので、1 前後と読む。「勝った」とは書かない)。
+- 100 MiB は変わらない (partial-modify の経路で、読み込みは触る chunk だけ)。
+
+**B (新規ファイルの durable write) への副作用の確認**: PUT の変更は B の 10 MiB 以上にも効く。交互に測った (新 r1 → 基準 r2 → 新 r3 → 基準 r4 → 新 r5 → 基準 r6 → 新 r7 → 基準 r8 → 新 r9 → 基準 r10、各 n=10)。run ごとの中央値 (fsync、ms):
+
+| サイズ・構成 | 新 (r1 / r3 / r5 / r7 / r9) | 基準 (r2 / r4 / r6 / r8 / r10) |
+|---|---|---|
+| 1 MiB ebpf-pcache | 14.2 / 13.8 / 13.6 / 13.1 / 13.6 | 13.8 / 13.8 / 14.0 / 29.8 / 38.3 |
+| **10 MiB ebpf-pcache** | **42.0 / 151.3 / 41.0 / 41.8 / 41.5** | 48.7 / 49.5 / 161.5 / 217.7 / 50.5 |
+| 10 MiB fuse-cache (対照) | 75.3 / 76.2 / 73.2 / 73.2 / 73.8 | 493.2 / 288.2 / 73.6 / 73.8 / 74.5 |
+| 100 MiB ebpf-pcache | 260.4 / 628.4 / 256.2 / 2049.8 / 244.8 | 298.1 / 254.8 / 268.3 / 265.2 / 281.0 |
+| 100 MiB fuse-cache (対照) | 363.4 / 361.6 / 353.7 / 366.1 / 382.2 | 951.5 / 361.8 / 367.2 / 354.9 / 367.9 |
+
+- 揺れの少ない run の 10 MiB は、新 約 41〜42 ms、基準 約 49〜50 ms (**約 -15%**)。fuse ÷ ebpf は約 1.5× → 約 1.8×。100 MiB の変化は読めない (新 約 245〜260、基準 約 255〜298 ms。差はあっても -5% 程度)。1 MiB は同じ。
+- **揺れ**: MinIO が遅い時間帯が連続して現れる (どの run にも、fuse-cache にも、基準にも新にもある: fuse の 100 MiB で 28 秒、新 r7 の ebpf 100 MiB で 4 秒)。10 MiB の ebpf で 150〜220 ms が連続した run が 新 r3 と 基準 r6 / r8 にあり、**新だけに出る劣化ではない**。ただし並列 part が揺れに弱いかは、この測定では分けられない (新で 1/5、基準で 2/5 の run)。原因は未切り分け。`mc admin trace` は残っていない。ディスクの空きは 20% 以上。
+- **正しさ**: 全 run で `fsync-returned-early=0`、B の verify は全 PASS (10 run の全 object)、C は `size_after` が全て元のサイズ。`make test-regression` は全件 (33 件) PASS、`go test -race ./internal/s3 ./internal/objstore` PASS、dmesg に BUG / WARNING なし。
+
+**同じ仕事か**: S3 への GET / PUT の数は**数えていない**。変更前後で GET の本数 (chunk ごと) は同じはずだが、PUT は 1 回 → 2〜4 part + CompleteMultipartUpload に増えた (MinIO 側のリクエスト数は増える)。s3fs-fuse の PUT の方式 (multipart にするか) は確かめていない。
+
+**測っていないこと**: kick の先読み数 (8) と並列 part 数 (4) を振った値、`putParallelMin` を 2 × 5 MiB より下げた値、実 S3 (遠い遅延) での並列 PUT の効果、`C` の `partial_modify_min` (16 MiB) を下げる案の測定。
+
+### 18.61 「MinIO が遅い時間帯が連続する」揺れの切り分け (2026-11-11、途中)
+
+§18.59 / §18.60 の B / C / D で、同じ run の中に 1 秒〜数十秒の遅い区間が連続して出る (fuse-cache の 100 MiB で 28 秒、ebpf の 100 MiB で 4 秒など)。基準にも新にも、fuse にも ebpf にも出る。原因を探した。生データ: `docs/journal/data/burst-analysis-20261111/`。
+
+**条件**: KVM 6 CPU、RAM 8 GB、`6.12.0-061200-generic`、ローカル MinIO (silo)、ディスクは仮想の `sda` (140 GB、`ROTA=1`)。
+
+**やったことと結果**
+1. fs を通さず `mc pipe` で 100 MiB を 40 回連続で PUT: 435〜475 ms で安定、1 回だけ 653 ms。揺れなし (dirty は 100 → 1 MB と減る)。
+2. 2.4 GiB の object を `mc rm --recursive` で消した直後に 100 MiB を 30 回 PUT (2 回): 437〜506 ms。揺れなし。**MinIO の削除の後処理が遅さの原因、という仮説は外れ**。
+3. fs を通して `dd bs=1M conv=fsync` で 100 MiB を 40 回 (ebpf-pcache): 205〜1027 ms。反復 9 だけ 1027 ms で、そのときの writeback が 83 MB に跳び、io pressure (`some`) が 2.6 → 11% に上がり、vmstat の `wa` は 12〜35%。**後半は 250 → 約 495 ms と単調に遅くなる傾向があった**が、原因は未確認 (fuse で同じ傾向かは取れていない)。
+4. 同じ負荷を fuse-cache で: 反復 7〜9 が 1856 / 2672 / 1703 ms、他は 361〜431 ms。**ebpf と同じように、数反復の連続した遅い区間が出る**。反復 22 の途中で進まなくなり、40 まで完走していない (原因は未確認。s3fs の disk cache dir は約 2.2 GB で、ホストのディスクの空きは 18 GB あった)。
+5. 環境の状態: `/proc/pressure/io` の累計が大きい (`some` の avg300 が 3〜8%、total 約 550 秒)。`pgsteal_direct` 約 120 万、`allocstall_normal` 約 5,700 (メモリの reclaim も起きている)。MinIO は 17 万 object (主に sync-bench の bucket) を持つ。
+
+**読み**
+- 遅い区間は **fs の種類にも変更の有無にも依らず**、**書き込みの負荷を fs 経由で連続して流したときに**出る。MinIO への直接の PUT では 70 回の中に出なかった。
+- 出ているときは writeback の急増と io pressure の上昇が重なる。ディスクの I/O 待ちの揺れが有力だが、**原因は確定していない**。仮想ディスクの host 側の揺れか、ゲストの writeback か、メモリ reclaim か、分けられていない。
+- 対策 (測定の側): 書き込みの項目 (B / C / D) は、run の**中央値ではなく、揺れの少ない run を選ぶか、交互に 5 組以上測る** (§18.60 のやり方)。遅い区間が連続するので、n=10 の 1 run の中央値は区間に乗ると丸ごとずれる。
+- 未実施: `vm.dirty_*` を変えた比較、ゲストの disk の `iostat -x` (await / util) の記録、host 側の確認、メモリの少ない (8 GB) VM で page cache が足りるかの確認。
+- **続き (§18.64)**: 原因は VM の block デバイスの書き込み停止と確定した (fs・MinIO・cache-dir に依らない)。
+
+### 18.62 AC-89: 容量 32 MiB の 100 MiB cold read、先読みの窓が 4 chunk に 1 回しか補充されていなかった (2026-11-11)
+
+§18.56 / §18.58 は「GET のまとめ方ではこれ以上縮まらない」で止まっていた。今回は構造を調べ直し、先読みの**補充の契機**に原因を見つけた。生データと script: `docs/journal/data/ac89-readahead-20261111/` (`ac89.sh` `chainAC.sh` `ac89-chain.log`)。
+
+**条件**: `6.12.0-061200-generic`、KVM 6 CPU、ローカル MinIO、100 MiB の object、`--cache-capacity=32 MiB`、cold read は `drop_caches=3` の後の `cat` (5 回 × 3 組)。基準は `6b66b70`。haltpoll は触っていない。
+
+**原因** (`handleReadMiss`): 先読み (`maybeReadahead`) は、miss の chunk **自分の GET が終わった後**にだけ呼ばれていた。さらに、先読み済みで飛行中の chunk を待つだけの miss (`readaheadWait` の分岐) は、先読みを呼ばずに return する。つまり窓は「本当の miss」のときにしか補充されない。窓が 3 chunk なので、4 chunk に 1 回、先読みのない状態で GET を 1 本ずつ直列に払い、その後に 3 chunk を並列に取る、という鋸歯になる。upcall は 25 chunk に対して 18〜20 回。
+
+**変更**: `maybeReadahead` を、自分の chunk の GET を待たずに、(`readaheadWait` の前で) 呼ぶ。待つだけの miss でも窓が 1 chunk 進む。
+
+**値** (cold read、ms、中央値。n=5 を 3 組、新・基準を交互)
+
+| | 基準 | 新 | 無制限 (同じ組) |
+|---|---:|---:|---:|
+| 容量 32 MiB | 174 / 169 / 171 | **148 / 154 / 149** | 135〜138 |
+
+- 無制限に対する比: 基準 +25〜28% → 新 **+8〜11%**。upcall は 18〜20 → 13〜17 回。
+- 窓の幅を振った (1〜6 chunk、n=5 × 2): 1 chunk 160〜171、2 chunk 145〜162、**3 chunk 135〜161 (中央値 約 145)**、4 chunk 148〜161、5〜6 chunk は 138〜183 で不安定 (先に evict される)。現行の式 (容量 / 4 MiB / 2 − 1 = 3) が最適に近い。式は変えない。
+- 残る +8〜11%: 無制限は 4 本の並列 range GET (handler 約 117 ms の中で 2 upcall)、容量付きは 4 MiB ごとに upcall と populate が入る。これ以上は未切り分け。
+- **GET の下限 (MinIO から 100 MiB を最短で取る時間) は測れていない。** 並列 range GET を署名付きの curl で測ろうとしたが、シェルの制約で取れなかった。
+
+**検証**
+- `go test -race ./cmd/...` PASS。新しい `TestReadMissKeepsTheReadaheadWindowFull` は、先読み済みの chunk (飛行中) への miss で窓が進むことを見る。**修正前のコードでは FAIL** することを確認した。
+- `make test-regression` は全件 (33 件) PASS。dmesg の BUG / WARNING なし。
+- `make check-invariants` OK。
+
+**同じ仕事か**: S3 への GET の本数は数えていない。先読みの本数 (窓の幅) と chunk の大きさは変えていないので、同じはずだが、確認はしていない。
+
+### 18.63 AC-89 の残り (+8〜11%) の切り分け: 先読みが自己クロックでなく、hit で窓が進まなかった (2026-11-12)
+
+§18.62 の後も、容量 32 MiB の 100 MiB cold read は無制限より +8〜11% 遅かった。原因を切り分け、直した。生データと script: `docs/journal/data/ac89-selfclock-20261112/` (`ac89.sh` `ac89tr.sh` `ac89perf.sh` `ac89sweep.sh` `chainAC.sh` `ac89-chain2.log`、`timeline-*.log` は一時の時刻ログ)。
+
+**条件**: `6.12.0-061200-generic`、KVM 6 CPU、ローカル MinIO、100 MiB の object、`--cache-capacity=32 MiB`、cold read は `drop_caches=3` の後の `cat`。基準は `529bbd4` (§18.62)。
+
+**下限** (daemon の S3 client で 100 MiB を range GET、9 回の中央値): 25 MiB × 4 並列 29 ms、16 MiB × 4 並列 31 ms、4 MiB × 4 並列 38 ms、4 MiB × 8 並列 34 ms、4 MiB 直列 82 ms、1 MiB × 4 並列 60 ms。**S3 の取得は 137 ms の約 1/4 にすぎず**、残りは populate と page cache、cat 側。MinIO が object を page cache に持っているので、この値は MinIO の読みが速い場合の下限。
+
+**時系列** (一時の時刻ログ、100 MiB の 1 run):
+- 無制限: 最初の 16 MiB × 4 本の GET が返るまで約 51 ms。先頭 chunk が見えるのは約 60 ms。その後は 1 chunk あたり約 0.9 ms の populate が連続して流れる。
+- 容量 32 MiB (§18.62 の版): miss の chunk 0 で chunk 1〜3 を先読みし、約 17 ms で全部 populate される。reader はこの 3 chunk を page cache の hit で読み進めるが、**hit は daemon に見えないので窓は進まない**。reader が次の欠けた chunk (miss) に着いたとき (約 23 ms) に、ようやく次の 3 chunk を取りに行く。その間の約 5.6 ms は pipeline が空で、これが 4 chunk ごとに約 6 回ある。
+
+perf (`-a -g`) の CPU 配分は、silo 約 35%、daemon 約 22〜25%、docker-proxy 約 8%、cat 約 9% で、両者に大きな差はない (cat のサンプル数で割った daemon の CPU は容量付きで約 +10%、silo は約 +3%)。run 数を揃えていないので、内訳の差は結論に使っていない。
+
+**変更**: 先読みを自己クロックにした。先読みが 1 つ終わるたびに次の chunk を要求し、`window + 1` 個 (32 MiB で 4 個) の GET を飛行中に保つ。要求の範囲は、最後の miss から `ahead = 容量の chunk 数 − 2` chunk (32 MiB で 6、上限 8) まで。`ahead` は、要求済みでまだ読まれていない chunk が容量に収まるための上限。
+
+**掃引** (一時の環境変数、cap32、n=5 を 2 ラウンド、ms の中央値):
+
+| 設定 | 中央値 (2 ラウンド) |
+|---|---|
+| 旧 (窓 3、miss で補充) | 154 / 158 |
+| ahead 3 / conc 3 | 149 / 151 |
+| ahead 4 / conc 3 | 138 / 149 |
+| ahead 6 / conc 3 | 137 / 140 |
+| ahead 5 / conc 4 | 137 / 149 |
+| **ahead 6 / conc 4** | **138 / 140** |
+| 無制限 | 136 / 128 |
+
+**交互測定** (cold read の中央値 ms、n=5、新と基準を交互に 3 組):
+
+| | 基準 (`529bbd4`) | 新 | 無制限 (同じ組) |
+|---|---:|---:|---:|
+| 容量 32 MiB | 134 / 147 / 150 | **130 / 133 / 136** | 124〜132 |
+
+- 無制限に対する比: 基準 +6〜15% → 新 **約 +4%**。upcall は 14〜16 → 8〜14 回。
+- 昨日の run より全体が速い (無制限が 137 → 125〜130 ms)。環境の揺れで、同じセッションの対照で比べている。
+
+**検証**
+- `make test-regression` は全件 (33 件) PASS、dmesg の BUG / WARNING なし。`make check-invariants` OK。
+- `go test -race ./cmd/...` PASS。`TestReadMissKeepsTheReadaheadWindowFull` (飛行中の chunk を待つ miss で上限が動くこと、`ahead` を超えて先読みしないこと)、`TestReadaheadAhead`、`TestReadaheadRestart` を足した。旧の `readaheadRange` とそのテストは置き換えた。
+
+**同じ仕事か**: S3 への GET の本数 (先読みで取る chunk の数) は数えていない。chunk の大きさは同じ。先読みは「最後の miss + ahead」までなので、reader が止まった場合の取りすぎは最大 `ahead` chunk (24 MiB)。reader が進まないまま unread の chunk が容量を超えない設計だが、容量の小さい構成 (16 MiB 以下) の実機試験は `test-regression` の範囲のみ。
+
+**残り**: 約 +4%。無制限は最初の 51 ms を 16 MiB × 4 本の GET に使うが、その後の populate が連続して流れる。容量付きは 4 MiB ごとに upcall と populate が入る。これ以上は未切り分け。
+
+### 18.64 書き込みの揺れの原因: VM の block デバイス (`QEMU HARDDISK`) の書き込み停止 (2026-11-12)
+
+§18.61 の続き。「fs 経由の書き込みで遅い区間が連続して出る」原因を、**fs・MinIO・daemon の disk cache のどれにも依らない、ゲストの block デバイスの停止**と確定した。生データと script: `docs/journal/data/disk-stall-20261112/` (`*.iters` は反復ごとの ms、`*.samples` は 1 秒ごとの `/proc/diskstats` ほか、`burst4.sh` `chain4.sh` `rawdisk.sh` `an4.py`)。
+
+**条件**: KVM 6 CPU、RAM 8 GB、`6.12.0-061200-generic`、disk は `QEMU HARDDISK` (140 GB、`ROTA=1`、`mq-deadline`、`nr_requests=256`)、ローカル MinIO。`vm.dirty_ratio=20`、`dirty_background_ratio=10`、`dirty_expire_centisecs=3000`。
+
+**実験**: 100 MiB の書き込みを 60 回、5 モード × 3 ラウンド。1 秒ごとに sda の書き込み MB/s、write await (ms/IO)、util、Dirty / Writeback、io PSI を採る。モード: `direct` (`docker exec mc pipe`、MinIO へ直接)、`direct+local` (直接 PUT + 同じ disk へ 100 MiB のローカル書き込み = daemon の disk cache の書き込みを模す)、`fuse-raw`、`ebpf-nocache` (cache-dir なし)、`ebpf-pcache`。最後に、MinIO も fs も使わない O_DIRECT の `dd` (100 MiB、150 回 × 2)。
+
+**結果** (反復が run の中央値の 2 倍を超えたものを「遅い」とした。n=60 / run)
+
+| モード・ラウンド | 中央値 ms | 遅い反復 | 遅い時間 / 全体 | 遅い窓の write await (最大) | util |
+|---|---:|---:|---:|---:|---:|
+| direct 1 | 458 | 9 | 40 / 64 s | 1742 ms | 100% |
+| direct 2 / 3 | 450 / 457 | 0 / 0 | — | (最大 29 / 52 ms) | — |
+| direct+local 1 / 2 / 3 | 578 / 574 / 572 | 0 / 16 / 10 | 0 / 52 / 23 s | 623 / 339 ms | 96 / 93% |
+| fuse-raw 1 / 2 / 3 | 381 / **2396** / **2467** | 6 / 2 / 6 | 13 / 17 / 48 s | 160〜1347 ms | 92〜103% |
+| ebpf-nocache 1 / 2 / 3 | 233 / 229 / 230 | 9 / 18 / 15 | 12 / 23 / 19 s | 389〜421 ms | 89〜92% |
+| ebpf-pcache 1 / 2 / 3 | 224 / 233 / 234 | 4 / 6 / 16 | 14 / 7 / 38 s | 462〜1621 ms | 86〜100% |
+| raw O_DIRECT dd 1 / 2 | 70 / 70 | 11 / 4 | 58 / 3.9 s | (最大 11977 / 1153 ms) | — |
+
+- **どのモードにも出る**: fs を通さない `direct` (MinIO へ直接) と、MinIO も fs も使わない O_DIRECT の `dd` にも出た。run によって出る / 出ないが分かれる (direct は 2・3 ラウンドが 0、1 ラウンドが 60 回中 9 回)。**fs の種類・cache-dir の有無・MinIO・変更の有無とは関係ない**。
+- **遅い反復は disk の write await が 400 ms〜3 秒、util が 86〜100% の窓と重なる**。遅い窓の書き込みスループットは 58〜190 MB/s で、正常な窓 (224〜374 MB/s) の約半分以下。
+- **周期的ではない**: 遅い区間は数秒〜数十秒続く連続した窓 (direct 1 は 14〜55 秒がほぼ全部遅い)。run 全体が一様に遅いことも (fuse-raw の 2 / 3 ラウンドは中央値が 2.4 s)。dirty の閾値に近い量ではなく (dirty は 100 MB 前後)、ゲスト側の writeback の閾値 (dirty_ratio) では説明できない。
+- **現時点でも続いている**: 実験後に `scripts/disk-stall-probe.sh` を流すと、中央値 1167 ms (全部遅い) や、中央値 268 ms で 4 回の停止、が出た。健全な状態は 100 MiB で約 70 ms。
+- **原因の層**: ゲストの block デバイス (QEMU のエミュレートされた disk) から先、つまりホストの I/O の競合か throttle。ゲストの設定 (`vm.dirty_*`、scheduler) を変える実験はしていない。ホスト側は確認していない。
+
+**これまでの記録への影響**
+- §18.59 / §18.60 の B / C / D、§18.61 の書き込みの run の遅い区間は、この停止で説明できる。fuse-cache の 100 MiB の 28 秒、ebpf の 100 MiB の 4 秒も同じ。
+- §18.61 に書いた「ebpf の連続書き込みで後半が 250 → 495 ms と遅くなる」傾向は、停止の窓と重なっただけの可能性が高い。fs 側の劣化とは書かない。
+- §18.60 の B の 10 MiB の改善 (約 -15%) は、揺れの少ない run を選んで比べた値。disk が止まっていない run だけで比べた値であることは、この実験の前は確認できていなかった。**停止の窓を除いた再測定はしていない** (今の disk は遅い)。
+
+**対策** (入れた)
+- `scripts/disk-stall-probe.sh`: 100 MiB の O_DIRECT 書き込みを 20 回 (約 2 秒)。中央値が 300 ms を超える (ディスク全体が遅い) か、中央値の 3 倍を超える反復がある (停止) と終了コード 1。
+- `perf-bench-verify` skill の §0 に 10 番として追加: 書き込みを伴う項目の前後に流し、1 が出たら間の run を捨てる。
