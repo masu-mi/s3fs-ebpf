@@ -19,55 +19,23 @@ set -uo pipefail
 
 SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/toolchain.sh
-source "$SCRIPTS_DIR/lib/toolchain.sh"
+source "$SCRIPTS_DIR/lib/kmodbuild.sh"
 
 SETUP="${SETUP:-0}" KEEP="${KEEP:-0}"
 [[ "${1:-}" == -h || "${1:-}" == --help ]] && { sed -n '2,19p' "$0"; exit 0; }
 [[ $# -gt 0 ]] && KRELS="$*"
 
-# check_one <krel> — runs in a subshell with KREL/KDIR pinned to that kernel.
+# check_one <krel> — runs in a subshell, pinned to that kernel.
 check_one() {
-    local krel=$1 work=$2
-    export KREL="$krel"; unset KDIR KMOD_CC KMOD_PAHOLE
-    # shellcheck disable=SC2034  # re-derive the per-kernel defaults
-    KDIR="/lib/modules/$krel/build"
-    # re-source so KREL/KDIR-dependent defaults are those of this kernel
-    unset _S3FS_LIB_TOOLCHAIN; source "$SCRIPTS_DIR/lib/toolchain.sh"
-
+    local krel=$1 work=$2 inst="$2/$1/root"
     if [[ "$SETUP" == 1 ]]; then
         ASSUME_YES=1 KREL="$krel" "$SCRIPTS_DIR/setup-toolchain.sh" headers kbuild >&2 \
             || { echo "setup-toolchain headers kbuild failed"; return 1; }
     fi
-    KREL="$krel" KDIR="$KDIR" "$SCRIPTS_DIR/doctor.sh" --quiet --only kmod >&2 \
-        || { echo "doctor --only kmod: NG (see above)"; return 1; }
+    mkdir -p "$work/$krel" "$inst"
+    kmod_build "$krel" "$work" || return 1
 
-    local cc pahole ldlib kcflags src="$work/$krel/src" inst="$work/$krel/root"
-    cc=$(detect_kmod_cc) || { echo "no usable gcc for $krel"; return 1; }
-    pahole=$(detect_pahole) || { echo "no usable pahole for $krel"; return 1; }
-    ldlib=$(pahole_libdir "$pahole"); kcflags=$(kmod_kcflags "$cc")
-
-    mkdir -p "$src/kmod" "$inst"
-    cp -r "$S3FS_TOPDIR/kmod/." "$src/kmod/"; cp -r "$S3FS_TOPDIR/include" "$src/include"
-    rm -f "$src"/kmod/*.ko "$src"/kmod/*.o "$src"/kmod/.*.cmd 2>/dev/null
-
-    local margs=(KDIR="$KDIR" CC="$cc" HOSTCC="$cc" PAHOLE="$pahole")
-    [[ -n "$kcflags" ]] && margs+=(KCFLAGS="$kcflags")
-    local env=(env ${ldlib:+LD_LIBRARY_PATH="$ldlib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"})
-
-    "${env[@]}" make -C "$src/kmod" "${margs[@]}" >"$work/$krel/build.log" 2>&1 \
-        || { echo "build failed (tail of $work/$krel/build.log):"; tail -n 15 "$work/$krel/build.log"; return 1; }
-    local ko="$src/kmod/s3fs_kfunc.ko"
-    [[ -f "$ko" ]] || { echo "build succeeded but $ko is missing"; return 1; }
-    if grep -q 'Skipping BTF generation' "$work/$krel/build.log"; then
-        echo "kbuild skipped BTF generation (no $KDIR/vmlinux?)"; return 1
-    fi
-
-    local vm; vm=$(modinfo -F vermagic "$ko" 2>/dev/null | awk '{print $1}')
-    [[ "$vm" == "$krel" ]] || { echo "vermagic '$vm' != kernel '$krel'"; return 1; }
-    "$SCRIPTS_DIR/check-kmod-btf.sh" "$ko" >/dev/null 2>&1 || {
-        "$SCRIPTS_DIR/check-kmod-btf.sh" "$ko" 2>&1 | head -n 3; return 1; }
-
-    "${env[@]}" make -C "$src/kmod" "${margs[@]}" INSTALL_MOD_PATH="$inst" modules_install \
+    "${KMOD_ENV[@]}" make -C "$KMOD_SRC" "${KMOD_MAKE_ARGS[@]}" INSTALL_MOD_PATH="$inst" modules_install \
         >"$work/$krel/install.log" 2>&1 \
         || { echo "modules_install failed:"; tail -n 10 "$work/$krel/install.log"; return 1; }
     local installed
@@ -77,7 +45,7 @@ check_one() {
     depmod -b "$inst" "$krel" >>"$work/$krel/install.log" 2>&1
     grep -q 's3fs_kfunc.ko' "$inst"/lib/modules/"$krel"/modules.dep \
         || { echo "s3fs_kfunc not in modules.dep of the scratch root"; return 1; }
-    echo "gcc=$cc pahole=$(pahole_version "$pahole" "$ldlib") vermagic=$vm installed=${installed#"$inst"}"
+    echo "$KMOD_INFO installed=${installed#"$inst"}"
 }
 
 WORK=""

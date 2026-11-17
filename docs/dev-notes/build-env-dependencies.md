@@ -149,3 +149,18 @@ scripts/setup-toolchain.sh   doctor が NG にする項目をステップ単位�
 - `make kmod-matrix` (`scripts/kmod-matrix.sh`): `/lib/modules` にある 6.12 以上の全カーネルについて、(1) `doctor --only kmod` (2) 使い捨てコピーでの build (カーネル間でオブジェクトが混ざらない) (3) vermagic == そのカーネル (4) module BTF (5) 使い捨ての `INSTALL_MOD_PATH` への `modules_install` + `depmod` (`modules.dep` に載る) を確認し、1 つでも落ちたら exit 1。実 `/lib/modules` には何も入れず、insmod もしない。
 - `KRELS="a b"` か引数で対象を絞る。`SETUP=1` で各カーネルに `setup-toolchain.sh headers kbuild` を先に当てる。
 - apt は `apt_get` (`scripts/lib/common.sh`) 経由: dpkg ロック待ち (`APT_LOCK_TIMEOUT`、既定 300 秒)、非対話、ミラー失敗の再試行 (`APT_RETRIES`、既定 3)。mainline の deb 取得も curl を再試行する。
+
+## 実行環境向け apt パッケージ (.deb)
+
+`make deb` → `make deb-check` → `make deb-install` (`scripts/build-deb.sh build|check|install`)。出力は `dist/deb/`。
+
+| パッケージ | 中身 |
+|---|---|
+| `s3fs-ebpf` | `/usr/bin/s3fs-ebpf`、`/usr/share/s3fs-ebpf/{bpf,policies}` (`policy_test_*` は除く) |
+| `s3fs-ebpf-kmod-<krel>` | `/lib/modules/<krel>/updates/s3fs_kfunc.ko`。カーネルごとに 1 つ (kmod は vermagic が一致するカーネルにしか載らない)。postinst / postrm で `depmod -a <krel>`。`Provides: s3fs-ebpf-kmod` |
+
+- kmod の build は `kmod-matrix` と同じ `scripts/lib/kmodbuild.sh` (カーネルごとに使い捨てコピー、vermagic・module BTF の検査込み)。`KRELS="a b" make deb` で対象を絞る。
+- `deb-check` は何も入れずに、中身・vermagic == パッケージ名のカーネル・BTF・`depmod` 後の `modules.dep`・`apt-get install -s` (依存解決のシミュレーション) を確認する。
+- `deb-install` は `apt_get install` (ロック待ち・再試行付き) のあと、`/usr/bin/s3fs-ebpf` が動くことと、各カーネルで `modinfo -k <krel> s3fs_kfunc` が引けることを確認する。
+- デーモンは bpf オブジェクトを `$S3FS_EBPF_ROOT`、作業ディレクトリ (またはその親)、`/usr/share/s3fs-ebpf` の順で探す。
+- 新しいカーネルを入れたら `make setup-kbuild && make deb` で、そのカーネル用の kmod パッケージが増える。

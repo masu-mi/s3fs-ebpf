@@ -70,7 +70,7 @@ DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
         mount unmount daemon-run daemon-stop \
         bench bench-write bench-scale bench-3way \
         bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
-        doctor doctor-build toolchain kmod-matrix setup-kernel setup-toolchain setup-kbuild \
+        doctor doctor-build toolchain kmod-matrix deb deb-check deb-install setup-kernel setup-toolchain setup-kbuild \
         lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
         test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-nocache-signal test-cold-signal test-staging test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
         test-evict-readback test-populate-boundary \
@@ -120,6 +120,15 @@ kmod: ## Build kernel module -> kmod/s3fs_kfunc.ko
 
 kmod-matrix: ## Build + install-check kmod against every installed kernel >= 6.12 (KRELS=..., SETUP=1 to run headers/kbuild setup first)
 	$(SCRIPTS_DIR)/kmod-matrix.sh
+
+deb: daemon bpf ## Build runtime .deb packages -> dist/deb (s3fs-ebpf + s3fs-ebpf-kmod-<krel> per kernel; KRELS=...)
+	$(SCRIPTS_DIR)/build-deb.sh build
+
+deb-check: ## Inspect dist/deb/*.deb (contents, vermagic, BTF, depmod, apt simulate); installs nothing
+	$(SCRIPTS_DIR)/build-deb.sh check
+
+deb-install: ## apt-get install dist/deb/*.deb (sudo), then verify per kernel
+	$(SCRIPTS_DIR)/build-deb.sh install
 
 kmod-clean: ## Clean kernel module build artefacts
 	$(MAKE) -C $(KMOD_DIR) $(KMOD_MAKE_ARGS) clean
