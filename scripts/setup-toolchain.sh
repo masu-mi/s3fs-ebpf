@@ -36,7 +36,7 @@ ARCH_DEB=$(dpkg --print-architecture 2>/dev/null || echo amd64)
 APT_UPDATED=0
 apt_update_once() {
     [[ $APT_UPDATED == 1 ]] && return 0
-    run sudo apt-get update
+    apt_get update
     APT_UPDATED=1
 }
 

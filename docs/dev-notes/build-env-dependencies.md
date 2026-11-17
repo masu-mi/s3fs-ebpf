@@ -141,3 +141,31 @@ scripts/setup-toolchain.sh   doctor が NG にする項目をステップ単位�
 - `s3fs-ebpf dev` 配下へ移った `test-arena` / `microbench` を旧名で呼んでいた (Makefile / bench)
 - コミット済み bpf2go object が clang < 19 生成で `addr_space_cast` 無し → verifier 拒否 (C-1、`arena_cast_test.go`)
 - `rmmod` が BPF prog の module 参照解放 (非同期) と競合して "in use" → `scripts/kmod-unload.sh` でリトライ
+
+## 複数バージョンのカーネル
+
+`KREL` (既定は `uname -r`) だけで `KDIR` / gcc / pahole の判定が決まるので、実行中でないカーネルにも同じ検査をかけられる。
+
+- `make kmod-matrix` (`scripts/kmod-matrix.sh`): `/lib/modules` にある 6.12 以上の全カーネルについて、(1) `doctor --only kmod` (2) 使い捨てコピーでの build (カーネル間でオブジェクトが混ざらない) (3) vermagic == そのカーネル (4) module BTF (5) 使い捨ての `INSTALL_MOD_PATH` への `modules_install` + `depmod` (`modules.dep` に載る) を確認し、1 つでも落ちたら exit 1。実 `/lib/modules` には何も入れず、insmod もしない。
+- `KRELS="a b"` か引数で対象を絞る。`SETUP=1` で各カーネルに `setup-toolchain.sh headers kbuild` を先に当てる。
+- apt は `apt_get` (`scripts/lib/common.sh`) 経由: dpkg ロック待ち (`APT_LOCK_TIMEOUT`、既定 300 秒)、非対話、ミラー失敗の再試行 (`APT_RETRIES`、既定 3)。mainline の deb 取得も curl を再試行する。
+
+## 実行環境向け apt パッケージ (.deb)
+
+`make deb` → `make deb-check` → `make deb-install` (`scripts/build-deb.sh build|check|install`)。出力は `dist/deb/`。
+
+| パッケージ | 中身 |
+|---|---|
+| `s3fs-ebpf` | `/usr/bin/s3fs-ebpf`、`/usr/share/s3fs-ebpf/{bpf,policies}` (`policy_test_*` は除く)、man ページ (`/usr/share/man/man1/s3fs-ebpf*.1.gz`)。`Suggests: s3fs-ebpf-doc` |
+| `s3fs-ebpf-doc` (`all`) | `/usr/share/doc/s3fs-ebpf-doc/`: `docs/user`・`docs/design`・`docs/dev-notes`・README・`kmod-pcache-invariants.md` を gzip して収録。`docs/journal` (計測ログ約 6 MB) は入れない。`LICENSE` が無い間は `copyright` にその旨を書く |
+| `s3fs-ebpf-kmod-<krel>` | `/lib/modules/<krel>/updates/s3fs_kfunc.ko`。カーネルごとに 1 つ (kmod は vermagic が一致するカーネルにしか載らない)。postinst / postrm で `depmod -a <krel>`。`Provides: s3fs-ebpf-kmod` |
+
+- kmod の build は `kmod-matrix` と同じ `scripts/lib/kmodbuild.sh` (カーネルごとに使い捨てコピー、vermagic・module BTF の検査込み)。`KRELS="a b" make deb` で対象を絞る。
+- `deb-check` は何も入れずに、中身・vermagic == パッケージ名のカーネル・BTF・`depmod` 後の `modules.dep`・`apt-get install -s` (依存解決のシミュレーション) を確認する。
+- `deb-install` は `apt_get install` (ロック待ち・再試行付き) のあと、`/usr/bin/s3fs-ebpf` が動くことと、各カーネルで `modinfo -k <krel> s3fs_kfunc` が引けることを確認する。
+- デーモンは bpf オブジェクトを `$S3FS_EBPF_ROOT`、作業ディレクトリ (またはその親)、`/usr/share/s3fs-ebpf` の順で探す。
+- 新しいカーネルを入れたら `make setup-kbuild && make deb` で、そのカーネル用の kmod パッケージが増える。
+
+- man ページ: `man/s3fs-ebpf.1` (手書きの概要・環境変数・ファイル) と、`scripts/gen-man.sh` が `s3fs-ebpf <command> --help` から作る `s3fs-ebpf-<command>.1` (フラグがバイナリとずれない)。`deb-check` は gzip・`.TH` 行・`groff -ww` の警告ゼロを確認し、doc パッケージは copyright・主要ファイル・未圧縮 `.md` の残りと journal の混入を確認する。
+
+公式相当 (Debian / Ubuntu / PPA / 自前 apt リポジトリ) にするために足りないもの: [`deb-packaging-official.md`](deb-packaging-official.md) (計画なし、backlog AC-98 に条件付きで記録)。

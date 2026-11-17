@@ -169,15 +169,7 @@ func runFastpath(args []string) int {
 	// Layer 2 / Layer 3 BPF policy program (Week 4 (d)). --policy-bpf
 	// takes 'builtin:<name>' (engine-shipped) or 'file:<path>' (user
 	// eBPF escape hatch, §4.5 Layer 3). Same load path, same attach.
-	repoRoot, _ := os.Getwd()
-	// Best-effort: if run from repo root or bin/, resolve upward.
-	if _, err := os.Stat(filepath.Join(repoRoot, "bpf")); err != nil {
-		if p := filepath.Dir(repoRoot); p != repoRoot {
-			if _, err := os.Stat(filepath.Join(p, "bpf")); err == nil {
-				repoRoot = p
-			}
-		}
-	}
+	repoRoot := resolveShareRoot()
 	// CEL policy hook may override --policy-bpf. Precedence:
 	//   1. CEL `policy: <expr>` if it evaluates to non-empty string
 	//   2. --policy-bpf flag
@@ -542,4 +534,24 @@ func runFastpath(args []string) int {
 	<-ctx.Done()
 
 	return 0
+}
+
+// shareRootDefault is where the .deb installs bpf/ and policies/ (make deb).
+const shareRootDefault = "/usr/share/s3fs-ebpf"
+
+// resolveShareRoot finds the directory holding bpf/*.bpf.o: $S3FS_EBPF_ROOT,
+// else the working directory or its parent (a source tree: repo root or
+// bin/), else the packaged /usr/share/s3fs-ebpf. Falls back to the working
+// directory so the "not found" error names a path.
+func resolveShareRoot() string {
+	if r := os.Getenv("S3FS_EBPF_ROOT"); r != "" {
+		return r
+	}
+	wd, _ := os.Getwd()
+	for _, c := range []string{wd, filepath.Dir(wd), shareRootDefault} {
+		if _, err := os.Stat(filepath.Join(c, "bpf")); err == nil {
+			return c
+		}
+	}
+	return wd
 }
