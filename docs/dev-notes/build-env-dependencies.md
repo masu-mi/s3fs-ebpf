@@ -156,7 +156,8 @@ scripts/setup-toolchain.sh   doctor が NG にする項目をステップ単位�
 
 | パッケージ | 中身 |
 |---|---|
-| `s3fs-ebpf` | `/usr/bin/s3fs-ebpf`、`/usr/share/s3fs-ebpf/{bpf,policies}` (`policy_test_*` は除く) |
+| `s3fs-ebpf` | `/usr/bin/s3fs-ebpf`、`/usr/share/s3fs-ebpf/{bpf,policies}` (`policy_test_*` は除く)、man ページ (`/usr/share/man/man1/s3fs-ebpf*.1.gz`)。`Suggests: s3fs-ebpf-doc` |
+| `s3fs-ebpf-doc` (`all`) | `/usr/share/doc/s3fs-ebpf-doc/`: `docs/user`・`docs/design`・`docs/dev-notes`・README・`kmod-pcache-invariants.md` を gzip して収録。`docs/journal` (計測ログ約 6 MB) は入れない。`LICENSE` が無い間は `copyright` にその旨を書く |
 | `s3fs-ebpf-kmod-<krel>` | `/lib/modules/<krel>/updates/s3fs_kfunc.ko`。カーネルごとに 1 つ (kmod は vermagic が一致するカーネルにしか載らない)。postinst / postrm で `depmod -a <krel>`。`Provides: s3fs-ebpf-kmod` |
 
 - kmod の build は `kmod-matrix` と同じ `scripts/lib/kmodbuild.sh` (カーネルごとに使い捨てコピー、vermagic・module BTF の検査込み)。`KRELS="a b" make deb` で対象を絞る。
@@ -164,3 +165,5 @@ scripts/setup-toolchain.sh   doctor が NG にする項目をステップ単位�
 - `deb-install` は `apt_get install` (ロック待ち・再試行付き) のあと、`/usr/bin/s3fs-ebpf` が動くことと、各カーネルで `modinfo -k <krel> s3fs_kfunc` が引けることを確認する。
 - デーモンは bpf オブジェクトを `$S3FS_EBPF_ROOT`、作業ディレクトリ (またはその親)、`/usr/share/s3fs-ebpf` の順で探す。
 - 新しいカーネルを入れたら `make setup-kbuild && make deb` で、そのカーネル用の kmod パッケージが増える。
+
+- man ページ: `man/s3fs-ebpf.1` (手書きの概要・環境変数・ファイル) と、`scripts/gen-man.sh` が `s3fs-ebpf <command> --help` から作る `s3fs-ebpf-<command>.1` (フラグがバイナリとずれない)。`deb-check` は gzip・`.TH` 行・`groff -ww` の警告ゼロを確認し、doc パッケージは copyright・主要ファイル・未圧縮 `.md` の残りと journal の混入を確認する。

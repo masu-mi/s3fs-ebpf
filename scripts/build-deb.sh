@@ -6,7 +6,9 @@
 #   scripts/build-deb.sh install           # apt-get install dist/deb/*.deb, then verify
 #
 # Packages:
-#   s3fs-ebpf               /usr/bin/s3fs-ebpf, /usr/share/s3fs-ebpf/{bpf,policies}   (arch-specific)
+#   s3fs-ebpf               /usr/bin/s3fs-ebpf, /usr/share/s3fs-ebpf/{bpf,policies},
+#                           man pages (scripts/gen-man.sh)                            (arch-specific)
+#   s3fs-ebpf-doc           /usr/share/doc/s3fs-ebpf-doc: docs/user, design, dev-notes (gzip; no journal)
 #   s3fs-ebpf-kmod-<krel>   /lib/modules/<krel>/updates/s3fs_kfunc.ko  (one per kernel;
 #                           built against that kernel's headers, Provides s3fs-ebpf-kmod)
 # Needs `make daemon bpf` first (the Makefile's `deb` target does it).
@@ -24,7 +26,7 @@ ARCH=$(dpkg --print-architecture)
 VERSION="${VERSION:-0.0.0+git$(git -C "$S3FS_TOPDIR" log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d).$(git -C "$S3FS_TOPDIR" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 MAINTAINER="${MAINTAINER:-s3fs-ebpf developers <noreply@example.invalid>}"
 
-# control <root> <name> <arch> <depends> <provides> <description>
+# write_control <root> <name> <arch> <depends> <provides> <description> [recommends] [suggests]
 write_control() {
     local root=$1
     mkdir -p "$root/DEBIAN"
@@ -38,6 +40,7 @@ write_control() {
         [[ -n "$4" ]] && echo "Depends: $4"
         [[ -n "$5" ]] && echo "Provides: $5"
         [[ -n "${7:-}" ]] && echo "Recommends: $7"
+        [[ -n "${8:-}" ]] && echo "Suggests: $8"
         echo "Description: $6"
     } >"$root/DEBIAN/control"
 }
@@ -59,12 +62,39 @@ build_main() {
     done
     [[ $n -gt 0 ]] || die "no bpf/*.bpf.o (make bpf)"
     install -m 0644 "$S3FS_TOPDIR"/policies/* "$root/usr/share/s3fs-ebpf/policies/"
+    mkdir -p "$root/usr/share/man/man1"
+    "$SCRIPTS_DIR/gen-man.sh" "$root/usr/share/man/man1" || die "man page generation failed"
+    chmod 0644 "$root"/usr/share/man/man1/*.gz
     write_control "$root" s3fs-ebpf "$ARCH" "" "" \
         "S3 file system with an eBPF-driven page cache (daemon and policies)
  User-space daemon, CLI and built-in cache policies. Needs the matching
  s3fs-ebpf-kmod-<kernel release> package for the running kernel." \
-        "s3fs-ebpf-kmod"
+        "s3fs-ebpf-kmod" "s3fs-ebpf-doc"
     pack "$root" "$OUT/s3fs-ebpf_${VERSION}_${ARCH}.deb"
+}
+
+# Documentation: user guide + design + dev notes. docs/journal (measurement
+# logs, ~6 MB) stays out. Markdown is gzip'ed (Debian policy for doc files).
+DOC_DIRS=(user design dev-notes)
+build_doc() {
+    local root="$1/s3fs-ebpf-doc" d dst="$1/s3fs-ebpf-doc/usr/share/doc/s3fs-ebpf-doc" f
+    mkdir -p "$dst"
+    for d in "${DOC_DIRS[@]}"; do cp -r "$S3FS_TOPDIR/docs/$d" "$dst/$d"; done
+    cp "$S3FS_TOPDIR/docs/kmod-pcache-invariants.md" "$dst/"
+    cp "$S3FS_TOPDIR/README.md" "$dst/README.md"
+    # docs/user/cli-reference.md is generated; keep it, drop nothing else.
+    find "$dst" -name '*.tmpl' -delete
+    find "$dst" -type f -name '*.md' -print0 | xargs -0 gzip -9n
+    find "$dst" -type d -exec chmod 0755 {} + ; find "$dst" -type f -exec chmod 0644 {} +
+    # Debian requires a copyright file. The tree has no LICENSE yet: say so
+    # rather than invent one.
+    if [[ -f "$S3FS_TOPDIR/LICENSE" ]]; then cp "$S3FS_TOPDIR/LICENSE" "$dst/copyright"
+    else printf 'No LICENSE file in the source tree at build time.\nSet the license before distributing these packages.\n' >"$dst/copyright"; fi
+    write_control "$root" s3fs-ebpf-doc all "" "" \
+        "Documentation for s3fs-ebpf
+ User guide, design documents and development notes, as gzip-compressed
+ Markdown under /usr/share/doc/s3fs-ebpf-doc."
+    pack "$root" "$OUT/s3fs-ebpf-doc_${VERSION}_all.deb"
 }
 
 build_kmod() { # <krel> <work>
@@ -96,6 +126,7 @@ cmd_build() {
     rm -rf "$OUT"; mkdir -p "$OUT"
     log "s3fs-ebpf $VERSION ($ARCH)"
     build_main "$work"
+    build_doc "$work"
     for k in "${krels[@]}"; do ( build_kmod "$k" "$work" ) || rc=1; done
     log "built:"; ls -1 "$OUT" >&2
     return $rc
@@ -117,6 +148,24 @@ cmd_check() {
             "$x/usr/bin/s3fs-ebpf" --help >/dev/null 2>&1 || { warn "$name: binary does not run"; rc=1; }
             ls "$x"/usr/share/s3fs-ebpf/bpf/*.bpf.o >/dev/null 2>&1 || { warn "$name: no bpf objects"; rc=1; }
             [[ -f "$x/usr/share/s3fs-ebpf/policies/default.cel" ]] || { warn "$name: no default.cel"; rc=1; }
+            local m n_man=0
+            for m in "$x"/usr/share/man/man1/*.1.gz; do
+                [[ -e "$m" ]] || continue
+                n_man=$((n_man + 1))
+                gzip -t "$m" 2>/dev/null && zcat "$m" | grep -q '^\.TH ' \
+                    && { ! command -v groff >/dev/null || [[ -z "$(zcat "$m" | groff -k -man -ww -z 2>&1)" ]]; } \
+                    || { warn "$name: bad man page $(basename "$m")"; rc=1; }
+            done
+            [[ $n_man -ge 2 && -e "$x/usr/share/man/man1/s3fs-ebpf.1.gz" ]] || { warn "$name: man pages missing ($n_man)"; rc=1; }
+            ;;
+        s3fs-ebpf-doc)
+            local dd="$x/usr/share/doc/s3fs-ebpf-doc"
+            [[ -f "$dd/copyright" ]] || { warn "$name: no copyright file"; rc=1; }
+            [[ -f "$dd/user/getting-started.md.gz" && -f "$dd/README.md.gz" ]] \
+                || { warn "$name: expected docs missing"; rc=1; }
+            [[ -z "$(find "$dd" -name '*.md' -print -quit)" ]] || { warn "$name: uncompressed .md left"; rc=1; }
+            [[ ! -d "$dd/journal" ]] || { warn "$name: journal must not be packaged"; rc=1; }
+            find "$dd" -name '*.md.gz' -print0 | xargs -0 -n50 gzip -t 2>/dev/null || { warn "$name: corrupt gzip"; rc=1; }
             ;;
         s3fs-ebpf-kmod-*)
             krel=$(basename "$(ls -d "$x"/lib/modules/*/ 2>/dev/null | head -n1)")
@@ -146,6 +195,8 @@ cmd_install() {
     apt_get install -y "${debs[@]}" || die "install failed"
     log "verify"
     dpkg -s s3fs-ebpf >/dev/null 2>&1 || { warn "s3fs-ebpf not installed"; rc=1; }
+    dpkg -s s3fs-ebpf-doc >/dev/null 2>&1 || { warn "s3fs-ebpf-doc not installed"; rc=1; }
+    [[ -e /usr/share/man/man1/s3fs-ebpf.1.gz ]] || { warn "man page not installed"; rc=1; }
     /usr/bin/s3fs-ebpf --help >/dev/null 2>&1 || { warn "/usr/bin/s3fs-ebpf does not run"; rc=1; }
     for d in "${debs[@]}"; do
         k=$(dpkg-deb -f "$d" Package); [[ "$k" == s3fs-ebpf-kmod-* ]] || continue
@@ -160,5 +211,5 @@ case "${1:-}" in
     build) shift; cmd_build "$@" ;;
     check) cmd_check ;;
     install) cmd_install ;;
-    *) sed -n '2,15p' "$0"; exit 1 ;;
+    *) sed -n '2,17p' "$0"; exit 1 ;;
 esac

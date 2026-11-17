@@ -1,0 +1,80 @@
+.TH S3FS-EBPF 1 "" "s3fs-ebpf" "User Commands"
+.SH NAME
+s3fs-ebpf \- S3 file system with an eBPF-driven page cache
+.SH SYNOPSIS
+.B s3fs-ebpf
+.I command
+.RI [ options ]
+.SH DESCRIPTION
+.B s3fs-ebpf
+mounts an S3-compatible bucket through the in-kernel
+.B s3fs_ebpf
+VFS (the
+.B s3fs_kfunc
+kernel module).
+The daemon serves read misses, flushes and syncs to the object store, and attaches the cache policy (CEL, or an eBPF struct_ops program) that decides what the page cache keeps.
+.PP
+The kernel module must match the running kernel exactly.
+Install the
+.BI s3fs-ebpf-kmod- kernel-release
+package for
+.BR "uname -r" .
+.SH COMMANDS
+Each command has its own manual page,
+.BR s3fs-ebpf-\fIcommand\fR (1).
+.TP
+.B mount
+Mount an S3 bucket via the s3fs_ebpf VFS.
+.TP
+.B unmount
+Unmount a previously mounted target.
+.TP
+.B fastpath
+Run the fastpath daemon: attach fentry/vfs_getattr, serve read misses, flush, sync S3.
+.TP
+.B stats
+Print fast/slow path counters.
+.TP
+.B policy
+Hot-reload the cache policy blob.
+.TP
+.B hash-policy
+Print the SHA256 of a user policy .bpf.o, for allowlist entries.
+.TP
+.B s3-list
+List objects in a bucket (\fB\-\-backend\fR s3|gcs).
+.TP
+.B s3-stat
+Stat a single object (\fB\-\-backend\fR s3|gcs).
+.TP
+.B dev
+Development, probe and demo commands.
+.SH ENVIRONMENT
+.TP
+.B S3FS_EBPF_ROOT
+Directory that holds
+.IR bpf/ ,
+where built-in policies (\fB\-\-policy\-bpf builtin:\fIname\fR) are looked up.
+Default: the current directory or its parent when it has a
+.I bpf
+subdirectory, else
+.IR /usr/share/s3fs-ebpf .
+.SH FILES
+.TP
+.I /usr/share/s3fs-ebpf/bpf/*.bpf.o
+Built-in eBPF cache policies.
+.TP
+.I /usr/share/s3fs-ebpf/policies/
+Example CEL policies and the allowlist example.
+.TP
+.I /lib/modules/KERNEL/updates/s3fs_kfunc.ko
+The kernel module, one package per kernel release.
+.TP
+.I /usr/share/doc/s3fs-ebpf-doc/
+Full documentation (package
+.BR s3fs-ebpf-doc ).
+.SH SEE ALSO
+.BR s3fs-ebpf-fastpath (1),
+.BR s3fs-ebpf-mount (1),
+.BR modprobe (8),
+.BR depmod (8)
