@@ -38,7 +38,7 @@ const (
 // Program bundles a loaded struct_ops policy: single vtable map, one
 // Link object. Hot swap = 1 BPF_LINK_UPDATE that retargets the existing
 // link at the new vtable map (kmod .update callback = 1 RCU pointer
-// swap). See SwapFrom and docs/design/policy-engine-design.md §4.5.
+// swap). See SwapFrom and docs/design/policy/policy-engine-design.md §4.5.
 type Program struct {
 	Coll     *ebpf.Collection
 	Progs    map[string]*ebpf.Program // section name → struct_ops program

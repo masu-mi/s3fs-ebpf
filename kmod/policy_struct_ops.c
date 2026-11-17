@@ -7,7 +7,7 @@
  * one BPF_LINK_UPDATE, whose .update below swaps the RCU pointer once,
  * so readers see either the whole old vtable or the whole new one.
  *
- * See docs/design/policy-engine-design.md §4.5 for the design context.
+ * See docs/design/policy/policy-engine-design.md §4.5 for the design context.
  */
 
 #include <linux/bpf.h>

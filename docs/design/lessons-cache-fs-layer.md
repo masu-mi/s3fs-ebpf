@@ -56,7 +56,7 @@
 
 | # | 内容 |
 |---|---|
-| C7 | `docs/user/related-works.md` と `docs/design/ebpf-fuse-advantages-roadmap.md` の優位性の記述は、warm の定常状態には当てはまらない (本文書の §0 と、`where-fs-layer-can-win.md` を参照する注記を追加した) |
+| C7 | `docs/user/related-works.md` と `docs/design/ebpf/ebpf-fuse-advantages-roadmap.md` の優位性の記述は、warm の定常状態には当てはまらない (本文書の §0 と、`where-fs-layer-can-win.md` を参照する注記を追加した) |
 | C8 | 当初の「Push-down (Parquet の row group や Bloom filter をカーネルで評価する)」は未実装で、今回の計測でも検証していない |
 | C9 | 書き込み (fsync、rename、部分変更) の意味は E-01 / AC-51 の限界のまま。OLTP の書き込みは対象外 |
 
@@ -151,7 +151,7 @@
 - `docs/dev-notes/lessons-learned.md` — 実装で踏んだ地雷 (kmod・VFS・bench)
 - `docs/design/design-review-checklist.md` — 設計・実装・測定の検討観点
 - `docs/journal/history.md` — 開発史とトラブル
-- `docs/design/cache-algorithms.md` — LRU / SIEVE / S3-FIFO / W-TinyLFU の早見
+- `docs/design/policy/cache-algorithms.md` — LRU / SIEVE / S3-FIFO / W-TinyLFU の早見
 
 [r11]: https://www.usenix.org/conference/nsdi20/presentation/song
 [r12]: https://par.nsf.gov/biblio/10647289-cache_ext-customizing-page-cache-ebpf

@@ -5,7 +5,7 @@ description: キャッシュ policy (CEL / eBPF) の開発と検証。hit rate�
 
 # policy の開発と検証
 
-書き方は `docs/user/writing-policies.md` (3 層の選び方、allowlist)、設計は `docs/design/policy-engine-design.md` / `cache-algorithms.md` / `ac58-pick-victim.md` / `wtinylfu-pick-plan.md`、struct_ops の glue は `docs/dev-notes/struct-ops-kmod-glue.md` と `struct-ops-data-members.md`。
+書き方は `docs/user/writing-policies.md` (3 層の選び方、allowlist)、設計は `docs/design/policy/policy-engine-design.md` / `cache-algorithms.md` / `ac58-pick-victim.md` / `wtinylfu-pick-plan.md`、struct_ops の glue は `docs/dev-notes/ebpf-kernel/struct-ops-kmod-glue.md` と `struct-ops-data-members.md`。
 
 ## 層の選び方
 
@@ -28,7 +28,7 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 ```
 
 - 複数 seed / α: `make bench-hitrate-multi` (`ALPHAS=`)、大小混在: `make bench-hitrate-mixed` (D-01)、policy の呼び出しコスト: `scripts/bench-policy-cost.sh`、アクセスパターン別: `scripts/bench-read-pattern-policy.sh`。
-- **page cache があると policy に hit の信号が届かず差が出ない。** policy の質は `PCACHE_DROP=1` (ebpf-pcachedrop) で見る (`docs/dev-notes/bench-suite-overview.md` の H)。
+- **page cache があると policy に hit の信号が届かず差が出ない。** policy の質は `PCACHE_DROP=1` (ebpf-pcachedrop) で見る (`docs/dev-notes/process/bench-suite-overview.md` の H)。
 - `bench-hitrate.sh` は `s3fs-test` を作り直して中身を消す。他の bench の object (`hello.txt` …) が消えるので H は最後に回し、後で seed し直す。
 - 比較の前提 (capacity mode、各行が SOFTCAP 個の slot の hit rate、OPT との比較) は `scripts/bench-hitrate.sh` の冒頭コメント。値の記録・検証は `perf-bench-verify` §3〜4。
 

@@ -48,7 +48,7 @@ struct s3fs_policy_ops {
 	int (*on_evict)(u64 ino);
 	int (*on_pressure)(u64 count, u64 threshold);
 	int (*on_hit)(u64 ino);
-	/* AC-58 (docs/design/ac58-pick-victim.md).  Appended at the end so
+	/* AC-58 (docs/design/policy/ac58-pick-victim.md).  Appended at the end so
 	 * programs built against the 4-member vtable keep loading (libbpf
 	 * binds by member name).  on_insert / on_remove / pick_victim are
 	 * serialized by the kmod (s3fs_policy_evict_lock), so the BPF side
@@ -56,7 +56,7 @@ struct s3fs_policy_ops {
 	int (*on_insert)(u64 ino);   /* ino entered the candidate set (idempotent) */
 	int (*on_remove)(u64 ino);   /* the kmod evicted ino */
 	u64 (*pick_victim)(void);    /* next ino to evict; 0 = no opinion */
-	/* AC-66 (docs/design/wtinylfu-pick-plan.md).  Bytes the capacity
+	/* AC-66 (docs/design/plans/wtinylfu-pick-plan.md).  Bytes the capacity
 	 * pass charges ino this round, called right after on_insert under
 	 * the same lock, so a policy can keep byte budgets. */
 	int (*on_size)(u64 ino, u64 bytes);

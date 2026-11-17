@@ -48,5 +48,5 @@ prefetch_next: entry.s3_key.matches("^datasets/[^/]+/(train|val)/") ? 2 : 0
 
 # 小さい shard を繰り返し読む学習ジョブは、1 回しか読まれない shard が多い。
 # S3-FIFO は小さい FIFO で一度きりのアクセスを早く追い出すので向いている
-# (pick_victim 版、docs/design/ac58-pick-victim.md)。
+# (pick_victim 版、docs/design/policy/ac58-pick-victim.md)。
 policy: "builtin:policy_s3fifo_pick_ops"

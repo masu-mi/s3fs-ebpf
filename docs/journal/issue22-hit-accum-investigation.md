@@ -1,6 +1,6 @@
 # issue #22 の調査まとめ: hit_accum の効果と、途中で見つかった不具合 (2026-10-27)
 
-issue #22 (hit の信号を per-CPU で集計し、evict の前に policy へ反映する) を実装し、測定した記録。設計は [`../design/hit-signal-percpu-accumulation.md`](../design/hit-signal-percpu-accumulation.md)、数値の表は [`benchmark-results.md`](benchmark-results.md) §18.44。ここには「結局どうだったか」と「何を間違えたか」をまとめる。
+issue #22 (hit の信号を per-CPU で集計し、evict の前に policy へ反映する) を実装し、測定した記録。設計は [`../design/hit-signal-percpu-accumulation.md`](../design/policy/hit-signal-percpu-accumulation.md)、数値の表は [`benchmark-results.md`](benchmark-results.md) §18.44。ここには「結局どうだったか」と「何を間違えたか」をまとめる。
 
 ## 1. 結論
 
@@ -121,7 +121,7 @@ KUnit は 45 件 PASS。3 つとも、戻すと 3 件 FAIL(42 件 PASS)になる
 - 既定を 1 にした (2026-10-28)。残りの課題は、上の simulator のモデル化と、長時間の soak。
 
 調査の続きで確認したこと (`benchmark-results.md` §18.45):
-- **lockdep (AC-42)**: lockdep 付きカーネル (6.12.0-s3fs-lockdep) で `make test-lockdep` が PASS (2026-10-28)。`hit_accum` 1 / 0 の `test-regression` と 120 秒の evict-race で lockdep / sleeping-in-atomic / RCU の報告が 0 件。evict の mutex の中の `ilookup` / `iput` を含む。手順と踏んだこと: `docs/dev-notes/lockdep-kernel.md`。
+- **lockdep (AC-42)**: lockdep 付きカーネル (6.12.0-s3fs-lockdep) で `make test-lockdep` が PASS (2026-10-28)。`hit_accum` 1 / 0 の `test-regression` と 120 秒の evict-race で lockdep / sleeping-in-atomic / RCU の報告が 0 件。evict の mutex の中の `ilookup` / `iput` を含む。手順と踏んだこと: `docs/dev-notes/process/lockdep-kernel.md`。
 - `INTERLEAVE=1` にしても hit rate は上がらない。評価の間隔は simulator との差の原因ではなかった。
 - gate (b) は 10 MiB の cat が 16 ms 前後の同点で、ベースライン (`51e9e50`) は PASS、現在は `hit_accum` 0 / 1 とも FAIL だが差は 0.7% でノイズ内。`hit_accum` の影響ではない。
 - G5: large の 1 access が `on_hit` 約 82 回 (folio ごと) だったのが、`hit_accum=1` で高々 1 回になった。
@@ -129,7 +129,7 @@ KUnit は 45 件 PASS。3 つとも、戻すと 3 件 FAIL(42 件 PASS)になる
 
 ## 9. 関連
 
-- [`../design/hit-signal-percpu-accumulation.md`](../design/hit-signal-percpu-accumulation.md) — 設計、測定の手順、採否の基準
+- [`../design/hit-signal-percpu-accumulation.md`](../design/policy/hit-signal-percpu-accumulation.md) — 設計、測定の手順、採否の基準
 - [`benchmark-results.md`](benchmark-results.md) §18.41 (訂正済み)、§18.44
 - [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md) — 「hit の集計」の節 (pending の ino を `on_insert` しない)
-- [`../design/ac58-pick-victim.md`](../design/ac58-pick-victim.md) — S3-FIFO の ghost の長さ
+- [`../design/ac58-pick-victim.md`](../design/policy/ac58-pick-victim.md) — S3-FIFO の ghost の長さ

@@ -5,7 +5,7 @@ description: root・実機なしの単体テスト。KUnit (UML/qemu)・カバ�
 
 # 単体テスト (kmod KUnit / daemon go test / 静的検査)
 
-実機の回帰試験 (`regression-test` skill、約 25 分、root、MinIO が要る) より先に、数秒〜数分で境界を確かめる層。詳細は `docs/dev-notes/kunit.md` (suite の一覧、見つけたバグ、カバレッジの仕組み)。
+実機の回帰試験 (`regression-test` skill、約 25 分、root、MinIO が要る) より先に、数秒〜数分で境界を確かめる層。詳細は `docs/dev-notes/process/kunit.md` (suite の一覧、見つけたバグ、カバレッジの仕組み)。
 
 ## 回す
 

@@ -1,6 +1,6 @@
 # ファイルの状態遷移 (kmod / daemon / S3) と、形式検証で見つけたこと
 
-2026-11-05。PR #44 の `open_check` の作業で「open が S3 を確認していなかった」「作成直後のファイルを開き直すと ENOENT」を、実装と測定のあとで見つけた。同じ種類の見落としを設計の段階で見つけるために、ファイルの状態遷移を図にして、TLA+ で検証した。モデルは `specs/tla/FileLifecycle.tla`、実行は `make test-spec`。手順は `docs/dev-notes/design-verification.md`。
+2026-11-05。PR #44 の `open_check` の作業で「open が S3 を確認していなかった」「作成直後のファイルを開き直すと ENOENT」を、実装と測定のあとで見つけた。同じ種類の見落としを設計の段階で見つけるために、ファイルの状態遷移を図にして、TLA+ で検証した。モデルは `specs/tla/FileLifecycle.tla`、実行は `make test-spec`。手順は `docs/dev-notes/process/design-verification.md`。
 
 ## 1. 誰がどの状態を持っているか
 

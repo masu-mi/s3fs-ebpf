@@ -1,0 +1,11 @@
+# Paths that docs mention but that are not in this repo.  One per line.
+# cilium/ebpf's own docs (referenced as upstream material)
+docs/attach.md
+docs/prog-types.md
+docs/ebpf/concepts/verifier-errors.md
+# patch and docs that were never committed / were deleted; kept in history text
+docs/misc/cilium-ebpf-addr-space-cast-marshal.patch
+docs/user/meetup-ebpf-outline.md
+docs/journal/olap-s3-results.md
+# typo in a historical entry (backlog-archive)
+docs/design/deisign.md

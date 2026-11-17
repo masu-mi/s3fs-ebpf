@@ -13,13 +13,13 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 | 段階 | 読むもの | 目安 |
 |---|---|---|
-| 0. 全体 | [`../../README.md`](../../README.md) → [`motivation.md`](motivation.md) → [`../design/component-communication.md`](../design/component-communication.md) (mermaid 図) | 全体像。ここだけで「何を作ったか」が分かる |
+| 0. 全体 | [`../../README.md`](../../README.md) → [`motivation.md`](meetup/motivation.md) → [`../design/component-communication.md`](../design/component-communication.md) (mermaid 図) | 全体像。ここだけで「何を作ったか」が分かる |
 | 1. 前提 | §3.1 eBPF の基本、§3.2 VFS とファイルシステム、§3.3 FUSE | eBPF と FS を知っていれば飛ばしてよい |
 | 2. 中核 | §3.4 bpf_arena、§3.5 KFunc、§3.6 struct_ops | この PoC の主題。発表の流れもこの 3 つ |
 | 3. 実装の周辺 | §3.7 Go と cilium/ebpf、§3.8 キャッシュのアルゴリズム、§3.9 pcache (page cache との分担) | 設計の理由 |
 | 4. 品質 | §3.10 KUnit、§3.11 lockdep、§3.12 kCFI | カーネルモジュールを安全に書く側 |
 | 5. 計測 | §3.13 閉じた環境の MinIO (Silo) + Prometheus / Grafana | 再現と検証 |
-| 6. 振り返り | [`retrospective-and-reuse.md`](retrospective-and-reuse.md)、[`meetup-qa.md`](meetup-qa.md) (想定問答 58 問、冒頭に早見表)、[`../design/lessons-cache-fs-layer.md`](../design/lessons-cache-fs-layer.md) | 何がうまくいき、何がうまくいかなかったか |
+| 6. 振り返り | [`retrospective-and-reuse.md`](retrospective-and-reuse.md)、[`meetup-qa.md`](meetup/meetup-qa.md) (想定問答 58 問、冒頭に早見表)、[`../design/lessons-cache-fs-layer.md`](../design/lessons-cache-fs-layer.md) | 何がうまくいき、何がうまくいかなかったか |
 
 実装を触る人は、段階 2〜4 の後に [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md) と [`getting-started.md`](getting-started.md) へ進む。
 
@@ -45,7 +45,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ### 3.1 eBPF の基本 (verifier、BTF、CO-RE、map)
 
-**この repo では:** BPF のプログラムは policy とキャッシュ判定に使う。採用した機能 (fentry / arena / ringbuf / per-CPU / LRU hash / struct_ops / KFunc / CO-RE / `bpf_loop`) の用途と落とし穴は [`../design/ebpf-features-guide.md`](../design/ebpf-features-guide.md)、policy の書き方は [`writing-policies.md`](writing-policies.md)、verifier の地雷は [`../dev-notes/lessons-learned.md`](../dev-notes/lessons-learned.md)。
+**この repo では:** BPF のプログラムは policy とキャッシュ判定に使う。採用した機能 (fentry / arena / ringbuf / per-CPU / LRU hash / struct_ops / KFunc / CO-RE / `bpf_loop`) の用途と落とし穴は [`../design/ebpf-features-guide.md`](../design/ebpf/ebpf-features-guide.md)、policy の書き方は [`writing-policies.md`](writing-policies.md)、verifier の地雷は [`../dev-notes/lessons-learned.md`](../dev-notes/lessons-learned.md)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -84,7 +84,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 ### 3.4 bpf_arena
 
 **この repo では:** 既定の arena モードでファイルの中身を arena に置く。kmod から見た arena は「daemon のユーザーメモリ」で、読むたびに GUP (約 1.7 µs) が要ったため、pcache モードに移った。
-読む順: [`../design/bpf-arena-use-cases.md`](../design/bpf-arena-use-cases.md) (向く用途と向かない用途) → [`../dev-notes/arena-access-paths.md`](../dev-notes/arena-access-paths.md) (誰がどう読むか、図) → [`../dev-notes/arena-address-translation.md`](../dev-notes/arena-address-translation.md) (`addr_space_cast` と JIT) → [`../dev-notes/go-and-bpf-arena.md`](../dev-notes/go-and-bpf-arena.md) (Go から使うコツ) → [`../dev-notes/cilium-ebpf-arena-and-struct-ops.md`](../dev-notes/cilium-ebpf-arena-and-struct-ops.md) (課題 C1〜C9)。
+読む順: [`../design/bpf-arena-use-cases.md`](../design/ebpf/bpf-arena-use-cases.md) (向く用途と向かない用途) → [`../dev-notes/arena-access-paths.md`](../dev-notes/ebpf-kernel/arena-access-paths.md) (誰がどう読むか、図) → [`../dev-notes/arena-address-translation.md`](../dev-notes/ebpf-kernel/arena-address-translation.md) (`addr_space_cast` と JIT) → [`../dev-notes/go-and-bpf-arena.md`](../dev-notes/ebpf-kernel/go-and-bpf-arena.md) (Go から使うコツ) → [`../dev-notes/cilium-ebpf-arena-and-struct-ops.md`](../dev-notes/ebpf-kernel/cilium-ebpf-arena-and-struct-ops.md) (課題 C1〜C9)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -96,7 +96,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ### 3.5 KFunc
 
-**この repo では:** 判断の hot path で使う関数 (`Layer 0 KFuncs`) を kmod が KFunc として提供し、BPF から呼ぶ。KF_SLEEPABLE の呼び出し側の制約が地雷になった。[`../design/policy-engine-design.md`](../design/policy-engine-design.md) (4 層の構成)、[`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) §3 (KF_SLEEPABLE)、[`meetup-qa.md`](meetup-qa.md) (arena と KFunc の節)。
+**この repo では:** 判断の hot path で使う関数 (`Layer 0 KFuncs`) を kmod が KFunc として提供し、BPF から呼ぶ。KF_SLEEPABLE の呼び出し側の制約が地雷になった。[`../design/policy-engine-design.md`](../design/policy/policy-engine-design.md) (4 層の構成)、[`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-kernel/ebpf-ecosystem-gaps.md) §3 (KF_SLEEPABLE)、[`meetup-qa.md`](meetup/meetup-qa.md) (arena と KFunc の節)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -108,7 +108,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 ### 3.6 struct_ops
 
 **この repo では:** policy (on_admit / on_evict / on_hit / on_insert / on_remove / pick_victim など) の vtable を kmod が定義し、BPF で実装して `BPF_LINK_UPDATE` 1 回で差し替える。fmod_ret 版は削除した。
-読む順: [`../dev-notes/struct-ops-kmod-glue.md`](../dev-notes/struct-ops-kmod-glue.md) (kmod 側の glue が何のためか) → [`../dev-notes/struct-ops-data-members.md`](../dev-notes/struct-ops-data-members.md) (関数ポインタ以外の member) → [`../design/ac58-pick-victim.md`](../design/ac58-pick-victim.md) (vtable の粒度) → [`../design/policy-attach-comparison.md`](../design/policy-attach-comparison.md) (fmod_ret との比較) → [`../dev-notes/cilium-ebpf-arena-and-struct-ops.md`](../dev-notes/cilium-ebpf-arena-and-struct-ops.md) §2。
+読む順: [`../dev-notes/struct-ops-kmod-glue.md`](../dev-notes/ebpf-kernel/struct-ops-kmod-glue.md) (kmod 側の glue が何のためか) → [`../dev-notes/struct-ops-data-members.md`](../dev-notes/ebpf-kernel/struct-ops-data-members.md) (関数ポインタ以外の member) → [`../design/ac58-pick-victim.md`](../design/policy/ac58-pick-victim.md) (vtable の粒度) → [`../design/policy-attach-comparison.md`](../design/ebpf/policy-attach-comparison.md) (fmod_ret との比較) → [`../dev-notes/cilium-ebpf-arena-and-struct-ops.md`](../dev-notes/ebpf-kernel/cilium-ebpf-arena-and-struct-ops.md) §2。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -123,7 +123,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ### 3.7 Go (daemon) と cilium/ebpf
 
-**この repo では:** daemon は Go。BPF の load と attach は cilium/ebpf、`bpf2go` で `.o` を埋め込む。arena の mmap は自前、struct_ops の差し替えは raw syscall。依存の落とし穴は [`../dev-notes/cilium-ebpf-arena-and-struct-ops.md`](../dev-notes/cilium-ebpf-arena-and-struct-ops.md)、Go と arena の相性は [`../dev-notes/go-and-bpf-arena.md`](../dev-notes/go-and-bpf-arena.md)。
+**この repo では:** daemon は Go。BPF の load と attach は cilium/ebpf、`bpf2go` で `.o` を埋め込む。arena の mmap は自前、struct_ops の差し替えは raw syscall。依存の落とし穴は [`../dev-notes/cilium-ebpf-arena-and-struct-ops.md`](../dev-notes/ebpf-kernel/cilium-ebpf-arena-and-struct-ops.md)、Go と arena の相性は [`../dev-notes/go-and-bpf-arena.md`](../dev-notes/ebpf-kernel/go-and-bpf-arena.md)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -133,18 +133,18 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ### 3.8 キャッシュのアルゴリズム (LRU / SIEVE / S3-FIFO / W-TinyLFU)
 
-**この repo では:** policy を struct_ops で差し替えて hit rate を比べる。図つきの早見は [`../design/cache-algorithms.md`](../design/cache-algorithms.md)、計測は [`../journal/benchmark-results.md`](../journal/benchmark-results.md) §18.41〜18.43、simulator は [`../design/trace-harness.md`](../design/trace-harness.md)。
+**この repo では:** policy を struct_ops で差し替えて hit rate を比べる。図つきの早見は [`../design/cache-algorithms.md`](../design/policy/cache-algorithms.md)、計測は [`../journal/benchmark-results.md`](../journal/benchmark-results.md) §18.41〜18.43、simulator は [`../design/trace-harness.md`](../design/policy/trace-harness.md)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
-| 論文 | SIEVE (NSDI '24): [発表ページ](https://www.usenix.org/conference/nsdi24/presentation/zhang-yazhuo) | [`../design/cache-algorithms.md`](../design/cache-algorithms.md) の参考文献より |
+| 論文 | SIEVE (NSDI '24): [発表ページ](https://www.usenix.org/conference/nsdi24/presentation/zhang-yazhuo) | [`../design/cache-algorithms.md`](../design/policy/cache-algorithms.md) の参考文献より |
 | 論文 | S3-FIFO (SOSP '23): [PDF](https://junchengyang.com/publication/sosp23-s3fifo.pdf)、[著者の解説](https://blog.junchengyang.com/system/cache/2023/08/01/s3fifo) | 同上 |
 | 論文 | TinyLFU: [arXiv 1512.00727](https://arxiv.org/abs/1512.00727)。実装は [Caffeine](https://github.com/ben-manes/caffeine) | 同上 |
 | 関連 | cache_ext (page cache を eBPF で拡張): [論文ページ](https://par.nsf.gov/biblio/10647289-cache_ext-customizing-page-cache-ebpf) | [`../design/lessons-cache-fs-layer.md`](../design/lessons-cache-fs-layer.md) の参考文献より |
 
 ### 3.9 page cache と GUP (pcache の背景)
 
-**この repo では:** 中身を kmod の chunk と page cache に置く pcache モード。chunk の pin、reset の条件は [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md)。arena モードで kmod が daemon のメモリを `pin_user_pages_remote` で読んだ理由は [`../dev-notes/arena-access-paths.md`](../dev-notes/arena-access-paths.md)。
+**この repo では:** 中身を kmod の chunk と page cache に置く pcache モード。chunk の pin、reset の条件は [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md)。arena モードで kmod が daemon のメモリを `pin_user_pages_remote` で読んだ理由は [`../dev-notes/arena-access-paths.md`](../dev-notes/ebpf-kernel/arena-access-paths.md)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -153,7 +153,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ### 3.10 KUnit
 
-**この repo では:** daemon も root も使わずに、kmod のデータ構造と VFS の振る舞い (chunk 表、admit 表、pending、`kern_mount` した FS の read / write、policy の vtable の dispatch) を `make test-kunit` で単体試験する。kmod のソースを kernel の tree に組み込み、UML (既定) か QEMU で動かす。構成とテストで見つけたバグは [`../dev-notes/kunit.md`](../dev-notes/kunit.md)。
+**この repo では:** daemon も root も使わずに、kmod のデータ構造と VFS の振る舞い (chunk 表、admit 表、pending、`kern_mount` した FS の read / write、policy の vtable の dispatch) を `make test-kunit` で単体試験する。kmod のソースを kernel の tree に組み込み、UML (既定) か QEMU で動かす。構成とテストで見つけたバグは [`../dev-notes/kunit.md`](../dev-notes/process/kunit.md)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -162,7 +162,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ### 3.11 lockdep
 
-**この repo では:** `CONFIG_PROVE_LOCKING` つきのカーネルを build して、回帰テスト一式を通す (`make test-lockdep`)。ロック順の規則は [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md)、手順と読み方は [`../dev-notes/lockdep-kernel.md`](../dev-notes/lockdep-kernel.md)。性能はこのカーネルでは測らない。
+**この repo では:** `CONFIG_PROVE_LOCKING` つきのカーネルを build して、回帰テスト一式を通す (`make test-lockdep`)。ロック順の規則は [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md)、手順と読み方は [`../dev-notes/lockdep-kernel.md`](../dev-notes/process/lockdep-kernel.md)。性能はこのカーネルでは測らない。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -172,7 +172,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ### 3.12 kCFI
 
-**この repo では:** struct_ops の `cfi_stubs` が、kCFI が有効なカーネルで必要になる (無効でも stub は要る)。命令列と BPF との関係は [`../dev-notes/kcfi-basics.md`](../dev-notes/kcfi-basics.md)、glue の全体は [`../dev-notes/struct-ops-kmod-glue.md`](../dev-notes/struct-ops-kmod-glue.md)。
+**この repo では:** struct_ops の `cfi_stubs` が、kCFI が有効なカーネルで必要になる (無効でも stub は要る)。命令列と BPF との関係は [`../dev-notes/kcfi-basics.md`](../dev-notes/ebpf-kernel/kcfi-basics.md)、glue の全体は [`../dev-notes/struct-ops-kmod-glue.md`](../dev-notes/ebpf-kernel/struct-ops-kmod-glue.md)。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -184,7 +184,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 ### 3.13 閉じた環境の MinIO (Silo) と、Prometheus / Grafana
 
 **この repo では:** 外の S3 や GCS には出ずに、手元の docker compose に S3 互換のオブジェクトストア 1 台と、Prometheus / Grafana / node_exporter を立てて、すべての測定をその中で行う。MinIO は 2026-10 時点で community イメージの匿名 pull を制限しているため、MinIO の AGPL-3.0 fork の **Pigsty Silo** (`docker.io/pgsty/silo:latest`) に切り替えてある。CLI、環境変数、health endpoint、port は MinIO と同じ。
-手順は [`getting-started.md`](getting-started.md)、性能試験の意味と見方は [`../dev-notes/bench-suite-overview.md`](../dev-notes/bench-suite-overview.md)、環境の注意点は [`../journal/bench-env-notes.md`](../journal/bench-env-notes.md)、実行と検証の手順は `.claude/skills/perf-bench-verify/SKILL.md`。
+手順は [`getting-started.md`](getting-started.md)、性能試験の意味と見方は [`../dev-notes/bench-suite-overview.md`](../dev-notes/process/bench-suite-overview.md)、環境の注意点は [`../journal/bench-env-notes.md`](../journal/bench-env-notes.md)、実行と検証の手順は `.claude/skills/perf-bench-verify/SKILL.md`。
 
 | 種類 | 資料 | 確認 |
 |---|---|---|
@@ -197,7 +197,7 @@ s3fs-ebpf は、次の技術を組み合わせた PoC。初めて読む人が、
 
 ## 4. もっと追うときの入口
 
-- 発表の想定問答 ([`meetup-qa.md`](meetup-qa.md)): 設計の理由、arena と KFunc、struct_ops の運用、FUSE との比較、計測の妥当性を 58 問で。
+- 発表の想定問答 ([`meetup-qa.md`](meetup/meetup-qa.md)): 設計の理由、arena と KFunc、struct_ops の運用、FUSE との比較、計測の妥当性を 58 問で。
 - 開発史 ([`../journal/history.md`](../journal/history.md)): 年表、トラブルと教訓。
 - 設計のチェックリスト ([`../design/design-review-checklist.md`](../design/design-review-checklist.md)): 見つけた不具合から、検討の観点を整理。
 - doc の全体の地図は [`../INDEX.md`](../INDEX.md)。

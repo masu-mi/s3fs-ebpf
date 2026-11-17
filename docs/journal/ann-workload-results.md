@@ -1,6 +1,6 @@
 # ANN (IVF / HNSW) policy simulator 結果 (P0〜P2)
 
-2026-10-30。`docs/design/ann-workload-measurement-plan.md` の P0〜P2。`scripts/bench-ann-sim.sh` (`dev ann-sim`) で再現できる。kmod / MinIO は使っていない (simulator のみ)。実機 (P4) と OLTP (E4) は未実施。
+2026-10-30。`docs/design/plans/ann-workload-measurement-plan.md` の P0〜P2。`scripts/bench-ann-sim.sh` (`dev ann-sim`) で再現できる。kmod / MinIO は使っていない (simulator のみ)。実機 (P4) と OLTP (E4) は未実施。
 
 条件: N=1000 万、chunk 4 MiB、各点 5 seed、warmup 20% は集計外、cold start。容量はデータ全体 (index+raw) に対する比。OPT は等サイズ近似の上界、noevict は無限容量。全表は `/tmp/bench-ann-sim/*.md` (再生成可)。数値は seed 平均 (seed 間の幅は表に出る)。
 

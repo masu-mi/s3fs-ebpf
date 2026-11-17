@@ -9,7 +9,7 @@
 #
 # Every detect_* honours an explicit env override first (CLANG=, KMOD_CC=,
 # KMOD_PAHOLE=, BPFTOOL=, KDIR=) so `make CLANG=clang-21` keeps working.
-# See docs/dev-notes/build-env-dependencies.md for why each rule exists.
+# See docs/dev-notes/process/build-env-dependencies.md for why each rule exists.
 
 [[ -n "${_S3FS_LIB_TOOLCHAIN:-}" ]] && return 0
 _S3FS_LIB_TOOLCHAIN=1

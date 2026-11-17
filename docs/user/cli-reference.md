@@ -61,6 +61,10 @@ Targets:
     all                           Build all components (kmod + bpf + daemon)
     build                         Alias of 'all'
     kmod                          Build kernel module -> kmod/s3fs_kfunc.ko
+    kmod-matrix                   Build + install-check kmod against every installed kernel >= 6.12 (KRELS=..., SETUP=1 to run headers/kbuild setup first)
+    deb                           Build runtime .deb packages -> dist/deb (s3fs-ebpf + s3fs-ebpf-kmod-<krel> per kernel; KRELS=...)
+    deb-check                     Inspect dist/deb/*.deb (contents, vermagic, BTF, depmod, apt simulate); installs nothing
+    deb-install                   apt-get install dist/deb/*.deb (sudo), then verify per kernel
     kmod-clean                    Clean kernel module build artefacts
     bpf                           Build eBPF program -> bpf/demo/arena_demo.bpf.o
     bpf-clean                     Clean eBPF build artefacts
@@ -91,7 +95,7 @@ Targets:
     doctor                        Check kernel / headers / compilers / tools and print fixes
     doctor-build                  Same as doctor, limited to what 'make all' needs
     toolchain                     Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
-    setup-kernel-lockdep          Build + install a 6.12 kernel with CONFIG_PROVE_LOCKING (docs/dev-notes/lockdep-kernel.md)
+    setup-kernel-lockdep          Build + install a 6.12 kernel with CONFIG_PROVE_LOCKING (docs/dev-notes/process/lockdep-kernel.md)
     test-lockdep                  Run the regression suite on a lockdep kernel, fail on lock-order reports (AC-42)
     setup-kernel                  Install mainline Linux 6.12 LTS kernel (Ubuntu; reboot after)
     setup-toolchain               Install everything (clang, bpftool, headers, gcc/pahole, go, bench)
@@ -99,21 +103,23 @@ Targets:
     lint-scripts                  shellcheck scripts/ and s3fs-ebpf.sh
   Documentation:
     cli-reference                 Regenerate docs/user/cli-reference.md (CLI / make help)
-  Week 1 verification:
+  Week 1 probe:
     test-arena                    insmod + run bpf_arena/KFunc round-trip probe + rmmod
   Unit tests (no daemon, no root):
     test-kunit                    KUnit suites for kmod in UML (KSRC=<linux source tree>)
     test-kunit-cov                KUnit in UML with clang coverage -> coverage/kmod.lcov (KSRC=...)
     test-daemon                   go test for the daemon
     test-daemon-cov               go test with coverage -> coverage/daemon.out
-  Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
+  Tests:
+    test                          Unit + static + model checks, no root / mount / docker
+    check-docs                    docs/: broken relative links and docs/... paths (no network)
     check-invariants              Static checks on kmod/vfs_ops.c (+ kmod/vfs/) and the bench seeds (no root)
-    spec-check                    Exhaustive check of the v2 redesign spec models (docs/design/v2-spec, python3 only, no root)
+    spec-check                    Exhaustive check of the v2 redesign spec models (specs/v2, python3 only, no root)
     test-policy-conformance       Live pick_victim policies vs their simulators, per access (issue #22)
     test-sync-keeps-cache         An unchanged bucket sync must not drop the cache (issue #22)
     test-boot-kernel              scripts/boot-kernel.sh picks the right grub entry (fixture + dry-run, no root)
     test-splice-hits              sendfile / splice reads are counted as hits (hit_accum, issue #22)
-    test-regression               Run all regression tests
+    test-regression               Run all regression tests (static checks + live, root + mount)
     test-write-readback           T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
     test-large-file-read          T2/Q3: 300 MiB pcache read, sha256 must match
     test-evict-readback           Q1/S8: evict then re-read — size and content unchanged
@@ -141,6 +147,7 @@ Targets:
     test-open-check               open_check=1: open(2) without O_CREAT HEADs S3 and fails ENOENT for a key deleted after the last sync
     test-spec                     TLA+ models (specs/tla) with TLC in a throwaway container: every variant gives the result its cfg expects
     test-parity                   differential test: the same operations on s3fs-fuse and s3fs-ebpf give the same result (known gaps listed in scripts/lib/parity-known-diff.sh)
+    test-fsync-inflight           fsync of a clean file whose close flush is in flight waits for S3 (AC-96)
     test-fsync-new-file           a new file written + fsync'ed is not truncated by the create placeholder flush
     test-pattern-aware-admit      R-01/AC-47: the fentry's access pattern still drives full-file promotion (seq, random, parallel, off)
     test-pick-victim-stale        AC-64: an ino that left the admit set does not stay in the policy's own list (pick_victim -> on_remove)

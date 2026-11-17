@@ -9,7 +9,7 @@
 #
 # Exit status: 1 if any NG (build will fail), 0 otherwise (WARN allowed).
 # The categories and IDs (K-*, H-*, C-*, T-*, B-*) match
-# docs/dev-notes/build-env-dependencies.md.
+# docs/dev-notes/process/build-env-dependencies.md.
 set -uo pipefail
 
 # shellcheck source=lib/toolchain.sh

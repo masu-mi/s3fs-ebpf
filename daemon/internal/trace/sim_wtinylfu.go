@@ -2,7 +2,7 @@ package trace
 
 import "container/list"
 
-// AC-66 (docs/design/wtinylfu-pick-plan.md): reference W-TinyLFU and
+// AC-66 (docs/design/plans/wtinylfu-pick-plan.md): reference W-TinyLFU and
 // S3-FIFO simulators, plus a W-TinyLFU that follows the BPF version
 // (bpf/policy_wtinylfu_pick_ops.bpf.c) step for step, so the cost of the
 // BPF approximations (CLOCK instead of LRU inside each segment) is visible

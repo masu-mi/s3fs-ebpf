@@ -5,7 +5,7 @@
 // (Every program in the object must be bound to a member, or the load fails
 // before validate runs: hence no unused hook here.)
 // Not a policy to run: it only exists to be loaded (and, for the rejected
-// ones, refused). See docs/dev-notes/struct-ops-data-members.md.
+// ones, refused). See docs/dev-notes/ebpf-kernel/struct-ops-data-members.md.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>

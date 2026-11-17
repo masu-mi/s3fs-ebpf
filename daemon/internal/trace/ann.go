@@ -7,7 +7,7 @@ import (
 	"sort"
 )
 
-// Synthetic ANN workloads (docs/design/ann-workload-measurement-plan.md
+// Synthetic ANN workloads (docs/design/plans/ann-workload-measurement-plan.md
 // §3). Every generator is deterministic for a given parameter set and
 // seed. Popularity (which clusters / regions queries favour) is an input
 // assumption, never a measurement: always sweep it.

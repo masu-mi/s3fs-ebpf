@@ -1,6 +1,6 @@
 # 開発史: s3fs-ebpf の経緯・課題・トラブル
 
-この文書は、git 履歴 (`git log`、2026-10-01〜2026-10-18 の 138 commit)、`docs/journal/backlog.md`、`docs/journal/benchmark-results.md` (以下 `br`)、週次ノート (`docs/journal/week*-notes.md`)、`docs/dev-notes/lessons-learned.md` (以下 `ll`) をもとに、プロジェクトの流れをまとめたものです。数値には出典 (`br §N`、backlog ID、commit) を付けています。出典に書かれていないことは書いていません。
+この文書は、git 履歴 (`git log`、2026-10-01〜2026-10-18 の 138 commit)、`docs/backlog/backlog.md`、`docs/journal/benchmark-results.md` (以下 `br`)、週次ノート (`docs/journal/week*-notes.md`)、`docs/dev-notes/lessons-learned.md` (以下 `ll`) をもとに、プロジェクトの流れをまとめたものです。数値には出典 (`br §N`、backlog ID、commit) を付けています。出典に書かれていないことは書いていません。
 
 注意: Week 1〜4 の作業 (2026-09) はこのリポジトリの git 履歴に含まれていません。最初の commit は 2026-10-01 で、backlog が参照する古い commit (`55dbc7d`、`d7efccc` など) はこの履歴にはありません。
 
@@ -217,7 +217,7 @@ backlog の ID 系列ごとの内容と件数です。件数は backlog のチ�
 ### 4.5 外れた仮説
 
 - **AA-03 / AB-10: GUP と rwlock**: AA-01 は 64 jobs の劣後を admit の spinlock と見て rwlock にしましたが、76% に悪化しました (`br §12.2`)。AB-07 では GUP を除いても 63.9% で、rwlock を除いた AB-10 でも変わりませんでした (`br §15`)。最終的に、差の正体は `fentry/generic_file_read_iter` の負担 (perf で約 19%) で、フックを外すと fuse-raw と同じ IOPS になりました (`br §18.16`)。§15 の時点での「VFS ラッパーと folio lock の競合」という結論も外れていたことになります。
-- **large folio 仮説**: 「FUSE は large folio を使うので速い」という仮説は、100 MiB 読みで fuse-cache も ebpf も order 0 が 25,600 件ずつで、6.12 では成り立ちませんでした (`br §18.16`、`docs/design/read-iter-hook-overhead.md`)。gate (a) の fio は 18 B のファイルを読むため、folio はどの FS でも 4 KiB 1 枚です。
+- **large folio 仮説**: 「FUSE は large folio を使うので速い」という仮説は、100 MiB 読みで fuse-cache も ebpf も order 0 が 25,600 件ずつで、6.12 では成り立ちませんでした (`br §18.16`、`docs/design/ebpf/read-iter-hook-overhead.md`)。gate (a) の fio は 18 B のファイルを読むため、folio はどの FS でも 4 KiB 1 枚です。
 - **U10 (buf_readers) 仮説**: §18.2 の性能低下と容量超過の原因を pcache hit 経路の `buf_readers` 増減と見ましたが、A/B では差がノイズの範囲で、容量超過の本当の原因は buf の確保サイズでした (`br §18.10`)。U10 は不要として削除しました (`892e1be`)。
 - **arena kern_vm の直接参照 (Week 4 (a))**: kmod から kern_vm を deref できる前提で設計しましたが、generic context の fault handler がなく全て EFAULT でした (`ll §1.1`)。`ll` は、先に完璧な設計を立てていたらこの案で 2 週停滞していたと振り返っています。
 

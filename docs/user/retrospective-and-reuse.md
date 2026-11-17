@@ -1,6 +1,6 @@
 # 振り返り: このプロジェクトは失敗か、成果をどう活かすか (Rust での再実装、FUSE への貢献)
 
-2026-10-22。「Rust による再実装や FUSE への貢献などで、このプロジェクトを活かせるか。また失敗だったのか」という問いへの答えをまとめる。リポジトリ内の数字と事実には出典 (`docs/user/meetup-qa.md` の Q 番号、`docs/journal/benchmark-results.md` の §、backlog ID) を付けた。リポジトリの外の状況 (Rust for Linux、aya、fuse-bpf、cache_ext など) は書いた時点での理解で、**この文書では確かめていない**。そうした箇所には「(未確認)」と付けた。手を付ける前に一次情報を見ること。
+2026-10-22。「Rust による再実装や FUSE への貢献などで、このプロジェクトを活かせるか。また失敗だったのか」という問いへの答えをまとめる。リポジトリ内の数字と事実には出典 (`docs/user/meetup/meetup-qa.md` の Q 番号、`docs/journal/benchmark-results.md` の §、backlog ID) を付けた。リポジトリの外の状況 (Rust for Linux、aya、fuse-bpf、cache_ext など) は書いた時点での理解で、**この文書では確かめていない**。そうした箇所には「(未確認)」と付けた。手を付ける前に一次情報を見ること。
 
 ---
 
@@ -19,10 +19,10 @@
 |---|---|
 | 速さの源を特定した。hit のときに daemon へ行かない (open も upcall しない) 構造そのものが効いている | open+read+close は fuse-cache の 172 倍 (§18.27)、小さいファイル 1 万個の warm cat は 93 倍 (§18.31)。arena を使わない pcache モードでも同じ水準 (Q55)。ただし 172 倍は open で S3 を確認しない条件の値で、確認する条件 (`open_check=1`) では約 1.2 倍 (§18.52、`meetup-qa.md` Q42) |
 | struct_ops の vtable の形についての知見。score を返すだけの vtable では順序が伝わらず、BPF 版の hit rate が simulator より低くなる。victim を BPF に選ばせる `pick_victim` にすると改善する | Q16〜Q18。pick_victim 版で旧版より 2〜7 ポイント高い (Q20) |
-| 本当の律速を perf と A/B で特定した。64 jobs の並列 read の劣後は、自分で付けた `fentry/generic_file_read_iter` の負担 (約 19%) だった | Q34、§18.16、`docs/design/read-iter-hook-overhead.md` |
+| 本当の律速を perf と A/B で特定した。64 jobs の並列 read の劣後は、自分で付けた `fentry/generic_file_read_iter` の負担 (約 19%) だった | Q34、§18.16、`docs/design/ebpf/read-iter-hook-overhead.md` |
 | 自前の VFS の race を、不変条件の文書化、修正前に FAIL するテスト、KUnit で止めた | `docs/kmod-pcache-invariants.md`、Q51、`docs/journal/history.md` §4〜§5 |
 | 計測の無効化を記録し、数字を置き換えた (hit rate 88.5%、§16 / §17 など) | `docs/journal/history.md` §4.4 |
-| upstream への具体的な要望が出た | K-01 / K-02、cilium/ebpf の marshal 修正 (`docs/dev-notes/ebpf-ecosystem-gaps.md`。patch は取り込み後に削除済み) |
+| upstream への具体的な要望が出た | K-01 / K-02、cilium/ebpf の marshal 修正 (`docs/dev-notes/ebpf-kernel/ebpf-ecosystem-gaps.md`。patch は取り込み後に削除済み) |
 
 ### 2.2 うまくいかなかったこと
 
@@ -47,11 +47,11 @@
 | 資産 | 置き場所 | 持ち出せる先 |
 |---|---|---|
 | 「hit なら open / lookup も daemon に送らない」構造と、その効果の実測 | Q33、Q42、§18.27、§18.31 | FUSE / fuse-bpf の議論の根拠 |
-| eviction の vtable の設計 (`on_insert` / `on_remove` / `pick_victim`) と、score 型が負ける理由 | `docs/design/ac58-pick-victim.md`、Q16〜Q20 | BPF で page cache のポリシーを差し替える仕組み一般 |
-| 汎用関数への fentry の hot path での負担と、その測り方 (bpf_stats、並列の A/B、perf) | `docs/design/read-iter-hook-overhead.md`、Q30、Q31 | BPF を hot path に置くすべての場面 |
+| eviction の vtable の設計 (`on_insert` / `on_remove` / `pick_victim`) と、score 型が負ける理由 | `docs/design/policy/ac58-pick-victim.md`、Q16〜Q20 | BPF で page cache のポリシーを差し替える仕組み一般 |
+| 汎用関数への fentry の hot path での負担と、その測り方 (bpf_stats、並列の A/B、perf) | `docs/design/ebpf/read-iter-hook-overhead.md`、Q30、Q31 | BPF を hot path に置くすべての場面 |
 | backing file の段の設計 (FUSE passthrough と同じ形、未実装) | `docs/design/backing-file-tier.md`、Q50 | FUSE passthrough / fuse-bpf と同じ構造なので、FUSE 側で同じことをする設計の比較対象 |
-| ポリシー simulator と trace の再生 | `docs/design/trace-harness.md` | カーネル版と simulator のずれの検証 |
-| arena の仕組みと、kmod から使えない理由 | Q10、`docs/dev-notes/ebpf-ecosystem-gaps.md` §1 | arena の使いどころの説明、K-01 / K-02 |
+| ポリシー simulator と trace の再生 | `docs/design/policy/trace-harness.md` | カーネル版と simulator のずれの検証 |
+| arena の仕組みと、kmod から使えない理由 | Q10、`docs/dev-notes/ebpf-kernel/ebpf-ecosystem-gaps.md` §1 | arena の使いどころの説明、K-01 / K-02 |
 | 不変条件の文書化と、修正前 FAIL のテストの進め方 | `docs/kmod-pcache-invariants.md`、Q51 | どの言語で書き直すときにも要る |
 
 ---
@@ -97,7 +97,7 @@
 |---|---|---|
 | cilium/ebpf の marshal 修正 | `addr_space_cast` の Offset が 0 に潰れる (`docs/misc/cilium-ebpf-addr-space-cast-marshal.patch` (削除済み。cilium/ebpf の main に取り込まれたので不要になった。git の履歴に残る)) | 済み: 自分で出し、cilium/ebpf の main に `cc4947e` として取り込まれた (2026-10-24 に確認。リリースはまだ)。いまの依存 `v0.22.1-0.20261008…` はこれを含む |
 | K-01 `bpf_arena_get_kern_vm_start` の export | 1 行の変更 | 低い。in-tree に使う側のない、out-of-tree の kmod のための export は通りにくい (一般的な傾向。未確認) |
-| K-02 kern_vm の generic context 用 fault handler | 約 50 行の見込み | 低い。arena の設計の前提 (BPF の実行中だけの shadow mapping) に踏み込む。強い use case が要る (`docs/dev-notes/ebpf-ecosystem-gaps.md` §1.2) |
+| K-02 kern_vm の generic context 用 fault handler | 約 50 行の見込み | 低い。arena の設計の前提 (BPF の実行中だけの shadow mapping) に踏み込む。強い use case が要る (`docs/dev-notes/ebpf-kernel/ebpf-ecosystem-gaps.md` §1.2) |
 
 > **2026-10-24 追記 (7.2 / 7.3 のソースで確認、試してはいない)**: 7.2 で「bpf/arena: Direct kernel-side access」が入った。kfunc が kern_vm の未割り当てのページに触れると `bpf_arena_handle_page_fault` (x86 / arm64 の fault 経路) が scratch page を張って続ける。ただし `bpf_prog_find_from_stack()` で BPF プログラムが stack にいるときだけ働くので、kmod の read 経路のように BPF の外から読む K-01 / K-02 の用途は残る。`bpf_arena_map_kern_vm_start()` / `bpf_prog_arena()` も足されたが、EXPORT_SYMBOL はされていない。 7.3 では kfunc の引数名に `__arena` (または `__arena__nullable`) を付けると、verifier がその引数を arena のポインタとして検査し、JIT (`emit_kfunc_arena_args`、x86 / arm64) が呼び出しの直前に `kern_vm_start + (u32)rN` に付け替える。struct_ops の `__arena` 引数は trampoline が逆向き (kern_vm の番地 → arena のポインタ) に変換する。これで BPF から呼ばれた kfunc は GUP なしで arena を読み書きできる。
 
@@ -113,7 +113,7 @@
 
 ## 関連
 
-- `docs/user/meetup-qa.md` Q2〜Q4 (FUSE / fuse-bpf との比較)、Q50 (backing file の段)、Q55〜Q58 (振り返りと今後)
+- `docs/user/meetup/meetup-qa.md` Q2〜Q4 (FUSE / fuse-bpf との比較)、Q50 (backing file の段)、Q55〜Q58 (振り返りと今後)
 - `docs/journal/history.md` (経緯、トラブル、教訓)
-- `docs/design/backing-file-tier.md`、`docs/design/ac58-pick-victim.md`、`docs/design/read-iter-hook-overhead.md`
-- `docs/dev-notes/ebpf-ecosystem-gaps.md` (K-01 / K-02 の根拠)
+- `docs/design/backing-file-tier.md`、`docs/design/policy/ac58-pick-victim.md`、`docs/design/ebpf/read-iter-hook-overhead.md`
+- `docs/dev-notes/ebpf-kernel/ebpf-ecosystem-gaps.md` (K-01 / K-02 の根拠)

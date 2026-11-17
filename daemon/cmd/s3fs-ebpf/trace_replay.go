@@ -23,7 +23,7 @@ func runTraceReplay(args []string) int {
 	fs := flag.NewFlagSet("trace-replay", flag.ExitOnError)
 	perAccess := fs.String("per-access", "", "write one line per read (policy idx ino H|M) to this file, for diffing against a live run")
 	tracePath := fs.String("trace", "",
-		"Path to JSON Lines trace (see docs/design/trace-harness.md format). "+
+		"Path to JSON Lines trace (see docs/design/policy/trace-harness.md format). "+
 			"Overrides --zipf when set.")
 	zipf := fs.String("zipf", "",
 		"Generate a synthetic Zipf trace: alpha,files,accesses. "+

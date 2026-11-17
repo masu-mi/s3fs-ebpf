@@ -14,6 +14,6 @@
 #       --pattern-aware-admit \
 #       --metrics-addr=:9600
 #
-# 詳細: docs/design/ebpf-hook-gaps.md §3.4
+# 詳細: docs/design/ebpf/ebpf-hook-gaps.md §3.4
 
 prewarm: false
