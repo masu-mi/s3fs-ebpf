@@ -2,7 +2,7 @@
 
 2026-11-05。**設計と spec の検証まで** (実装はまだ。コードは変えていない)。arena モードの名残、ファイルの中身の二重の帳簿、種類ごとに別々の kmod → daemon の通信路が、不変条件の多さ (R1 / S1 / C2 / F1 / W3 …) の主な原因になっている、という見立てから、構成を減らす案を出し、通信の規則を実行できるモデルで検証した。
 
-**関連**: 現状の図は [`component-communication.md`](component-communication.md) と [`daemon-kmod-messaging.md`](daemon-kmod-messaging.md)。不変条件は [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md)。検証用のモデルは [`v2-spec/`](v2-spec/) (`make spec-check`)。
+**関連**: 現状の図は [`component-communication.md`](component-communication.md) と [`daemon-kmod-messaging.md`](daemon-kmod-messaging.md)。不変条件は [`../kmod-pcache-invariants.md`](../kmod-pcache-invariants.md)。検証用のモデルは [`specs/v2/`](../../specs/v2/) (`make spec-check`)。
 
 ---
 
