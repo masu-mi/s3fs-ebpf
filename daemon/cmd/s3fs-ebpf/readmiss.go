@@ -21,7 +21,7 @@ type readMissEvent struct {
 	Count  uint32
 	Flags  uint32
 	// SeqCount / RandCount: the file's read pattern so far, counted by the
-	// kmod in .read_iter (what the read_iter fentry used to keep in a BPF map).
+	// kmod in .read_iter.
 	SeqCount  uint32
 	RandCount uint32
 	// Seq identifies the request (kmod's inflight record); DONE echoes it.

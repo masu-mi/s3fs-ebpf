@@ -20,9 +20,8 @@ const (
 	rootIno      = uint64(1)
 )
 
-// Allocator is the S3Key → ino mapping. Previously spread across
-// package globals; collected here (W-02) so the state is named,
-// testable, and can be zero'd cleanly between test cases.
+// Allocator is the S3Key → ino mapping (W-02): named, testable state that
+// can be zero'd cleanly between test cases.
 //
 // Convention for pathByIno: dirIno → "sub1/nested" (no trailing '/'),
 // fileIno → "sub1/nested/foo.txt". Root is not stored (empty prefix).

@@ -219,7 +219,7 @@ static bool s3fs_fd_remote_covered(struct inode *inode, struct s3fs_file_data *f
  * everywhere below eof?  Yes when it covers the whole chunk, or the chunk
  * from its start up to eof (the file's last chunk).  A range that starts
  * inside the chunk never does: the bytes in front of offset were not part
- * of this call (the tail case used to ignore that and mark them valid). */
+ * of this call. */
 static bool s3fs_populate_fills_chunk(u64 offset, u64 end, u64 eof, u32 ci)
 {
 	u64 cs = (u64)ci << S3FS_PCACHE_CHUNK_SHIFT;

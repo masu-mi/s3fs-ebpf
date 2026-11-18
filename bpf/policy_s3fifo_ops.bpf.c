@@ -5,9 +5,6 @@
 //
 // Paper: https://www.cs.cmu.edu/~beckmann/publications/papers/2023.sosp.s3fifo.pdf
 //
-// The single-tier 2-bit counter version that previously carried this
-// name is now in bpf/policy_freq2bit_ops.bpf.c under a truthful name.
-//
 // Algorithm shape (paper Section 3.1), adapted to our vtable:
 //
 //   State per ino: { tier ∈ {S, M, G}, freq ∈ 0..3, seq }

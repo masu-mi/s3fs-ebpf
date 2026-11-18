@@ -273,8 +273,8 @@ func (c *DiskCache) Write(key string, buf []byte, etag string) {
 	c.write(key, buf, etag, nil)
 }
 
-// WriteAsync is Write moved off the caller's path (AC-52: the disk write
-// used to sit inside the cold read's latency). buf must not be modified
+// WriteAsync is Write moved off the caller's path (AC-52), so the disk write
+// is not in the cold read's latency. buf must not be modified
 // afterwards. The write is dropped when maxAsyncWrites are already in
 // flight, and discarded if Invalidate runs before it commits.
 func (c *DiskCache) WriteAsync(key string, buf []byte, etag string) {

@@ -375,8 +375,7 @@ func runFastpath(args []string) int {
 	}
 
 	// V-01: open /dev/s3fs_ebpf once and share the fd across all admit /
-	// signal ioctls. Previously signalAdmit reopened
-	// the device on every call, adding an open/close pair per upcall.
+	// signal ioctls.
 	devF, err := openSharedDev(*dev)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open dev: %v\n", err)
