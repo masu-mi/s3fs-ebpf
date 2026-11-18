@@ -1,9 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_test_badname_ops.bpf.c — TEST FIXTURE for the struct_ops data members and validate()
 // (scripts/test-policy-data-members.sh). REFUSED: the name has a character outside [A-Za-z0-9_.] (init_member -> -EINVAL).
 // Not a policy to run: it only exists to be loaded (and, for the rejected
-// ones, refused). See docs/dev-notes/struct-ops-data-members.md.
+// ones, refused). See docs/dev-notes/ebpf-kernel/struct-ops-data-members.md.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* admit table (ino -> daemon backing), pcache check, policy hooks, ino evict.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
@@ -91,7 +91,7 @@ atomic_long_t s3fs_evictions_total = ATOMIC_LONG_INIT(0);
 atomic_long_t s3fs_folio_hits = ATOMIC_LONG_INIT(0);
 
 /*
- * Issue #22 (docs/design/hit-signal-percpu-accumulation.md).
+ * Issue #22 (docs/design/policy/hit-signal-percpu-accumulation.md).
  * .read_iter counts one access per open file in a per-CPU
  * slot of the inode's s3fs_file_data; admit_replace Phase 1 replays the
  * delta into the policy's on_hit under the evict mutex.

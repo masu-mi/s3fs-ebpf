@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* directory and super ops, fill_super.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
@@ -50,11 +50,9 @@ static struct inode *s3fs_ebpf_make_inode(struct super_block *sb,
 		/* Size resolution priority:
 		 *   1. sync entry's size (S3-authoritative)
 		 *   2. fd->size (compile-time placeholder for bootstrap)
-		 * Formerly we peeked at the admit table (arena bytes) but
-		 * with range-list admits (D-01) a single admit entry no
-		 * longer reflects the whole file size — a partial range
-		 * would falsely report a smaller i_size. Daemon must push
-		 * the authoritative size via sync entries.
+		 * The admit table is not consulted: with range-list admits (D-01)
+		 * an admit entry does not reflect the whole file size.  The daemon
+		 * must push the authoritative size via sync entries.
 		 */
 		(void)admit_uaddr; (void)admit_size; (void)admit_mm;
 		if (e->size > 0)
@@ -487,8 +485,8 @@ static void entry_forget(unsigned long parent, const char *name, size_t len,
 	local_entry_remove(parent, name, len);
 	if (!h || !seq) {
 		/* OOM, or no event was queued so S3 keeps the object: a tombstone could
-		 * never be dropped (the listing would keep it).  The old behaviour: the
-		 * dcache hides the name until the next sync lists it again. */
+		 * never be dropped (the listing would keep it).  The dcache hides the
+		 * name until the next sync lists it again. */
 		kfree(h);
 		return;
 	}

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 /*
  * KUnit suites for vfs_ops.c.  #included at the end of vfs_ops.c when the
  * module is built with KUNIT=1 (-DS3FS_KUNIT), so the suites reach the

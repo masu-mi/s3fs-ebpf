@@ -105,7 +105,7 @@ daemon_wait_exit() {
 # ebpf_mount <mp> — insmod (if needed) + mount -t s3fs_ebpf (if needed).
 # ebpf_hit_params — write HIT_REARM_JIFFIES / HIT_REPLAY_MAX
 # (when set) to the kmod's hit-signal module parameters (issue #22,
-# docs/design/hit-signal-percpu-accumulation.md).  Unset = keep the
+# docs/design/policy/hit-signal-percpu-accumulation.md).  Unset = keep the
 # kmod default.  Same mechanism as ebpf_nocache.
 ebpf_hit_params() {
 	local p=/sys/module/${S3FS_KMOD_NAME}/parameters

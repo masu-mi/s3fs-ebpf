@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 /*
  * KUnit suite for policy_struct_ops.c (#included under S3FS_KUNIT): the
  * vtable dispatch and the reg / unreg / update publication rules, driven

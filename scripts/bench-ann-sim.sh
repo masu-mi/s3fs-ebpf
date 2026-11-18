@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P2 matrix of docs/design/ann-workload-measurement-plan.md: synthetic IVF /
+# P2 matrix of docs/design/plans/ann-workload-measurement-plan.md: synthetic IVF /
 # HNSW / mixed traces replayed chunk-granular through every policy.
 # No kmod, MinIO or root needed. Results: $OUT/*.md (default /tmp/bench-ann-sim).
 set -euo pipefail

@@ -1,6 +1,6 @@
 ---------------------------- MODULE LostUpdate ----------------------------
 (*
- * 入門記事 (docs/dev-notes/tlaplus-introduction.md) の教材。
+ * 入門記事 (docs/dev-notes/process/tlaplus-introduction.md) の教材。
  * 2 つのプロセスが共有カウンタを +1 する。読んで、書く、の 2 ステップに
  * 分かれていると、片方の更新が消える (lost update)。
  *   Atomic = FALSE : 読み (Read) と書き (Write) が別のステップ。 -> 違反する

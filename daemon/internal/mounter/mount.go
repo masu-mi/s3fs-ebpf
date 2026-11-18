@@ -23,7 +23,6 @@ func Mount(o Options) error {
 	return nil
 }
 
-// Unmount detaches the filesystem.
 func Unmount(target string) error {
 	if err := syscall.Unmount(target, 0); err != nil {
 		return fmt.Errorf("umount %s: %w", target, err)

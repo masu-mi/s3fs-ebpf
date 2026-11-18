@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* policy tracking, capacity eviction, admit_replace, admit shutdown.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
@@ -171,9 +171,8 @@ u64 s3fs_admit_size(u64 ino)
 }
 
 /*
- * The capacity / policy pass (formerly admit_replace, which also swapped the
- * daemon's arena admit list; arena ranges are gone).  Collects the cached
- * inodes (clean, with allocated chunks) and, for each: replays the accumulated hits, tells the
+ * The capacity / policy pass.  Collects the cached inodes (clean, with
+ * allocated chunks) and, for each: replays the accumulated hits, tells the
  * policy (on_insert / on_size), takes the votes, and evicts down to
  * capacity_bytes (pick_victim or score order).  Called by the daemon's EVAL
  * ioctl (after a populate, before it wakes the reader; on /policy/eval).

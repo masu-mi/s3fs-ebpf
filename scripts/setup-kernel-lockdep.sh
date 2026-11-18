@@ -33,7 +33,7 @@
 # BTF needs it).  The build stops early if SRC_DIR has less than MIN_FREE_GB.
 # Run it on the machine that will boot the kernel (the kmod is built against
 # its headers); reboot afterwards, then run `make setup-toolchain` and
-# `scripts/test-lockdep.sh`.  docs/dev-notes/lockdep-kernel.md has the details
+# `scripts/test-lockdep.sh`.  docs/dev-notes/process/lockdep-kernel.md has the details
 # and how to go back to the normal kernel.
 set -euo pipefail
 

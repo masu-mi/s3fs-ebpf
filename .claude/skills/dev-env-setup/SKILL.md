@@ -5,7 +5,7 @@ description: 環境構築と build・実行の切り分け。「make が通ら�
 
 # 環境構築と build / 実行の切り分け
 
-手順の本体は `docs/user/getting-started.md`、依存の理由は `docs/dev-notes/build-env-dependencies.md`、既知の落とし穴は `docs/dev-notes/lessons-learned.md`。
+手順の本体は `docs/user/getting-started.md`、依存の理由は `docs/dev-notes/process/build-env-dependencies.md`、既知の落とし穴は `docs/dev-notes/lessons-learned.md`。
 
 ## 最初の 3 コマンド
 
@@ -19,7 +19,7 @@ make all             # kmod + bpf + daemon
 
 - 全部入れる: `make setup-toolchain` (`ASSUME_YES=1` で非対話、`DRY_RUN=1 scripts/setup-toolchain.sh` で実行内容だけ確認、`scripts/setup-toolchain.sh clang bpftool ...` で個別)。clang-20、bpftool wrapper、gcc/pahole、go、bench の依存。
 - カーネル: **kmod は 6.12 以上が要る** (`kmod/s3fs_ebpf_dev.c` の `#error`)。`make setup-kernel` (mainline 6.12 LTS、Ubuntu、再起動が要る)。入れ替えたら `make setup-kbuild` (headers、gcc/pahole、`$KDIR/vmlinux`)。6.12 未満のコンテナでは `make bpf daemon` だけ。`vmlinux.h` は `make vmlinux` で実行中のカーネルの BTF から作り直す。
-- lockdep カーネル: `make setup-kernel-lockdep` (`docs/dev-notes/lockdep-kernel.md`)。ホストが落ちると復旧に時間がかかるので、試す前に `scripts/boot-kernel.sh` の grub 選択を確かめる (`make test-boot-kernel`)。
+- lockdep カーネル: `make setup-kernel-lockdep` (`docs/dev-notes/process/lockdep-kernel.md`)。ホストが落ちると復旧に時間がかかるので、試す前に `scripts/boot-kernel.sh` の grub 選択を確かめる (`make test-boot-kernel`)。
 - bench の依存 (hyperfine、fio、s3fs、`/etc/passwd-s3fs`): `make setup-bench-env`。
 - **go build は repo のルートか `daemon/` で行う** (`daemon/cmd/s3fs-ebpf` の中だと 60 MB のバイナリが出て commit に混ざる)。cobra は `@v1.10.2` (memory `project-go-deps-cobra-pitfall`)。
 - ビルド警告 `the compiler differs` は無視してよい。`error` は見る。

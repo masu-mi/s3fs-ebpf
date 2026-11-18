@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test-policy-data-members.sh — struct_ops DATA members (flags / name) and validate(), on a real
-# kernel (docs/dev-notes/struct-ops-data-members.md).
+# kernel (docs/dev-notes/ebpf-kernel/struct-ops-data-members.md).
 #
 # The kmod's s3fs_policy_ops carries, besides the hooks, `flags` and `name`.  The kernel accepts a
 # non-function member only if the type's init_member takes it, so this checks the whole path:

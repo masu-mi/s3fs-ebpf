@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_s3fifo_pick_ops — S3-FIFO (Yang et al, SOSP 2023) on the AC-58
-// vtable (docs/design/ac58-pick-victim.md), with the three real queues.
+// vtable (docs/design/policy/ac58-pick-victim.md), with the three real queues.
 //
 //   S (small, ~10 %)  new candidates enter here
 //   M (main)          promoted from S, or re-admitted from the ghost queue

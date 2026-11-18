@@ -1,7 +1,7 @@
 // Package policy is the CEL-based policy engine spike (Week 4 (d)
 // P-01). Minimum viable path: load one .cel file at daemon start,
 // evaluate the `prewarm` expression per Entry, return a bool. The
-// wider architecture (`docs/design/policy-engine-design.md §4.5`: DSL Layer 1
+// wider architecture (`docs/design/policy/policy-engine-design.md §4.5`: DSL Layer 1
 // + built-in eBPF Layer 2 + user eBPF Layer 3 + KFunc Layer 0) grows
 // from here — additional hooks reuse the same `cel.Env` shape.
 //
@@ -133,7 +133,6 @@ func (e *Engine) EvalPrewarm(in EntryInput) bool {
 // typo like `100000` cannot make one miss read a whole directory.
 const MaxPrefetchNext = 64
 
-// HasPrefetchNext reports whether the policy declares prefetch_next.
 func (e *Engine) HasPrefetchNext() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

@@ -1,6 +1,6 @@
 # 使い始める: 環境構築・ビルド・起動・計測
 
-[`README.md`](../../README.md) の Quick start の詳細版。前提環境の確認から、ビルド、マウント、テスト、ベンチマーク、片付けまでを並べる。CLI のフラグと Make ターゲットの全量は [`cli-reference.md`](cli-reference.md)、初期 (Week 1〜3) の個別の動作確認手順は [`../journal/early-walkthroughs.md`](../journal/early-walkthroughs.md) にある。
+[`README.md`](../../README.md) の Quick start の詳細版。前提環境の確認から、ビルド、マウント、テスト、ベンチマーク、片付けまでを並べる。CLI のフラグと Make ターゲットの全量は [`cli-reference.md`](cli-reference.md)、初期 (Week 1〜3) の個別の動作確認手順は [`../journal/early-walkthroughs.md`](../journal/weekly/early-walkthroughs.md) にある。
 
 ## 前提環境
 
@@ -14,7 +14,7 @@
 | Tools | `bpftool`, `docker compose` v2, `gettext-base` (envsubst)。bench は `hyperfine`, `fio`, `s3fs` |
 
 依存箇所（カーネル版 / ヘッダ / コンパイラ / ツール / テストツール）ごとの症状と解消方法は
-[`docs/dev-notes/build-env-dependencies.md`](../dev-notes/build-env-dependencies.md) にまとめています。
+[`docs/dev-notes/process/build-env-dependencies.md`](../dev-notes/process/build-env-dependencies.md) にまとめています。
 
 ---
 
@@ -127,7 +127,7 @@ make test-kunit KSRC=... KUNIT_ARGS="--arch=x86_64 --qemu_args='-smp 4'"   # qem
 make test-daemon-cov test-kunit-cov KSRC=...  # カバレッジ (coverage/)。CI は public のとき Codecov に送る
 ```
 
-KUnit の準備、suite の中身、見つかったバグは [`docs/dev-notes/kunit.md`](../dev-notes/kunit.md)。
+KUnit の準備、suite の中身、見つかったバグは [`docs/dev-notes/process/kunit.md`](../dev-notes/process/kunit.md)。
 
 ---
 
@@ -166,7 +166,7 @@ make bench-3way         # ebpf vs fuse-raw vs fuse-cache 3-way (+ fuse-diskcache
 
 ### 6 構成 × A〜H の測り直し (issue #35)
 
-fuse-raw / fuse-diskcache / fuse-cache / ebpf-nocache / ebpf-pcachedrop / ebpf-pcache を同じ項目で比べる。各項目 (A: open+read+close、B: 新規 durable write、C: 既存の途中書き換え、D: cold read、E: 小さいファイル 10,000 個、F: 64 jobs 並列 read、G: SQLite とベクトル検索、H: policy ごとの hit rate) が**何の側面を測るか**は [`../dev-notes/bench-suite-overview.md`](../dev-notes/bench-suite-overview.md)。結果は `benchmark-results.md` §18.48 / §18.49。`make` のターゲットはなく、script を直接呼ぶ (`OUT=<dir>` で出力先):
+fuse-raw / fuse-diskcache / fuse-cache / ebpf-nocache / ebpf-pcachedrop / ebpf-pcache を同じ項目で比べる。各項目 (A: open+read+close、B: 新規 durable write、C: 既存の途中書き換え、D: cold read、E: 小さいファイル 10,000 個、F: 64 jobs 並列 read、G: SQLite とベクトル検索、H: policy ごとの hit rate) が**何の側面を測るか**は [`../dev-notes/bench-suite-overview.md`](../dev-notes/process/bench-suite-overview.md)。結果は `benchmark-results.md` §18.48 / §18.49。`make` のターゲットはなく、script を直接呼ぶ (`OUT=<dir>` で出力先):
 
 ```bash
 OUT=/tmp/r/main   STEPS="A B C D" scripts/bench-pcache-remeasure.sh   # A〜D (STEPS=E で小さいファイル。BACKENDS で構成を絞る)

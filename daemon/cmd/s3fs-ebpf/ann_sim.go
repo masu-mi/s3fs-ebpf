@@ -10,7 +10,7 @@ import (
 	"github.com/bbsakura/s3fs-ebpf/daemon/internal/trace"
 )
 
-// runAnnSim is P1/P2 of docs/design/ann-workload-measurement-plan.md: it
+// runAnnSim is P1/P2 of docs/design/plans/ann-workload-measurement-plan.md: it
 // generates a synthetic ANN trace (IVF / HNSW / mixed) per seed and replays
 // it, chunk-granular, through every policy at several capacities given as a
 // fraction of the data size. Output is one markdown table.

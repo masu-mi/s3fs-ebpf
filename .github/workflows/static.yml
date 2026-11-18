@@ -1,0 +1,24 @@
+# Checks that need no root, kernel or docker: invariants, model checks, docs links.
+# Unlike test.yml this also runs on docs-only changes (make check-docs).
+name: static
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: make check-invariants spec-check check-docs test-boot-kernel

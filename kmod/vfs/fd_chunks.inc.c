@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* per-inode content buffer (4 MiB chunk table).  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
@@ -44,8 +44,7 @@ struct s3fs_chunk {
 struct s3fs_hit_acc {
 	u64 count;     /* accesses counted on this CPU (monotonic) */
 	u64 last_tick; /* jiffies of the last one */
-	/* Read access pattern (what the read_iter fentry used to keep in
-	 * s3fs_ino_slots): the end of the previous read on this CPU, and how many
+	/* Read access pattern: the end of the previous read on this CPU, and how many
 	 * reads were sequential / random.  Handed to the daemon in the miss event. */
 	u64 last_end_pos;
 	u32 seq_count;

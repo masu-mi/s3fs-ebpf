@@ -5,7 +5,7 @@ description: 状態遷移図 → TLA+ → TLC で設計・既存実装を網羅�
 
 # 状態遷移図 → TLA+ → TLC → 実機で確認
 
-入門: `docs/dev-notes/tlaplus-introduction.md`。方針: `docs/dev-notes/design-verification.md`。適用例: `docs/design/file-lifecycle-state-machine.md` と `specs/tla/FileLifecycle.tla`。この skill は**手順と、過去に実際に踏んだ落とし穴**を書く。
+入門: `docs/dev-notes/process/tlaplus-introduction.md`。方針: `docs/dev-notes/process/design-verification.md`。適用例: `docs/design/file-lifecycle-state-machine.md` と `specs/tla/FileLifecycle.tla`。この skill は**手順と、過去に実際に踏んだ落とし穴**を書く。
 
 ## 0. 使うかどうか
 

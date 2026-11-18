@@ -26,7 +26,7 @@ METRICS_ADDR ?= :9600
 #   KMOD_PAHOLE pahole >= CONFIG_PAHOLE_VERSION, else $$HOME/.local build
 #   BPFTOOL     a bpftool that runs (Ubuntu wrapper / Debian /usr/sbin)
 # Each is a `?=` default: `make CLANG=clang-21` or an env var wins.
-# Background: docs/dev-notes/build-env-dependencies.md
+# Background: docs/dev-notes/process/build-env-dependencies.md
 $(foreach v,$(shell $(SCRIPTS_DIR)/detect-toolchain.sh --make),$(eval $(v)))
 
 # LD_LIBRARY_PATH prefix for a $$HOME/.local pahole (needs its libdwarves).
@@ -65,17 +65,17 @@ CLI_REF_TMPL := $(TOPDIR)/docs/user/cli-reference.md.tmpl
 CLI_REF      := $(TOPDIR)/docs/user/cli-reference.md
 DAEMON_BIN  := $(BIN_DIR)/s3fs-ebpf
 
-.PHONY: test-fsync-inflight test-nocache-signal test-cold-signal test-staging test-boot-kernel test-splice-hits test-sync-keeps-cache setup-kernel-lockdep test-lockdep check-invariants spec-check test-policy-conformance help all build kmod kmod-clean bpf bpf-clean daemon daemon-gen daemon-clean \
-        vmlinux vmlinux-clean compose-up compose-down compose-logs \
-        mount unmount daemon-run daemon-stop \
-        bench bench-write bench-scale bench-3way \
-        bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env \
-        doctor doctor-build toolchain kmod-matrix deb deb-check deb-install setup-kernel setup-toolchain setup-kbuild \
-        lint-scripts cli-reference test-arena test-kunit test-kunit-cov test-daemon test-daemon-cov \
-        test-write-existing-nopm test-open-check test-parity test-spec test-fsync-large-new-file test-pcache-drop test-nocache-signal test-cold-signal test-staging test-policy-reload test-policy-data-members test-regression test-write-readback test-large-file-read \
-        test-evict-readback test-populate-boundary \
-        test-pcache-multiread test-pcache-evict-race test-pcache-evict-race-short test-pcache-capacity-tail \
-        clean
+.PHONY: help
+# build
+.PHONY: all build kmod kmod-clean kmod-matrix bpf bpf-clean vmlinux vmlinux-clean daemon daemon-gen daemon-clean deb deb-check deb-install clean
+# run
+.PHONY: compose-up compose-down compose-logs mount unmount daemon-run daemon-stop
+# bench
+.PHONY: bench bench-write bench-scale bench-3way bench-hitrate bench-hitrate-multi bench-hitrate-mixed setup-bench-env
+# env
+.PHONY: doctor doctor-build toolchain setup-kernel setup-kernel-lockdep setup-toolchain setup-kbuild lint-scripts cli-reference
+# tests (unit / spec / live regression)
+.PHONY: test check-docs check-invariants spec-check test-arena test-boot-kernel test-cold-signal test-daemon test-daemon-cov test-evict-readback test-fsync-inflight test-fsync-large-new-file test-fsync-new-file test-kunit test-kunit-cov test-large-file-read test-lockdep test-nocache-signal test-open-check test-parity test-pattern-aware-admit test-pcache-capacity-noeval test-pcache-capacity-seq test-pcache-capacity-tail test-pcache-drop test-pcache-evict-race test-pcache-evict-race-short test-pcache-multiread test-pcache-prewarm test-pcache-prewarm-none test-pick-victim-stale test-policy-conformance test-policy-data-members test-policy-reload test-populate-boundary test-prefetch-next test-regression test-spec test-splice-hits test-staging test-sync-keeps-cache test-write-existing test-write-existing-capacity test-write-existing-nopm test-write-partial test-write-readback test-wtinylfu-harness
 
 ## Help:
 help: ## Show this help
@@ -288,7 +288,7 @@ toolchain: ## Print the resolved CLANG / KMOD_CC / KMOD_PAHOLE / BPFTOOL / KDIR
 	  KMOD_CC '$(KMOD_CC)' KMOD_PAHOLE '$(KMOD_PAHOLE)' KMOD_LDLIB '$(KMOD_LDLIB)' \
 	  KMOD_KCFLAGS '$(KMOD_KCFLAGS)' GO '$(GO)' GO_ROOT '$(GO_ROOT)'
 
-setup-kernel-lockdep: ## Build + install a 6.12 kernel with CONFIG_PROVE_LOCKING (docs/dev-notes/lockdep-kernel.md)
+setup-kernel-lockdep: ## Build + install a 6.12 kernel with CONFIG_PROVE_LOCKING (docs/dev-notes/process/lockdep-kernel.md)
 	$(SCRIPTS_DIR)/setup-kernel-lockdep.sh
 
 test-lockdep: ## Run the regression suite on a lockdep kernel, fail on lock-order reports (AC-42)
@@ -318,7 +318,7 @@ $(CLI_REF): $(CLI_REF_TMPL) $(DAEMON_BIN) Makefile
 	 envsubst '$$CLI_HELP $$CLI_MOUNT_HELP $$MAKE_HELP' \
 	   < $(CLI_REF_TMPL) > $(CLI_REF)
 
-## Week 1 verification:
+## Week 1 probe:
 test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	@echo "==> insmod kmod/s3fs_kfunc.ko"
 	@if ! lsmod | grep -q '^s3fs_kfunc'; then sudo insmod $(KMOD_DIR)/s3fs_kfunc.ko; fi
@@ -329,14 +329,14 @@ test-arena: kmod daemon ## insmod + run bpf_arena/KFunc round-trip probe + rmmod
 	 exit $$rc
 
 ## Unit tests (no daemon, no root):
-# KSRC: a Linux >= 6.12 source tree (see docs/dev-notes/kunit.md).
+# KSRC: a Linux >= 6.12 source tree (see docs/dev-notes/process/kunit.md).
 # KUNIT_ARGS: extra kunit.py args, e.g. --arch=x86_64 --qemu_args='-smp 4'.
 test-kunit: ## KUnit suites for kmod in UML (KSRC=<linux source tree>)
-	@test -n "$(KSRC)" || { echo "set KSRC=<linux source tree>, see docs/dev-notes/kunit.md"; exit 2; }
+	@test -n "$(KSRC)" || { echo "set KSRC=<linux source tree>, see docs/dev-notes/process/kunit.md"; exit 2; }
 	KSRC=$(KSRC) $(SCRIPTS_DIR)/kunit.sh $(KUNIT_ARGS)
 
 test-kunit-cov: ## KUnit in UML with clang coverage -> coverage/kmod.lcov (KSRC=...)
-	@test -n "$(KSRC)" || { echo "set KSRC=<linux source tree>, see docs/dev-notes/kunit.md"; exit 2; }
+	@test -n "$(KSRC)" || { echo "set KSRC=<linux source tree>, see docs/dev-notes/process/kunit.md"; exit 2; }
 	KSRC=$(KSRC) $(SCRIPTS_DIR)/kunit-cov.sh $(CURDIR)/coverage/kmod.lcov $(KUNIT_ARGS)
 
 test-daemon: ## go test for the daemon
@@ -346,12 +346,19 @@ test-daemon-cov: ## go test with coverage -> coverage/daemon.out
 	mkdir -p coverage
 	cd $(DAEMON_DIR) && $(GO_ENV) $(GO) test -covermode=atomic -coverprofile=$(CURDIR)/coverage/daemon.out ./...
 
-## Regression tests (T1–T5, AC-01, R1/S1/T3 coverage):
+## Tests:
+# `make test` is everything that needs neither root nor a mount (what a laptop or CI can run).
+# KUnit (needs KSRC) and TLC (needs docker) are separate: test-kunit, test-spec.
+test: test-daemon check-invariants spec-check check-docs test-boot-kernel ## Unit + static + model checks, no root / mount / docker
+
+check-docs: ## docs/: broken relative links and docs/... paths (no network)
+	@python3 -B $(SCRIPTS_DIR)/check-doc-links.py
+
 check-invariants: ## Static checks on kmod/vfs_ops.c (+ kmod/vfs/) and the bench seeds (no root)
 	@$(SCRIPTS_DIR)/check-kmod-invariants.sh
 
-spec-check: ## Exhaustive check of the v2 redesign spec models (docs/design/v2-spec, python3 only, no root)
-	@python3 -B docs/design/v2-spec/run.py
+spec-check: ## Exhaustive check of the v2 redesign spec models (specs/v2, python3 only, no root)
+	@python3 -B specs/v2/run.py
 
 test-policy-conformance: kmod daemon ## Live pick_victim policies vs their simulators, per access (issue #22)
 	@$(SCRIPTS_DIR)/test-policy-conformance.sh
@@ -367,7 +374,44 @@ test-splice-hits: kmod daemon ## sendfile / splice reads are counted as hits (hi
 	@echo "==> test-splice-hits"
 	@$(SCRIPTS_DIR)/test-splice-hits.sh
 
-test-regression: check-invariants test-boot-kernel test-write-readback test-large-file-read test-evict-readback test-populate-boundary test-pcache-multiread test-pcache-evict-race-short test-pcache-capacity-tail test-pcache-prewarm-none test-pcache-prewarm test-prefetch-next test-pcache-capacity-noeval test-pcache-capacity-seq test-write-existing test-write-existing-nopm test-write-existing-capacity test-write-partial test-fsync-new-file test-fsync-inflight test-open-check test-parity test-fsync-large-new-file test-pattern-aware-admit test-pick-victim-stale test-sync-keeps-cache test-splice-hits test-pcache-drop test-nocache-signal test-cold-signal test-staging test-policy-reload test-policy-data-members test-policy-conformance ## Run all regression tests
+# Live regression suite (root + mount). Not in it, on purpose: test-pcache-evict-race (120 s
+# stress; the -short variant is), test-lockdep (needs the lockdep kernel),
+# test-arena (week-1 probe), test-wtinylfu-harness (BPF verifier only, run with policy changes).
+REGRESSION_TESTS := \
+	test-write-readback \
+	test-large-file-read \
+	test-evict-readback \
+	test-populate-boundary \
+	test-pcache-multiread \
+	test-pcache-evict-race-short \
+	test-pcache-capacity-tail \
+	test-pcache-prewarm-none \
+	test-pcache-prewarm \
+	test-prefetch-next \
+	test-pcache-capacity-noeval \
+	test-pcache-capacity-seq \
+	test-write-existing \
+	test-write-existing-nopm \
+	test-write-existing-capacity \
+	test-write-partial \
+	test-fsync-new-file \
+	test-fsync-inflight \
+	test-open-check \
+	test-parity \
+	test-fsync-large-new-file \
+	test-pattern-aware-admit \
+	test-pick-victim-stale \
+	test-sync-keeps-cache \
+	test-splice-hits \
+	test-pcache-drop \
+	test-nocache-signal \
+	test-cold-signal \
+	test-staging \
+	test-policy-reload \
+	test-policy-data-members \
+	test-policy-conformance
+
+test-regression: check-invariants test-boot-kernel $(REGRESSION_TESTS) ## Run all regression tests (static checks + live, root + mount)
 
 test-write-readback: kmod daemon ## T1: write → read content match (new file, 4 MiB+, truncate-extend, flush+drop_caches)
 	@echo "==> test-write-readback (T1/AC-22)"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_sieve_ops — SIEVE (NSDI 2024, Zhang et al) as a Layer 2
 // struct_ops policy. Sibling built-in with LRU / S3-FIFO / freq2bit so hit-rate
@@ -12,7 +12,7 @@
 //
 // We don't have an on_hit hook (per-read access is a super-hot path
 // currently handled by the kernel's built-in fentry counters — see
-// docs/design/policy-engine-design.md §2.2). Without on_hit, we degrade
+// docs/design/policy/policy-engine-design.md §2.2). Without on_hit, we degrade
 // the "hit sets visited=1" step: instead the visited bit only ever
 // gets set on first sight (grace period). The remaining second-chance
 // semantics (visited=1 → clear + keep, visited=0 → evict) match SIEVE

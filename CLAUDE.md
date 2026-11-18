@@ -3,6 +3,7 @@
 ## セッション開始時
 - kmod の read/pcache/eviction 周りに触れるときは、最初に `docs/kmod-pcache-invariants.md` だけを読む（ロック順、R1、pending のキー、chunk の pin、reset の条件）。コードから読み直さない。
 - 不変条件を変えるコード変更をしたら、同じ変更でこのメモも更新する。
+- 開発の進め方 (技術トピック、典型作業、コツ) は `docs/dev-notes/development-playbook.md`。docs を動かしたら `make check-docs`、root なしの検証は `make test`。
 
 ## 個別タスクは skill から始める
 新規セッションでは、やることに合う skill を先に呼ぶ (手順と、過去に踏んだ落とし穴が入っている。docs/ だけでは見つからない)。
@@ -25,7 +26,7 @@
 新しい個別タスクの手順を作ったら `.claude/skills/<name>/SKILL.md` に skill として足し、この表にも 1 行足す。
 
 ## 設計・既存実装の調査
-- 設計するとき、既存の実装を調べるときは、状態を持つもの (kmod / daemon / S3 / page cache) と更新者を並べ、**状態遷移図 (mermaid、`docs/design/`) を書いて、全部の状態からの遷移を検証する**。非同期・並行・持ち主が複数の遷移は、TLA+ のモデル (`specs/tla/`) にして `make test-spec` で網羅する。反例は `scripts/test-parity.sh` で実機に当てる。手順は skill `tlc-design-verification` (`.claude/skills/tlc-design-verification/SKILL.md`)、入門は `docs/dev-notes/tlaplus-introduction.md`、方針と理由は `docs/dev-notes/design-verification.md`、適用例: `docs/design/file-lifecycle-state-machine.md`。
+- 設計するとき、既存の実装を調べるときは、状態を持つもの (kmod / daemon / S3 / page cache) と更新者を並べ、**状態遷移図 (mermaid、`docs/design/`) を書いて、全部の状態からの遷移を検証する**。非同期・並行・持ち主が複数の遷移は、TLA+ のモデル (`specs/tla/`) にして `make test-spec` で網羅する。反例は `scripts/test-parity.sh` で実機に当てる。手順は skill `tlc-design-verification` (`.claude/skills/tlc-design-verification/SKILL.md`)、入門は `docs/dev-notes/process/tlaplus-introduction.md`、方針と理由は `docs/dev-notes/process/design-verification.md`、適用例: `docs/design/file-lifecycle-state-machine.md`。
 - 速度比を書く前に、S3 への HEAD / GET と upcall の数を双方で数える (`.claude/skills/perf-bench-verify/SKILL.md` の 4)。
 
 ## kmod/vfs_ops.c の読み方

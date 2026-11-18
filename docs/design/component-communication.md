@@ -5,10 +5,10 @@ s3fs-ebpf は **Linux VFS + kmod (`s3fs_kfunc.ko`) + eBPF プログラム / マ�
 **関連 doc**:
 - [`daemon-kmod-messaging.md`](daemon-kmod-messaging.md) — daemon と kmod の間のメッセージを、イベント (miss / flush / fsync / unlink / rename / sync / evict) とデータ構造 (キュー、pending) で整理した図つきの見取り図。**まずここ**
 - [`read-path-design.md`](read-path-design.md) — Path A/B/C 通信の設計理由
-- [`policy-engine-design.md`](policy-engine-design.md) — policy dispatch (CEL で policy を選び、struct_ops の vtable で呼び、KFunc で kmod の状態を読む。fmod_ret の層は issue #35 で削除済み)
-- [`policy-attach-comparison.md`](policy-attach-comparison.md) — fmod_ret vs struct_ops (fmod_ret は削除済み。比較は当時の記録)
-- [`hook-timings-diagrams.md`](hook-timings-diagrams.md) — 8 タイミング × 3 path のオブジェクト図
-- [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-ecosystem-gaps.md) — ここに見えている ioctl/ringbuf/miscdev 選択の理由
+- [`policy-engine-design.md`](policy/policy-engine-design.md) — policy dispatch (CEL で policy を選び、struct_ops の vtable で呼び、KFunc で kmod の状態を読む。fmod_ret の層は issue #35 で削除済み)
+- [`policy-attach-comparison.md`](ebpf/policy-attach-comparison.md) — fmod_ret vs struct_ops (fmod_ret は削除済み。比較は当時の記録)
+- [`hook-timings-diagrams.md`](ebpf/hook-timings-diagrams.md) — 8 タイミング × 3 path のオブジェクト図
+- [`../dev-notes/ebpf-ecosystem-gaps.md`](../dev-notes/ebpf-kernel/ebpf-ecosystem-gaps.md) — ここに見えている ioctl/ringbuf/miscdev 選択の理由
 
 ---
 
@@ -247,7 +247,7 @@ fsync も同じ `reqq` から `read(2)` で読む (専用の queue も blocking 
 - **書いた直後の read を支える (AC-82、2026-11-05):** FLUSH の `DONE` が成功したとき、kmod は chunk の `populated` を立て、**populated な chunk の連続した範囲ごとに PCACHE の admit entry を入れる** (`fd->lock` の下、R1)。書いた直後の `.read_folio` は chunk から返り、S3 への upcall は出ない。以前は daemon が PUT のあと中身を arena にコピーして `ADMIT_ARENA` で admit し直し (`AdmitContent`)、書いた直後の read はその arena のコピーを GUP で読んでいた。arena の消費と、満杯のときの `flush_errors_total` の誤計上は、削除で解消した。
 - 書いた直後の read の遅延と S3 の GET 数、新規 100 MiB の fsync の時間は**未計測** (`make test-regression` は通る)。
 
-E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/journal/backlog-archive.md J-05` 参照)。
+E-03 の実装 (`docs/journal/weekly/week4c-implementation-notes.md`)。coalescer が「バースト close を 1 PUT に集約」を実現 (bench で 1141 close → 1 PUT を実測、`docs/backlog/backlog-archive.md J-05` 参照)。
 
 **§4 の `s3fs_req_event` (FLUSH) が (削除済みの) BPF の ringbuf と別 transport になっている理由**: kmod C context (`.release` / `.fsync` → `s3fs_ebpf_flush_pop` = `kmod/vfs_ops.c:1338`) の producer なので、BPF prog 専用の `bpf_ringbuf_reserve/submit` は使えない (`bpf_ringbuf_output` は kmod 側から呼べるが、以下 2 要件が満たせない):
 
@@ -271,7 +271,7 @@ E-03 の実装 (`docs/journal/week4c-implementation-notes.md`)。coalescer が�
 
 ## 5. Policy engine dispatch
 
-BPF 側の policy は struct_ops (`struct s3fs_policy_ops`、`kmod/policy_struct_ops.h`) の 1 方式だけ。hook は `on_admit` / `on_evict` / `on_pressure` / `on_hit` に、AC-58 で `on_insert` / `on_remove` / `pick_victim`、AC-66 で `on_size` が足された。`pick_victim` を持つ policy は容量超過のときに victim を自分で選ぶ (`docs/design/ac58-pick-victim.md`)。KFunc は BPF → kmod の逆方向 helper。差し替えは `BPF_LINK_UPDATE` 1 回 (RCU ポインタ 1 本)。fmod_ret の層は issue #35 で削除した (kmod に `s3fs_policy_on_*` の anchor はない。`docs/design/policy-attach-comparison.md` は当時の比較の記録)。
+BPF 側の policy は struct_ops (`struct s3fs_policy_ops`、`kmod/policy_struct_ops.h`) の 1 方式だけ。hook は `on_admit` / `on_evict` / `on_pressure` / `on_hit` に、AC-58 で `on_insert` / `on_remove` / `pick_victim`、AC-66 で `on_size` が足された。`pick_victim` を持つ policy は容量超過のときに victim を自分で選ぶ (`docs/design/policy/ac58-pick-victim.md`)。KFunc は BPF → kmod の逆方向 helper。差し替えは `BPF_LINK_UPDATE` 1 回 (RCU ポインタ 1 本)。fmod_ret の層は issue #35 で削除した (kmod に `s3fs_policy_on_*` の anchor はない。`docs/design/ebpf/policy-attach-comparison.md` は当時の比較の記録)。
 
 ```mermaid
 flowchart TB
@@ -299,7 +299,7 @@ flowchart TB
     KF -.->|"kmod の状態を参照"| Vtable
 ```
 
-policy の各 hook の呼び出し順と map の使い方は [`policy-bpf-maps.md`](policy-bpf-maps.md) §1。
+policy の各 hook の呼び出し順と map の使い方は [`policy-bpf-maps.md`](policy/policy-bpf-maps.md) §1。
 
 ---
 
@@ -350,7 +350,7 @@ sequenceDiagram
 - 現行 ioctl の overhead (~500ns-1μs) は Path C 全体 (S3 Get ~5-30ms 支配) の 0.02% 以下
 - **将来** の per-request event stream / userspace-driven policy voting なら USER_RINGBUF が本命
 
-詳細は [`../dev-notes/ebpf-ecosystem-gaps.md §1-§4`](../dev-notes/ebpf-ecosystem-gaps.md#1-bpf_arena--一番苦しんだ領域) の trade-off 議論。
+詳細は [`../dev-notes/ebpf-ecosystem-gaps.md §1-§4`](../dev-notes/ebpf-kernel/ebpf-ecosystem-gaps.md#1-bpf_arena--一番苦しんだ領域) の trade-off 議論。
 
 ---
 

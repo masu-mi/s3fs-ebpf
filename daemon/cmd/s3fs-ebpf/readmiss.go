@@ -21,14 +21,13 @@ type readMissEvent struct {
 	Count  uint32
 	Flags  uint32
 	// SeqCount / RandCount: the file's read pattern so far, counted by the
-	// kmod in .read_iter (what the read_iter fentry used to keep in a BPF map).
+	// kmod in .read_iter.
 	SeqCount  uint32
 	RandCount uint32
 	// Seq identifies the request (kmod's inflight record); DONE echoes it.
 	Seq uint64
 }
 
-// readMissFromReq is the MISS form of a request read from kmod.
 func readMissFromReq(r *reqEvent) readMissEvent {
 	return readMissEvent{Ino: r.Ino, Offset: r.Offset, Count: r.Count, Flags: r.Flags,
 		SeqCount: r.SeqCount, RandCount: r.RandCount, Seq: r.Seq}

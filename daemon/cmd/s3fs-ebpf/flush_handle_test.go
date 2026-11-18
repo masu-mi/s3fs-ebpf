@@ -23,7 +23,7 @@ type fakeFlushKmod struct {
 }
 
 // Done is DONE(FLUSH): it records the outcome, and for an error the kmod marks
-// the file dirty again (what MARK_DIRTY used to be asked for separately).
+// the file dirty again.
 func (f *fakeFlushKmod) Done(ino uint64, errCode int32) error {
 	f.signalled = append(f.signalled, errCode)
 	if errCode != 0 {

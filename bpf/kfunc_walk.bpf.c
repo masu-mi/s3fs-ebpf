@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // kfunc_walk — the "after" half of `s3fs-ebpf dev verifier-demo`.
 //

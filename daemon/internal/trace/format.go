@@ -21,7 +21,7 @@
 //	op    "read" (miss on empty cache), "write" (invalidates the
 //	      entry). Extend with "delete" later if needed.
 //
-// Optional range fields (docs/design/ann-workload-measurement-plan.md
+// Optional range fields (docs/design/plans/ann-workload-measurement-plan.md
 // P0). Absent (len == 0) means the legacy whole-file event, and the
 // event serialises exactly as before:
 //

@@ -22,7 +22,7 @@ kmod と daemon を実際に載せ、MinIO に対して操作を流して、内�
 - **シグナル**: `test-nocache-signal`、`test-cold-signal` (upcall 待ちの signal が -EIO にならない)。
 - **s3fs-fuse との差分**: `make test-parity` — 同じ操作列を s3fs-fuse と s3fs-ebpf に流して結果か errno を比べる。既知の差は `scripts/lib/parity-known-diff.sh`。kmod の見え方 (lookup / readdir / rename / unlink / open) を変えたら、既知の差が増えたか減ったかを見る。性能比を出す前にも見る (`perf-bench-verify` §4)。
 - **policy の忠実度**: `test-policy-conformance` (live の hit 数を simulator と比べる。タイミングに敏感でカナリアにも使える)。`policy-develop` skill。
-- **ロック**: `make test-lockdep` は lockdep 付きカーネルが要る (`make setup-kernel-lockdep`、20〜40 分 + 再起動、`docs/dev-notes/lockdep-kernel.md`)。ロック順を触ったら必須。触っていなければ PR に「未実施」と明記する。
+- **ロック**: `make test-lockdep` は lockdep 付きカーネルが要る (`make setup-kernel-lockdep`、20〜40 分 + 再起動、`docs/dev-notes/process/lockdep-kernel.md`)。ロック順を触ったら必須。触っていなければ PR に「未実施」と明記する。
 - **TLA+**: `make test-spec` (CI は別ジョブ、regression には含まれない)。`tlc-design-verification` skill。
 
 ## 結果の読み方
@@ -39,4 +39,4 @@ kmod と daemon を実際に載せ、MinIO に対して操作を流して、内�
 4. **修正前のコードで FAIL することを確かめる**: `git worktree add --detach /tmp/<scratch>/base <修正前 commit>` でビルドし、同じ script を流す。終わったら `git worktree remove --force`。PASS するだけの試験は何も守らない。
 5. `shellcheck` は `make lint-scripts`。`bash -n` では出力パスの間違いが見つからない。新しい script は本番の前に 1 回短く流す。
 6. 速度ではなく**正しさ**を主に書く。daemon だけで足りるなら Go の単体テスト (`-race`) にする。
-7. 起票: 直したバグは `docs/journal/backlog.md` の `## AC.` の表に `✅ 修正` と回帰テスト名を残す (`perf-bench-verify` §5)。
+7. 起票: 直したバグは `docs/backlog/backlog.md` の `## AC.` の表に `✅ 修正` と回帰テスト名を残す (`perf-bench-verify` §5)。

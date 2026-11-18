@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_time_decay_ops — time-decay LRU. Second Layer 0 KFunc demo
 // after policy_pressure_ops. Where pressure_ops reads live admit

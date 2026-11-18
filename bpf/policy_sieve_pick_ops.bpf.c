@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_sieve_pick_ops — SIEVE (NSDI 2024, Zhang et al) with a real FIFO
-// and hand, on the AC-58 vtable (docs/design/ac58-pick-victim.md).
+// and hand, on the AC-58 vtable (docs/design/policy/ac58-pick-victim.md).
 //
 //   on_insert   append ino at the head of the FIFO (visited = 0); idempotent
 //   on_hit      visited = 1

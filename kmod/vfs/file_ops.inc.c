@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* regular file ops: partial modify, write, setattr.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_pressure_ops — SIEVE with pressure-aware strictness. Demo
 // vehicle for the P-08 Layer 0 KFunc set (admit_count + softcap).
@@ -21,7 +21,7 @@
 // The KFunc calls are the interesting bit — they're the first
 // piece of kmod-side state a Layer 2/3 program can read that
 // isn't plumbed through hook arguments. See P-08 in
-// docs/journal/backlog.md.
+// docs/backlog/backlog.md.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>

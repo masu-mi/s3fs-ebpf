@@ -1,6 +1,6 @@
 # backing file の段 — 中身をローカル FS のファイルに素通しして、メモリの上限を緩める (案)
 
-2026-10-21。状態: **案。未実装・未計測。** fuse-bpf / FUSE passthrough と同じように、hit したファイルの read をローカル FS のファイル (backing file) に素通しする段を kmod に足す案。目的は、hit の速さ (特に open を daemon に送らないこと) を保ったまま、pcache モードのメモリの制約を緩めること。発表の想定問答では `docs/user/meetup-qa.md` の「メモリの上限を緩めるため、ローカル FS へ素通しする段を足せないか」に要約した。
+2026-10-21。状態: **案。未実装・未計測。** fuse-bpf / FUSE passthrough と同じように、hit したファイルの read をローカル FS のファイル (backing file) に素通しする段を kmod に足す案。目的は、hit の速さ (特に open を daemon に送らないこと) を保ったまま、pcache モードのメモリの制約を緩めること。発表の想定問答では `docs/user/meetup/meetup-qa.md` の「メモリの上限を緩めるため、ローカル FS へ素通しする段を足せないか」に要約した。
 
 kmod の read / pcache / eviction の不変条件の正本は `docs/kmod-pcache-invariants.md`。実装に入るときは、この案の §5 で変わる不変条件をそちらに書く。
 
@@ -45,7 +45,7 @@ backing の段だけにすると、page cache から落ちた後の読み直し�
 
 ## 3. 経路ごとの扱い
 
-- **read**: 上の図のとおり。warm のファイルは `.read_iter` で素通しし、`generic_file_read_iter` を通らない。read の fentry (`fentry/generic_file_read_iter`、R-01) は warm のファイルでは発火しないので、on_hit は kmod の `.read_iter` の中で数える。これは `docs/design/read-iter-hook-overhead.md` §4.6 の「hit の経路のフックを外す」方向とも合う。
+- **read**: 上の図のとおり。warm のファイルは `.read_iter` で素通しし、`generic_file_read_iter` を通らない。read の fentry (`fentry/generic_file_read_iter`、R-01) は warm のファイルでは発火しないので、on_hit は kmod の `.read_iter` の中で数える。これは `docs/design/ebpf/read-iter-hook-overhead.md` §4.6 の「hit の経路のフックを外す」方向とも合う。
 - **mmap**: warm のファイルは `backing_file_mmap` で backing file の mapping を使う。読み出しは動く。書き込み可能な共有 mapping は、今の pcache と同じく扱わない (`MAP_SHARED` + `PROT_WRITE` は拒否するか、warm から外す)。
 - **write**: dirty になるファイルは warm に置かない。最初の変更のときに pcache の段に移し (AC-50 の読み込みは backing file から行えるので S3 に行かない)、flush は今のまま。PUT が終わったら daemon がディスクキャッシュを新しい中身で置き換える。
 - **truncate / unlink / rename**: unlink はディスクキャッシュのファイルも消す (開いている backing file は Linux の通常の動きで close まで残る)。rename は `DiskCache.InvalidateRename` と同じく、登録の付け替えか削除。
@@ -63,7 +63,7 @@ backing の段だけにすると、page cache から落ちた後の読み直し�
 - R1 (PCACHE entry があれば chunk は確保済み) と T2 (populated の確認) は hot の段だけのものになる。warm の段の不変条件は「登録があれば backing file は全体を取得済みで、ETag が登録時のもの」。
 - 段の移動 (hot → warm、warm → hot) は `fd->lock` の下で行い、in-flight の read (pin、pending) がない時だけにする。pcache の shed (AC-45 C3) と同じ考え方。
 - policy (struct_ops) の役割は 2 つに分かれる。hot の段で何を追い出すか (今のまま)、warm の段でどのファイルを消すか (今は daemon の mtime 順)。後者を BPF に渡すかは決めていない。最初の版は daemon のまま。
-- KUnit (`docs/dev-notes/kunit.md`) に、段の移動と read / truncate / evict の並行のテストを足す。
+- KUnit (`docs/dev-notes/process/kunit.md`) に、段の移動と read / truncate / evict の並行のテストを足す。
 
 ## 6. 性能の見込み (推測。計測していない)
 
@@ -108,6 +108,6 @@ cold read で「書き終えるのを待つ」コストは、取得しながら 
 
 ## 関連
 
-- `docs/user/meetup-qa.md` — fuse-bpf との違い、pcache とディスクキャッシュの違い、メモリの制限と memcg の問答
+- `docs/user/meetup/meetup-qa.md` — fuse-bpf との違い、pcache とディスクキャッシュの違い、メモリの制限と memcg の問答
 - `docs/design/pcache-mode.md` — 今の pcache モード
 - `docs/journal/benchmark-results.md` §18.27 / §18.39 — open+read+close と、メモリ回収待ち

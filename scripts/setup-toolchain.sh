@@ -9,7 +9,7 @@
 #   DRY_RUN=1    scripts/setup-toolchain.sh  # print actions only
 #   ASSUME_YES=1 scripts/setup-toolchain.sh  # accept prompts (non-tty)
 #
-# Steps (doctor IDs in brackets, see docs/dev-notes/build-env-dependencies.md):
+# Steps (doctor IDs in brackets, see docs/dev-notes/process/build-env-dependencies.md):
 #   packages   base build packages + docker / compose            [B-2]
 #   clang      clang >= 19 (+ matching llvm-strip)               [C-1 C-2]
 #   bpftool    a bpftool binary that actually runs               [T-1]

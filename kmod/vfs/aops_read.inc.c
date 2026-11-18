@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* address_space ops: read_folio / read_iter / open / release.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 
@@ -410,7 +410,7 @@ static const struct address_space_operations s3fs_ebpf_aops = {
  *   signal_flush from the daemon can find us. Wait up to
  *   S3FS_FSYNC_WAIT_JIFFIES for the completion, propagate PUT result
  *   as fsync() return value. This gives POSIX-conforming fsync
- *   semantics (E-01, `docs/journal/backlog.md`).
+ *   semantics (E-01, `docs/backlog/backlog.md`).
  *
  * Returns 0 on success, negative errno on wait timeout / PUT failure.
  */

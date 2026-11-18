@@ -149,7 +149,6 @@ func (c *DiskCache) Observe(key, etag string, size int64) {
 	c.remote.Store(key, remoteState{etag: etag, size: size})
 }
 
-// ETag returns the ETag the backend last reported for key, if any.
 func (c *DiskCache) ETag(key string) (string, bool) {
 	if !c.enabled() {
 		return "", false
@@ -273,8 +272,8 @@ func (c *DiskCache) Write(key string, buf []byte, etag string) {
 	c.write(key, buf, etag, nil)
 }
 
-// WriteAsync is Write moved off the caller's path (AC-52: the disk write
-// used to sit inside the cold read's latency). buf must not be modified
+// WriteAsync is Write moved off the caller's path (AC-52), so the disk write
+// is not in the cold read's latency. buf must not be modified
 // afterwards. The write is dropped when maxAsyncWrites are already in
 // flight, and discarded if Invalidate runs before it commits.
 func (c *DiskCache) WriteAsync(key string, buf []byte, etag string) {
@@ -307,7 +306,6 @@ func (c *DiskCache) WriteAsync(key string, buf []byte, etag string) {
 	}()
 }
 
-// WaitAsync blocks until every WriteAsync issued so far has finished.
 func (c *DiskCache) WaitAsync() {
 	if c.enabled() {
 		c.async.wg.Wait()
@@ -382,7 +380,6 @@ func (c *DiskCache) Invalidate(key string) {
 	c.drop(key)
 }
 
-// drop removes the cached body stored under key.
 func (c *DiskCache) drop(key string) {
 	p := c.path(key)
 	c.async.mu.Lock()

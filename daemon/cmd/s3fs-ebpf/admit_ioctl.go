@@ -76,7 +76,6 @@ func signalAdmit(devPath string, ino uint64, chunkOffset int64, seq uint64, errC
 	return signalAdmitFlags(devPath, ino, chunkOffset, seq, errCode, 0)
 }
 
-// signalAdmitFlags is signalAdmit with S3FS_DONE_* flags.
 func signalAdmitFlags(devPath string, ino uint64, chunkOffset int64, seq uint64, errCode int32, flags uint32) error {
 	f, closeFn, err := devFileOrOpen(devPath)
 	if err != nil {

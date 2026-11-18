@@ -218,7 +218,6 @@ func ChunkReplay(p Policy, events []Event, o ChunkOpts) ChunkResult {
 	return res
 }
 
-// Footprint returns the number of distinct chunks events touch.
 func Footprint(events []Event, chunkSize uint64) int {
 	seen := map[uint64]struct{}{}
 	for _, a := range planChunks(events, ChunkOpts{ChunkSize: chunkSize}).acc {
@@ -227,7 +226,6 @@ func Footprint(events []Event, chunkSize uint64) int {
 	return len(seen)
 }
 
-// SortedTags lists the tags of r in a stable order.
 func (r ChunkResult) SortedTags() []string {
 	var t []string
 	for k := range r.ByTag {

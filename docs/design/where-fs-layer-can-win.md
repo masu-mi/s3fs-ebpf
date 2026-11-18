@@ -19,7 +19,7 @@
 | D5 | 最初のアクセスは「pattern-aware full admit」でファイル全体を入れる。判定は先頭 4 KiB 読みの seq_ratio=1.00 だけ。計測では open の中で 34 ms 払い、ループが warm に見える | daemon ログ、cold 調査 |
 | D6 | kmod が chunk の複本を持つ (`fd_buf_bytes` 68 MB / 64 MiB)。page cache と二重で、メモリ制約下は不利になりうる (未計測) | cold・warm 調査 |
 | D7 | arena は 128 MiB 固定 (BPF compile-time)。数 GB〜数十 GB のモデル重みやデータセットは想定外 | `docs/journal/bench-env-notes.md` ほか |
-| D8 | 読み取り専用・不変ファイルに限る。書き込み (fsync・rename) の意味は E-01 / AC-51 の限界のまま | `docs/design/olap-oltp-s3-evaluation-plan.md` §5 E4 |
+| D8 | 読み取り専用・不変ファイルに限る。書き込み (fsync・rename) の意味は E-01 / AC-51 の限界のまま | `docs/design/plans/olap-oltp-s3-evaluation-plan.md` §5 E4 |
 | D9 | 計測の落とし穴が多い。cold と warm の不揃い、`drop_caches` の値、daemon の disk cache の残り、prime の有無で、結論が逆転した | 本セッションの訂正 (ann-workload-results.md) |
 
 ## 3. 残っている可能性

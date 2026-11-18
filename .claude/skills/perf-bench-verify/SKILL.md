@@ -5,7 +5,7 @@ description: 性能試験 (A〜H・層ごとのレイテンシ) の実行・記�
 
 # 性能試験 → 可視化 → 記録 → 検証 → backlog
 
-各試験の中身と、何の側面を測っているかは `docs/dev-notes/bench-suite-overview.md`。まずそれを読む (A〜H と層ごとのレイテンシの表がある)。この skill は**手順と、過去に実際に踏んだ落とし穴**を書く。
+各試験の中身と、何の側面を測っているかは `docs/dev-notes/process/bench-suite-overview.md`。まずそれを読む (A〜H と層ごとのレイテンシの表がある)。この skill は**手順と、過去に実際に踏んだ落とし穴**を書く。
 
 ## 0. 始める前に (環境の衛生、毎回)
 
@@ -53,7 +53,7 @@ N_FILES=30 N_ACCESS=2000 ZIPF_ALPHA=0.7 SOFTCAP=8 SEED=42 PCACHE_DROP=1 DAEMON_E
 1. 生データを `docs/journal/data/<名前>-<日付>/` に置く (`A.txt` `B.txt` … `*.json` `results.jsonl` `summary.txt` `environment.txt`、スクリーンショット)。`docs/INDEX.md` に 1 行足す。
 2. `docs/journal/benchmark-results.md` の次の節 (`### 18.NN`) に、**条件** (日付、`uname -r`、commit、各構成の起動オプションと module param、n、cold の手順)、**値** (中央値 + 四分位範囲 + 最小・最大)、**比** (「s3fs-fuse の時間 ÷ s3fs-ebpf の時間」。1 超が ebpf の勝ち。IOPS や ops/s は逆数にする) を書く。表は構成ごとの絶対値と 3 組の比 (fuse-raw/ebpf-nocache = 構造の差、fuse-diskcache/ebpf-pcachedrop = 独自キャッシュの差、fuse-cache/ebpf-pcache = 全体)。
 3. 以前の値と ±20% 以上違う項目は、**理由 + 根拠**か「未切り分け」と書く。推測を理由として書かない。
-4. `docs/design/where-fs-layer-can-win.md` と `docs/user/meetup-qa.md` に新しい値を反映する (出典の節番号つきで)。
+4. `docs/design/where-fs-layer-can-win.md` と `docs/user/meetup/meetup-qa.md` に新しい値を反映する (出典の節番号つきで)。
 
 ## 4. 検証 (不審な点の洗い出し)
 
@@ -90,7 +90,7 @@ AC-75 / AC-76 で分かったこと: `docs/dev-notes/ac75-ac76-lessons.md`。
 
 ## 5. バグ・調査課題の起票
 
-不審な点が実際のバグか調査課題だったら、`docs/journal/backlog.md` の `## AC.` の表に 1 行足す (列は `| # | 内容 | 優先度 | 状態 |`、ID は末尾の次の番号)。
+不審な点が実際のバグか調査課題だったら、`docs/backlog/backlog.md` の `## AC.` の表に 1 行足す (列は `| # | 内容 | 優先度 | 状態 |`、ID は末尾の次の番号)。
 
 - **内容**: 症状 (どの試験のどの値か)、再現手順、原因が分かっていれば原因、根拠の節 (`br §18.NN`)。直したものは `✅ 修正` と回帰テストの名前、直していないものは `⏳ 未着手` と「何を確かめるか」。
 - **回帰テストを足す**: 修正前のコードで FAIL することを確かめる。`git worktree add --detach /tmp/<scratch>/base <commit>` で修正前をビルドし、同じスクリプトを走らせる (終わったら `git worktree remove --force`)。

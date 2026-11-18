@@ -111,7 +111,6 @@ func (a *Arena) WriteAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-// ReadAt reads len(p) bytes from the arena at the given byte offset.
 func (a *Arena) ReadAt(p []byte, off int64) (int, error) {
 	if a == nil || a.mem == nil {
 		return 0, fmt.Errorf("arena not initialised")
@@ -126,7 +125,6 @@ func (a *Arena) ReadAt(p []byte, off int64) (int, error) {
 	return n, nil
 }
 
-// Size returns the mmap'd region size in bytes.
 func (a *Arena) Size() uint64 {
 	if a == nil {
 		return 0
@@ -143,7 +141,6 @@ func (a *Arena) BaseAddr() uint64 {
 	return a.base
 }
 
-// MapID returns the kernel's numeric ID for the arena map.
 func (a *Arena) MapID() (uint32, error) {
 	info, err := a.Map.Info()
 	if err != nil {

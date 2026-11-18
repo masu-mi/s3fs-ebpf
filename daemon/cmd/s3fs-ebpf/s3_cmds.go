@@ -39,7 +39,6 @@ func runS3List(args []string) int {
 	return 0
 }
 
-// runS3Stat fetches a single object's HEAD metadata and prints it.
 func runS3Stat(args []string) int {
 	fs := flag.NewFlagSet("s3-stat", flag.ExitOnError)
 	newClient := backendFlags(fs)

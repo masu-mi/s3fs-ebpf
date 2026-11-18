@@ -1,6 +1,6 @@
 # Benchmark Results — s3fs-ebpf vs s3fs-fuse
 
-Week 4 (e) の初回計測記録。Meetup スライドの原資料として、また将来「改善が実測できているか」の baseline として残す。詳細な機能設計は `docs/design/read-path-design.md`、Path B/C の実装記録は `docs/journal/week4a-implementation-notes.md`。
+Week 4 (e) の初回計測記録。Meetup スライドの原資料として、また将来「改善が実測できているか」の baseline として残す。詳細な機能設計は `docs/design/read-path-design.md`、Path B/C の実装記録は `docs/journal/weekly/week4a-implementation-notes.md`。
 
 対応 script: `scripts/bench-latency.sh` (hyperfine + microbench + fio filestat の 3 段)。
 
@@ -83,7 +83,7 @@ Meetup narrative は「read latency の絶対値」ではなく **「diskless / 
 
 - Ubuntu 24.04.5 LTS (noble)
 - Linux 6.12.90-061290-generic (Ubuntu mainline PPA)
-- gcc-14 / clang-20 (詳細は `docs/journal/week1-build-runtime-notes.md`)
+- gcc-14 / clang-20 (詳細は `docs/journal/weekly/week1-build-runtime-notes.md`)
 
 ### 1.2 対象 FS
 
@@ -1873,7 +1873,7 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 
 ### 18.41 AC-58: `pick_victim` で SIEVE を本来の形にした (bench-hitrate、capacity mode)
 
-`scripts/bench-hitrate.sh` (30 files、softcap 8、2000 access、Zipf α=0.7、`POLICIES="lru_ops sieve_ops sieve_pick_ops"`、各 seed 1 回)。`sieve_pick_ops` は FIFO と hand を BPF が持ち、capacity 超過のときに kmod が `pick_victim` で次の victim を聞く (`docs/design/ac58-pick-victim.md`)。
+`scripts/bench-hitrate.sh` (30 files、softcap 8、2000 access、Zipf α=0.7、`POLICIES="lru_ops sieve_ops sieve_pick_ops"`、各 seed 1 回)。`sieve_pick_ops` は FIFO と hand を BPF が持ち、capacity 超過のときに kmod が `pick_victim` で次の victim を聞く (`docs/design/policy/ac58-pick-victim.md`)。
 
 | seed | lru_ops | sieve_ops (旧、visited bit のみ) | sieve_pick_ops | 参考: trace-replay の lru / sieve / opt |
 |---|---|---|---|---|
@@ -1961,11 +1961,11 @@ sha256 は一致、`test-regression` 16 件 PASS。**300 MiB の目標 (0.9× �
 
 **正しさのテスト**: `make test-regression` 18 件 PASS (multiread、evict-race-short の sha256 を含む)。dmesg に oops / BUG / hung task なし。
 
-**lockdep は、この時点では未検証**。計測カーネル (6.12.0-061200) は `CONFIG_PROVE_LOCKING` が無効だった (AC-42)。2026-10-28 に lockdep 付きカーネルで `make test-lockdep` を実行し、報告 0 件で通った (`docs/dev-notes/lockdep-kernel.md`)。
+**lockdep は、この時点では未検証**。計測カーネル (6.12.0-061200) は `CONFIG_PROVE_LOCKING` が無効だった (AC-42)。2026-10-28 に lockdep 付きカーネルで `make test-lockdep` を実行し、報告 0 件で通った (`docs/dev-notes/process/lockdep-kernel.md`)。
 
 ### 18.44 issue #22: `hit_accum` (hit を `.read_iter` で per-CPU に数え、`admit_replace` から反映) の A/B (2026-10-27)
 
-設計は `docs/design/hit-signal-percpu-accumulation.md`。KVM ゲスト (6 vCPU、6.12.0-061200、HZ=1000)、ローカル MinIO。`hit_accum` を同じビルドで切り替えた。生の出力は `/tmp/claude-1000/hitsig/` (永続しない)。
+設計は `docs/design/policy/hit-signal-percpu-accumulation.md`。KVM ゲスト (6 vCPU、6.12.0-061200、HZ=1000)、ローカル MinIO。`hit_accum` を同じビルドで切り替えた。生の出力は `/tmp/claude-1000/hitsig/` (永続しない)。
 
 **hit rate — 調査で見つけた 3 つのずれと、取り直し** (`bench-hitrate-multi.sh`、pcache モード、`INTERLEAVE`=25、seed 42 / 7 / 123 の中央値 %)。最初の測定では `hit_accum=1` が pick 版を +9〜11 pt 上げたが、原因を調べると、その差の多くは信号の欠落ではなく次の 3 つだった:
 
@@ -2145,7 +2145,7 @@ per-access の hit/miss を simulator と突き合わせた (`bench-hitrate.sh` 
 
 ### 18.48 6 構成 × A〜G、2 構成 × H の測り直しと、計測中に見つけた fsync の不具合 (2026-11-03、issue #35)
 
-issue #35 (policy の差し替えを `BPF_LINK_UPDATE` だけにする、`--partial-modify` の既定化、`pcache_drop` の追加) を入れた状態での測り直し。生データと集計の出力は `docs/journal/data/s18-48-20261103/` (`report.md` がこの節の表の元)。試験の概要と測っている側面は `docs/dev-notes/bench-suite-overview.md`、手順は `.claude/skills/perf-bench-verify/SKILL.md`。
+issue #35 (policy の差し替えを `BPF_LINK_UPDATE` だけにする、`--partial-modify` の既定化、`pcache_drop` の追加) を入れた状態での測り直し。生データと集計の出力は `docs/journal/data/s18-48-20261103/` (`report.md` がこの節の表の元)。試験の概要と測っている側面は `docs/dev-notes/process/bench-suite-overview.md`、手順は `.claude/skills/perf-bench-verify/SKILL.md`。
 
 #### 最初の run は無効だった (MinIO に `mc admin trace` が残っていた)
 

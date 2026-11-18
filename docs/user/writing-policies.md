@@ -2,8 +2,8 @@
 
 s3fs-ebpf のキャッシュポリシーを書く人向けの実装ガイド。**Meetup
 発表資料ではなく、実際に手を動かして policy を試す人**が対象。
-概念的な architecture は `docs/design/policy-engine-design.md`、Meetup
-narrative は `docs/user/motivation.md §0` を見てほしい。
+概念的な architecture は `docs/design/policy/policy-engine-design.md`、Meetup
+narrative は `docs/user/meetup/motivation.md §0` を見てほしい。
 
 ## 目次
 
@@ -265,7 +265,7 @@ stat /mnt/s3demo/big.bin
 > **仕組み**: `prewarm=false` でも `prewarmEntry` の step 1 (metadata warm)
 > は必ず走り、BPF `inode_index` に登録される。stat は Path A のまま高速。
 > content は first read-miss → `handleReadMiss` → `SeqRatio() ≥ 0.70` で
-> full-file GET という流れ。詳細は `docs/design/ebpf-hook-gaps.md §3.4`。
+> full-file GET という流れ。詳細は `docs/design/ebpf/ebpf-hook-gaps.md §3.4`。
 
 ---
 
@@ -482,7 +482,7 @@ struct s3fs_policy_ops mypolicy_ops = {
 
 - `name` は `policy struct_ops registered (… name=mypolicy flags=0x0)` と `updated (hot swap) name=…` に出る。reload で入れ替えると hook と同時に切り替わる。
 - 次は kernel が load を断る (reload は HTTP 500 `update: invalid argument`、起動時は load 失敗): 未知の `flags` の bit、`name` に `[A-Za-z0-9_.]` 以外の文字がある / NUL で終わらない、`pick_victim` があるのに `on_insert` か `on_remove` がない、`NO_ON_HIT` を立てたのに `on_hit` もある。
-- 関数ポインタ以外のメンバは、kmod が受け取るもの (`flags` と `name`) 以外を 0 以外にすると load が断られる。詳細は [`../dev-notes/struct-ops-data-members.md`](../dev-notes/struct-ops-data-members.md)。
+- 関数ポインタ以外のメンバは、kmod が受け取るもの (`flags` と `name`) 以外を 0 以外にすると load が断られる。詳細は [`../dev-notes/struct-ops-data-members.md`](../dev-notes/ebpf-kernel/struct-ops-data-members.md)。
 
 ### ビルド
 
@@ -532,7 +532,7 @@ kmod の module parameter (daemon の `--softcap` / `--cache-capacity` で設定
 
 どちらのモードでも、miss upcall で reader が待っている ino は evict しない。
 capacity mode では policy は「誰を先に追い出すか」を決めるだけで、上限は kmod が守る。
-詳細は `docs/design/admit-and-softcap.md`。
+詳細は `docs/design/policy/admit-and-softcap.md`。
 
 ### verifier で reject されたら
 
@@ -684,7 +684,7 @@ kmod / mount 起動なしに、workload trace を Go 側 policy simulator
 
 **制約**: simulator は Go reimpl なので **BPF policy と挙動が一致しない**
 (strict LRU vs 近似 LRU 等)。数値は algorithm 直感、実 bench 数値は
-`scripts/bench-hitrate.sh` で。詳細 `docs/design/trace-harness.md`。
+`scripts/bench-hitrate.sh` で。詳細 `docs/design/policy/trace-harness.md`。
 
 ## Debugging / trouble shooting
 
@@ -732,9 +732,9 @@ curl -s http://localhost:9600/metrics | grep policy_hook_invocations
 
 ## 参照
 
-- 設計: `docs/design/policy-engine-design.md` (4 layer 詳細)
-- attach 方式比較: `docs/design/policy-attach-comparison.md` (fmod_ret vs struct_ops)
+- 設計: `docs/design/policy/policy-engine-design.md` (4 layer 詳細)
+- attach 方式比較: `docs/design/ebpf/policy-attach-comparison.md` (fmod_ret vs struct_ops)
 - bench 数値: `docs/journal/hit-rate-bench.md`
-- Meetup demo: `docs/user/demo-scenario.md`
-- trace harness: `docs/design/trace-harness.md`
+- Meetup demo: `docs/user/meetup/demo-scenario.md`
+- trace harness: `docs/design/policy/trace-harness.md`
 - 教訓集: `docs/dev-notes/lessons-learned.md`

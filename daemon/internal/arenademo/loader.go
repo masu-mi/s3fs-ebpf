@@ -134,7 +134,6 @@ func (p *Programs) RunTestShared(in TestArgs) (TestArgs, uint32, error) {
 	return out, ret, nil
 }
 
-// Close releases all loaded programs, maps, and the arena mmap.
 func (p *Programs) Close() error {
 	if p == nil {
 		return nil

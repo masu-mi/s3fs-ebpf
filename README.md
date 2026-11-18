@@ -1,9 +1,13 @@
 # s3fs-ebpf
 
+[![test](https://github.com/masu-mi/s3fs-ebpf/actions/workflows/test.yml/badge.svg)](https://github.com/masu-mi/s3fs-ebpf/actions/workflows/test.yml)
+[![codecov](https://codecov.io/gh/masu-mi/s3fs-ebpf/graph/badge.svg)](https://codecov.io/gh/masu-mi/s3fs-ebpf)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Linux 6.12 LTS の eBPF 機能 (**`struct_ops`**、**KFunc**) で S3 ファイルシステムを組めるかを試す **PoC** です。(`bpf_arena` は最初の版でファイルの中身を置いていましたが、今は検証用のデモ `make test-arena` だけが使います。)FUSE を経由せず、カーネルモジュールが Linux VFS に直接ファイルシステムを登録し、キャッシュ判定やポリシーを eBPF に任せます。本番利用は想定していません。
 
 - 実装済み: read / write path、ポリシーの hot swap (CEL + built-in eBPF + user eBPF + KFunc の 4 層)、中身を kmod の chunk と page cache に置く pcache モード、既存オブジェクトの途中書き換え、victim 選択の BPF 化 (`pick_victim`)、open で S3 の存在を確認するモード (`open_check`)、flush / rename / delete を kmod が積んだ順に S3 へ反映する処理、rename・unlink した S3 由来の名前を隠す tombstone
-- 経緯と現状: [`docs/journal/history.md`](docs/journal/history.md)、残課題: [`docs/journal/backlog.md`](docs/journal/backlog.md)
+- 経緯と現状: [`docs/journal/history.md`](docs/journal/history.md)、残課題: [`docs/backlog/backlog.md`](docs/backlog/backlog.md)
 
 ## アーキテクチャ
 
@@ -38,9 +42,9 @@ Linux 6.12 LTS の eBPF 機能 (**`struct_ops`**、**KFunc**) で S3 ファイ�
 詳しくは:
 - 技術要素 (bpf_arena / struct_ops / KFunc / KUnit / lockdep / kCFI / 閉じた MinIO など) を入門記事と一次資料から学ぶ: [`docs/user/learning-guide.md`](docs/user/learning-guide.md)。doc 全体の地図は [`docs/INDEX.md`](docs/INDEX.md)
 - 全体の通信路 (VFS / kmod / BPF / daemon / backend): [`docs/design/component-communication.md`](docs/design/component-communication.md)
-- policy engine: [`docs/design/policy-engine-design.md`](docs/design/policy-engine-design.md)
+- policy engine: [`docs/design/policy/policy-engine-design.md`](docs/design/policy/policy-engine-design.md)
 - pcache モード (ファイルの中身を kmod の chunk 表と page cache に置く。唯一のモード): [`docs/design/pcache-mode.md`](docs/design/pcache-mode.md)
-- KFunc が要る理由 (verifier 拒否デモ): [`docs/journal/early-walkthroughs.md`](docs/journal/early-walkthroughs.md#verifier-拒否デモ-verifier-demo)
+- KFunc が要る理由 (verifier 拒否デモ): [`docs/journal/weekly/early-walkthroughs.md`](docs/journal/weekly/early-walkthroughs.md#verifier-拒否デモ-verifier-demo)
 - ExtFUSE / RFUSE との比較: [`docs/user/related-works.md`](docs/user/related-works.md)
 
 ## 使ってみる
@@ -63,7 +67,7 @@ make unmount            # daemon 停止 + umount + rmmod
 - 自作 policy を書く: [`docs/user/writing-policies.md`](docs/user/writing-policies.md)
 - GCS backend で動かす: [`docs/user/gcs-backend.md`](docs/user/gcs-backend.md)
 - CLI のフラグと Make ターゲット一覧: [`docs/user/cli-reference.md`](docs/user/cli-reference.md)
-- Meetup のデモ台本: [`docs/user/demo-scenario.md`](docs/user/demo-scenario.md)
+- Meetup のデモ台本: [`docs/user/meetup/demo-scenario.md`](docs/user/meetup/demo-scenario.md)
 
 ## 性能
 
@@ -80,7 +84,7 @@ make unmount            # daemon 停止 + umount + rmmod
 | 既存 10 MiB の途中に 4 KiB + fsync | 47.9 ms | 70.2 ms | 0.68× (負け) | fuse-raw |
 | cold read 300 MiB | 314.1 ms | 367.3 ms | 0.86× (負け) | fuse-raw |
 
-**180× の行の読み方**: s3fs-fuse は open のたびに S3 へ HEAD を 1 回投げます (キャッシュありでも、1000 回で HEAD 1001)。`open_check=0` の s3fs-ebpf は投げないので、180× は「open で S3 を確認しない設定の値」です (現在の既定の `open_check=1` では次の行の約 1.2×)。確認を揃える (`open_check=1`) と、時間のほぼ全部が HEAD 1 往復になり、差は約 1.2× に縮みます (§18.52)。キャッシュなし同士の差も、3.2× と書いていたものは HEAD の分を含み、揃えると約 1.7× です (§18.51)。確認の頻度を下げて速くする案 (TTL、更新通知) は [`docs/journal/backlog.md`](docs/journal/backlog.md) の AC-78〜81 にあります。
+**180× の行の読み方**: s3fs-fuse は open のたびに S3 へ HEAD を 1 回投げます (キャッシュありでも、1000 回で HEAD 1001)。`open_check=0` の s3fs-ebpf は投げないので、180× は「open で S3 を確認しない設定の値」です (現在の既定の `open_check=1` では次の行の約 1.2×)。確認を揃える (`open_check=1`) と、時間のほぼ全部が HEAD 1 往復になり、差は約 1.2× に縮みます (§18.52)。キャッシュなし同士の差も、3.2× と書いていたものは HEAD の分を含み、揃えると約 1.7× です (§18.51)。確認の頻度を下げて速くする案 (TTL、更新通知) は [`docs/backlog/backlog.md`](docs/backlog/backlog.md) の AC-78〜81 にあります。
 
 open / `ls -l` / cat を何度も繰り返す小さいファイルの使い方で勝ち、大きいファイルの cold read と、`--partial-modify` の対象 (16 MiB) 未満の途中書き換えではまだ負けます。page cache のヒットで終わる warm の SQLite / ベクトル検索は fuse-cache と ±3% で差がつきません。新規ファイルの durable write は、fsync が PUT の完了前に返る不具合を直した後は 1 MiB / 10 MiB が 1.3〜1.5×、100 MiB は差がなくなりました。
 
@@ -88,19 +92,28 @@ open / `ls -l` / cat を何度も繰り返す小さいファイルの使い方�
 
 **Phase 4 の前後 (2026-11-11、§18.59)**: kmod ↔ daemon の queue を 1 本の request queue と 1 本の read(2) にまとめた変更 (#63) の前 (`a60bdcb`) と後 (`852f666`) を、同じセッションで基準 → 新 → 新 → 基準の順に測りました。open+read+close の p50 (キャッシュあり約 3.0 µs)、64 スレッドの並列 read (`ebpf-pcache ÷ fuse-raw` が 0.98 前後)、新規ファイルの durable write、途中の書き換え、cold read、小さいファイル 10,000 個の `ls -l` / cat (cold 約 2.05 s、warm 約 0.12 s) の**どれも前後で有意な差はありません** (対照の fuse-cache も動いていません)。1 回だけ大きく外れたセルが基準にも新にもあり、原因は未切り分けです。測っていないのは、`open_check=1` での A / E、S3 の HEAD / GET の数、SQLite / ベクトル検索、policy の hit rate です。
 
-表と測り方は [`docs/journal/benchmark-results.md`](docs/journal/benchmark-results.md) の §18.48 (6 構成 × 8 項目の測り直し) と §18.49 (page cache / kmod の chunk 表 / daemon の disk cache / S3 の層ごとのレイテンシ)、試験の概要と測っている側面は [`docs/dev-notes/bench-suite-overview.md`](docs/dev-notes/bench-suite-overview.md)、ベンチの実行方法は [`docs/user/getting-started.md`](docs/user/getting-started.md#ベンチマーク) です。キャッシュ policy ごとの hit rate は [`docs/journal/hit-rate-bench.md`](docs/journal/hit-rate-bench.md) と §18.48 (open のたびに page cache を捨てる構成では、policy なしの 27.8% に対して W-TinyLFU が 50.9%) にあります。
+表と測り方は [`docs/journal/benchmark-results.md`](docs/journal/benchmark-results.md) の §18.48 (6 構成 × 8 項目の測り直し) と §18.49 (page cache / kmod の chunk 表 / daemon の disk cache / S3 の層ごとのレイテンシ)、試験の概要と測っている側面は [`docs/dev-notes/process/bench-suite-overview.md`](docs/dev-notes/process/bench-suite-overview.md)、ベンチの実行方法は [`docs/user/getting-started.md`](docs/user/getting-started.md#ベンチマーク) です。キャッシュ policy ごとの hit rate は [`docs/journal/hit-rate-bench.md`](docs/journal/hit-rate-bench.md) と §18.48 (open のたびに page cache を捨てる構成では、policy なしの 27.8% に対して W-TinyLFU が 50.9%) にあります。
 
 ## 検証
 
 ```bash
+make test               # root・mount 不要の検証 (go test、check-invariants、spec-check、docs のリンク、boot-kernel)
+make test-daemon-cov    # daemon のカバレッジ -> coverage/daemon.out (Codecov へ)
+make test-kunit-cov KSRC=<linux>  # kmod の KUnit (UML) のカバレッジ -> coverage/kmod.lcov (Codecov へ)
 make test-regression    # 実機の回帰試験 (約 25 分、30 本)
 make test-parity        # s3fs-fuse と同じ操作を流して、結果 (内容か errno) を比べる差分テスト
 make test-spec          # TLA+ のモデルを TLC で検証 (使い捨てコンテナ、ホストに Java は不要)
 ```
 
 - 速度比は、双方が同じ仕事をしたときだけ意味があります。そのため、比を書く前に S3 への HEAD / GET と upcall の数を双方で数え (`.claude/skills/perf-bench-verify`)、振る舞いの差は `test-parity` の既知の差 ([`scripts/lib/parity-known-diff.sh`](scripts/lib/parity-known-diff.sh)) に理由つきで並べます。
-- 非同期・並行の状態 (kmod / daemon / S3 の flush・rename・sync) は、実装の前に状態遷移図と TLA+ のモデル ([`specs/tla/`](specs/tla/)) で検証します。入門: [`docs/dev-notes/tlaplus-introduction.md`](docs/dev-notes/tlaplus-introduction.md)、手順: [`docs/dev-notes/design-verification.md`](docs/dev-notes/design-verification.md)。適用例は [ファイルの状態遷移](docs/design/file-lifecycle-state-machine.md) (反例 3 件) と [kmod の entry 表](docs/design/kmod-entry-table-state-machine.md) (設計案 3 つを棄却)。
+- 非同期・並行の状態 (kmod / daemon / S3 の flush・rename・sync) は、実装の前に状態遷移図と TLA+ のモデル ([`specs/tla/`](specs/tla/)) で検証します。入門: [`docs/dev-notes/process/tlaplus-introduction.md`](docs/dev-notes/process/tlaplus-introduction.md)、手順: [`docs/dev-notes/process/design-verification.md`](docs/dev-notes/process/design-verification.md)。適用例は [ファイルの状態遷移](docs/design/file-lifecycle-state-machine.md) (反例 3 件) と [kmod の entry 表](docs/design/kmod-entry-table-state-machine.md) (設計案 3 つを棄却)。
 
 ## ドキュメント
 
-トピック別の索引は [`docs/INDEX.md`](docs/INDEX.md) です。
+トピック別の索引は [`docs/INDEX.md`](docs/INDEX.md) です。開発を始めるときは [`docs/dev-notes/development-playbook.md`](docs/dev-notes/development-playbook.md) (技術トピック、典型作業、コツ) から。
+
+## ライセンス
+
+[MIT License](LICENSE) (Copyright (c) 2026 Masumi Kanai)。
+
+`kmod/` は `GPL-2.0 OR MIT` (SPDX) で、module の宣言は `MODULE_LICENSE("Dual MIT/GPL")` (GPL 互換としてカーネルに扱われ、GPL-only のシンボルを使える。6.12 で insmod / rmmod を確認済み)。BPF プログラムの `SEC("license")` は verifier が GPL 互換を求めるので `GPL` のままにしている。

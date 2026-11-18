@@ -92,7 +92,7 @@ func runMount(args []string) int {
 
 	fmt.Printf("[mount] bucket=%s endpoint=%s target=%s cache=%s policy=%s\n",
 		*bucket, *endpoint, *mountPoint, *cacheDir, *policy)
-	fmt.Fprintln(os.Stderr, "mount: skeleton only — not implemented yet (see docs/user/motivation.md Week 2)")
+	fmt.Fprintln(os.Stderr, "mount: skeleton only — not implemented yet (see docs/user/meetup/motivation.md Week 2)")
 	return 0
 }
 
@@ -121,7 +121,7 @@ func runPolicy(args []string) int {
 	plugin := fs.String("plugin", "", "Path to Lua/WASM policy file")
 	fs.Parse(args)
 	fmt.Printf("[policy] action=%s plugin=%s\n", *action, *plugin)
-	fmt.Fprintln(os.Stderr, "policy: skeleton only — not implemented yet (see docs/user/motivation.md Week 3)")
+	fmt.Fprintln(os.Stderr, "policy: skeleton only — not implemented yet (see docs/user/meetup/motivation.md Week 3)")
 	return 0
 }
 

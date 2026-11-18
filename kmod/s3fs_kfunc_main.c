@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 /*
  * s3fs-ebpf: skeleton VFS + KFunc kernel module.
  *
@@ -89,7 +89,7 @@ static void __exit s3fs_ebpf_exit(void)
 module_init(s3fs_ebpf_init);
 module_exit(s3fs_ebpf_exit);
 
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("bbsakura");
 MODULE_DESCRIPTION("s3fs-ebpf: VFS + KFunc skeleton for eBPF-driven S3 filesystem");
 MODULE_VERSION("0.0.1");

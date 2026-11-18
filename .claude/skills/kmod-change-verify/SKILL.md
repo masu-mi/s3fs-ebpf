@@ -24,10 +24,10 @@ kmod の誤りはカーネルの oops になる。**oops すると、そのプ�
 ## 3. 通す
 
 - `make test-regression` (約 25 分、30 件が PASS。`test-parity` と `test-open-check` を含む。`test-spec` は含まない: ネットワークとコンテナが要るので、手元では `make test-spec`、CI は別ジョブ)。背景で走らせ、`<scratch>/reg.log` の `EXIT=` と `status=PASS` の数を見る。終了通知は起動用シェルのもので、本体の終了ではない (`grep EXIT=` で確かめる)。
-- **KUnit** (`make test-kunit KSRC=<linux-6.12 の tree>`、UML、lockdep + KASAN 付き、約 80 秒): kmod の**新しいデータ構造・分岐にはテストを足す**。実機の回帰は粗いので、tombstone の消去条件のような境界は KUnit で書く。足したら**変異で確かめる** (条件を 1 つ外して、そのテストだけが落ちること。確認後は戻す)。tree は `curl -O https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz` で取り、**sha256 を `.../v6.x/sha256sums.asc` の行と照合**してから専用ディレクトリに解く (`docs/dev-notes/kunit.md`)。KUnit の lockdep は、実機の `test-lockdep` の代わりにならない (UML は 1 CPU、実カーネルの経路ではない)。
+- **KUnit** (`make test-kunit KSRC=<linux-6.12 の tree>`、UML、lockdep + KASAN 付き、約 80 秒): kmod の**新しいデータ構造・分岐にはテストを足す**。実機の回帰は粗いので、tombstone の消去条件のような境界は KUnit で書く。足したら**変異で確かめる** (条件を 1 つ外して、そのテストだけが落ちること。確認後は戻す)。tree は `curl -O https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.tar.xz` で取り、**sha256 を `.../v6.x/sha256sums.asc` の行と照合**してから専用ディレクトリに解く (`docs/dev-notes/process/kunit.md`)。KUnit の lockdep は、実機の `test-lockdep` の代わりにならない (UML は 1 CPU、実カーネルの経路ではない)。
 - **ABI を変える** (`include/s3fs_ebpf_uapi.h` の構造体にフィールドを足す) と、ioctl 番号と `sizeof` が変わる。`daemon/internal/kmodio` の構造体、`kmodio_test.go` の期待値 (`sizeof` と ioctl 番号。C の `sizeof` は手計算で確かめる)、kmod と daemon の同時 build。古い daemon と新しい kmod の組み合わせは動かない。
 - `make test-parity` は s3fs-fuse との差分テスト。kmod の見え方 (lookup / readdir / rename / unlink) を変えたら、`scripts/lib/parity-known-diff.sh` の既知の差が減ったか増えたかを見る。修正前のコードで新しい操作が FAIL することも確かめる (`git worktree add --detach <scratch>/base <commit>` で修正前をビルド)。
-- `make test-lockdep` は lockdep 付きカーネル (`make setup-kernel-lockdep` で 20〜40 分の build、再起動) が要る。ロック順を触ったら必須。触っていなければ PR に「未実施」と明記する。`docs/dev-notes/lockdep-kernel.md`。
+- `make test-lockdep` は lockdep 付きカーネル (`make setup-kernel-lockdep` で 20〜40 分の build、再起動) が要る。ロック順を触ったら必須。触っていなければ PR に「未実施」と明記する。`docs/dev-notes/process/lockdep-kernel.md`。
 - 性能を言うなら `perf-bench-verify` の手順 (環境の衛生、対照項目、行ごとの counter)。
 
 ## 4. oops したら
@@ -40,4 +40,4 @@ kmod の誤りはカーネルの oops になる。**oops すると、そのプ�
 
 - 試して効かなかった変更は戻す (`git checkout <file>`) と、**何を試して何が変わらなかったか**を backlog の該当行に残す (「readahead だけでは速くならなかった」が次の判断の根拠になった)。
 - 速そうな変更でも、`perf record -a -g` で割合を見てから効くか判断する。方法は `perf-bench-verify` の「遅い行の原因を切り分ける」。
-- `docs/kmod-pcache-invariants.md` と `docs/journal/backlog.md` を更新してから PR にする。
+- `docs/kmod-pcache-invariants.md` と `docs/backlog/backlog.md` を更新してから PR にする。
