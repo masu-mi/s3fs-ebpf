@@ -40,7 +40,6 @@ type Allocator struct {
 	dirty     atomic.Uint32
 }
 
-// New returns an empty in-memory allocator.
 func New() *Allocator {
 	return &Allocator{
 		byKey:     map[string]uint64{},

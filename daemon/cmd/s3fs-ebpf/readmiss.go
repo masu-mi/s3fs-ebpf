@@ -28,7 +28,6 @@ type readMissEvent struct {
 	Seq uint64
 }
 
-// readMissFromReq is the MISS form of a request read from kmod.
 func readMissFromReq(r *reqEvent) readMissEvent {
 	return readMissEvent{Ino: r.Ino, Offset: r.Offset, Count: r.Count, Flags: r.Flags,
 		SeqCount: r.SeqCount, RandCount: r.RandCount, Seq: r.Seq}

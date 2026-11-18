@@ -133,7 +133,6 @@ func (e *Engine) EvalPrewarm(in EntryInput) bool {
 // typo like `100000` cannot make one miss read a whole directory.
 const MaxPrefetchNext = 64
 
-// HasPrefetchNext reports whether the policy declares prefetch_next.
 func (e *Engine) HasPrefetchNext() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

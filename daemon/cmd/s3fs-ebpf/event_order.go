@@ -118,7 +118,6 @@ func (d *orderedDrain) handle(ev *reqEvent) {
 	d.noteHandled(ev.Seq)
 }
 
-// pending is the number of requests queued and not yet handled.
 func (d *orderedDrain) pending() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()

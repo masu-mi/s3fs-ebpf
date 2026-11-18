@@ -23,7 +23,6 @@ type Queue struct {
 	kick    chan struct{}
 }
 
-// New returns an empty queue.
 func New() *Queue {
 	return &Queue{
 		warming: make(map[uint64]struct{}),
@@ -57,7 +56,6 @@ func (q *Queue) Add(items []Item) int {
 // Kick is signalled whenever Add queued something.
 func (q *Queue) Kick() <-chan struct{} { return q.kick }
 
-// IsWarming reports whether ino is queued or being read by the worker.
 func (q *Queue) IsWarming(ino uint64) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -74,7 +72,6 @@ func (q *Queue) Done(items []Item) {
 	q.mu.Unlock()
 }
 
-// Take removes and returns everything queued.
 func (q *Queue) Take() []Item {
 	q.mu.Lock()
 	defer q.mu.Unlock()

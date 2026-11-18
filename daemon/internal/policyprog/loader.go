@@ -137,7 +137,6 @@ func (p *Program) attachStructOps() error {
 	return fmt.Errorf("policyprog: no struct_ops map in %s", p.Path)
 }
 
-// structOpsVTableOf returns the first struct_ops map in coll.
 func structOpsVTableOf(coll *ebpf.Collection) *ebpf.Map {
 	for _, m := range coll.Maps {
 		if m.Type() == ebpf.StructOpsMap {

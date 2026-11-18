@@ -331,7 +331,6 @@ func (s *stager) observe(ctx context.Context, ino uint64) {
 	}
 }
 
-// stagingFor wires the stager to a backend.
 func newBackendStager(cfg stagingCfg, s3c objstore.Backend) *stager {
 	return newStager(cfg, s3c.Get)
 }

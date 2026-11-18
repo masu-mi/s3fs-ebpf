@@ -250,7 +250,6 @@ func (p *wtinylfuClockSim) budgets() (window, protected int) {
 	return int(wb / p.weight), int(pb / p.weight)
 }
 
-// move takes el out of its segment and appends it to seg as the newest.
 func (p *wtinylfuClockSim) move(el *list.Element, seg int) *list.Element {
 	e := el.Value.(*clockEntry)
 	p.seg[e.seg].Remove(el)
