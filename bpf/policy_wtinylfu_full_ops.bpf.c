@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_wtinylfu_full_ops — Full W-TinyLFU (CMS + Window LRU tier +
 // Doorkeeper Bloom filter + Aging).

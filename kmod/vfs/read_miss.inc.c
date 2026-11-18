@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* inflight table (what syscalls wait on) + MISS queueing + DONE; also the entry table helpers.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 

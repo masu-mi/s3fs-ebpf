@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_sieve_ops — SIEVE (NSDI 2024, Zhang et al) as a Layer 2
 // struct_ops policy. Sibling built-in with LRU / S3-FIFO / freq2bit so hit-rate

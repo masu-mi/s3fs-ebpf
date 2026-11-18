@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_size_aware_ops — SIEVE with size-biased eviction. Demo for
 // the per-ino KFunc `s3fs_kfunc_ino_size()` (P-08 extension).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_test_pickonly_ops.bpf.c — TEST FIXTURE for the struct_ops data members and validate()
 // (scripts/test-policy-data-members.sh). REFUSED: pick_victim without on_insert / on_remove (validate -> -EINVAL).

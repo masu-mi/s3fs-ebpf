@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* directory and super ops, fill_super.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 

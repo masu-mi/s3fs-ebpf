@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_s3fifo_ops — S3-FIFO (Yang et al, SOSP 2023) as a Layer 2
 // struct_ops policy. **This is the real 3-tier implementation.**

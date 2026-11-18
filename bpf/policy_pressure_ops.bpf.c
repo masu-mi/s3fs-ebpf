@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_pressure_ops — SIEVE with pressure-aware strictness. Demo
 // vehicle for the P-08 Layer 0 KFunc set (admit_count + softcap).

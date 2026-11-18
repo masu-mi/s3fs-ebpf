@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* address_space ops: read_folio / read_iter / open / release.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 

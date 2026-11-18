@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_test_named_ops.bpf.c — TEST FIXTURE for the struct_ops data members and validate()
 // (scripts/test-policy-data-members.sh). ACCEPTED: sets both data members. No on_hit, which is what NO_ON_HIT declares.

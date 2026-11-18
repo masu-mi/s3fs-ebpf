@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* bootstrap / dynamic / local entry tables, name index, resolve.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 

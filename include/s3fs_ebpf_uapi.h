@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /*
  * s3fs-ebpf UAPI: shared ioctl definitions between kmod, daemon, and BPF.
  *

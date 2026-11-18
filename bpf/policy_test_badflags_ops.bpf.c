@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_test_badflags_ops.bpf.c — TEST FIXTURE for the struct_ops data members and validate()
 // (scripts/test-policy-data-members.sh). REFUSED: flags has a bit the kmod does not know (init_member -> -EINVAL).

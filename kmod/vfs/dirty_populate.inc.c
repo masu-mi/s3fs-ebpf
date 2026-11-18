@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* dirty read/layout, file_data lifecycle, populate_pages.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 

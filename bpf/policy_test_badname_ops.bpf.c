@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_test_badname_ops.bpf.c — TEST FIXTURE for the struct_ops data members and validate()
 // (scripts/test-policy-data-members.sh). REFUSED: the name has a character outside [A-Za-z0-9_.] (init_member -> -EINVAL).

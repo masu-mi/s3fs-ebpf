@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_lru_pick_ops — exact LRU on the AC-58 vtable
 // (docs/design/policy/ac58-pick-victim.md).  The older policy_lru_ops is an

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // AC-66: runs policy_wtinylfu_pick_ops's operations as a SEC("syscall")
 // program, so the verifier and the logic can be checked without the kmod

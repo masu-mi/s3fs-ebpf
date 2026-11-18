@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 /* fd buffer audit, flush pins, s3fs_file_data_reset.  Part of vfs_ops.c: included from there, one translation
  * unit, never compiled on its own. */
 

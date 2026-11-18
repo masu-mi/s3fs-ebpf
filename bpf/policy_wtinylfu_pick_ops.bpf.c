@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_wtinylfu_pick_ops — W-TinyLFU (Einziger et al., TOS 2017; Caffeine's
 // shape) on the AC-58 vtable.  Design: docs/design/plans/wtinylfu-pick-plan.md

@@ -116,4 +116,4 @@ make test-spec          # TLA+ のモデルを TLC で検証 (使い捨てコン
 
 [MIT License](LICENSE) (Copyright (c) 2026 Masumi Kanai)。
 
-注意: カーネルは GPL-only のシンボル (KFunc / struct_ops など) を使う module と BPF プログラムに GPL 互換のライセンス宣言を求めるため、`kmod/` の `MODULE_LICENSE("GPL")` と、`bpf/` の `SEC("license") = "GPL"` はそのまま残している (MIT は GPL 互換)。
+`kmod/` は `GPL-2.0 OR MIT` (SPDX) で、module の宣言は `MODULE_LICENSE("Dual MIT/GPL")` (GPL 互換としてカーネルに扱われ、GPL-only のシンボルを使える。6.12 で insmod / rmmod を確認済み)。BPF プログラムの `SEC("license")` は verifier が GPL 互換を求めるので `GPL` のままにしている。

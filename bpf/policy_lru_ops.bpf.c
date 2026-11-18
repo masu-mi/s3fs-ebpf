@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 //
 // policy_lru_ops — approximate LRU (admit-order FIFO) as a Layer 2
 // struct_ops policy. Sibling built-in alongside policy_s3fifo_ops

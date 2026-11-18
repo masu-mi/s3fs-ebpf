@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
 #ifndef _S3FS_POLICY_STRUCT_OPS_H
 #define _S3FS_POLICY_STRUCT_OPS_H
 
